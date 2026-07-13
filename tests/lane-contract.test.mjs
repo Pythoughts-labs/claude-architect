@@ -39,12 +39,32 @@ function shellFenceLines(markdown) {
   return lines;
 }
 
+function shellFenceCommands(markdown) {
+  const commands = [];
+  let command = "";
+
+  for (const line of shellFenceLines(markdown)) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("#")) continue;
+
+    command += `${command ? " " : ""}${trimmed.replace(/\\\s*$/, "")}`;
+    if (!/\\\s*$/.test(trimmed)) {
+      commands.push(command);
+      command = "";
+    }
+  }
+
+  if (command) commands.push(command);
+  return commands;
+}
+
 for (const [host, lane, file, adapter] of agents) {
   const source = read(file);
   const context = `${host} ${file}`;
   const executableLines = shellFenceLines(source)
     .map((line) => line.trim())
     .filter((line) => line && !line.startsWith("#"));
+  const executableCommands = shellFenceCommands(source);
 
   for (const field of ["objective", "files", "interfaces", "constraints", "verification"]) {
     requirePattern(source, new RegExp(`\\b${field}\\b`, "i"), `${context}: missing ${field} spec field`);
@@ -62,7 +82,38 @@ for (const [host, lane, file, adapter] of agents) {
     /(?:trap\s+'rm -f "\$SPEC" "\$FINAL"'\s+EXIT|remove `SPEC` and `FINAL`)/,
     `${context}: missing SPEC and FINAL cleanup`,
   );
-  requirePattern(executableLines.join("\n"), new RegExp(`\\b${adapter}\\.sh\\b`), `${context}: missing executable ${adapter}.sh delegation`);
+  if (host === "OpenCode") {
+    requirePattern(
+      executableLines.join("\n"),
+      new RegExp(`\\blocal\\s+adapter=${adapter}\\.sh\\b`),
+      `${context}: runtime resolver must select ${adapter}.sh`,
+    );
+
+    const runtimeInvocation = executableCommands.find((command) =>
+      /^(?:(?:[A-Za-z_][A-Za-z0-9_]*=\S+)\s+)*"\$RUNTIME"\s+/.test(command),
+    );
+    assert.ok(runtimeInvocation, `${context}: missing executable "$RUNTIME" invocation`);
+
+    if (lane === "codex") {
+      requirePattern(
+        runtimeInvocation,
+        /--output-last-message\s+"\$FINAL"\s+-\s+<\s+"\$SPEC"/,
+        `${context}: "$RUNTIME" must read "$SPEC" from stdin and write final output to "$FINAL"`,
+      );
+    } else {
+      requirePattern(
+        runtimeInvocation,
+        /"\$RUNTIME"\s+"\$SPEC"\s+"\$FINAL"(?:\s|$)/,
+        `${context}: "$RUNTIME" must receive "$SPEC" and "$FINAL"`,
+      );
+    }
+  } else {
+    requirePattern(
+      executableCommands.join("\n"),
+      new RegExp(`\\b${adapter}\\.sh\\b`),
+      `${context}: missing executable ${adapter}.sh delegation`,
+    );
+  }
   requirePattern(source, /git status(?: --short)?/i, `${context}: missing actual git status inspection`);
   requirePattern(source, /git diff/i, `${context}: missing actual git diff inspection`);
   requirePattern(
