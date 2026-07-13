@@ -45,13 +45,13 @@ Every delegation carries the same five-part spec: the objective, the exact files
 
 | Lane | Invoke | Producer | Route here when |
 |---|---|---|---|
-| Cloud, default | `codex-implementer` | GPT-5.6 Sol via the Codex CLI | General implementation, or when a second model family is worth it for correctness |
+| Cloud | `codex-implementer` | GPT-5.6 Sol via the Codex CLI | General implementation, or when a second model family is worth it for correctness |
 | Provider pool | `opencode-implementer` | Any authenticated OpenCode provider (Zen/Go, MiniMax coding plan, OpenAI) | The right model sits behind an OpenCode credential the other lanes cannot reach |
 | Local, $0 | `pi-implementer` | Open-weight model on local hardware via Pi | Routine work you want to keep local at zero marginal token cost |
 | Autonomous | `pythinker-implementer` | Your own Pythinker agent, headless `--yolo` | A trusted spec should run to completion with no human in the loop |
 | Judgment | `claude-advisor` | Claude's strongest tier, read only | Architecture, migrations, API shape, a broad refactor, or a problem that has resisted two attempts |
 
-Codex is the default. Reach for OpenCode when the model you want only lives in its provider pool, Pi when local execution and zero token cost matter, and Pythinker when full unattended execution is the point. Each lane is a harness around a producer, so Pi, OpenCode, and Pythinker take an explicit `--model`; Codex pins its own. Every CLI lane runs a preflight and returns a structured `unavailable` report rather than quietly implementing the work itself. A lane that promises Codex and silently becomes a Claude lane is worse than a loud failure, because you chose that lane for a reason.
+There is no implicit lane default. If `/delegate` does not name Codex, OpenCode, Pi, Pythinker, or an implementer, the architect asks which CLI to use before preparing or launching the delegation. Reach for OpenCode when the model you want only lives in its provider pool, Pi when local execution and zero token cost matter, and Pythinker when full unattended execution is the point. Each lane is a harness around a producer, so Pi, OpenCode, and Pythinker take an explicit `--model`; Codex pins its own. Every CLI lane runs a preflight and returns a structured `unavailable` report rather than quietly implementing the work itself. A lane that promises Codex and silently becomes a Claude lane is worse than a loud failure, because you chose that lane for a reason.
 
 ## Install
 
@@ -90,9 +90,11 @@ Or globally, under `~/.config/opencode/`. Quit and restart OpenCode afterward, s
 Ask the architect to delegate:
 
 ```text
-Add rate limiting to our public API. Use the delegate skill, send the
-implementation to the right lane, and review the diff before accepting it.
+/delegate Add rate limiting to our public API and review the diff before
+accepting it.
 ```
+
+Because that request does not name a lane, the architect asks you to choose Codex, OpenCode, Pi, or Pythinker before it continues. Name one in the request to skip the question.
 
 The spec it produces always names the objective, the exact files, the interfaces, the constraints, and the verification command. Independent read-only tasks or edits to separate files can run in parallel. Writing agents must not race in the same working tree, so isolate concurrent runs in separate worktrees.
 

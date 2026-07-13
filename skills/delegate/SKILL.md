@@ -13,18 +13,35 @@ The session is the architect and should run Claude's strongest available tier (F
 - Keep context lean. Delegate broad searches and return conclusions rather than raw output.
 - Reason once, then put the decision into a complete delegation spec.
 
+## Lane selection
+
+Before preparing a spec or launching a subagent, check whether the user explicitly named a CLI or implementer. Treat `Codex` or `Codex CLI` as `codex-implementer`, `OpenCode` as `opencode-implementer`, `Pi` as `pi-implementer`, and `Pythinker` as `pythinker-implementer`.
+
+If the user invokes `/delegate` without naming a CLI, implementer, or agent, use the host's structured question tool when available, ask this question, and wait for the answer:
+
+> Which CLI should handle this delegation?
+
+Offer exactly these choices:
+
+- **Codex** - `codex-implementer`
+- **OpenCode** - `opencode-implementer`
+- **Pi** - `pi-implementer`
+- **Pythinker** - `pythinker-implementer`
+
+There is no implicit default. Do not prepare or launch a delegation until the user selects a lane.
+
 ## Lanes
 
 | Lane | Invoke | Route here when |
 |---|---|---|
-| Cloud / default | `codex-implementer` | Routine or correctness-sensitive implementation through GPT-5.6 Sol and Codex CLI. This is the default implementation lane. |
+| Cloud | `codex-implementer` | Routine or correctness-sensitive implementation through GPT-5.6 Sol and Codex CLI. |
 | Provider pool | `opencode-implementer` | The right model lives behind an OpenCode credential the other lanes can't reach (Zen/Go Kimi/GLM/DeepSeek, MiniMax coding plan). Pass the provider/model explicitly. |
 | Local / $0 | `pi-implementer` | Routine work suitable for a local open-weight model through Pi. Pass the model explicitly. |
 | In-house / autonomous | `pythinker-implementer` | A trusted spec should run unattended through Pythinker `--yolo`. Pass the provider/model explicitly. |
 | Exploration | OpenCode `explore` or Claude Code `Explore` | Broad read-only codebase searches and implementation-surface mapping. |
 | Judgment | Opus architect or `claude-advisor` | Architecture, migrations, API shapes, major refactors, repeated failures, and final review of multi-step work. |
 
-Use Codex by default. Prefer OpenCode when the target model is only reachable through its provider pool. Prefer Pi when local execution and zero marginal cost matter. Prefer Pythinker when full unattended execution is the defining requirement. Race independent lanes only when the added implementation is worth the cost, and isolate races in separate worktrees because concurrent writers must not touch the same files.
+When the user asks for routing advice, recommend Codex for routine or correctness-sensitive implementation, OpenCode when the target model is only reachable through its provider pool, Pi when local execution and zero marginal cost matter, and Pythinker when full unattended execution is the defining requirement. A recommendation does not replace the explicit selection required for an unspecified `/delegate` invocation. Race independent lanes only when the added implementation is worth the cost, and isolate races in separate worktrees because concurrent writers must not touch the same files.
 
 Route all delegated Codex work explicitly to `claude-master:codex-implementer`, including work started from long-running flows such as `/goal`. Do **not** use `codex:codex-rescue`, `codex-companion.mjs`, or `codex app-server` as an implementation lane: the official rescue companion keeps a detached app-server broker alive for the Claude session, and fresh threads can leave configured MCP workers such as `node_repl` attached to that broker after the task reports completion. The one-shot lane ignores user config, runs ephemerally, and terminates its isolated process group when the task ends.
 
