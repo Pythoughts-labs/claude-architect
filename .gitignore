@@ -1,5 +1,6 @@
 demo/
 .DS_Store
+.pi-subagents/
 # pythinker — local agent state (do not commit)
 .pythinker/
 .pythinker-review/

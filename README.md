@@ -20,9 +20,68 @@
 
 # Claude Master
 
-Run your Claude Code or OpenCode session on the strongest model you have, and keep it doing the one thing that model is worth paying for: deciding. It writes the spec, picks who implements, and reviews the result. The typing runs somewhere cheaper.
+Install the plugin, run `/delegate`, and let Claude handle the handoff. Claude writes the implementation spec, sends the work to Codex, OpenCode, Pi, or Pythinker, then reviews the result before accepting it. Your strongest model stays focused on decisions instead of spending tokens on mechanical edits.
 
-That is the whole idea. A `delegate` skill turns a request into a complete spec, routes it to one of four implementation lanes, and hands the diff back to the architect for review before anything counts as done. A separate `claude-advisor` is there for the calls that decide whether the next hour is wasted.
+## Quick start
+
+### 1. Install the plugin
+
+```bash
+claude plugin marketplace add Pythoughts-labs/claude-master
+claude plugin install claude-master@claude-master
+```
+
+Restart Claude Code so it loads the plugin.
+
+### 2. Delegate a task
+
+Open Claude Code in your project and run:
+
+```text
+/delegate Use Codex to add rate limiting to our public API, run the tests, and review the diff before accepting it.
+```
+
+Name Codex, OpenCode, Pi, or Pythinker in the request to choose a lane immediately. If you leave the lane out, Claude Master asks which one to use.
+
+### 3. Review the result
+
+Claude prepares the spec and delegates the implementation. When the lane finishes, Claude reads the diff and checks the verification output before accepting the work.
+
+<p align="center">
+  <img src="assets/claud-master.webp" alt="Claude Master delegating an implementation task and reviewing the result" width="880">
+</p>
+
+## Install with an AI agent
+
+Paste this prompt into Claude Code or another coding agent when you want it to handle setup:
+
+```text
+Install Claude Master for Claude Code in this environment.
+
+Before making changes:
+1. Confirm that the `claude` CLI is installed and available on PATH.
+2. Check the current marketplace and plugin state. Do not remove or overwrite unrelated configuration.
+3. Add the marketplace with:
+   claude plugin marketplace add Pythoughts-labs/claude-master
+4. Install the plugin with:
+   claude plugin install claude-master@claude-master
+5. Verify the installation with `claude plugin list --json` and confirm that `claude-master@claude-master` is installed and enabled.
+6. Tell me to restart Claude Code so the plugin loads.
+7. Check which implementation CLIs are available: `codex`, `opencode`, `pi`, and `pythinker`. Report missing tools, authentication, or local model servers. Do not install those dependencies unless I ask.
+
+Show every command you ran and its actual result. Stop and explain the failure if any required command exits unsuccessfully.
+```
+
+Or run the installation yourself:
+
+```bash
+command -v claude
+claude plugin marketplace add Pythoughts-labs/claude-master
+claude plugin install claude-master@claude-master
+claude plugin list --json
+```
+
+Restart Claude Code, open a project, and run `/delegate`. Update commands, OpenCode installation, and lane requirements are documented below.
 
 ## Why it saves money
 
