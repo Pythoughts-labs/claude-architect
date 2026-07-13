@@ -24,20 +24,20 @@ If the user invokes `/delegate` without naming a CLI, implementer, or agent, use
 Offer exactly these choices:
 
 - **Codex** - `codex-implementer`; GPT-5.6 Sol at `low` reasoning by default (supported overrides: `medium`, `high`, `xhigh`, `max`).
-- **OpenCode** - `opencode-implementer`; caller-selected provider/model, with a model-specific `--variant` such as `high` when supported.
-- **Pi** - `pi-implementer`; caller-selected model, with `--thinking off|minimal|low|medium|high|xhigh|max` (`medium` by default).
-- **Pythinker** - `pythinker-implementer`; caller-selected provider/model; no shared reasoning-level flag, so model or agent configuration controls it.
+- **OpenCode** - `opencode-implementer`; configured provider/model unless overridden, with an optional model-specific `--variant` such as `high` when supported.
+- **Pi** - `pi-implementer`; configured model unless overridden, with optional `--thinking off|minimal|low|medium|high|xhigh|max`; Pi configuration supplies the default.
+- **Pythinker** - `pythinker-implementer`; configured provider/model unless overridden, with optional `--thinking-effort off|minimal|low|medium|high|xhigh|max`; Pythinker configuration supplies the default.
 
-There is no implicit lane default. Do not prepare or launch a delegation until the user selects a lane. If the answer names a supported model or reasoning override, include it in the delegation spec; otherwise use the selected lane's documented default.
+There is no implicit lane default. Do not prepare or launch a delegation until the user selects a lane. Model selection within a harness lane is optional. If the answer names a supported model or reasoning override, include it in the delegation spec; otherwise let the selected harness use its CLI-configured default.
 
 ## Lanes
 
 | Lane | Invoke | Route here when |
 |---|---|---|
 | Cloud | `codex-implementer` | Routine or correctness-sensitive implementation through GPT-5.6 Sol and Codex CLI. |
-| Provider pool | `opencode-implementer` | The right model lives behind an OpenCode credential the other lanes can't reach (Zen/Go Kimi/GLM/DeepSeek, MiniMax coding plan). Pass the provider/model explicitly. |
-| Local / $0 | `pi-implementer` | Routine work suitable for a local open-weight model through Pi. Pass the model explicitly. |
-| In-house / autonomous | `pythinker-implementer` | A trusted spec should run unattended through Pythinker `--yolo`. Pass the provider/model explicitly. |
+| Provider pool | `opencode-implementer` | The right model lives behind an OpenCode credential the other lanes can't reach (Zen/Go Kimi/GLM/DeepSeek, MiniMax coding plan). Override the configured provider/model when needed. |
+| Local / $0 | `pi-implementer` | Routine work suitable for a local open-weight model through Pi. Override the configured model when needed. |
+| In-house / autonomous | `pythinker-implementer` | A trusted spec should run unattended through Pythinker `--yolo`. Override the configured provider/model when needed. |
 | Exploration | OpenCode `explore` or Claude Code `Explore` | Broad read-only codebase searches and implementation-surface mapping. |
 | Judgment | Opus architect or `claude-advisor` | Architecture, migrations, API shapes, major refactors, repeated failures, and final review of multi-step work. |
 

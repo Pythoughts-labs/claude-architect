@@ -15,7 +15,8 @@ for (const lane of ["codex-implementer", "opencode-implementer", "pi-implementer
 assert.match(skill, /GPT-5\.6 Sol at `low` reasoning by default \(supported overrides: `medium`, `high`, `xhigh`, `max`\)/);
 assert.match(skill, /model-specific `--variant`/);
 assert.match(skill, /`--thinking off\|minimal\|low\|medium\|high\|xhigh\|max`/);
-assert.match(skill, /no shared reasoning-level flag/);
+assert.match(skill, /`--thinking-effort off\|minimal\|low\|medium\|high\|xhigh\|max`/);
+assert.match(skill, /Pythinker configuration supplies the default/);
 assert.match(skill, /include it in the delegation spec/);
 assert.match(claudeCodexAgent, /model_reasoning_effort=low/);
 assert.match(opencodeCodexAgent, /model_reasoning_effort=low/);
