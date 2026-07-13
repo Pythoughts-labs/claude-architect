@@ -32,9 +32,9 @@ terminate_process_group() {
 }
 
 if command -v setsid >/dev/null 2>&1; then
-  setsid "${COMMAND[@]}" &
+  setsid "${COMMAND[@]}" <&0 &
 else
-  perl -MPOSIX -e 'POSIX::setsid() >= 0 or die "setsid: $!"; exec @ARGV or die "exec: $!"' "${COMMAND[@]}" &
+  perl -MPOSIX -e 'POSIX::setsid() >= 0 or die "setsid: $!"; exec @ARGV or die "exec: $!"' "${COMMAND[@]}" <&0 &
 fi
 CODEX_PID=$!
 trap 'terminate_process_group "$CODEX_PID"' EXIT INT TERM HUP
