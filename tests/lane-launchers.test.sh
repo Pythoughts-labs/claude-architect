@@ -230,6 +230,10 @@ assert_count 0 --model "$TMP/pi-default/state/args" 'Pi default model flag'
 assert_count 0 --thinking "$TMP/pi-default/state/args" 'Pi default thinking flag'
 assert_common_success pi-default pi 17
 
+prepare_case pi-default-cap pi
+run_adapter pi-default-cap run-pi-isolated.sh "$ENV_BIN" -u PI_TIMEOUT_SECONDS
+assert_common_success pi-default-cap pi 900
+
 prepare_case pi-model pi
 run_adapter pi-model run-pi-isolated.sh "$ENV_BIN" PI_MODEL=local/model PI_TIMEOUT_SECONDS=18
 assert_count 1 --model "$TMP/pi-model/state/args" 'Pi model flag'
@@ -253,6 +257,10 @@ assert_count 0 --model "$TMP/pythinker-default/state/args" 'Pythinker default mo
 assert_count 0 --thinking-effort "$TMP/pythinker-default/state/args" 'Pythinker default thinking flag'
 assert_common_success pythinker-default pythinker 27
 
+prepare_case pythinker-default-cap pythinker
+run_adapter pythinker-default-cap run-pythinker-isolated.sh "$ENV_BIN" -u PYTHINKER_TIMEOUT_SECONDS
+assert_common_success pythinker-default-cap pythinker 900
+
 prepare_case pythinker-model pythinker
 run_adapter pythinker-model run-pythinker-isolated.sh "$ENV_BIN" PYTHINKER_MODEL=provider/model PYTHINKER_TIMEOUT_SECONDS=28
 assert_count 1 --model "$TMP/pythinker-model/state/args" 'Pythinker model flag'
@@ -274,6 +282,10 @@ assert_file_equals "$TMP/opencode-default/spec" "$TMP/opencode-default/state/std
 assert_count 0 --model "$TMP/opencode-default/state/args" 'OpenCode default model flag'
 assert_count 0 --variant "$TMP/opencode-default/state/args" 'OpenCode default variant flag'
 assert_common_success opencode-default opencode 37
+
+prepare_case opencode-default-cap opencode
+run_adapter opencode-default-cap run-opencode-isolated.sh "$ENV_BIN" -u OPENCODE_TIMEOUT_SECONDS
+assert_common_success opencode-default-cap opencode 900
 
 prepare_case opencode-model opencode
 run_adapter opencode-model run-opencode-isolated.sh "$ENV_BIN" OPENCODE_MODEL=provider/model OPENCODE_TIMEOUT_SECONDS=38
