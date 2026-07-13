@@ -51,7 +51,7 @@ Every delegation carries the same five-part spec: the objective, the exact files
 | Autonomous | `pythinker-implementer` | Your own Pythinker agent, headless `--yolo` | A trusted spec should run to completion with no human in the loop |
 | Judgment | `claude-advisor` | Claude's strongest tier, read only | Architecture, migrations, API shape, a broad refactor, or a problem that has resisted two attempts |
 
-There is no implicit lane default. If `/delegate` does not name Codex, OpenCode, Pi, Pythinker, or an implementer, the architect asks which CLI to use before preparing or launching the delegation. Reach for OpenCode when the model you want only lives in its provider pool, Pi when local execution and zero token cost matter, and Pythinker when full unattended execution is the point. Each lane is a harness around a producer, so Pi, OpenCode, and Pythinker take an explicit `--model`; Codex pins its own. Every CLI lane runs a preflight and returns a structured `unavailable` report rather than quietly implementing the work itself. A lane that promises Codex and silently becomes a Claude lane is worse than a loud failure, because you chose that lane for a reason.
+There is no implicit lane default. If `/delegate` does not name Codex, OpenCode, Pi, Pythinker, or an implementer, the architect asks which CLI to use before preparing or launching the delegation. Reach for OpenCode when the model you want only lives in its provider pool, Pi when local execution and zero token cost matter, and Pythinker when full unattended execution is the point. Each lane is a harness around a producer. Codex pins its own model; Pi, OpenCode, and Pythinker accept optional model and thinking or variant overrides, and otherwise defer to the selected CLI's configured defaults. Every CLI lane runs a preflight and returns a structured `unavailable` report rather than quietly implementing the work itself. A lane that promises Codex and silently becomes a Claude lane is worse than a loud failure, because you chose that lane for a reason.
 
 ## Install
 
@@ -73,17 +73,25 @@ The plugin loads the agent definitions in `agents/` and the `delegate` skill in 
 
 ### OpenCode
 
-This repository ships native OpenCode assets: `opencode.json` registers the shared `skills/` directory, and `.opencode/agents/` holds OpenCode-compatible subagents with explicit permissions.
+This repository ships native OpenCode assets: `opencode.json` registers the shared `skills/` directory for source-checkout use, and `.opencode/agents/` holds OpenCode-compatible subagents with explicit permissions.
 
-Copy them into a project:
+Install into a project, regardless of your current working directory:
 
 ```bash
-mkdir -p .opencode/agents .opencode/skills/delegate
-cp /path/to/claude-master/.opencode/agents/*.md .opencode/agents/
-cp /path/to/claude-master/skills/delegate/SKILL.md .opencode/skills/delegate/SKILL.md
+bash /path/to/claude-master/scripts/install-opencode.sh --project /path/to/project
 ```
 
-Or globally, under `~/.config/opencode/`. Quit and restart OpenCode afterward, since it loads skills and agents at startup. Running OpenCode directly from this repository picks up `opencode.json` and `.opencode/agents/` on its own.
+Or install globally:
+
+```bash
+bash /path/to/claude-master/scripts/install-opencode.sh --global
+```
+
+Project installation writes the four agents to `<project>/.opencode/agents`, the delegate skill to `<project>/.opencode/skills/delegate/SKILL.md`, and the shared runtime plus all four CLI adapters to `<project>/.opencode/claude-master/scripts`. Global installation writes the same layout under `${OPENCODE_CONFIG_DIR}` when set, otherwise `${XDG_CONFIG_HOME:-$HOME/.config}/opencode`.
+
+The implementation agents locate their adapter from `CLAUDE_MASTER_ROOT/scripts` when `CLAUDE_MASTER_ROOT` is set, then walk from the current directory through every ancestor looking first for a source checkout with `.claude-plugin/plugin.json` and `scripts/`, then for a project `.opencode/claude-master/scripts` install. They next check a custom `OPENCODE_CONFIG_DIR` and finally the default global config location. This makes nested project directories work without assuming a project-root working directory. Running OpenCode directly from this source checkout remains the development mode: it picks up `opencode.json` and `.opencode/agents/`, while the source marker lets agents use the repository's runtime scripts.
+
+Quit and restart OpenCode after installing or updating because it loads skills and agents at startup. If a lane reports `STATUS: unavailable` because it cannot find the runtime, rerun one of the installer commands above; use `CLAUDE_MASTER_ROOT=/path/to/claude-master` only when intentionally selecting a checkout at runtime.
 
 ## Use
 
@@ -94,16 +102,16 @@ Ask the architect to delegate:
 accepting it.
 ```
 
-Because that request does not name a lane, the architect asks you to choose Codex, OpenCode, Pi, or Pythinker before it continues. The question identifies each lane's producer and reasoning control: Codex runs GPT-5.6 Sol at `low` by default (`medium`, `high`, `xhigh`, and `max` are overrides), OpenCode exposes model-specific variants, Pi exposes `--thinking`, and Pythinker relies on its model or agent configuration. Use a custom answer to name an override, or name a lane and reasoning level in the request to skip the question.
+Because that request does not name a lane, the architect asks you to choose Codex, OpenCode, Pi, or Pythinker before it continues. The question identifies each lane's producer and reasoning control: Codex runs GPT-5.6 Sol at `low` by default (`medium`, `high`, `xhigh`, and `max` are overrides), OpenCode exposes an optional model-specific variant, Pi exposes optional `--model` and `--thinking`, and Pythinker exposes optional `--model` and `--thinking-effort`. Without an override, Pi, OpenCode, and Pythinker use their CLI-configured defaults. Use a custom answer to name an override, or name a lane and reasoning level in the request to skip the question.
 
 The spec it produces always names the objective, the exact files, the interfaces, the constraints, and the verification command. Independent read-only tasks or edits to separate files can run in parallel. Writing agents must not race in the same working tree, so isolate concurrent runs in separate worktrees.
 
 ## Requirements
 
 - **Codex lane:** install and authenticate the [OpenAI Codex CLI](https://github.com/openai/codex). The lane calls `gpt-5.6-sol` at low reasoning by default.
-- **OpenCode lane:** install the [OpenCode CLI](https://opencode.ai) and authenticate a provider with `opencode auth login`. The lane runs `opencode run --agent build --auto` and takes the model explicitly.
-- **Pi lane:** install the [Pi coding agent](https://pi.dev) and start a local model server. Pass the provider and model explicitly.
-- **Pythinker lane:** install the [Pythinker CLI](https://pythoughts-labs.github.io/pythinker-code/), authenticate a provider, and pass the model explicitly. This lane runs unattended in `--yolo` mode.
+- **OpenCode lane:** install the [OpenCode CLI](https://opencode.ai) and authenticate a provider with `opencode auth login`. The lane runs `opencode run --agent build --auto`; optional model and variant overrides otherwise defer to OpenCode configuration.
+- **Pi lane:** install the [Pi coding agent](https://pi.dev) and start a local model server. Optional model and thinking overrides otherwise defer to Pi configuration.
+- **Pythinker lane:** install the [Pythinker CLI](https://pythoughts-labs.github.io/pythinker-code/), authenticate a provider, and optionally pass a model or `--thinking-effort off|minimal|low|medium|high|xhigh|max` override. Absent overrides defer to Pythinker configuration. This lane runs unattended in `--yolo` mode.
 - **Advisor:** Claude Code users need access to the model set in `agents/claude-advisor.md` (Fable 5). OpenCode users can set a preferred advisor model in their copied agent file; without one it inherits the session model.
 
 ## When to call the advisor
@@ -114,7 +122,7 @@ Consult `claude-advisor` before an architecture decision, a data migration, a pu
 
 - `agents/` holds the Claude Code subagents: the four lanes and the advisor.
 - `skills/delegate/` is the shared routing and acceptance doctrine.
-- `.opencode/agents/` and `opencode.json` carry the same lanes and skill for OpenCode.
+- `.opencode/agents/`, `opencode.json`, and `scripts/install-opencode.sh` carry the OpenCode agents, skill wiring, and packaged runtime.
 - `.claude-plugin/` has the plugin and marketplace manifests.
 - `assets/` holds the banner.
 
