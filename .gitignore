@@ -1,0 +1,7 @@
+demo/
+.DS_Store
+# pythinker — local agent state (do not commit)
+.pythinker/
+.pythinker-review/
+.pythinker-review-flow/
+*.scratchpad.lock

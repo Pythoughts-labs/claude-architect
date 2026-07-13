@@ -1,0 +1,77 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 360" role="img" aria-label="Claude Master — the strongest model decides, cheaper lanes do the typing">
+  <title>Claude Master</title>
+
+  <defs>
+    <pattern id="dots" width="26" height="26" patternUnits="userSpaceOnUse">
+      <circle cx="1.5" cy="1.5" r="1.5" fill="#d97757" fill-opacity="0.05"/>
+    </pattern>
+    <clipPath id="panelClip">
+      <rect x="10" y="10" width="1180" height="340" rx="16"/>
+    </clipPath>
+  </defs>
+
+  <!-- panel -->
+  <rect x="10" y="10" width="1180" height="340" rx="16" fill="#0b0e14" stroke="#222b38" stroke-width="1.5"/>
+  <g clip-path="url(#panelClip)">
+    <rect x="10" y="10" width="1180" height="340" fill="url(#dots)"/>
+    <rect x="10" y="10" width="6" height="340" fill="#d97757"/>
+  </g>
+  <rect x="10" y="10" width="1180" height="340" rx="16" fill="none" stroke="#d97757" stroke-width="1.5" stroke-opacity="0.20"/>
+
+  <!-- title bar -->
+  <g font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace">
+    <circle cx="46" cy="44" r="6.5" fill="#ff5f57"/>
+    <circle cx="70" cy="44" r="6.5" fill="#febc2e"/>
+    <circle cx="94" cy="44" r="6.5" fill="#28c840"/>
+    <text x="126" y="49" font-size="15" fill="#6e7681">Pythoughts-labs/claude-master · architect session</text>
+    <text x="1158" y="49" font-size="14" fill="#4b5563" text-anchor="end">v0.1.0</text>
+  </g>
+  <line x1="10" y1="70" x2="1190" y2="70" stroke="#1a212c" stroke-width="1"/>
+
+  <g font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace">
+    <!-- wordmark -->
+    <text x="44" y="150" font-size="62" font-weight="800" letter-spacing="2" fill="#e6edf3"
+          textLength="672" lengthAdjust="spacingAndGlyphs">CLAUDE MASTER</text>
+
+    <!-- tagline + money line -->
+    <text x="46" y="194" font-size="21" font-weight="500" fill="#9aa4b2">The strongest model decides. Cheaper lanes do the typing.</text>
+    <text x="46" y="224" font-size="18" font-weight="700" fill="#d97757">You pay for judgment, not volume.</text>
+
+    <!-- session log panel (right) -->
+    <rect x="812" y="96" width="346" height="150" rx="10" fill="#0d1220" stroke="#1b2430" stroke-width="1"/>
+    <text x="834" y="124" font-size="13" fill="#6e7681">session.log</text>
+    <g font-size="14">
+      <text x="834" y="158" font-weight="700" fill="#3fb950">ok</text><text x="864" y="158" fill="#9aa4b2">spec written by architect</text>
+      <text x="834" y="186" font-weight="700" fill="#3fb950">ok</text><text x="864" y="186" fill="#9aa4b2">routed to cheapest lane</text>
+      <text x="834" y="214" font-weight="700" fill="#3fb950">ok</text><text x="864" y="214" fill="#9aa4b2">diff reviewed, accepted</text>
+    </g>
+
+    <!-- prompt line -->
+    <text x="46" y="274" font-size="18" fill="#e6edf3">
+      <tspan fill="#3fb950" font-weight="700">$</tspan><tspan fill="#c9d1d9"> delegate </tspan><tspan fill="#7ee787">"add rate limiting to the public API"</tspan><tspan fill="#c9d1d9"> --lane auto</tspan>
+    </text>
+
+    <!-- routing flow -->
+    <text x="46" y="324" font-size="17" font-weight="700" fill="#e6edf3">architect</text>
+    <text x="152" y="324" font-size="17" fill="#6e7681">-&gt;</text>
+
+    <!-- lane chips -->
+    <g font-size="15" font-weight="700">
+      <rect x="190" y="308" width="80"  height="30" rx="7" fill="#d97757"/>
+      <text x="230" y="328" text-anchor="middle" fill="#0b0e14">codex</text>
+
+      <rect x="282" y="308" width="112" height="30" rx="7" fill="#58a6ff"/>
+      <text x="338" y="328" text-anchor="middle" fill="#0b0e14">opencode</text>
+
+      <rect x="406" y="308" width="86"  height="30" rx="7" fill="#3fb950"/>
+      <text x="449" y="328" text-anchor="middle" fill="#0b0e14">pi · $0</text>
+
+      <rect x="504" y="308" width="118" height="30" rx="7" fill="#d29922"/>
+      <text x="563" y="328" text-anchor="middle" fill="#0b0e14">pythinker</text>
+
+      <rect x="634" y="308" width="82"  height="30" rx="7" fill="#f85149"/>
+      <text x="675" y="328" text-anchor="middle" fill="#0b0e14">fable</text>
+    </g>
+    <text x="734" y="328" font-size="15" fill="#6e7681">-&gt; architect reviews every diff</text>
+  </g>
+</svg>

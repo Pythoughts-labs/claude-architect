@@ -1,0 +1,36 @@
+{
+  "name": "claude-master",
+  "version": "0.1.0",
+  "description": "Architect-first delegation for Claude Code and OpenCode. A Fable/Opus architect routes implementation to GPT-5.6 Sol through Codex, OpenCode's provider pool, local open-weight models through Pi, or autonomous Pythinker runs, then reviews every diff before acceptance.",
+  "author": {
+    "name": "elkaix",
+    "url": "https://github.com/elkaix"
+  },
+  "homepage": "https://github.com/Pythoughts-labs/claude-master",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Pythoughts-labs/claude-master.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Pythoughts-labs/claude-master/issues"
+  },
+  "license": "MIT",
+  "keywords": [
+    "claude-master",
+    "claude-code",
+    "claude-code-plugin",
+    "opencode",
+    "agents",
+    "subagents",
+    "model-routing",
+    "orchestration",
+    "delegation",
+    "architect",
+    "advisor",
+    "fable",
+    "codex",
+    "pi",
+    "pythinker",
+    "local-llm"
+  ]
+}
