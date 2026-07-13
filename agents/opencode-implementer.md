@@ -85,14 +85,13 @@ Adapter discipline (non-negotiable):
 
 | Flag | Why |
 |---|---|
-| `run "$(cat "$SPEC")"` | The spec as one positional message argument — no quoting hazards, no truncation. There is no prompt-file flag. |
+| `< "$SPEC"` | Pipes the exact spec file to OpenCode on stdin — no positional message argument, quoting hazards, or truncation. |
 | `--dir "$(pwd)"` | Deterministic working root — opencode edits there without a `cd`. |
 | `--agent build` | OpenCode's full-permission primary agent; the one built to write code. |
 | `--auto` | Auto-approves permissions not explicitly denied. Required headless — without it the run can stall forever on a permission prompt. It is this lane's `--yolo`, and exactly why the architect must review the diff. |
 | `OPENCODE_MODEL` | Forwards the architect's provider/model override exactly. Empty means the adapter omits `--model` and OpenCode's configured default applies. |
 | `OPENCODE_VARIANT` | Forwards the architect's optional variant override exactly. Empty means the adapter omits `--variant` and OpenCode configuration supplies the default. |
 | `--log-level ERROR` | Keeps the captured output readable — the final message, not a log stream. |
-| `< /dev/null` | Closes stdin so the headless run cannot block waiting on it. |
 | isolated adapter | Owns OpenCode's CLI flags, stdin/output handling, and optional timeout policy. On timeout, report `STATUS: timeout` with whatever landed. |
 
 Run `opencode models` to see what is available. For reasoning-capable models the caller may also pass `--variant` (e.g. `high`); forward it verbatim. Note `opencode run` persists a session per invocation — harmless clutter, cleanable later with `opencode session`.
