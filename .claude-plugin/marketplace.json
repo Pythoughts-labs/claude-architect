@@ -11,7 +11,7 @@
     {
       "name": "claude-master",
       "source": "./",
-      "version": "0.2.0",
+      "version": "0.2.1",
       "description": "Architect-first delegation through Codex, the OpenCode provider pool, local open-weight Pi, or autonomous Pythinker, with a commitment-boundary advisor and native OpenCode assets.",
       "author": {
         "name": "elkaix",
