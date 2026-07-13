@@ -48,14 +48,12 @@ and include its actual output in your final message."]
 SPEC_EOF
 ```
 
-2. Invoke codex non-interactively, sandboxed to the workspace, with reasoning effort pinned high:
+2. Invoke Codex through the plugin's isolated one-shot runner, sandboxed to the workspace, with reasoning effort pinned high:
 
 ```bash
-# Portable timeout: macOS has no `timeout` unless coreutils is installed
-T=$(command -v gtimeout || command -v timeout || true)
-[ -z "$T" ] && echo "WARN: no timeout binary — codex runs uncapped (brew install coreutils to cap)"
+trap 'rm -f "$SPEC" "$FINAL"' EXIT
 
-${T:+$T 600} codex exec \
+bash "$CLAUDE_PLUGIN_ROOT/scripts/run-codex-isolated.sh" \
   --model gpt-5.6-sol \
   -c model_reasoning_effort=high \
   --sandbox workspace-write \
@@ -70,10 +68,12 @@ Flag discipline (non-negotiable):
 | Flag | Why |
 |---|---|
 | `--sandbox workspace-write` | Codex writes code, scoped to the working tree, with no network access. Never `danger-full-access`. |
+| `--ignore-user-config` | Prevents delegated runs from loading interactive user MCP servers such as `node_repl`, browser tools, and their worker subprocesses. |
+| `--ephemeral` | Prevents a finished delegation from persisting a resumable Codex session. |
 | `-c model_reasoning_effort=high` | Pins GPT-5.6 Sol to high reasoning for complex implementation work. |
 | `--skip-git-repo-check` + `--cd "$(pwd)"` | Deterministic working root; works outside git repos. |
 | `- < spec file` | Prompt via stdin. No quoting hazards, no truncated specs. |
-| `${T:+$T 600}` | Ten-minute wall clock when `timeout`/`gtimeout` exists (macOS needs `brew install coreutils`); runs uncapped otherwise. On timeout, report `STATUS: timeout` with whatever landed. |
+| isolated runner | Applies a ten-minute wall clock when `timeout`/`gtimeout` exists (macOS needs `brew install coreutils`), adds `--ignore-user-config --ephemeral`, and terminates the run's isolated process group on exit. On timeout, report `STATUS: timeout` with whatever landed. |
 
 `--model gpt-5.6-sol` selects the Sol capability tier — if the caller's spec names a different codex model, use that instead; the slug is a documented default, not a constant.
 
@@ -101,7 +101,8 @@ GAPS: [spec ambiguities, unfinished items, or "none"]
 
 ## Rules
 
+- Never invoke `codex:codex-rescue`, `codex-companion.mjs`, or `codex app-server` from this lane. Those paths use a detached broker whose MCP children can survive a completed task.
 - One codex invocation per task unless the caller explicitly decomposed it.
 - Never claim completion without re-running the verification yourself. "Codex said it works" is forbidden as evidence.
 - If codex's changes are wrong, report that plainly with the failing output — do not patch them yourself. Fix decisions belong to the caller.
-- If the task turns out to be architectural — the spec itself is wrong — stop and report; that decision belongs upstream (consult `claude-advisor`).
+- If the task turns out to be architectural — the spec itself is wrong — stop and report; that decision belongs to the Opus architect or `claude-advisor` upstream.

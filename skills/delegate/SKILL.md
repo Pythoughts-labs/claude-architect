@@ -1,6 +1,6 @@
 ---
 name: delegate
-description: Delegate implementation, exploration, and review from an architect session to the cheapest adequate subagent or CLI lane. Use when splitting work, writing subagent specs, selecting codex-implementer/opencode-implementer/pi-implementer/pythinker-implementer, controlling token cost, or consulting claude-advisor.
+description: Delegate implementation, exploration, and review from an Opus or Fable architect session to the cheapest adequate subagent or CLI lane. Use when splitting work, writing subagent specs, selecting codex-implementer/opencode-implementer/pi-implementer/pythinker-implementer, controlling token cost, or consulting claude-advisor.
 ---
 
 # Delegate
@@ -22,9 +22,11 @@ The session is the architect and should run Claude's strongest available tier (F
 | Local / $0 | `pi-implementer` | Routine work suitable for a local open-weight model through Pi. Pass the model explicitly. |
 | In-house / autonomous | `pythinker-implementer` | A trusted spec should run unattended through Pythinker `--yolo`. Pass the provider/model explicitly. |
 | Exploration | OpenCode `explore` or Claude Code `Explore` | Broad read-only codebase searches and implementation-surface mapping. |
-| Judgment | `claude-advisor` | Architecture, migrations, API shapes, major refactors, repeated failures, and final review of multi-step work. |
+| Judgment | Opus architect or `claude-advisor` | Architecture, migrations, API shapes, major refactors, repeated failures, and final review of multi-step work. |
 
 Use Codex by default. Prefer OpenCode when the target model is only reachable through its provider pool. Prefer Pi when local execution and zero marginal cost matter. Prefer Pythinker when full unattended execution is the defining requirement. Race independent lanes only when the added implementation is worth the cost, and isolate races in separate worktrees because concurrent writers must not touch the same files.
+
+Route all delegated Codex work explicitly to `claude-master:codex-implementer`, including work started from long-running flows such as `/goal`. Do **not** use `codex:codex-rescue`, `codex-companion.mjs`, or `codex app-server` as an implementation lane: the official rescue companion keeps a detached app-server broker alive for the Claude session, and fresh threads can leave configured MCP workers such as `node_repl` attached to that broker after the task reports completion. The one-shot lane ignores user config, runs ephemerally, and terminates its isolated process group when the task ends.
 
 If a CLI lane returns `unavailable` or `timeout`, reroute the unchanged spec and report the substitution. Never silently implement inside a wrapper agent that promised a different producer.
 
@@ -46,7 +48,7 @@ Launch independent read-only investigations or tasks with disjoint files in para
 
 ## Commitment boundaries
 
-Consult `claude-advisor` before architecture decisions, migrations, public API changes, or broad refactors; after two failed approaches; and once before accepting a multi-step deliverable. Pass the decision, constraints, and options considered.
+The architect may run on Opus and own these judgments directly, or consult `claude-advisor`. Use one of those paths before architecture decisions, migrations, public API changes, or broad refactors; after two failed approaches; and once before accepting a multi-step deliverable. Pass the decision, constraints, and options considered when consulting the advisor.
 
 ## Acceptance
 

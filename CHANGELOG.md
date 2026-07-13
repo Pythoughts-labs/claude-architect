@@ -4,6 +4,12 @@ All notable changes to Claude Master are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses
 [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.0] - 2026-07-13
+
+### Fixed
+
+- Routed all delegated Codex work away from the persistent rescue companion and isolated each run from user MCP configuration, preventing completed tasks from accumulating `node_repl` and other MCP worker subprocesses under the Codex app-server.
+
 ## [0.1.0] - 2026-07-12
 
 Initial public release.
@@ -16,4 +22,5 @@ Initial public release.
 - Native OpenCode assets under `.opencode/` and `opencode.json`, so the same lanes and skill work outside Claude Code.
 - SVG banner and shields badges for the README.
 
+[0.2.0]: https://github.com/Pythoughts-labs/claude-master/releases/tag/v0.2.0
 [0.1.0]: https://github.com/Pythoughts-labs/claude-master/releases/tag/v0.1.0
