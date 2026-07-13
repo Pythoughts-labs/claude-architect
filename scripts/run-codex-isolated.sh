@@ -2,16 +2,23 @@
 
 set -euo pipefail
 
-TIMEOUT_SECONDS=${CODEX_TIMEOUT_SECONDS:-600}
+# Long-running agents have no reliable heartbeat, so wall-clock limits are opt-in.
+TIMEOUT_SECONDS=${CODEX_TIMEOUT_SECONDS:-0}
 CAP=()
 
-if [[ "$TIMEOUT_SECONDS" =~ ^[1-9][0-9]*$ ]]; then
+if [[ "$TIMEOUT_SECONDS" == 0 ]]; then
+  :
+elif [[ "$TIMEOUT_SECONDS" =~ ^[1-9][0-9]*$ ]]; then
   TIMEOUT_BIN=$(command -v gtimeout || command -v timeout || true)
   if [[ -n "$TIMEOUT_BIN" ]]; then
     CAP=("$TIMEOUT_BIN" "$TIMEOUT_SECONDS")
   else
-    printf 'WARN: no timeout binary; Codex runs uncapped (brew install coreutils to cap)\n' >&2
+    printf 'ERROR: CODEX_TIMEOUT_SECONDS=%s requires timeout or gtimeout; install coreutils or set CODEX_TIMEOUT_SECONDS=0.\n' "$TIMEOUT_SECONDS" >&2
+    exit 69
   fi
+else
+  printf 'ERROR: CODEX_TIMEOUT_SECONDS must be 0 or a positive integer; got %q\n' "$TIMEOUT_SECONDS" >&2
+  exit 64
 fi
 
 # Delegated runs must not inherit interactive MCP servers, which can outlive a

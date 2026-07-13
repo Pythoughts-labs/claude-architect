@@ -19,8 +19,10 @@ assert.match(skill, /no shared reasoning-level flag/);
 assert.match(skill, /include it in the delegation spec/);
 assert.match(claudeCodexAgent, /model_reasoning_effort=low/);
 assert.match(opencodeCodexAgent, /model_reasoning_effort=low/);
+assert.match(opencodeCodexAgent, /Do not impose a default wall-clock cap/);
 assert.doesNotMatch(claudeCodexAgent, /model_reasoning_effort=high/);
 assert.doesNotMatch(opencodeCodexAgent, /model_reasoning_effort=high/);
+assert.doesNotMatch(opencodeCodexAgent, /600-second cap/);
 
 assert.doesNotMatch(skill, /Use Codex by default|default implementation lane/);
 

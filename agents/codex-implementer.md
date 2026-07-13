@@ -73,7 +73,7 @@ Flag discipline (non-negotiable):
 | `-c model_reasoning_effort=low` | Uses low reasoning by default. If the caller selects `medium`, `high`, `xhigh`, or `max`, pass that value instead. |
 | `--skip-git-repo-check` + `--cd "$(pwd)"` | Deterministic working root; works outside git repos. |
 | `- < spec file` | Prompt via stdin. No quoting hazards, no truncated specs. |
-| isolated runner | Applies a ten-minute wall clock when `timeout`/`gtimeout` exists (macOS needs `brew install coreutils`), adds `--ignore-user-config --ephemeral`, and terminates the run's isolated process group on exit. On timeout, report `STATUS: timeout` with whatever landed. |
+| isolated runner | Adds `--ignore-user-config --ephemeral` and terminates the run's isolated process group on exit. It has no wall-clock cap by default so healthy long tasks can finish. Set a positive `CODEX_TIMEOUT_SECONDS` for a task-specific cap (`timeout`/`gtimeout` required); `0` leaves it uncapped, and malformed or unenforceable values fail before Codex starts. On timeout, report `STATUS: timeout` with whatever landed. |
 
 `--model gpt-5.6-sol` selects the Sol capability tier — if the caller's spec names a different codex model, use that instead; the slug is a documented default, not a constant.
 
