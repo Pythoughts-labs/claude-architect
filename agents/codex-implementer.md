@@ -1,6 +1,6 @@
 ---
 name: codex-implementer
-description: Cross-vendor implementation lane running GPT-5.6 Sol via the OpenAI Codex CLI (`codex exec`, reasoning effort high). Route work here when correctness or completeness is critical enough to justify a second model family, or when you want an independent non-Anthropic implementation to compare against a Claude lane. Receives the same complete spec as the implementer agent; drives codex to write the code; returns a structured report with verification evidence. Requires the `codex` CLI installed and authenticated — reports a structured error if it is missing, never silently substitutes itself.
+description: Cross-vendor implementation lane running GPT-5.6 Sol via the OpenAI Codex CLI (`codex exec`, reasoning effort low by default). Route work here when correctness or completeness is critical enough to justify a second model family, or when you want an independent non-Anthropic implementation to compare against a Claude lane. Receives the same complete spec as the implementer agent; drives codex to write the code; returns a structured report with verification evidence. Requires the `codex` CLI installed and authenticated — reports a structured error if it is missing, never silently substitutes itself.
 model: sonnet
 tools: Bash, Read, Grep, Glob
 ---
@@ -48,14 +48,14 @@ and include its actual output in your final message."]
 SPEC_EOF
 ```
 
-2. Invoke Codex through the plugin's isolated one-shot runner, sandboxed to the workspace, with reasoning effort pinned high:
+2. Invoke Codex through the plugin's isolated one-shot runner, sandboxed to the workspace, with reasoning effort set to low by default:
 
 ```bash
 trap 'rm -f "$SPEC" "$FINAL"' EXIT
 
 bash "$CLAUDE_PLUGIN_ROOT/scripts/run-codex-isolated.sh" \
   --model gpt-5.6-sol \
-  -c model_reasoning_effort=high \
+  -c model_reasoning_effort=low \
   --sandbox workspace-write \
   --skip-git-repo-check \
   --cd "$(pwd)" \
@@ -70,7 +70,7 @@ Flag discipline (non-negotiable):
 | `--sandbox workspace-write` | Codex writes code, scoped to the working tree, with no network access. Never `danger-full-access`. |
 | `--ignore-user-config` | Prevents delegated runs from loading interactive user MCP servers such as `node_repl`, browser tools, and their worker subprocesses. |
 | `--ephemeral` | Prevents a finished delegation from persisting a resumable Codex session. |
-| `-c model_reasoning_effort=high` | Pins GPT-5.6 Sol to high reasoning for complex implementation work. |
+| `-c model_reasoning_effort=low` | Uses low reasoning by default. If the caller selects `medium`, `high`, `xhigh`, or `max`, pass that value instead. |
 | `--skip-git-repo-check` + `--cd "$(pwd)"` | Deterministic working root; works outside git repos. |
 | `- < spec file` | Prompt via stdin. No quoting hazards, no truncated specs. |
 | isolated runner | Applies a ten-minute wall clock when `timeout`/`gtimeout` exists (macOS needs `brew install coreutils`), adds `--ignore-user-config --ephemeral`, and terminates the run's isolated process group on exit. On timeout, report `STATUS: timeout` with whatever landed. |

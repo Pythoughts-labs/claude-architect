@@ -94,13 +94,13 @@ Ask the architect to delegate:
 accepting it.
 ```
 
-Because that request does not name a lane, the architect asks you to choose Codex, OpenCode, Pi, or Pythinker before it continues. Name one in the request to skip the question.
+Because that request does not name a lane, the architect asks you to choose Codex, OpenCode, Pi, or Pythinker before it continues. The question identifies each lane's producer and reasoning control: Codex runs GPT-5.6 Sol at `low` by default (`medium`, `high`, `xhigh`, and `max` are overrides), OpenCode exposes model-specific variants, Pi exposes `--thinking`, and Pythinker relies on its model or agent configuration. Use a custom answer to name an override, or name a lane and reasoning level in the request to skip the question.
 
 The spec it produces always names the objective, the exact files, the interfaces, the constraints, and the verification command. Independent read-only tasks or edits to separate files can run in parallel. Writing agents must not race in the same working tree, so isolate concurrent runs in separate worktrees.
 
 ## Requirements
 
-- **Codex lane:** install and authenticate the [OpenAI Codex CLI](https://github.com/openai/codex). The lane calls `gpt-5.6-sol` at high reasoning.
+- **Codex lane:** install and authenticate the [OpenAI Codex CLI](https://github.com/openai/codex). The lane calls `gpt-5.6-sol` at low reasoning by default.
 - **OpenCode lane:** install the [OpenCode CLI](https://opencode.ai) and authenticate a provider with `opencode auth login`. The lane runs `opencode run --agent build --auto` and takes the model explicitly.
 - **Pi lane:** install the [Pi coding agent](https://pi.dev) and start a local model server. Pass the provider and model explicitly.
 - **Pythinker lane:** install the [Pythinker CLI](https://pythoughts-labs.github.io/pythinker-code/), authenticate a provider, and pass the model explicitly. This lane runs unattended in `--yolo` mode.

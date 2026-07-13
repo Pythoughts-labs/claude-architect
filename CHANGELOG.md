@@ -8,7 +8,7 @@ All notable changes to Claude Master are recorded here. The format follows
 
 ### Changed
 
-- `/delegate` now asks the user to choose Codex, OpenCode, Pi, or Pythinker when no CLI or agent is named instead of silently defaulting to Codex.
+- `/delegate` now asks the user to choose Codex, OpenCode, Pi, or Pythinker when no CLI or agent is named instead of silently defaulting to Codex, and the question documents each lane's model and reasoning controls. GPT-5.6 Sol now defaults to low reasoning.
 
 ## [0.4.0] - 2026-07-13
 

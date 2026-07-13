@@ -17,18 +17,18 @@ The session is the architect and should run Claude's strongest available tier (F
 
 Before preparing a spec or launching a subagent, check whether the user explicitly named a CLI or implementer. Treat `Codex` or `Codex CLI` as `codex-implementer`, `OpenCode` as `opencode-implementer`, `Pi` as `pi-implementer`, and `Pythinker` as `pythinker-implementer`.
 
-If the user invokes `/delegate` without naming a CLI, implementer, or agent, use the host's structured question tool when available, ask this question, and wait for the answer:
+If the user invokes `/delegate` without naming a CLI, implementer, or agent, use the host's structured question tool when available, ask this question, and wait for the answer. Include the producer and reasoning control in each option so the user knows what the lane will run:
 
-> Which CLI should handle this delegation?
+> Which CLI should handle this delegation? Each choice shows its model and reasoning default. Use a custom answer to name a different supported reasoning level.
 
 Offer exactly these choices:
 
-- **Codex** - `codex-implementer`
-- **OpenCode** - `opencode-implementer`
-- **Pi** - `pi-implementer`
-- **Pythinker** - `pythinker-implementer`
+- **Codex** - `codex-implementer`; GPT-5.6 Sol at `low` reasoning by default (supported overrides: `medium`, `high`, `xhigh`, `max`).
+- **OpenCode** - `opencode-implementer`; caller-selected provider/model, with a model-specific `--variant` such as `high` when supported.
+- **Pi** - `pi-implementer`; caller-selected model, with `--thinking off|minimal|low|medium|high|xhigh|max` (`medium` by default).
+- **Pythinker** - `pythinker-implementer`; caller-selected provider/model; no shared reasoning-level flag, so model or agent configuration controls it.
 
-There is no implicit default. Do not prepare or launch a delegation until the user selects a lane.
+There is no implicit lane default. Do not prepare or launch a delegation until the user selects a lane. If the answer names a supported model or reasoning override, include it in the delegation spec; otherwise use the selected lane's documented default.
 
 ## Lanes
 
