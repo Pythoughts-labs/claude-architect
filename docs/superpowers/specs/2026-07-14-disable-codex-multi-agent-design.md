@@ -4,19 +4,26 @@
 
 ## Problem
 
-Claude Architect invokes Codex with `--ignore-user-config`, but Codex enables `multi_agent` by default. A delegated Codex run can therefore spawn internal implementers or reviewers and repeatedly poll them, despite Claude Architect's one-shot Producer contract.
+Claude Architect invokes Codex with `--ignore-user-config`, but Codex enables `multi_agent` by default. More importantly, Codex 0.144.4 can select MultiAgent V2 from GPT-5.6 Sol's model metadata even when `codex features list` reports both `multi_agent=false` and `multi_agent_v2=false`. In V2's `explicitRequestOnly` mode, applicable `AGENTS.md` or skill instructions can still trigger internal implementers and reviewers.
 
 ## Decision
 
-The shared Codex runner will pass `--disable multi_agent` on every invocation. Enforcement belongs in `scripts/run-codex-isolated.sh` so Claude Code, OpenCode, and direct adapter callers receive identical behavior.
+The shared runner will append two controls after every caller's arguments:
+
+```text
+--disable multi_agent
+-c features.multi_agent_v2={enabled=false,max_concurrent_threads_per_session=1}
+```
+
+The feature flag disables the normal path. The V2 concurrency limit is the hard backstop: V2 counts the root thread, so one total slot leaves zero child capacity and every `spawn_agent` call is rejected. Appending both controls prevents caller arguments from weakening them. Enforcement belongs in `scripts/run-codex-isolated.sh` so Claude Code, OpenCode, and direct runner callers receive identical behavior.
 
 Claude Architect will continue using `--sandbox workspace-write`; it will not add `--yolo` or otherwise weaken approval and sandbox policy.
 
 ## Changes
 
-- Extend the existing lifecycle regression test first so both the `setsid` and Perl isolation paths must forward the exact `--disable` and `multi_agent` arguments.
-- Add `--disable multi_agent` to both `codex exec` branches in the shared runner.
-- Update the Claude and OpenCode Codex implementer contracts to document that the adapter disables internal Codex delegation.
+- Extend the lifecycle regression test so both process-isolation paths and the stderr-logging launch branch must receive the enforced feature flag and V2 cap.
+- Append the single-agent controls to both `codex exec` branches in the shared runner.
+- Update the Claude and OpenCode Codex implementer contracts with the model-selected V2 behavior and hard-cap rationale.
 
 ## Verification
 

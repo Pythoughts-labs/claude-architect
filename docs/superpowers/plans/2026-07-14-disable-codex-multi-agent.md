@@ -2,9 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Ensure every Codex process launched by Claude Architect has Codex's internal `multi_agent` feature disabled.
+**Goal:** Ensure Codex processes launched by Claude Architect cannot spawn internal subagents.
 
-**Architecture:** Enforce the feature flag once in the shared Codex runner so Claude Code, OpenCode, and direct runner callers behave identically. Protect the argv contract with the existing real-process lifecycle harness, then synchronize both implementer instruction files with the enforced runtime behavior.
+**Architecture:** Append the normal feature disable plus a one-total-thread MultiAgent V2 cap in the shared Codex runner so Claude Code, OpenCode, and direct runner callers behave identically. The V2 cap is required because GPT-5.6 Sol can select V2 through model metadata despite disabled feature flags. Protect both launch branches with the existing real-process lifecycle harness, then synchronize both implementer instruction files with the enforced runtime behavior.
 
 **Tech Stack:** Bash 3.2-compatible shell, Codex CLI, existing shell integration tests.
 
@@ -16,6 +16,10 @@
 - Do not modify the untracked `tasks/` directory.
 
 ---
+
+## Live-verification correction
+
+Tasks 1 and 2 record the initial feature-flag-only implementation. A live GPT-5.6 Sol run later proved that model metadata can force MultiAgent V2 while the feature listing remains false. Task 3 supersedes the earlier invocation details with the hard V2 concurrency cap.
 
 ### Task 1: Enforce single-agent Codex execution
 
@@ -163,3 +167,42 @@ git commit -m "fix(codex): disable internal multi-agent delegation"
 ```
 
 Expected: only the five scoped files are committed; the untracked `tasks/` directory remains untouched.
+
+### Task 3: Block model-selected MultiAgent V2
+
+**Files:**
+- Modify: `scripts/run-codex-isolated.sh`
+- Modify: `tests/codex-lifecycle.test.sh`
+- Modify: `agents/codex-implementer.md`
+- Modify: `.opencode/agents/codex-implementer.md`
+- Modify: `docs/superpowers/specs/2026-07-14-disable-codex-multi-agent-design.md`
+
+**Interfaces:**
+- Consumes: caller-provided Codex arguments, including the stdin prompt marker.
+- Produces: final enforced arguments `--disable multi_agent` and `-c features.multi_agent_v2={enabled=false,max_concurrent_threads_per_session=1}` after caller arguments.
+
+- [x] **Step 1: Reproduce the forced-V2 failure**
+
+Inspect the live Codex 0.144.4 rollout and confirm `multi_agent_version=v2`, `multi_agent_mode=explicitRequestOnly`, and a successful `spawn_agent` call while feature listing reports false.
+
+- [x] **Step 2: Write and run the failing hard-cap regression test**
+
+Require the exact adjacent `-c` and V2 cap argument pair in both process-isolation cases and the stderr-logging branch. Run `bash tests/codex-lifecycle.test.sh` and expect failure because the cap is absent.
+
+- [x] **Step 3: Append the hard controls after caller arguments**
+
+Use this final suffix in both runner branches:
+
+```bash
+"$@" \
+  --disable multi_agent \
+  -c 'features.multi_agent_v2={enabled=false,max_concurrent_threads_per_session=1}'
+```
+
+- [x] **Step 4: Synchronize contracts and regression assertions**
+
+Document why `--disable multi_agent` is insufficient for GPT-5.6 Sol and why one V2 slot blocks children. Assert both implementer contracts contain `max_concurrent_threads_per_session=1`.
+
+- [x] **Step 5: Verify the hard cap**
+
+Run the lifecycle test, Bash syntax check, ShellCheck excluding only the documented pre-existing `SC2034`, and a live ephemeral read-only Codex diagnostic that explicitly requests one child. Expected live result: `agent thread limit reached` and no files modified.
