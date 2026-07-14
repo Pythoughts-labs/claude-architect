@@ -1,20 +1,31 @@
 import { describe, it, expect } from "vitest";
-import { redact } from "../../src/runtime/redaction.js";
+import {
+  clearRegisteredSecrets,
+  redact,
+  redactRecord,
+  registerSecretValue,
+} from "../../src/runtime/redaction.js";
 describe("redact", () => {
   it("masks bearer tokens and known key prefixes", () => {
     expect(redact("Authorization: Bearer abc.def.ghi")).not.toContain("abc.def.ghi");
     expect(redact("key sk-ABCDEF0123456789")).not.toContain("sk-ABCDEF0123456789");
     expect(redact("AWS AKIAIOSFODNN7EXAMPLE here")).toContain("«redacted:");
+    expect(redact("AWS AKIAIOSFODNN7EXAMPLE here")).not.toContain("AKIAIOSFODNN7EXAMPLE");
   });
-  it("leaves ordinary text intact", () =>
-    expect(redact("just a normal sentence")).toBe("just a normal sentence"));
-});
+  it("leaves ordinary text intact", () => {
+    expect(redact("just a normal sentence")).toBe("just a normal sentence");
+    expect(redact("config key: application.database.connection failed")).toBe(
+      "config key: application.database.connection failed",
+    );
+  });
+  it("redacts a real JWT-shaped token", () => {
+    const jwt =
+      "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c";
+    const output = redact(`token ${jwt} here`);
 
-import {
-  clearRegisteredSecrets,
-  redactRecord,
-  registerSecretValue,
-} from "../../src/runtime/redaction.js";
+    expect(output).not.toContain("SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c");
+  });
+});
 
 describe("redact", () => {
   it("masks sensitive assignments while preserving the key", () => {
@@ -62,23 +73,28 @@ describe("redact", () => {
     });
   });
 
-  it("masks GitHub, Slack, and JWT-looking tokens", () => {
-    const input = [
-      "ghu_ABCDEF0123456789",
-      "xoxb-" + "1234567890-abcdefghijklmnop",
-      "abcdefgh.ijklmnop.qrstuvwx",
-    ].join(" ");
+  it("masks GitHub and Slack tokens", () => {
+    const input = ["ghu_ABCDEF0123456789", "xoxb-" + "1234567890-abcdefghijklmnop"].join(" ");
 
     const output = redact(input);
 
     expect(output).not.toContain("ghu_ABCDEF0123456789");
     expect(output).not.toContain("xoxb-" + "1234567890-abcdefghijklmnop");
-    expect(output).not.toContain("abcdefgh.ijklmnop.qrstuvwx");
   });
 
   it("leaves plain file paths intact", () => {
     const path = "/Users/panda/Projects/active/claude-architect/src/index.ts";
 
     expect(redact(path)).toBe(path);
+  });
+
+  it("does not let a __proto__ key in input hijack the output's prototype", () => {
+    const input = JSON.parse('{"__proto__": {"polluted": true}, "safe": "ok"}');
+
+    const output = redactRecord(input) as Record<string, unknown>;
+
+    expect(Object.getPrototypeOf(output)).toBe(Object.prototype);
+    expect(({} as Record<string, unknown>).polluted).toBeUndefined();
+    expect(output.safe).toBe("ok");
   });
 });

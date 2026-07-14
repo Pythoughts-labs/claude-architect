@@ -9,7 +9,7 @@ const rules: Array<{ kind: string; re: RegExp }> = [
   { kind: "slack", re: /\bxox[baprs]-[A-Za-z0-9-]{8,}\b/g },
   {
     kind: "jwt",
-    re: /\b[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b/g,
+    re: /\beyJ[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b/g,
   },
   {
     kind: "env",
@@ -43,13 +43,29 @@ export function redact(text: string): string {
   return result;
 }
 
+const DANGEROUS_KEYS = new Set(["__proto__", "constructor", "prototype"]);
+
 function redactValue(value: unknown): unknown {
   if (typeof value === "string") return redact(value);
   if (Array.isArray(value)) return value.map(redactValue);
   if (value === null || typeof value !== "object") return value;
 
   const result: Record<string, unknown> = {};
-  for (const [key, child] of Object.entries(value)) result[key] = redactValue(child);
+  for (const [key, child] of Object.entries(value)) {
+    const redacted = redactValue(child);
+    if (DANGEROUS_KEYS.has(key)) {
+      // Define as an own data property instead of assigning, so a
+      // `__proto__` key from untrusted input can't hijack result's prototype.
+      Object.defineProperty(result, key, {
+        value: redacted,
+        writable: true,
+        enumerable: true,
+        configurable: true,
+      });
+    } else {
+      result[key] = redacted;
+    }
+  }
   return result;
 }
 
