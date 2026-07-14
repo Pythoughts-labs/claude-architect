@@ -12,7 +12,7 @@
       "name": "claude-architect",
       "displayName": "Claude Architect",
       "source": "./",
-      "version": "0.6.0",
+      "version": "0.7.0",
       "description": "CLI coding-agent orchestration for Claude through Codex, OpenCode, Pi, and Pythinker Code, with architect-led review and native OpenCode assets.",
       "author": {
         "name": "elkaix",

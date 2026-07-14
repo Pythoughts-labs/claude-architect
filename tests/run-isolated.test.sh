@@ -227,8 +227,153 @@ EOF
   printf 'PASS: real timeout returns 124 and cleans descendants.\n'
 }
 
+assert_run_logging() {
+  local bin="$TMP/run-logging/bin"
+  local state="$TMP/run-logging/state"
+  local logdir="$state/logs"
+  local status
+  local lines
+
+  mkdir -p "$bin" "$state"
+  cat > "$bin/delegated-command" <<EOF
+#!$BASH_BIN
+printf 'to stderr\n' >&2
+exit "\${DC_STATUS:-0}"
+EOF
+  chmod +x "$bin/delegated-command"
+
+  # Success: one atomic line, result=ok, exit preserved, argv values not leaked.
+  PATH="$bin:$PATH" RUN_TIMEOUT_SECONDS=0 RUN_ISOLATED_LOG_DIR="$logdir" \
+    "$BASH_BIN" "$ROOT/scripts/run-isolated.sh" \
+      delegated-command --model m1 'super-secret-prompt-value' \
+    </dev/null >/dev/null 2>&1
+
+  if [[ ! -s "$logdir/runs.log" ]]; then
+    printf 'FAIL: run log was not written\n' >&2
+    exit 1
+  fi
+  lines=$(wc -l < "$logdir/runs.log")
+  if [[ "$lines" -ne 1 ]]; then
+    printf 'FAIL: expected exactly one run-log line, got %s\n' "$lines" >&2
+    exit 1
+  fi
+  if ! grep -Eq 'prog=delegated-command argc=4 dur=[0-9]+s status=0 result=ok' "$logdir/runs.log"; then
+    printf 'FAIL: success record malformed: %s\n' "$(cat "$logdir/runs.log")" >&2
+    exit 1
+  fi
+  if grep -Fq 'super-secret-prompt-value' "$logdir/runs.log"; then
+    printf 'FAIL: run log leaked an argv value\n' >&2
+    exit 1
+  fi
+
+  # Failure: exit code preserved, result=failed, appended as a second line.
+  set +e
+  PATH="$bin:$PATH" RUN_TIMEOUT_SECONDS=0 RUN_ISOLATED_LOG_DIR="$logdir" DC_STATUS=23 \
+    "$BASH_BIN" "$ROOT/scripts/run-isolated.sh" delegated-command \
+    </dev/null >/dev/null 2>&1
+  status=$?
+  set -e
+  if [[ "$status" -ne 23 ]]; then
+    printf 'FAIL: logging altered exit code (%s != 23)\n' "$status" >&2
+    exit 1
+  fi
+  lines=$(wc -l < "$logdir/runs.log")
+  if [[ "$lines" -ne 2 ]]; then
+    printf 'FAIL: expected two run-log lines after second run, got %s\n' "$lines" >&2
+    exit 1
+  fi
+  if ! grep -Eq 'status=23 result=failed' "$logdir/runs.log"; then
+    printf 'FAIL: failure record missing\n' >&2
+    exit 1
+  fi
+
+  # Deterministic result-category mapping for timeout (124) and signal (>128).
+  set +e
+  PATH="$bin:$PATH" RUN_TIMEOUT_SECONDS=0 RUN_ISOLATED_LOG_DIR="$logdir" DC_STATUS=124 \
+    "$BASH_BIN" "$ROOT/scripts/run-isolated.sh" delegated-command </dev/null >/dev/null 2>&1
+  PATH="$bin:$PATH" RUN_TIMEOUT_SECONDS=0 RUN_ISOLATED_LOG_DIR="$logdir" DC_STATUS=137 \
+    "$BASH_BIN" "$ROOT/scripts/run-isolated.sh" delegated-command </dev/null >/dev/null 2>&1
+  set -e
+  if ! grep -Eq 'status=124 result=timeout' "$logdir/runs.log"; then
+    printf 'FAIL: timeout category mapping missing\n' >&2
+    exit 1
+  fi
+  if ! grep -Eq 'status=137 result=signal' "$logdir/runs.log"; then
+    printf 'FAIL: signal category mapping missing\n' >&2
+    exit 1
+  fi
+
+  printf 'PASS: run logging records status/result atomically without leaking argv.\n'
+}
+
+assert_run_logging_is_concurrency_safe() {
+  local bin="$TMP/run-logging-concurrent/bin"
+  local state="$TMP/run-logging-concurrent/state"
+  local logdir="$state/logs"
+  local n=8
+  local i
+  local lines
+  local malformed
+
+  mkdir -p "$bin" "$state"
+  ln -s "$PERL_BIN" "$bin/perl"
+  cat > "$bin/delegated-command" <<EOF
+#!$BASH_BIN
+exit 0
+EOF
+  chmod +x "$bin/delegated-command"
+
+  # Fan out concurrently into one shared log, mirroring parallel lane dispatch.
+  for i in $(seq 1 "$n"); do
+    PATH="$bin:$PATH" RUN_TIMEOUT_SECONDS=0 RUN_ISOLATED_LOG_DIR="$logdir" \
+      "$BASH_BIN" "$ROOT/scripts/run-isolated.sh" delegated-command "arg$i" \
+      </dev/null >/dev/null 2>&1 &
+  done
+  wait
+
+  lines=$(wc -l < "$logdir/runs.log")
+  if [[ "$lines" -ne "$n" ]]; then
+    printf 'FAIL: expected %s concurrent run-log lines, got %s\n' "$n" "$lines" >&2
+    exit 1
+  fi
+  # No torn/interleaved writes: every line individually matches the full record.
+  # grep -c exits 1 when the count is zero (the success case), so guard set -e.
+  malformed=$(grep -Ecv '^[0-9T:-]+Z isolated pid=[0-9]+ prog=delegated-command argc=2 dur=[0-9]+s status=0 result=ok$' "$logdir/runs.log" || true)
+  if [[ "$malformed" -ne 0 ]]; then
+    printf 'FAIL: %s interleaved/malformed line(s) under concurrency\n' "$malformed" >&2
+    cat "$logdir/runs.log" >&2
+    exit 1
+  fi
+
+  printf 'PASS: concurrent lane fan-out yields one atomic well-formed line each.\n'
+}
+
+assert_logging_disabled_under_restricted_path() {
+  local bin="$TMP/logging-disabled/bin"
+  local state="$TMP/logging-disabled/state"
+
+  mkdir -p "$bin" "$state"
+  ln -s "$PERL_BIN" "$bin/perl"
+  cat > "$bin/delegated-command" <<EOF
+#!$BASH_BIN
+exit 0
+EOF
+  chmod +x "$bin/delegated-command"
+
+  # Restricted PATH (no date/mkdir) and no explicit log dir: logging must no-op
+  # rather than crash, leaving the delegated exit status intact.
+  PATH="$bin" RUN_TIMEOUT_SECONDS=0 \
+    "$BASH_BIN" "$ROOT/scripts/run-isolated.sh" delegated-command \
+    </dev/null >/dev/null 2>&1
+
+  printf 'PASS: logging is skipped cleanly when utilities are unavailable.\n'
+}
+
 assert_runner_branch setsid
 assert_runner_branch perl
 assert_pre_start_validation
 assert_timeout_wrapper_forwards_command
 assert_real_timeout_cleans_descendants
+assert_run_logging
+assert_run_logging_is_concurrency_safe
+assert_logging_disabled_under_restricted_path

@@ -248,9 +248,60 @@ EOF
   printf 'PASS: timeout expiration returns 124 and cleans up delegated workers.\n'
 }
 
+assert_codex_stderr_capture() {
+  local bin="$TMP/codex-stderr/bin"
+  local state="$TMP/codex-stderr/state"
+  local logdir="$state/logs"
+  local status
+  local i
+
+  mkdir -p "$bin" "$state"
+  ln -s "$PERL_BIN" "$bin/perl"
+  cat > "$bin/codex" <<EOF
+#!$BASH_BIN
+printf 'codex-diagnostic-line\n' >&2
+exit 5
+EOF
+  chmod +x "$bin/codex"
+
+  set +e
+  PATH="$bin:$PATH" CODEX_TIMEOUT_SECONDS=0 \
+    CODEX_LOG_DIR="$logdir" RUN_ISOLATED_LOG_DIR="$logdir" \
+    "$BASH_BIN" "$ROOT/scripts/run-codex-isolated.sh" --model test-model \
+    </dev/null >"$state/stdout" 2>"$state/stderr"
+  status=$?
+  set -e
+
+  if [[ "$status" -ne 5 ]]; then
+    printf 'FAIL: codex stderr capture altered exit status (%s != 5)\n' "$status" >&2
+    exit 1
+  fi
+
+  # stderr must still stream to the caller, and also be persisted per-run.
+  # The tee child is orphaned by exec, so poll briefly for its flush.
+  for i in $(seq 1 30); do
+    grep -Fq 'codex-diagnostic-line' "$state/stderr" 2>/dev/null \
+      && grep -Fqr 'codex-diagnostic-line' "$logdir" 2>/dev/null \
+      && break
+    "$SLEEP_BIN" 0.1
+  done
+
+  if ! grep -Fq 'codex-diagnostic-line' "$state/stderr"; then
+    printf 'FAIL: codex stderr was not streamed to the caller\n' >&2
+    exit 1
+  fi
+  if ! grep -Fqr 'codex-diagnostic-line' "$logdir"/codex-*.stderr; then
+    printf 'FAIL: codex stderr was not persisted to a per-run file\n' >&2
+    exit 1
+  fi
+
+  printf 'PASS: codex stderr is persisted and still streamed to the caller.\n'
+}
+
 run_case setsid
 run_case perl
 assert_invalid_timeouts_rejected
 assert_requested_timeout_requires_binary
 assert_requested_timeout_is_enforced
 assert_timeout_expiration_cleans_up_workers
+assert_codex_stderr_capture

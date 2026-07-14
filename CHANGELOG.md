@@ -6,6 +6,12 @@ All notable changes to Claude Architect are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-07-14
+
+### Added
+
+- The shared process-isolation lifecycle now records every delegated run. `run-isolated.sh` appends one atomic line per run to `runs.log` under `${TMPDIR:-/tmp}/claude-architect-runs` (override with `RUN_ISOLATED_LOG_DIR`), capturing the delegated program's basename, argument count, duration, exit status, and result category (`ok`, `failed`, `timeout`, `signal`) so a failed delegation is diagnosable after the fact. Argument values are never logged, since a spec or prompt can travel in argv. Codex — the only lane whose stderr streams to the caller rather than into its result file — additionally mirrors stderr to a per-run `codex-<timestamp>-<pid>.stderr` file (override with `CODEX_LOG_DIR`). Logging is skipped silently when the host lacks the required utilities, and can never alter a delegation's exit status.
+
 ## [0.6.0] - 2026-07-14
 
 ### Changed
@@ -57,7 +63,8 @@ Initial public release.
 - Native OpenCode assets under `.opencode/` and `opencode.json`, so the same lanes and skill work outside Claude Code.
 - SVG banner and shields badges for the README.
 
-[Unreleased]: https://github.com/Pythoughts-labs/claude-architect/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/Pythoughts-labs/claude-architect/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/Pythoughts-labs/claude-architect/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/Pythoughts-labs/claude-architect/releases/tag/v0.6.0
 [0.5.0]: https://github.com/Pythoughts-labs/claude-architect/releases/tag/v0.5.0
 [0.4.0]: https://github.com/Pythoughts-labs/claude-architect/releases/tag/v0.4.0

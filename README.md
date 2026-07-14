@@ -14,7 +14,7 @@
 <p align="center">
   <img alt="Claude Code" src="https://img.shields.io/badge/Claude_Code-plugin-d97757?style=flat-square&labelColor=0b0e14">
   <img alt="OpenCode" src="https://img.shields.io/badge/OpenCode-native-58a6ff?style=flat-square&labelColor=0b0e14">
-  <img alt="version" src="https://img.shields.io/badge/version-0.6.0-9aa4b2?style=flat-square&labelColor=0b0e14">
+  <img alt="version" src="https://img.shields.io/badge/version-0.7.0-9aa4b2?style=flat-square&labelColor=0b0e14">
   <img alt="license" src="https://img.shields.io/badge/license-MIT-3fb950?style=flat-square&labelColor=0b0e14">
 </p>
 
@@ -109,6 +109,8 @@ Every delegation carries the same five-part spec: the objective, the exact files
 There is no implicit lane default. If `/delegate` does not name Codex, OpenCode, Pi, Pythinker, or an implementer, the architect asks which CLI to use before preparing or launching the delegation. Reach for OpenCode when the model you want only lives in its provider pool, Pi when local execution and zero token cost matter, and Pythinker when full unattended execution is the point. Each lane is a harness around a producer. Codex pins its own model; Pi, OpenCode, and Pythinker accept optional model and thinking or variant overrides, and otherwise defer to the selected CLI's configured defaults. Every CLI lane runs a preflight and returns a structured `unavailable` report rather than quietly implementing the work itself. A lane that promises Codex and silently becomes a Claude lane is worse than a loud failure, because you chose that lane for a reason.
 
 Every implementation lane uses one shared process-isolation lifecycle through its own CLI-specific adapter. Codex is uncapped by default. Pi, Pythinker, and OpenCode fail closed after 900 seconds by default; set `PI_TIMEOUT_SECONDS=0`, `PYTHINKER_TIMEOUT_SECONDS=0`, or `OPENCODE_TIMEOUT_SECONDS=0`, respectively, to disable that cap.
+
+The shared lifecycle appends one line per run to `runs.log` under `${TMPDIR:-/tmp}/claude-architect-runs` (override with `RUN_ISOLATED_LOG_DIR`), recording the delegated program's basename, argument count, duration, exit status, and result category (`ok`, `failed`, `timeout`, or `signal`) so a failed delegation is diagnosable after the fact. Argument *values* are never logged, since a spec or prompt can travel in argv. Codex is the only lane whose stderr streams to the caller rather than into its result file, so its stderr is also mirrored to a per-run `codex-<timestamp>-<pid>.stderr` file in the same directory (override with `CODEX_LOG_DIR`). Logging is skipped silently when the host lacks the required utilities.
 
 ## Install
 

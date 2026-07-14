@@ -1,7 +1,7 @@
 {
   "name": "claude-architect",
   "displayName": "Claude Architect",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "description": "CLI coding-agent orchestration for Claude through Codex, OpenCode, Pi, and Pythinker Code. A Fable/Opus architect routes implementation across those CLIs and reviews every diff before acceptance.",
   "author": {
     "name": "elkaix",
