@@ -105,7 +105,7 @@ function escapeRegex(character: string): string {
   return /[\\^$.*+?()[\]{}|]/.test(character) ? `\\${character}` : character;
 }
 
-function globMatches(pattern: string, candidate: string): boolean {
+function globMatches(pattern: string, candidate: string, caseInsensitive = false): boolean {
   let expression = "^";
   for (let index = 0; index < pattern.length; index += 1) {
     const character = pattern[index]!;
@@ -125,12 +125,12 @@ function globMatches(pattern: string, candidate: string): boolean {
       expression += ".*";
     }
   }
-  return new RegExp(`${expression}$`).test(candidate);
+  return new RegExp(`${expression}$`, caseInsensitive ? "i" : undefined).test(candidate);
 }
 
 function isAllowed(pathname: string, writeAllowlist: string[], forbiddenScope: string[]): boolean {
   return writeAllowlist.some(pattern => globMatches(pattern, pathname))
-    && !forbiddenScope.some(pattern => globMatches(pattern, pathname));
+    && !forbiddenScope.some(pattern => globMatches(pattern, pathname, true));
 }
 
 async function advisoryLstatScan(worktreePath: string, changedPaths: string[]): Promise<boolean> {
@@ -251,17 +251,6 @@ export async function freezeCandidate(args: FreezeCandidateArgs): Promise<Freeze
       return { ok: false, reason: "modified-symlink" };
     }
 
-    const anchorRef = `refs/claude-architect/candidates/${args.runId}`;
-    const candidateCommitOid = (await checkedGit(args.repoRoot, [
-      "commit-tree",
-      candidateTreeOid,
-      "-p",
-      args.baseCommitOid,
-      "-m",
-      `candidate ${args.runId}`,
-    ])).trim();
-    await checkedGit(args.repoRoot, ["update-ref", anchorRef, candidateCommitOid]);
-
     const nameStatus = parseNameStatus(await checkedGit(args.repoRoot, [
       "diff-tree",
       "-r",
@@ -303,6 +292,16 @@ export async function freezeCandidate(args: FreezeCandidateArgs): Promise<Freeze
       args.baseCommitOid,
       candidateTreeOid,
     ]));
+    const anchorRef = `refs/claude-architect/candidates/${args.runId}`;
+    const candidateCommitOid = (await checkedGit(args.repoRoot, [
+      "commit-tree",
+      candidateTreeOid,
+      "-p",
+      args.baseCommitOid,
+      "-m",
+      `candidate ${args.runId}`,
+    ])).trim();
+    await checkedGit(args.repoRoot, ["update-ref", anchorRef, candidateCommitOid]);
 
     return {
       ok: true,

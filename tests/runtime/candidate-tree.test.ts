@@ -8,6 +8,7 @@ import { git } from "../../src/git/git-exec.js";
 const temporaryPaths: string[] = [];
 const gitHooks = vi.hoisted(() => ({
   afterReadTree: undefined as (() => Promise<void>) | undefined,
+  failCommand: undefined as string | undefined,
 }));
 
 vi.mock("../../src/git/git-exec.js", async importOriginal => {
@@ -15,6 +16,9 @@ vi.mock("../../src/git/git-exec.js", async importOriginal => {
   return {
     ...actual,
     git: async (...args: Parameters<typeof actual.git>) => {
+      if (args[1][0] === gitHooks.failCommand) {
+        return { stdout: "", stderr: `forced ${gitHooks.failCommand} failure`, exitCode: 1 };
+      }
       const result = await actual.git(...args);
       if (args[1][0] === "read-tree" && gitHooks.afterReadTree !== undefined) {
         const hook = gitHooks.afterReadTree;
@@ -56,6 +60,7 @@ async function initRepoAndWorktree(
 
 afterEach(async () => {
   gitHooks.afterReadTree = undefined;
+  gitHooks.failCommand = undefined;
   await Promise.all(temporaryPaths.splice(0).map(path => rm(path, { recursive: true, force: true })));
 });
 
@@ -108,6 +113,49 @@ describe("freezeCandidate", () => {
         result.artifact.candidateCommitOid,
       );
     }
+  });
+
+  it("records deleted files with their base mode and a null content hash", async () => {
+    const fixture = await initRepoAndWorktree({
+      "a.txt": "keep\n",
+      "delete.txt": "remove\n",
+    });
+    await rm(join(fixture.worktreePath, "delete.txt"));
+
+    const result = await freezeCandidate({
+      ...fixture,
+      runId: "run-deletion",
+      writeAllowlist: ["delete.txt"],
+      forbiddenScope: [],
+    });
+
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.artifact.changedPaths).toEqual([{
+        path: "delete.txt",
+        changeType: "deleted",
+        mode: "100644",
+        contentHash: null,
+      }]);
+      expect(result.artifact.patch).toContain("deleted file mode 100644");
+    }
+  });
+
+  it("does not leave an anchor when metadata construction fails", async () => {
+    const fixture = await initRepoAndWorktree();
+    await writeFile(join(fixture.worktreePath, "a.txt"), "updated\n");
+    const anchorRef = "refs/claude-architect/candidates/run-metadata-failure";
+    gitHooks.failCommand = "diff";
+
+    await expect(freezeCandidate({
+      ...fixture,
+      runId: "run-metadata-failure",
+      writeAllowlist: ["a.txt"],
+      forbiddenScope: [],
+    })).rejects.toThrow("git diff failed");
+
+    const refResult = await git(fixture.repoRoot, ["show-ref", "--verify", "--quiet", anchorRef]);
+    expect(refResult.exitCode).not.toBe(0);
   });
 
   it.skipIf(process.platform === "win32")("rejects a symlink added by the producer", async () => {
@@ -180,6 +228,21 @@ describe("freezeCandidate", () => {
       runId: "run-forbidden",
       writeAllowlist: ["src/**"],
       forbiddenScope: ["src/private.txt"],
+    });
+
+    expect(result).toEqual({ ok: false, reason: "out-of-scope-write" });
+  });
+
+  it("rejects case variants of forbidden paths", async () => {
+    const fixture = await initRepoAndWorktree();
+    await mkdir(join(fixture.worktreePath, "src", "Private"), { recursive: true });
+    await writeFile(join(fixture.worktreePath, "src", "Private", "secret.txt"), "secret\n");
+
+    const result = await freezeCandidate({
+      ...fixture,
+      runId: "run-forbidden-case-variant",
+      writeAllowlist: ["src/**"],
+      forbiddenScope: ["src/private/**"],
     });
 
     expect(result).toEqual({ ok: false, reason: "out-of-scope-write" });
