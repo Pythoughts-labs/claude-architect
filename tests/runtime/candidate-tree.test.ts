@@ -341,4 +341,36 @@ describe("freezeCandidate", () => {
       expect(result.artifact.patch).not.toMatch(/\n(?:literal|delta) \d+\n/);
     }
   });
+
+  it("does not run configured textconv drivers while building review patches", async () => {
+    const fixture = await initRepoAndWorktree({
+      ".gitattributes": "*.bin diff=leak\n",
+      "asset.bin": "\0base",
+    });
+    const converterPath = join(fixture.repoRoot, "..", "textconv.mjs");
+    await writeFile(converterPath, [
+      'import { readFileSync } from "node:fs";',
+      'process.stdout.write(`TEXTCONV_EXECUTED ${readFileSync(process.argv.at(-1)).toString("hex")}\\n`);',
+      "",
+    ].join("\n"));
+    await runGit(fixture.repoRoot, [
+      "config",
+      "diff.leak.textconv",
+      `${JSON.stringify(process.execPath)} ${JSON.stringify(converterPath)}`,
+    ]);
+    await writeFile(join(fixture.worktreePath, "asset.bin"), Buffer.from("\0changed"));
+
+    const result = await freezeCandidate({
+      ...fixture,
+      runId: "run-no-textconv",
+      writeAllowlist: ["asset.bin"],
+      forbiddenScope: [],
+    });
+
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.artifact.patch).not.toContain("TEXTCONV_EXECUTED");
+      expect(result.artifact.patch).toContain("[[BINARY_PATCH_PAYLOAD_OMITTED]]");
+    }
+  });
 });

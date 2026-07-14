@@ -287,6 +287,8 @@ export async function freezeCandidate(args: FreezeCandidateArgs): Promise<Freeze
       .digest("hex");
     const patch = sanitizeReviewPatch(await checkedGit(args.repoRoot, [
       "diff",
+      "--no-ext-diff",
+      "--no-textconv",
       "--binary",
       "--full-index",
       args.baseCommitOid,
