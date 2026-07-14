@@ -1,25 +1,28 @@
 {
   "name": "claude-architect",
-  "metadata": {
-    "description": "CLI coding-agent orchestration for Claude through Codex, OpenCode, Pi, and Pythinker Code, with a commitment-boundary advisor."
-  },
+  "description": "CLI coding-agent orchestration for Claude through Codex, OpenCode, Pi, and Pythinker Code, with a commitment-boundary advisor.",
   "owner": {
-    "name": "elkaix",
-    "url": "https://github.com/elkaix"
+    "name": "elkaix"
+  },
+  "renames": {
+    "claude-master": "claude-architect"
   },
   "plugins": [
     {
       "name": "claude-architect",
+      "displayName": "Claude Architect",
       "source": "./",
-      "version": "0.5.0",
+      "version": "0.6.0",
       "description": "CLI coding-agent orchestration for Claude through Codex, OpenCode, Pi, and Pythinker Code, with architect-led review and native OpenCode assets.",
       "author": {
         "name": "elkaix",
         "url": "https://github.com/elkaix"
       },
       "homepage": "https://github.com/Pythoughts-labs/claude-architect",
+      "repository": "https://github.com/Pythoughts-labs/claude-architect",
       "license": "MIT",
       "category": "workflow",
+      "strict": true,
       "keywords": [
         "claude-code",
         "opencode",

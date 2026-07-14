@@ -24,7 +24,7 @@
     <circle cx="70" cy="44" r="6.5" fill="#febc2e"/>
     <circle cx="94" cy="44" r="6.5" fill="#28c840"/>
     <text x="126" y="49" font-size="15" fill="#6e7681">Pythoughts-labs/claude-architect · architect session</text>
-    <text x="1158" y="49" font-size="14" fill="#4b5563" text-anchor="end">v0.5.0</text>
+    <text x="1158" y="49" font-size="14" fill="#4b5563" text-anchor="end">v0.6.0</text>
   </g>
   <line x1="10" y1="70" x2="1190" y2="70" stroke="#1a212c" stroke-width="1"/>
 

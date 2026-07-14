@@ -18,7 +18,7 @@
     <circle cx="120" cy="60" r="8" fill="#febc2e"/>
     <circle cx="148" cy="60" r="8" fill="#28c840"/>
     <text x="184" y="66" font-size="20" fill="#6e7681">Pythoughts-labs/claude-architect · architect session</text>
-    <text x="1216" y="66" font-size="18" fill="#4b5563" text-anchor="end">v0.5.0</text>
+    <text x="1216" y="66" font-size="18" fill="#4b5563" text-anchor="end">v0.6.0</text>
     <line x1="64" y1="94" x2="1216" y2="94" stroke="#1a212c" stroke-width="1"/>
 
     <!-- wordmark -->
