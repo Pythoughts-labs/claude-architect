@@ -80,31 +80,41 @@ async function findNestedRepositories(
 ): Promise<string[]> {
   const nested: string[] = [];
   let scannedEntries = 0;
+  const pendingDirectories = [{ path: repositoryRoot, relativePath: "" }];
 
-  async function walk(directory: string): Promise<void> {
-    const entries = await opendir(directory);
+  while (pendingDirectories.length > 0) {
+    const directory = pendingDirectories.pop()!;
+    if (directory.relativePath !== "") {
+      try {
+        await lstat(path.join(directory.path, ".git"));
+        nested.push(directory.relativePath);
+        continue;
+      } catch (error) {
+        if (typeof error !== "object" || error === null || !("code" in error)
+          || !["ENOENT", "ENOTDIR"].includes(String(error.code))) throw error;
+      }
+    }
+
+    const childDirectories: { path: string; relativePath: string }[] = [];
+    const entries = await opendir(directory.path);
     for await (const entry of entries) {
       scannedEntries += 1;
       if (scannedEntries > MAX_NESTED_REPOSITORY_SCAN_ENTRIES) {
         throw new Error("nested repository scan entry budget exceeded");
       }
       if (entry.name === ".git" || !entry.isDirectory()) continue;
-      const child = path.join(directory, entry.name);
+      const child = path.join(directory.path, entry.name);
       const relativeChild = path.relative(repositoryRoot, child).split(path.sep).join("/");
       if (registeredSubmodules.has(relativeChild)) continue;
       if (!writeAllowlist.some(pattern => patternOverlapsRepository(pattern, relativeChild))) continue;
-      try {
-        await lstat(path.join(child, ".git"));
-        nested.push(relativeChild);
-      } catch (error) {
-        if (typeof error !== "object" || error === null || !("code" in error)
-          || !["ENOENT", "ENOTDIR"].includes(String(error.code))) throw error;
-        await walk(child);
-      }
+      childDirectories.push({ path: child, relativePath: relativeChild });
+    }
+
+    for (let index = childDirectories.length - 1; index >= 0; index -= 1) {
+      pendingDirectories.push(childDirectories[index]!);
     }
   }
 
-  await walk(repositoryRoot);
   return nested;
 }
 
