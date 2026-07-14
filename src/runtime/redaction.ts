@@ -1,5 +1,9 @@
-const registeredSecrets = new Set<string>();
+const registeredSecrets = new Map<string, number>();
 const SECRET_MARKER = "«redacted:secret»";
+
+export interface SecretRegistration {
+  dispose(): void;
+}
 
 const rules: Array<{ kind: string; re: RegExp }> = [
   { kind: "bearer", re: /(?<=\bBearer[ \t]+)[A-Za-z0-9._~+/=-]+/gi },
@@ -25,8 +29,21 @@ const rules: Array<{ kind: string; re: RegExp }> = [
   },
 ];
 
-export function registerSecretValue(value: string): void {
-  if (value.length >= 6) registeredSecrets.add(value);
+export function registerSecretValue(value: string): SecretRegistration {
+  if (value.length < 6) return { dispose() {} };
+
+  registeredSecrets.set(value, (registeredSecrets.get(value) ?? 0) + 1);
+  let active = true;
+  return {
+    dispose(): void {
+      if (!active) return;
+      active = false;
+      const count = registeredSecrets.get(value);
+      if (count === undefined) return;
+      if (count === 1) registeredSecrets.delete(value);
+      else registeredSecrets.set(value, count - 1);
+    },
+  };
 }
 
 export function clearRegisteredSecrets(): void {
@@ -35,7 +52,7 @@ export function clearRegisteredSecrets(): void {
 
 export function redact(text: string): string {
   let result = text;
-  const secrets = [...registeredSecrets].sort((a, b) => b.length - a.length);
+  const secrets = [...registeredSecrets.keys()].sort((a, b) => b.length - a.length);
   for (const secret of secrets) result = result.replaceAll(secret, SECRET_MARKER);
   for (const rule of rules) {
     result = result.replace(rule.re, `«redacted:${rule.kind}»`);

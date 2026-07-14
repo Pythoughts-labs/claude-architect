@@ -71,6 +71,38 @@ describe("buildEnvironment", () => {
     ]));
   });
 
+  it("does not inherit host XDG configuration when using a temporary home", () => {
+    process.env.XDG_CONFIG_HOME = "/host/config";
+    process.env.XDG_CACHE_HOME = "/host/cache";
+    process.env.XDG_DATA_HOME = "/host/data";
+    process.env.XDG_STATE_HOME = "/host/state";
+
+    const result = buildEnvironment({
+      os: "darwin",
+      adapterAllowlist: ["XDG_CONFIG_HOME"],
+      tempHome: "/temporary/home",
+    });
+
+    expect(result.env.HOME).toBe("/temporary/home");
+    expect(result.env.XDG_CONFIG_HOME).toBeUndefined();
+    expect(result.env.XDG_CACHE_HOME).toBeUndefined();
+    expect(result.env.XDG_DATA_HOME).toBeUndefined();
+    expect(result.env.XDG_STATE_HOME).toBeUndefined();
+  });
+
+  it.each([
+    { additions: { "": "value" }, label: "an empty name" },
+    { additions: { "SAFE=OVERRIDE": "value" }, label: "an equals sign in a name" },
+    { additions: { "BAD\0NAME": "value" }, label: "a NUL byte in a name" },
+    { additions: { SAFE: "bad\0value" }, label: "a NUL byte in a value" },
+  ])("rejects $label", ({ additions }) => {
+    expect(() => buildEnvironment({
+      os: "darwin",
+      adapterAllowlist: [],
+      specAdditions: additions,
+    })).toThrow(/invalid environment/);
+  });
+
   it("registers sensitive host and constructed values with the redactor", () => {
     process.env.ENTERPRISE_CREDENTIAL = "host-secret-without-known-prefix";
 
@@ -86,11 +118,51 @@ describe("buildEnvironment", () => {
     expect(output).not.toContain("host-secret-without-known-prefix");
     expect(output).not.toContain("spec-secret-without-known-prefix");
   });
+
+  it.each([
+    "PGPASSWORD",
+    "MYSQL_PWD",
+    "REDISCLI_AUTH",
+    "apiKey",
+    "clientSecret",
+    "GOOGLE_APPLICATION_CREDENTIALS",
+  ])("registers the standard sensitive name %s", name => {
+    const secret = `value-for-${name}`;
+
+    const result = buildEnvironment({
+      os: "darwin",
+      adapterAllowlist: [],
+      specAdditions: { [name]: secret },
+    });
+
+    expect(redact(secret)).toBe("«redacted:secret»");
+    result.secretRegistration.dispose();
+  });
+
+  it("releases attempt secrets without clearing another active registration", () => {
+    const first = buildEnvironment({
+      os: "darwin",
+      adapterAllowlist: [],
+      specAdditions: { API_TOKEN: "shared-attempt-secret" },
+    });
+    const second = buildEnvironment({
+      os: "darwin",
+      adapterAllowlist: [],
+      specAdditions: { API_TOKEN: "shared-attempt-secret" },
+    });
+
+    first.secretRegistration.dispose();
+    first.secretRegistration.dispose();
+    expect(redact("shared-attempt-secret")).toBe("«redacted:secret»");
+
+    second.secretRegistration.dispose();
+    expect(redact("shared-attempt-secret")).toBe("shared-attempt-secret");
+  });
 });
 
 describe("registerSensitiveEnvironment", () => {
   it("registers sensitive verification-command environment values", () => {
-    registerSensitiveEnvironment({
+    const registration = registerSensitiveEnvironment({
       ORDINARY: "visible-value",
       VERIFICATION_PASSWORD: "verification-secret-value",
     });
@@ -98,5 +170,8 @@ describe("registerSensitiveEnvironment", () => {
     const output = redact("visible-value verification-secret-value");
     expect(output).toContain("visible-value");
     expect(output).not.toContain("verification-secret-value");
+
+    registration.dispose();
+    expect(redact("verification-secret-value")).toBe("verification-secret-value");
   });
 });
