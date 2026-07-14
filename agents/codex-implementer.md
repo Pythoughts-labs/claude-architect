@@ -112,10 +112,11 @@ Flag discipline (non-negotiable):
 | `--sandbox workspace-write` | Codex writes code, scoped to the working tree, with no network access. Never `danger-full-access`. |
 | `--ignore-user-config` | Prevents delegated runs from loading interactive user MCP servers such as `node_repl`, browser tools, and their worker subprocesses. |
 | `--ephemeral` | Prevents a finished delegation from persisting a resumable Codex session. |
+| `--disable multi_agent` | Prevents Codex from spawning internal subagents; Claude Architect owns delegation and verification. |
 | `-c model_reasoning_effort=low` | Uses low reasoning by default. If the caller selects `medium`, `high`, `xhigh`, or `max`, pass that value instead. |
 | `--skip-git-repo-check` + `--cd "$(pwd)"` | Deterministic working root; works outside git repos. |
 | `- < spec file` | Prompt via stdin. No quoting hazards, no truncated specs. |
-| isolated runner | Adds `--ignore-user-config --ephemeral` and terminates the run's isolated process group on exit. It has no wall-clock cap by default so healthy long tasks can finish. Set a positive `CODEX_TIMEOUT_SECONDS` for a task-specific cap (`timeout`/`gtimeout` required); `0` leaves it uncapped, and malformed or unenforceable values fail before Codex starts. On timeout, report `STATUS: timeout` with whatever landed. |
+| isolated runner | Adds `--ignore-user-config --ephemeral --disable multi_agent` and terminates the run's isolated process group on exit. It has no wall-clock cap by default so healthy long tasks can finish. Set a positive `CODEX_TIMEOUT_SECONDS` for a task-specific cap (`timeout`/`gtimeout` required); `0` leaves it uncapped, and malformed or unenforceable values fail before Codex starts. On timeout, report `STATUS: timeout` with whatever landed. |
 
 `--model gpt-5.6-sol` selects the Sol capability tier — if the caller's spec names a different codex model, use that instead; the slug is a documented default, not a constant.
 

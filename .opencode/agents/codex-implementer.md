@@ -69,7 +69,7 @@ Invoke the adapter from the workspace with the spec on stdin:
   --output-last-message "$FINAL" - < "$SPEC"
 ```
 
-The adapter supplies `--ignore-user-config` and `--ephemeral`. `low` is the default; honor an explicitly supported `medium`, `high`, `xhigh`, or `max` override and any other supported Codex option named by the contract. Do not impose a default wall-clock cap.
+The adapter supplies `--ignore-user-config`, `--ephemeral`, and `--disable multi_agent`; internal Codex subagents are not part of this lane. `low` is the default; honor an explicitly supported `medium`, `high`, `xhigh`, or `max` override and any other supported Codex option named by the contract. Do not impose a default wall-clock cap.
 
 After Codex exits, remove `SPEC` and `FINAL` as soon as their contents are consumed. Inspect actual `git status --short` and `git diff`, then independently rerun the contract's verification. A producer self-report is not evidence. Never repair the work here.
 

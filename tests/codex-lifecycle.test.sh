@@ -15,8 +15,10 @@ assert_contains() {
 }
 
 assert_contains "$ROOT/agents/codex-implementer.md" 'run-codex-isolated\.sh'
+assert_contains "$ROOT/agents/codex-implementer.md" '--disable multi_agent'
 assert_contains "$ROOT/.opencode/agents/codex-implementer.md" '--ignore-user-config'
 assert_contains "$ROOT/.opencode/agents/codex-implementer.md" '--ephemeral'
+assert_contains "$ROOT/.opencode/agents/codex-implementer.md" '--disable multi_agent'
 assert_contains "$ROOT/skills/delegate/SKILL.md" 'claude-architect:codex-implementer'
 assert_contains "$ROOT/skills/delegate/SKILL.md" 'codex:codex-rescue'
 assert_contains "$ROOT/skills/delegate/SKILL.md" 'app-server'
@@ -88,6 +90,24 @@ run_case() {
   grep -Fxq -- 'exec' "$state/args"
   grep -Fxq -- '--ignore-user-config' "$state/args"
   grep -Fxq -- '--ephemeral' "$state/args"
+
+  local arg
+  local disable_multi_agent_seen=0
+  local previous_arg=
+
+  while IFS= read -r arg; do
+    if [[ "$previous_arg" == --disable && "$arg" == multi_agent ]]; then
+      disable_multi_agent_seen=1
+      break
+    fi
+    previous_arg=$arg
+  done < "$state/args"
+
+  if [[ "$disable_multi_agent_seen" -ne 1 ]]; then
+    printf 'FAIL: %s branch did not disable Codex multi_agent\n' "$mode" >&2
+    exit 1
+  fi
+
   grep -Fxq -- '--model' "$state/args"
   grep -Fxq -- 'test-model' "$state/args"
 

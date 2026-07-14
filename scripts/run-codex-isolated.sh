@@ -44,10 +44,10 @@ if [[ -n "$ERR_DIR" ]] && mkdir -p "$ERR_DIR" 2>/dev/null; then
   ERR_FILE="$ERR_DIR/codex-$(date +%Y%m%d-%H%M%S)-$$.stderr"
   RUN_TIMEOUT_SECONDS=$TIMEOUT_SECONDS \
     exec "$BASH" "$SCRIPT_DIR/run-isolated.sh" \
-      codex exec --ignore-user-config --ephemeral "$@" \
+      codex exec --ignore-user-config --ephemeral --disable multi_agent "$@" \
       2> >(tee -a "$ERR_FILE" >&2)
 fi
 
 RUN_TIMEOUT_SECONDS=$TIMEOUT_SECONDS \
   exec "$BASH" "$SCRIPT_DIR/run-isolated.sh" \
-    codex exec --ignore-user-config --ephemeral "$@"
+    codex exec --ignore-user-config --ephemeral --disable multi_agent "$@"
