@@ -6,3 +6,7 @@ demo/
 .pythinker-review/
 .pythinker-review-flow/
 *.scratchpad.lock
+
+# live-dogfood notes (not part of deliverable)
+scratchpad.md
+.superpowers/
