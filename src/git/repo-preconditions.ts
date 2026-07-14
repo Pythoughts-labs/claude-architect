@@ -18,6 +18,7 @@ const IN_PROGRESS_PATHS = [
   "CHERRY_PICK_HEAD",
   "BISECT_LOG",
 ] as const;
+const MAX_NESTED_REPOSITORY_SCAN_ENTRIES = 10_000;
 
 function succeeded(result: GitResult): boolean {
   return result.exitCode === 0;
@@ -75,19 +76,29 @@ function submodulePaths(output: string): Set<string> {
 async function findNestedRepositories(
   repositoryRoot: string,
   registeredSubmodules: Set<string>,
+  writeAllowlist: string[],
 ): Promise<string[]> {
   const nested: string[] = [];
+  let scannedEntries = 0;
 
   async function walk(directory: string): Promise<void> {
-    for (const entry of await readdir(directory, { withFileTypes: true })) {
+    const entries = await readdir(directory, { withFileTypes: true });
+    scannedEntries += entries.length;
+    if (scannedEntries > MAX_NESTED_REPOSITORY_SCAN_ENTRIES) {
+      throw new Error("nested repository scan entry budget exceeded");
+    }
+    for (const entry of entries) {
       if (entry.name === ".git" || !entry.isDirectory()) continue;
       const child = path.join(directory, entry.name);
       const relativeChild = path.relative(repositoryRoot, child).split(path.sep).join("/");
       if (registeredSubmodules.has(relativeChild)) continue;
+      if (!writeAllowlist.some(pattern => patternOverlapsRepository(pattern, relativeChild))) continue;
       try {
         await lstat(path.join(child, ".git"));
         nested.push(relativeChild);
-      } catch {
+      } catch (error) {
+        if (typeof error !== "object" || error === null || !("code" in error)
+          || !["ENOENT", "ENOTDIR"].includes(String(error.code))) throw error;
         await walk(child);
       }
     }
@@ -139,7 +150,16 @@ export async function checkPreconditions(
   if (options.writeAllowlist !== undefined && options.writeAllowlist.length > 0) {
     const stagedEntries = await git(canonical, ["ls-files", "--stage", "-z"]);
     if (!succeeded(stagedEntries)) return { ok: false, reason: "git-command-failed" };
-    const nestedRepositories = await findNestedRepositories(canonical, submodulePaths(stagedEntries.stdout));
+    let nestedRepositories: string[];
+    try {
+      nestedRepositories = await findNestedRepositories(
+        canonical,
+        submodulePaths(stagedEntries.stdout),
+        options.writeAllowlist,
+      );
+    } catch {
+      return { ok: false, reason: "nested-repository-scan-failed" };
+    }
     if (nestedRepositories.some(nestedRoot =>
       options.writeAllowlist!.some(pattern => patternOverlapsRepository(pattern, nestedRoot)))) {
       return { ok: false, reason: "nested-repository" };

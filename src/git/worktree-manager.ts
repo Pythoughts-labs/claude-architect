@@ -1,6 +1,8 @@
 import { mkdir, rm } from "node:fs/promises";
 import path from "node:path";
-import { resolveStateDir } from "../platform/posix-platform-services.js";
+import type { PlatformServices } from "../platform/platform-services.js";
+import { getPlatformServices, UnsupportedPlatformError } from "../platform/select-platform.js";
+import { resolveStateDir } from "../runtime/state-dir.js";
 import { RuntimeError } from "../util/errors.js";
 import { git, type GitResult } from "./git-exec.js";
 
@@ -15,14 +17,21 @@ export class WorktreeManager {
   constructor(
     private readonly repoRoot: string,
     private readonly runId: string,
+    private readonly platformServices: Pick<PlatformServices, "os"> = getPlatformServices(),
   ) {}
 
-  async create(baseCommitOid: string): Promise<{ path: string; cleanup(): Promise<void> }> {
+  private managedWorktreePath(): { worktreesRoot: string; worktreePath: string } {
     const worktreesRoot = path.resolve(resolveStateDir(), "worktrees");
     const worktreePath = path.resolve(worktreesRoot, this.runId);
     if (worktreePath === worktreesRoot || !worktreePath.startsWith(`${worktreesRoot}${path.sep}`)) {
       throw new RuntimeError("invalid worktree run id");
     }
+    return { worktreesRoot, worktreePath };
+  }
+
+  async create(baseCommitOid: string): Promise<{ path: string; cleanup(): Promise<void> }> {
+    if (this.platformServices.os === "win32") throw new UnsupportedPlatformError();
+    const { worktreesRoot, worktreePath } = this.managedWorktreePath();
     await mkdir(worktreesRoot, { recursive: true });
     const result = await git(this.repoRoot, ["worktree", "add", "--detach", worktreePath, baseCommitOid]);
     if (result.exitCode !== 0) {
@@ -36,6 +45,9 @@ export class WorktreeManager {
   }
 
   async remove(worktreePath: string): Promise<void> {
+    if (worktreePath !== this.managedWorktreePath().worktreePath) {
+      throw new RuntimeError("refusing to remove unmanaged worktree path");
+    }
     const result = await git(this.repoRoot, ["worktree", "remove", "--force", worktreePath]);
     await rm(worktreePath, { recursive: true, force: true }).catch(() => {});
     if (result.exitCode !== 0) throw failure("git worktree remove", result);

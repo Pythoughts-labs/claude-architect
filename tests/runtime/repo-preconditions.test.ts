@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, realpath, rm, symlink, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -119,6 +119,61 @@ describe("checkPreconditions", () => {
     await expect(checkPreconditions(directory, { writeAllowlist: ["nested/*"] })).resolves.toEqual({ ok: false, reason: "nested-repository" });
     await expect(checkPreconditions(directory, { writeAllowlist: ["**/*.txt"] })).resolves.toEqual({ ok: false, reason: "nested-repository" });
   });
+
+  it.skipIf(process.platform === "win32")("does not scan an unreadable ignored directory outside the write allowlist", async () => {
+    const directory = await initRepo();
+    const unreadable = join(directory, "ignored");
+    await writeFile(join(directory, ".gitignore"), "ignored/\n");
+    await runGit(directory, ["add", ".gitignore"]);
+    await runGit(directory, ["commit", "-q", "-m", "ignore unreadable directory"]);
+    await mkdir(unreadable);
+    await chmod(unreadable, 0o000);
+
+    try {
+      await expect(checkPreconditions(directory, { writeAllowlist: ["src/**"] })).resolves.toMatchObject({ ok: true });
+    } finally {
+      await chmod(unreadable, 0o700);
+    }
+  });
+
+  it.skipIf(process.platform === "win32")("fails closed when a relevant nested-repository branch cannot be scanned", async () => {
+    const directory = await initRepo();
+    const unreadable = join(directory, "src", "ignored");
+    await writeFile(join(directory, ".gitignore"), "src/ignored/\n");
+    await runGit(directory, ["add", ".gitignore"]);
+    await runGit(directory, ["commit", "-q", "-m", "ignore unreadable source directory"]);
+    await mkdir(unreadable, { recursive: true });
+    await chmod(unreadable, 0o000);
+
+    try {
+      await expect(checkPreconditions(directory, { writeAllowlist: ["src/**"] })).resolves.toEqual({
+        ok: false,
+        reason: "nested-repository-scan-failed",
+      });
+    } finally {
+      await chmod(unreadable, 0o700);
+    }
+  });
+
+  it("fails closed when nested-repository discovery exceeds its directory-entry budget", async () => {
+    const directory = await initRepo();
+    const generated = join(directory, "src", "generated");
+    await writeFile(join(directory, ".gitignore"), "src/generated/\n");
+    await runGit(directory, ["add", ".gitignore"]);
+    await runGit(directory, ["commit", "-q", "-m", "ignore generated source directory"]);
+    await mkdir(generated, { recursive: true });
+    for (let offset = 0; offset < 10_001; offset += 250) {
+      await Promise.all(Array.from(
+        { length: Math.min(250, 10_001 - offset) },
+        (_, index) => writeFile(join(generated, `entry-${offset + index}.txt`), ""),
+      ));
+    }
+
+    await expect(checkPreconditions(directory, { writeAllowlist: ["src/**"] })).resolves.toEqual({
+      ok: false,
+      reason: "nested-repository-scan-failed",
+    });
+  }, 15_000);
 
   it("supports detached HEAD", async () => {
     const directory = await initRepo();

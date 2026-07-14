@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { git } from "../../src/git/git-exec.js";
 import { WorktreeManager } from "../../src/git/worktree-manager.js";
+import { UnsupportedPlatformError } from "../../src/platform/select-platform.js";
 
 let temporaryPaths: string[] = [];
 let previousPluginData: string | undefined;
@@ -79,6 +80,19 @@ describe("WorktreeManager", () => {
     expect(await runGit(directory, ["worktree", "list", "--porcelain"])).not.toContain(attempt.path);
   });
 
+  it("refuses to remove a path outside its managed worktree", async () => {
+    const { directory } = await initRepo();
+    const outside = await temporaryDirectory("ca-outside-worktree-");
+    const sentinel = join(outside, "sentinel.txt");
+    await writeFile(sentinel, "keep\n");
+    const manager = new WorktreeManager(directory, "run-confined");
+
+    await expect(manager.remove(outside)).rejects.toThrow("refusing to remove unmanaged worktree path");
+
+    await expect(stat(outside)).resolves.toBeDefined();
+    await expect(stat(sentinel)).resolves.toBeDefined();
+  });
+
   it("does not silently fall back to a temporary directory outside tests", async () => {
     const { directory, base } = await initRepo();
     delete process.env.CLAUDE_PLUGIN_DATA;
@@ -88,5 +102,17 @@ describe("WorktreeManager", () => {
     await expect(new WorktreeManager(directory, "run-no-state").create(base)).rejects.toThrow(
       "CLAUDE_PLUGIN_DATA is required outside test environments",
     );
+  });
+
+  it("rejects win32 before resolving or creating the state directory", async () => {
+    const { directory, base } = await initRepo();
+    const stateParent = await temporaryDirectory("ca-win32-state-parent-");
+    const stateRoot = join(stateParent, "not-created");
+    process.env.CLAUDE_PLUGIN_DATA = stateRoot;
+    const manager = new WorktreeManager(directory, "run-win32", { os: "win32" });
+
+    await expect(manager.create(base)).rejects.toBeInstanceOf(UnsupportedPlatformError);
+
+    await expect(stat(stateRoot)).rejects.toMatchObject({ code: "ENOENT" });
   });
 });

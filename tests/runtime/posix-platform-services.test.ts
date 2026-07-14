@@ -5,6 +5,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { getPlatformServices } from "../../src/platform/select-platform.js";
+import { resolveStateDir } from "../../src/runtime/state-dir.js";
 
 const fixture = fileURLToPath(new URL("./fixtures/echo-sleep.mjs", import.meta.url));
 const ps = getPlatformServices();
@@ -46,6 +47,10 @@ afterAll(async () => {
 });
 
 describe("PosixPlatformServices", () => {
+  it("uses the platform-neutral runtime state-directory policy", () => {
+    expect(resolveStateDir()).toBe(process.env.CLAUDE_ARCHITECT_STATE_DIR);
+  });
+
   it("resolves node and captures bounded process output", async () => {
     const originalPath = process.env.PATH;
     // Prefer the running Node binary over host PATH shims that require env beyond the intentionally sanitized PATH.

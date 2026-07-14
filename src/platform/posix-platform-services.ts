@@ -4,6 +4,7 @@ import { constants, promises as fs } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import nodeProcess from "node:process";
+import { resolveStateDir } from "../runtime/state-dir.js";
 import { BoundedBuffer } from "../util/bounded-buffer.js";
 import { RuntimeError } from "../util/errors.js";
 import { logger } from "../util/logger.js";
@@ -22,13 +23,6 @@ function errorCode(error: unknown): string | undefined {
 
 function delay(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms));
-}
-
-export function resolveStateDir(): string {
-  if (nodeProcess.env.CLAUDE_PLUGIN_DATA) return nodeProcess.env.CLAUDE_PLUGIN_DATA;
-  if (nodeProcess.env.CLAUDE_ARCHITECT_STATE_DIR) return nodeProcess.env.CLAUDE_ARCHITECT_STATE_DIR;
-  if (nodeProcess.env.NODE_ENV === "test") return tmpdir();
-  throw new RuntimeError("CLAUDE_PLUGIN_DATA is required outside test environments");
 }
 
 async function gitCommonDir(cwd: string): Promise<string> {
