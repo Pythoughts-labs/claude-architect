@@ -18,7 +18,7 @@ import {
   type ToolDependencies,
 } from "../../src/mcp/tools.js";
 import type { ResolvedExecutable } from "../../src/platform/platform-services.js";
-import { PosixPlatformServices } from "../../src/platform/posix-platform-services.js";
+import { getPlatformServices } from "../../src/platform/select-platform.js";
 import {
   FAILURE_PRECEDENCE,
   type FailureClassification,
@@ -213,7 +213,9 @@ function dependencies(
     env?: Record<string, string | undefined>;
   } = {},
 ): ToolDependencies {
-  const ps = new PosixPlatformServices();
+  // The platform-selected services, not Posix unconditionally: on Windows the
+  // POSIX process-group kill fails silently and a timed-out producer survives.
+  const ps = getPlatformServices();
   const attemptDependencies: AttemptRuntimeDependencies = {
     ps,
     producerRegistry: new ProducerRegistry(adapter === null ? [] : [adapter]),

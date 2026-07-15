@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { git } from "../../src/git/git-exec.js";
 import type { ResolvedExecutable } from "../../src/platform/platform-services.js";
-import { PosixPlatformServices } from "../../src/platform/posix-platform-services.js";
+import { getPlatformServices } from "../../src/platform/select-platform.js";
 import type { DelegationSpec } from "../../src/protocol/delegation-spec.js";
 import { ProducerRegistry } from "../../src/producers/producer-registry.js";
 import type {
@@ -195,7 +195,9 @@ function dependencies(
   overrides: Partial<AttemptRuntimeDependencies> = {},
 ): AttemptRuntimeDependencies {
   return {
-    ps: new PosixPlatformServices(),
+    // Platform-selected services: on Windows the POSIX process-group kill
+    // fails silently and a timed-out producer survives its whole sleep.
+    ps: getPlatformServices(),
     producerRegistry: new ProducerRegistry([adapter]),
     verifier: passingVerifier,
     runId: () => runId,
