@@ -244,6 +244,57 @@ describe("AcceptanceVerifier", () => {
     expect(result.failures).toContain("command-outcome-mismatch");
   });
 
+  it("accepts a platform-filtered command when skipped evidence accounts for it", async () => {
+    const structural = vi.fn(async (): Promise<StructuralVerifyResult> => ({
+      ok: true,
+      failures: [],
+      manifestHash: artifact.manifestHash,
+    }));
+    const skippedCommand = {
+      ...spec.verification[0]!,
+      id: "other-platform",
+      platform: { arch: ["not-this-architecture"] },
+    };
+    const project = vi.fn(async (): Promise<ProjectVerifyResult> => ({
+      commandOutcomes: [outcome],
+      mutated: false,
+      failures: [],
+      evidence: {
+        commands: [
+          {
+            id: "check",
+            confinement: "none",
+            networkPolicy: "unenforced",
+            requestedNetwork: "denied",
+            skipped: false,
+          },
+          {
+            id: "other-platform",
+            confinement: "none",
+            networkPolicy: "unenforced",
+            requestedNetwork: "denied",
+            skipped: true,
+            skipReason: "platform-arch",
+          },
+        ],
+      },
+      outputLogs: [
+        { name: "verification-0-stdout", text: "" },
+        { name: "verification-0-stderr", text: "" },
+      ],
+    }));
+    const verifyArgs = args();
+    verifyArgs.spec = {
+      ...spec,
+      verification: [spec.verification[0]!, skippedCommand],
+    };
+
+    const result = await new AcceptanceVerifier({ structural, project }).verify(verifyArgs);
+
+    expect(result.ok).toBe(true);
+    expect(result.failures).toEqual([]);
+  });
+
   it("rejects an empty verification success", async () => {
     const structural = vi.fn(async (): Promise<StructuralVerifyResult> => ({
       ok: true,

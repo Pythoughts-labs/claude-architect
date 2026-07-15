@@ -69,14 +69,36 @@ async function archiveProjectLogs(
 function outcomesMatchHostCommands(
   commands: DelegationSpec["verification"],
   outcomes: CommandOutcome[],
+  evidence: ProjectVerifyResult["evidence"]["commands"],
+  os: PlatformServices["os"],
+  arch: string,
 ): boolean {
   const byId = new Map(commands.map(command => [command.id, command]));
   if (byId.size !== commands.length) return false;
-  const outcomeIds = new Set(outcomes.map(outcome => outcome.id));
-  if (outcomes.length !== commands.length || outcomeIds.size !== outcomes.length) return false;
-  return outcomes.every(outcome => {
-    const command = byId.get(outcome.id);
-    return command !== undefined
+  const byOutcomeId = new Map(outcomes.map(outcome => [outcome.id, outcome]));
+  const byEvidenceId = new Map(evidence.map(command => [command.id, command]));
+  if (byOutcomeId.size !== outcomes.length
+    || byEvidenceId.size !== evidence.length
+    || evidence.length !== commands.length
+    || outcomes.some(outcome => !byId.has(outcome.id))
+    || evidence.some(command => !byId.has(command.id))) return false;
+
+  return commands.every(command => {
+    const commandEvidence = byEvidenceId.get(command.id);
+    if (commandEvidence === undefined) return false;
+    const skipReason = command.platform?.os !== undefined && !command.platform.os.includes(os)
+      ? "platform-os"
+      : command.platform?.arch !== undefined && !command.platform.arch.includes(arch)
+        ? "platform-arch"
+        : null;
+    const outcome = byOutcomeId.get(command.id);
+    if (skipReason !== null) {
+      return commandEvidence.skipped
+        && commandEvidence.skipReason === skipReason
+        && outcome === undefined;
+    }
+    return !commandEvidence.skipped
+      && outcome !== undefined
       && outcome.exitCode !== null
       && !outcome.timedOut
       && command.expectedExitCodes.includes(outcome.exitCode);
@@ -129,7 +151,13 @@ export class AcceptanceVerifier {
     if (project.commandOutcomes.length === 0 && failures.length === 0) {
       failures.push("empty-verification");
     }
-    if (!outcomesMatchHostCommands(args.spec.verification, project.commandOutcomes)
+    if (!outcomesMatchHostCommands(
+      args.spec.verification,
+      project.commandOutcomes,
+      project.evidence.commands,
+      args.ps.os,
+      process.arch,
+    )
       && !failures.includes("command-outcome-mismatch")) {
       failures.push("command-outcome-mismatch");
     }
