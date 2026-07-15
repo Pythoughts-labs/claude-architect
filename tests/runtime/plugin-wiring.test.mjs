@@ -71,9 +71,9 @@ describe("P0-A plugin wiring", () => {
     const marketplace = JSON.parse(read(".claude-plugin/marketplace.json"));
     const readme = read("README.md");
     const changelog = read("CHANGELOG.md");
-    assert.equal(plugin.version, "0.11.0");
-    assert.equal(marketplace.plugins[0].version, "0.11.0");
-    assert.match(readme, /badge\/version-0\.11\.0-/u);
+    assert.equal(plugin.version, "0.11.1");
+    assert.equal(marketplace.plugins[0].version, "0.11.1");
+    assert.match(readme, /badge\/version-0\.11\.1-/u);
     assert.doesNotMatch(
       readme,
       /`\/delegate`/u,
