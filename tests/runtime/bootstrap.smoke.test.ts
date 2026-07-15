@@ -254,6 +254,54 @@ describe("runtime bootstrap", () => {
     }
   });
 
+  it.skipIf(process.platform === "win32")(
+    "escalates when a re-executed server ignores termination",
+    async () => {
+      const root = await mkdtemp(path.join(tmpdir(), "ca-bootstrap-stubborn-signal-"));
+      temporaryPaths.push(root);
+      const preludePath = await nodeVersionPrelude(root, "20.19.0");
+      const bin = path.join(root, "bin");
+      const serverPath = path.join(root, "stubborn-server.mjs");
+      const pidFile = path.join(root, "server.pid");
+      const signalFile = path.join(root, "signal.txt");
+      await mkdir(bin);
+      await symlink(process.execPath, path.join(bin, "node"));
+      await writeFile(serverPath, [
+        "import { writeFileSync } from 'node:fs';",
+        "writeFileSync(process.env.TEST_SERVER_PID_FILE, String(process.pid));",
+        "process.on('SIGTERM', () => {",
+        "  writeFileSync(process.env.TEST_SIGNAL_FILE, 'SIGTERM');",
+        "});",
+        "setInterval(() => {}, 1000);",
+        "",
+      ].join("\n"));
+
+      const child = spawn(process.execPath, ["--import", preludePath, bootstrapPath], {
+        env: {
+          ...process.env,
+          PATH: bin,
+          CLAUDE_ARCHITECT_SERVER_PATH: serverPath,
+          TEST_SERVER_PID_FILE: pidFile,
+          TEST_SIGNAL_FILE: signalFile,
+        },
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+      let serverPid = 0;
+      try {
+        serverPid = Number(await waitForFile(pidFile));
+        child.kill("SIGTERM");
+        expect(await waitForFile(signalFile)).toBe("SIGTERM");
+        const exit = await waitForExit(child, 5_000);
+        await waitForProcessGone(serverPid);
+        expect(exit).toEqual({ code: null, signal: "SIGTERM" });
+        expect(isProcessAlive(serverPid)).toBe(false);
+      } finally {
+        if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+        if (serverPid > 1 && isProcessAlive(serverPid)) process.kill(serverPid, "SIGKILL");
+      }
+    },
+  );
+
   it.skipIf(process.platform === "win32")("mirrors direct signal termination from the server", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "ca-bootstrap-child-signal-"));
     temporaryPaths.push(root);

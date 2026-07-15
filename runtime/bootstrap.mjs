@@ -10,6 +10,8 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 const MINIMUM_NODE_MAJOR = 22;
 const VERSION_PROBE_TIMEOUT_MS = 5_000;
 const VERSION_PROBE_MAX_BYTES = 64 * 1024;
+const TERMINATION_GRACE_MS = 3_000;
+const SHUTDOWN_SIGNALS = new Set(["SIGHUP", "SIGINT", "SIGQUIT", "SIGTERM", "SIGBREAK"]);
 const NON_FORWARDABLE_POSIX_SIGNALS = new Set([
   "SIGCHLD",
   "SIGCONT",
@@ -76,7 +78,22 @@ async function runServerWith(nodePath, entrypoint) {
       stdio: "inherit",
       windowsHide: true,
     });
-    const forwardSignal = signal => child.kill(signal);
+    let terminatingSignal = null;
+    let terminationTimer = null;
+    const forceTerminate = () => {
+      if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+    };
+    const forwardSignal = signal => {
+      if (terminatingSignal !== null && SHUTDOWN_SIGNALS.has(signal)) {
+        forceTerminate();
+        return;
+      }
+      child.kill(signal);
+      if (SHUTDOWN_SIGNALS.has(signal)) {
+        terminatingSignal = signal;
+        terminationTimer = setTimeout(forceTerminate, TERMINATION_GRACE_MS);
+      }
+    };
     const forwardedSignals = process.platform === "win32"
       ? ["SIGINT", "SIGTERM", "SIGBREAK"]
       : Object.keys(osConstants.signals)
@@ -87,6 +104,7 @@ async function runServerWith(nodePath, entrypoint) {
     ]));
     for (const [signal, handler] of signalHandlers) process.on(signal, handler);
     const cleanup = () => {
+      if (terminationTimer !== null) clearTimeout(terminationTimer);
       for (const [signal, handler] of signalHandlers) process.off(signal, handler);
     };
     child.once("error", error => {
@@ -94,7 +112,12 @@ async function runServerWith(nodePath, entrypoint) {
       reject(error);
     });
     child.once("exit", (code, signal) => {
+      const parentSignal = terminatingSignal;
       cleanup();
+      if (parentSignal !== null) {
+        process.kill(process.pid, parentSignal);
+        return;
+      }
       if (signal !== null) {
         process.kill(process.pid, signal);
         return;
