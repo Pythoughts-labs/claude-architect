@@ -62,6 +62,11 @@ interface DirectoryIdentity {
   ino: number;
 }
 
+interface ValidatedDirectory {
+  path: string;
+  identity: DirectoryIdentity;
+}
+
 type PruneReason = "max-age" | "max-bytes";
 type AnchorCleanup = "not-applicable" | "deleted" | "already-absent";
 
@@ -204,14 +209,24 @@ async function syncDirectory(directory: string): Promise<void> {
   }
 }
 
-async function readRegularFile(filename: string): Promise<string> {
+async function readRegularFile(
+  filename: string,
+  parentIdentity?: DirectoryIdentity,
+): Promise<string> {
   const handle = await open(filename, constants.O_RDONLY | NO_FOLLOW);
   try {
+    if (parentIdentity !== undefined) {
+      await assertDirectoryIdentity(path.dirname(filename), parentIdentity);
+    }
     const metadata = await handle.stat();
     if (!metadata.isFile()) {
       throw new RuntimeError(`archive entry is not a regular file: ${redact(filename)}`);
     }
-    return await handle.readFile({ encoding: "utf8" });
+    const contents = await handle.readFile({ encoding: "utf8" });
+    if (parentIdentity !== undefined) {
+      await assertDirectoryIdentity(path.dirname(filename), parentIdentity);
+    }
+    return contents;
   } finally {
     await handle.close();
   }
@@ -487,7 +502,7 @@ export class ArtifactStore {
       } catch (error) {
         if (!isAlreadyPresent(error)) throw error;
         await assertDirectoryIdentity(directory, directoryIdentity);
-        const existing = await readRegularFile(destination);
+        const existing = await readRegularFile(destination, directoryIdentity);
         if (existing !== text) {
           throw new RuntimeError(`archive entry already exists with different content: ${relativePath}`);
         }
@@ -532,16 +547,20 @@ export class ArtifactStore {
   async readResult(runId: string): Promise<AttemptResult | null> {
     validateComponent(runId, "run id");
     const runDirectory = path.join(this.runsRoot, runId);
-    if (await this.ensureExistingRunDirectory(runDirectory) === null) return null;
+    const validated = await this.ensureExistingRunDirectory(runDirectory);
+    if (validated === null) return null;
     try {
-      return JSON.parse(await readRegularFile(path.join(runDirectory, "result.json"))) as AttemptResult;
+      return JSON.parse(await readRegularFile(
+        path.join(validated.path, "result.json"),
+        validated.identity,
+      )) as AttemptResult;
     } catch (error) {
       if (isMissing(error)) return null;
       throw error;
     }
   }
 
-  private async ensureExistingRunDirectory(directory: string): Promise<string | null> {
+  private async ensureExistingRunDirectory(directory: string): Promise<ValidatedDirectory | null> {
     const canonicalRunsRoot = await this.ensureRunsRoot();
     try {
       const metadata = await lstat(directory);
@@ -552,7 +571,9 @@ export class ArtifactStore {
       if (!isWithin(canonicalRunsRoot, canonicalDirectory)) {
         throw new RuntimeError("archive directory escapes plugin data");
       }
-      return canonicalDirectory;
+      const identity = { dev: metadata.dev, ino: metadata.ino };
+      await assertDirectoryIdentity(directory, identity);
+      return { path: canonicalDirectory, identity };
     } catch (error) {
       if (isMissing(error)) return null;
       throw error;
@@ -561,10 +582,14 @@ export class ArtifactStore {
 
   private async readManifest(runId: string): Promise<RunManifest | null> {
     const runDirectory = path.join(this.runsRoot, runId);
-    if (await this.ensureExistingRunDirectory(runDirectory) === null) return null;
+    const validated = await this.ensureExistingRunDirectory(runDirectory);
+    if (validated === null) return null;
     try {
       return verifyRunManifest(
-        JSON.parse(await readRegularFile(path.join(runDirectory, "manifest.json"))),
+        JSON.parse(await readRegularFile(
+          path.join(validated.path, "manifest.json"),
+          validated.identity,
+        )),
         runId,
       );
     } catch (error) {

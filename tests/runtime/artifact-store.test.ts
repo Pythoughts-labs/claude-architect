@@ -6,6 +6,7 @@ import {
   mkdir,
   mkdtemp,
   readFile,
+  rename,
   rm,
   stat,
   symlink,
@@ -15,7 +16,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AttemptResult } from "../../src/protocol/attempt-result.js";
 import { ArtifactStore } from "../../src/runtime/artifact-store.js";
 import {
@@ -26,6 +27,28 @@ import {
   clearRegisteredSecrets,
   registerSecretValue,
 } from "../../src/runtime/redaction.js";
+
+const filesystemHooks = vi.hoisted(() => ({
+  beforeOpen: undefined as undefined | ((filename: string) => Promise<void>),
+  beforeLstat: undefined as undefined | ((filename: string) => Promise<void>),
+}));
+
+vi.mock("node:fs/promises", async importOriginal => {
+  const actual = await importOriginal<typeof import("node:fs/promises")>();
+  return {
+    ...actual,
+    open: async (...args: Parameters<typeof actual.open>) => {
+      const hook = filesystemHooks.beforeOpen;
+      if (hook !== undefined) await hook(String(args[0]));
+      return actual.open(...args);
+    },
+    lstat: async (...args: Parameters<typeof actual.lstat>) => {
+      const hook = filesystemHooks.beforeLstat;
+      if (hook !== undefined) await hook(String(args[0]));
+      return actual.lstat(...args);
+    },
+  };
+});
 
 const execFileAsync = promisify(execFile);
 const temporaryPaths: string[] = [];
@@ -96,10 +119,14 @@ beforeEach(async () => {
   temporaryPaths.push(stateRoot);
   process.env.CLAUDE_PLUGIN_DATA = stateRoot;
   process.env.CLAUDE_PLUGIN_ROOT = join(stateRoot, "plugin-cache");
+  filesystemHooks.beforeOpen = undefined;
+  filesystemHooks.beforeLstat = undefined;
   clearRegisteredSecrets();
 });
 
 afterEach(async () => {
+  filesystemHooks.beforeOpen = undefined;
+  filesystemHooks.beforeLstat = undefined;
   if (previousPluginData === undefined) delete process.env.CLAUDE_PLUGIN_DATA;
   else process.env.CLAUDE_PLUGIN_DATA = previousPluginData;
   if (previousPluginRoot === undefined) delete process.env.CLAUDE_PLUGIN_ROOT;
@@ -142,6 +169,31 @@ describe("ArtifactStore", () => {
     await expect(access(join(process.env.CLAUDE_PLUGIN_ROOT!, "runs"))).rejects.toMatchObject({
       code: "ENOENT",
     });
+  });
+
+  it("does not accept a forged result after a validated run directory is swapped", async () => {
+    const runId = "run-read-swap";
+    const store = new ArtifactStore(runId);
+    await store.writeResult(sampleResult(runId));
+    const preservedPath = join(process.env.CLAUDE_PLUGIN_DATA!, "preserved-run-read-swap");
+    let swapped = false;
+    filesystemHooks.beforeOpen = async filename => {
+      if (swapped || !filename.endsWith(join(runId, "result.json"))) return;
+      swapped = true;
+      filesystemHooks.beforeOpen = undefined;
+      await rename(store.runDirectory, preservedPath);
+      await mkdir(store.runDirectory);
+      await writeFile(filename, `${JSON.stringify({
+        ...sampleResult(runId),
+        summary: "forged result",
+      })}\n`);
+    };
+
+    const result = await store.readResult(runId).catch(() => null);
+
+    expect(swapped).toBe(true);
+    expect(result?.summary).not.toBe("forged result");
+    await expect(stat(preservedPath)).resolves.toBeDefined();
   });
 
   it("keeps archived JSON valid when a registered secret contains JSON syntax", async () => {
@@ -747,41 +799,31 @@ describe("ArtifactStore", () => {
   });
 
   it("does not remove a replacement swapped into the quarantine path", async () => {
-    if (process.platform === "win32") return;
     const store = new ArtifactStore("run-quarantine-swap");
     await store.writeResult(sampleResult("run-quarantine-swap"));
     const runsRoot = join(process.env.CLAUDE_PLUGIN_DATA!, "runs");
     const oldTime = new Date(Date.now() - 60_000);
     await utimes(store.runDirectory, oldTime, oldTime);
     const preservedPath = join(runsRoot, ".preserved-run-quarantine-swap");
-    const swap = execFileAsync("/bin/sh", [
-      "-c",
-      `while :; do
-  for quarantine in "$1"/.prune-run-quarantine-swap-*; do
-    if [ -d "$quarantine" ]; then
-      mv "$quarantine" "$2"
-      mkdir "$quarantine"
-      printf 'do not delete\\n' > "$quarantine/replacement.txt"
-      printf '%s\\n' "$quarantine"
-      exit 0
-    fi
-  done
-done`,
-      "swap-quarantine",
-      runsRoot,
-      preservedPath,
-    ], { timeout: 5_000 });
+    let swappedPath: string | null = null;
+    filesystemHooks.beforeLstat = async directory => {
+      if (!directory.startsWith(join(runsRoot, ".prune-run-quarantine-swap-"))) return;
+      filesystemHooks.beforeLstat = undefined;
+      await rename(directory, preservedPath);
+      await mkdir(directory);
+      await writeFile(join(directory, "replacement.txt"), "do not delete\n");
+      swappedPath = directory;
+    };
 
     const pruned = await store.prune({
       maxAgeMs: 1_000,
       maxBytes: Number.MAX_SAFE_INTEGER,
     });
-    const swappedPath = (await swap).stdout.trim();
 
-    expect(swappedPath).not.toBe("");
+    expect(swappedPath).not.toBeNull();
     expect(pruned.removed).not.toContain("run-quarantine-swap");
     expect(pruned.retained.some(entry => entry.runId === "run-quarantine-swap")).toBe(true);
-    await expect(readFile(join(swappedPath, "replacement.txt"), "utf8")).resolves.toBe(
+    await expect(readFile(join(swappedPath!, "replacement.txt"), "utf8")).resolves.toBe(
       "do not delete\n",
     );
     await expect(stat(preservedPath)).resolves.toBeDefined();
