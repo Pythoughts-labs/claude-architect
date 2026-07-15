@@ -8,6 +8,20 @@ describe("normalizeWindowsEnv", () => {
     expect(Object.keys(out).filter(k => k.toLowerCase() === "path")).toEqual(["Path"]);
     expect(out.Path).toBe("c");
   });
+
+  it("collapses TEMP case variants with canonical casing and last-writer-wins", () => {
+    const out = normalizeWindowsEnv({ TEMP: "first", temp: "second", Temp: "last" });
+
+    expect(Object.keys(out).filter(k => k.toLowerCase() === "temp")).toEqual(["TEMP"]);
+    expect(out.TEMP).toBe("last");
+  });
+
+  it("collapses ComSpec case variants with canonical casing", () => {
+    const out = normalizeWindowsEnv({ ComSpec: "first", COMSPEC: "last" });
+
+    expect(Object.keys(out).filter(k => k.toLowerCase() === "comspec")).toEqual(["ComSpec"]);
+    expect(out.ComSpec).toBe("last");
+  });
 });
 
 describe("windows executable resolution (fs-faked, runs on all OSes)", () => {

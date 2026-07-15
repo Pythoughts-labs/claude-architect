@@ -22316,6 +22316,15 @@ async function gitCommonDir2(cwd) {
     });
   });
 }
+function canonicalizeForScope(candidate, root) {
+  const stripExtendedLengthPrefix = (value) => value.startsWith("\\\\?\\") ? value.slice(4) : value;
+  const normalizedCandidate = path2.win32.normalize(stripExtendedLengthPrefix(candidate)).toLowerCase();
+  let normalizedRoot = path2.win32.normalize(stripExtendedLengthPrefix(root)).toLowerCase();
+  if (normalizedRoot.endsWith("\\") && path2.win32.parse(normalizedRoot).root !== normalizedRoot) {
+    normalizedRoot = normalizedRoot.slice(0, -1);
+  }
+  return normalizedCandidate === normalizedRoot || normalizedCandidate.startsWith(`${normalizedRoot}\\`);
+}
 var WindowsPlatformServices = class {
   constructor(pluginRoot, arch = nodeProcess3.arch) {
     this.pluginRoot = pluginRoot;
@@ -26208,20 +26217,21 @@ function commandEnvironment(command, os) {
   defineEnvironmentValue(environment, "CLAUDE_ARCHITECT_DELEGATED", "1");
   return environment;
 }
-function isWithin2(root, candidate) {
+function isWithinScope(root, candidate, os) {
+  if (os === "win32") return canonicalizeForScope(candidate, root);
   const relative = path9.relative(root, candidate);
   return relative === "" || !path9.isAbsolute(relative) && relative !== ".." && !relative.startsWith(`..${path9.sep}`);
 }
-async function resolveCommandCwd(worktreePath, commandCwd) {
+async function resolveCommandCwd(worktreePath, commandCwd, os) {
   if (path9.isAbsolute(commandCwd)) return null;
   const lexical = path9.resolve(worktreePath, commandCwd);
-  if (!isWithin2(worktreePath, lexical)) return null;
+  if (!isWithinScope(worktreePath, lexical, os)) return null;
   try {
     const [canonicalRoot, canonicalCwd] = await Promise.all([
       realpath4(worktreePath),
       realpath4(lexical)
     ]);
-    return isWithin2(canonicalRoot, canonicalCwd) ? canonicalCwd : null;
+    return isWithinScope(canonicalRoot, canonicalCwd, os) ? canonicalCwd : null;
   } catch {
     return null;
   }
@@ -26367,7 +26377,7 @@ async function projectVerify(args) {
         commandEvidence.push(skippedEvidence(command, applicability.reason));
         continue;
       }
-      const cwd = await resolveCommandCwd(materialized.path, command.cwd);
+      const cwd = await resolveCommandCwd(materialized.path, command.cwd, ps.os);
       if (cwd === null) {
         const registration = registerSensitiveEnvironment(command.environment ?? {});
         try {

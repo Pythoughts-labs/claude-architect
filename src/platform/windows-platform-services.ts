@@ -144,8 +144,11 @@ async function gitCommonDir(cwd: string): Promise<string> {
 }
 
 export function canonicalizeForScope(candidate: string, root: string): boolean {
-  const normalizedCandidate = path.win32.normalize(candidate).toLowerCase();
-  let normalizedRoot = path.win32.normalize(root).toLowerCase();
+  const stripExtendedLengthPrefix = (value: string): string => value.startsWith("\\\\?\\")
+    ? value.slice(4)
+    : value;
+  const normalizedCandidate = path.win32.normalize(stripExtendedLengthPrefix(candidate)).toLowerCase();
+  let normalizedRoot = path.win32.normalize(stripExtendedLengthPrefix(root)).toLowerCase();
   if (normalizedRoot.endsWith("\\") && path.win32.parse(normalizedRoot).root !== normalizedRoot) {
     normalizedRoot = normalizedRoot.slice(0, -1);
   }

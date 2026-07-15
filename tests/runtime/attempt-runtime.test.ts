@@ -162,8 +162,8 @@ async function runGit(cwd: string, args: string[]): Promise<string> {
   return result.stdout.trim();
 }
 
-async function initRepo(): Promise<string> {
-  const directory = await temporaryDirectory("ca-attempt-repo-");
+async function initRepo(prefix = "ca-attempt-repo-"): Promise<string> {
+  const directory = await temporaryDirectory(prefix);
   await runGit(directory, ["init", "-q"]);
   await runGit(directory, ["config", "user.name", "Test User"]);
   await runGit(directory, ["config", "user.email", "test@example.invalid"]);
@@ -253,6 +253,23 @@ afterEach(async () => {
 });
 
 describe("runAttempt", () => {
+  it.runIf(process.platform !== "win32")(
+    "verifies a candidate from a POSIX checkout path containing spaces and Unicode",
+    async () => {
+      const repoRoot = await initRepo("wt ünïcode-");
+
+      const result = await runAttempt(
+        repoRoot,
+        validSpec(),
+        dependencies(new FakeAdapter(), "run-unicode-worktree"),
+      );
+
+      expect(result.status).toBe("verified-candidate");
+      expect(result.failure).toBeNull();
+      await expectAttemptResourcesCleaned("run-unicode-worktree");
+    },
+  );
+
   it("produces, archives, and cleans up a verified candidate", async () => {
     const repoRoot = await initRepo();
     const runId = "run-happy";

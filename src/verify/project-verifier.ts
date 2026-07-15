@@ -6,6 +6,7 @@ import { WorktreeManager } from "../git/worktree-manager.js";
 import type { PlatformServices, ResolvedExecutable, SupervisedExit } from "../platform/platform-services.js";
 import { supervise } from "../platform/process-supervisor.js";
 import { getPlatformServices } from "../platform/select-platform.js";
+import { canonicalizeForScope } from "../platform/windows-platform-services.js";
 import type { CandidateArtifact, CommandOutcome } from "../protocol/attempt-result.js";
 import type { VerificationCommand } from "../protocol/delegation-spec.js";
 import { registerSensitiveEnvironment } from "../runtime/environment-policy.js";
@@ -107,22 +108,31 @@ function commandEnvironment(
   return environment;
 }
 
-function isWithin(root: string, candidate: string): boolean {
+export function isWithinScope(
+  root: string,
+  candidate: string,
+  os: PlatformServices["os"],
+): boolean {
+  if (os === "win32") return canonicalizeForScope(candidate, root);
   const relative = path.relative(root, candidate);
   return relative === ""
     || (!path.isAbsolute(relative) && relative !== ".." && !relative.startsWith(`..${path.sep}`));
 }
 
-async function resolveCommandCwd(worktreePath: string, commandCwd: string): Promise<string | null> {
+async function resolveCommandCwd(
+  worktreePath: string,
+  commandCwd: string,
+  os: PlatformServices["os"],
+): Promise<string | null> {
   if (path.isAbsolute(commandCwd)) return null;
   const lexical = path.resolve(worktreePath, commandCwd);
-  if (!isWithin(worktreePath, lexical)) return null;
+  if (!isWithinScope(worktreePath, lexical, os)) return null;
   try {
     const [canonicalRoot, canonicalCwd] = await Promise.all([
       realpath(worktreePath),
       realpath(lexical),
     ]);
-    return isWithin(canonicalRoot, canonicalCwd) ? canonicalCwd : null;
+    return isWithinScope(canonicalRoot, canonicalCwd, os) ? canonicalCwd : null;
   } catch {
     return null;
   }
@@ -300,7 +310,7 @@ export async function projectVerify(args: ProjectVerifyArgs): Promise<ProjectVer
         commandEvidence.push(skippedEvidence(command, applicability.reason));
         continue;
       }
-      const cwd = await resolveCommandCwd(materialized.path, command.cwd);
+      const cwd = await resolveCommandCwd(materialized.path, command.cwd, ps.os);
       if (cwd === null) {
         const registration = registerSensitiveEnvironment(command.environment ?? {});
         try {

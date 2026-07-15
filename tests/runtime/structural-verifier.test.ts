@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { freezeCandidate } from "../../src/git/candidate-tree.js";
 import { git } from "../../src/git/git-exec.js";
 import type { CandidateArtifact } from "../../src/protocol/attempt-result.js";
+import { isWithinScope } from "../../src/verify/project-verifier.js";
 import { structuralVerify } from "../../src/verify/structural-verifier.js";
 
 interface Fixture {
@@ -73,6 +74,36 @@ function verify(
 
 afterEach(async () => {
   await Promise.all(temporaryPaths.splice(0).map(path => rm(path, { recursive: true, force: true })));
+});
+
+describe("scope containment", () => {
+  it("prevents drive-letter case evasion under win32 semantics", () => {
+    expect(isWithinScope(
+      "C:\\repo\\secret",
+      "c:\\repo\\secret\\file.ts",
+      "win32",
+    )).toBe(true);
+  });
+
+  it("contains UNC descendants without accepting false prefix matches", () => {
+    const root = "\\\\server\\share\\repo";
+
+    expect(isWithinScope(root, "\\\\server\\share\\repo\\src\\a.ts", "win32")).toBe(true);
+    expect(isWithinScope(root, "\\\\server\\share\\repository\\x.ts", "win32")).toBe(false);
+  });
+
+  it("normalizes win32 extended-length drive prefixes", () => {
+    expect(isWithinScope(
+      "\\\\?\\C:\\repo",
+      "C:\\repo\\src\\a.ts",
+      "win32",
+    )).toBe(true);
+  });
+
+  it("keeps POSIX containment case-sensitive", () => {
+    expect(isWithinScope("/repo/Secret", "/repo/secret/file.ts", "linux")).toBe(false);
+    expect(isWithinScope("/repo/Secret", "/repo/Secret/file.ts", "linux")).toBe(true);
+  });
 });
 
 describe("structuralVerify", () => {
