@@ -1,7 +1,7 @@
 import { mkdir } from "node:fs/promises";
 import path from "node:path";
 import type { PlatformServices } from "../platform/platform-services.js";
-import { getPlatformServices, UnsupportedPlatformError } from "../platform/select-platform.js";
+import { getPlatformServices } from "../platform/select-platform.js";
 import { resolveStateDir } from "../runtime/state-dir.js";
 import { RuntimeError } from "../util/errors.js";
 import { git, type GitResult } from "./git-exec.js";
@@ -30,7 +30,6 @@ export class WorktreeManager {
   }
 
   async create(baseCommitOid: string): Promise<{ path: string; cleanup(): Promise<void> }> {
-    if (this.platformServices.os === "win32") throw new UnsupportedPlatformError();
     const { worktreesRoot, worktreePath } = this.managedWorktreePath();
     await mkdir(worktreesRoot, { recursive: true });
     const result = await git(this.repoRoot, ["worktree", "add", "--detach", worktreePath, baseCommitOid]);

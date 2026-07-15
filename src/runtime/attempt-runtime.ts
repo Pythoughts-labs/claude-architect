@@ -200,6 +200,10 @@ function shouldUseTemporaryHome(profile: ProducerConfigurationProfile): boolean 
     || profile.isolationState === "controlled-config-with-copied-credentials";
 }
 
+function errorCode(error: unknown): string | undefined {
+  return (error as NodeJS.ErrnoException).code;
+}
+
 function assertDirectoryIdentity(target: RunStartTarget): Promise<void> {
   return Promise.all([
     lstat(target.publicDirectory),
@@ -216,11 +220,16 @@ function assertDirectoryIdentity(target: RunStartTarget): Promise<void> {
 }
 
 async function syncDirectory(directory: string): Promise<void> {
-  const handle = await open(directory, constants.O_RDONLY);
+  let handle;
   try {
+    handle = await open(directory, constants.O_RDONLY | NO_FOLLOW);
     await handle.sync();
+  } catch (error) {
+    const unsupportedOnWindows = process.platform === "win32"
+      && ["EISDIR", "EINVAL", "ENOTSUP", "EPERM"].includes(errorCode(error) ?? "");
+    if (!unsupportedOnWindows) throw error;
   } finally {
-    await handle.close();
+    await handle?.close();
   }
 }
 

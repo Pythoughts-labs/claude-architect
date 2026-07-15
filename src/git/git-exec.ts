@@ -26,7 +26,7 @@ export async function git(cwd: string, args: string[], indexFile?: string): Prom
   };
   const exit = await supervise(platformServices, {
     executable,
-    args,
+    args: ["-c", "core.autocrlf=false", ...args],
     cwd,
     env,
     timeoutMs: 60_000,

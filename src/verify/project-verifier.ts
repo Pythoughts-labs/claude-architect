@@ -114,9 +114,9 @@ export function isWithinScope(
   os: PlatformServices["os"],
 ): boolean {
   if (os === "win32") return canonicalizeForScope(candidate, root);
-  const relative = path.relative(root, candidate);
+  const relative = path.posix.relative(root, candidate);
   return relative === ""
-    || (!path.isAbsolute(relative) && relative !== ".." && !relative.startsWith(`..${path.sep}`));
+    || (!path.posix.isAbsolute(relative) && relative !== ".." && !relative.startsWith("../"));
 }
 
 async function resolveCommandCwd(

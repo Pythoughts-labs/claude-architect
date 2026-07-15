@@ -4,7 +4,6 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { git } from "../../src/git/git-exec.js";
 import { WorktreeManager } from "../../src/git/worktree-manager.js";
-import { UnsupportedPlatformError } from "../../src/platform/select-platform.js";
 
 let temporaryPaths: string[] = [];
 let previousPluginData: string | undefined;
@@ -133,15 +132,4 @@ describe("WorktreeManager", () => {
     );
   });
 
-  it("rejects win32 before resolving or creating the state directory", async () => {
-    const { directory, base } = await initRepo();
-    const stateParent = await temporaryDirectory("ca-win32-state-parent-");
-    const stateRoot = join(stateParent, "not-created");
-    process.env.CLAUDE_PLUGIN_DATA = stateRoot;
-    const manager = new WorktreeManager(directory, "run-win32", { os: "win32" });
-
-    await expect(manager.create(base)).rejects.toBeInstanceOf(UnsupportedPlatformError);
-
-    await expect(stat(stateRoot)).rejects.toMatchObject({ code: "ENOENT" });
-  });
 });

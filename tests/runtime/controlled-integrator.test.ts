@@ -127,6 +127,23 @@ describe("applyCandidateTree", () => {
     expect(anchor.exitCode).not.toBe(0);
   });
 
+  it("materializes LF bytes exactly when repository autocrlf is enabled", async () => {
+    const f = await fixture();
+    const candidateBytes = Buffer.from("candidate\n");
+    await writeFile(path.join(f.worktreePath, "a.txt"), candidateBytes);
+    const artifact = await freeze(f, "apply-autocrlf");
+    await runGit(f.repoRoot, ["config", "core.autocrlf", "true"]);
+
+    const result = await applyCandidateTree({
+      repoRoot: f.repoRoot,
+      artifact,
+      expectedArtifactHash: artifact.manifestHash,
+    });
+
+    expect(result.integration).toBe("applied");
+    expect(await readFile(path.join(f.repoRoot, "a.txt"))).toEqual(candidateBytes);
+  });
+
   it("applies a deletion and leaves it staged", async () => {
     const f = await fixture({ "a.txt": "keep\n", "delete.txt": "remove\n" });
     await rm(path.join(f.worktreePath, "delete.txt"));

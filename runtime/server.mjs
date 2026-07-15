@@ -21932,6 +21932,18 @@ var DELEGATION_SPEC_VERSION = "1";
 var ATTEMPT_RESULT_VERSION = "1";
 var RUNTIME_VERSION = "0.10.0";
 
+// src/platform/posix-platform-services.ts
+import { spawn, execFile } from "node:child_process";
+import { createHash } from "node:crypto";
+import { constants, promises as fs } from "node:fs";
+import { tmpdir as tmpdir2 } from "node:os";
+import path from "node:path";
+import nodeProcess2 from "node:process";
+
+// src/runtime/state-dir.ts
+import { tmpdir } from "node:os";
+import nodeProcess from "node:process";
+
 // src/util/errors.ts
 var RuntimeError = class extends Error {
   constructor(message, detail) {
@@ -21948,17 +21960,7 @@ var NestedDelegationError = class extends RuntimeError {
   }
 };
 
-// src/platform/posix-platform-services.ts
-import { spawn, execFile } from "node:child_process";
-import { createHash } from "node:crypto";
-import { constants, promises as fs } from "node:fs";
-import { tmpdir as tmpdir2 } from "node:os";
-import path from "node:path";
-import nodeProcess2 from "node:process";
-
 // src/runtime/state-dir.ts
-import { tmpdir } from "node:os";
-import nodeProcess from "node:process";
 function resolveStateDir() {
   if (nodeProcess.env.CLAUDE_PLUGIN_DATA) return nodeProcess.env.CLAUDE_PLUGIN_DATA;
   if (nodeProcess.env.NODE_ENV === "test") {
@@ -22476,13 +22478,6 @@ var WindowsPlatformServices = class {
 };
 
 // src/platform/select-platform.ts
-var UnsupportedPlatformError = class extends RuntimeError {
-  code = "unsupported-platform";
-  constructor() {
-    super("runtime operations are unsupported on win32");
-    this.name = "UnsupportedPlatformError";
-  }
-};
 var services;
 function getPlatformServices() {
   if (!services) services = process.platform === "win32" ? new WindowsPlatformServices() : new PosixPlatformServices();
@@ -22552,7 +22547,7 @@ async function git(cwd, args, indexFile) {
   };
   const exit = await supervise(platformServices, {
     executable,
-    args,
+    args: ["-c", "core.autocrlf=false", ...args],
     cwd,
     env,
     timeoutMs: 6e4,
@@ -25417,7 +25412,6 @@ var WorktreeManager = class {
     return { worktreesRoot, worktreePath };
   }
   async create(baseCommitOid) {
-    if (this.platformServices.os === "win32") throw new UnsupportedPlatformError();
     const { worktreesRoot, worktreePath } = this.managedWorktreePath();
     await mkdir2(worktreesRoot, { recursive: true });
     const result = await git(this.repoRoot, ["worktree", "add", "--detach", worktreePath, baseCommitOid]);
@@ -25712,6 +25706,9 @@ function preCancelledExit() {
 function shouldUseTemporaryHome(profile) {
   return profile.isolationState === "controlled-config-supported" || profile.isolationState === "controlled-config-with-copied-credentials";
 }
+function errorCode3(error2) {
+  return error2.code;
+}
 function assertDirectoryIdentity2(target) {
   return Promise.all([
     lstat4(target.publicDirectory),
@@ -25723,11 +25720,15 @@ function assertDirectoryIdentity2(target) {
   });
 }
 async function syncDirectory2(directory) {
-  const handle = await open3(directory, constants3.O_RDONLY);
+  let handle;
   try {
+    handle = await open3(directory, constants3.O_RDONLY | NO_FOLLOW2);
     await handle.sync();
+  } catch (error2) {
+    const unsupportedOnWindows = process.platform === "win32" && ["EISDIR", "EINVAL", "ENOTSUP", "EPERM"].includes(errorCode3(error2) ?? "");
+    if (!unsupportedOnWindows) throw error2;
   } finally {
-    await handle.close();
+    await handle?.close();
   }
 }
 async function writeRunStart(target, record2, create) {
@@ -26221,8 +26222,8 @@ function commandEnvironment(command, os) {
 }
 function isWithinScope(root, candidate, os) {
   if (os === "win32") return canonicalizeForScope(candidate, root);
-  const relative = path9.relative(root, candidate);
-  return relative === "" || !path9.isAbsolute(relative) && relative !== ".." && !relative.startsWith(`..${path9.sep}`);
+  const relative = path9.posix.relative(root, candidate);
+  return relative === "" || !path9.posix.isAbsolute(relative) && relative !== ".." && !relative.startsWith("../");
 }
 async function resolveCommandCwd(worktreePath, commandCwd, os) {
   if (path9.isAbsolute(commandCwd)) return null;
@@ -26832,11 +26833,11 @@ var LOCK_NAME = /^([0-9a-f]{64})\.lock$/;
 var OID = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/;
 var CANDIDATE_REF_PREFIX2 = "refs/claude-architect/candidates/";
 var BACKUP_REF_PREFIX = "refs/claude-architect/prune-backups/";
-function errorCode3(error2) {
+function errorCode4(error2) {
   return error2.code;
 }
 function isMissing2(error2) {
-  return errorCode3(error2) === "ENOENT";
+  return errorCode4(error2) === "ENOENT";
 }
 function isPlainDirectory(metadata) {
   return metadata.isDirectory() && !metadata.isSymbolicLink();
@@ -27253,8 +27254,8 @@ function defaultIsProcessAlive(pid) {
     nodeProcess4.kill(pid, 0);
     return true;
   } catch (error2) {
-    if (errorCode3(error2) === "EPERM") return true;
-    if (errorCode3(error2) === "ESRCH") return false;
+    if (errorCode4(error2) === "EPERM") return true;
+    if (errorCode4(error2) === "ESRCH") return false;
     throw error2;
   }
 }
