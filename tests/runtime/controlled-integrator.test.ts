@@ -12,6 +12,8 @@ const originalPluginData = process.env.CLAUDE_PLUGIN_DATA;
 const integrationHooks = vi.hoisted(() => ({
   beforeReadTree: undefined as (() => Promise<void>) | undefined,
   afterReadTree: undefined as (() => Promise<void>) | undefined,
+  afterWorktreeDiff: undefined as (() => Promise<void>) | undefined,
+  beforeAnchorDelete: undefined as (() => Promise<void>) | undefined,
 }));
 
 vi.mock("../../src/git/git-exec.js", async importOriginal => {
@@ -25,11 +27,23 @@ vi.mock("../../src/git/git-exec.js", async importOriginal => {
         integrationHooks.beforeReadTree = undefined;
         await hook();
       }
+      if (args[1][0] === "update-ref" && args[1].includes("-d")
+        && integrationHooks.beforeAnchorDelete !== undefined) {
+        const hook = integrationHooks.beforeAnchorDelete;
+        integrationHooks.beforeAnchorDelete = undefined;
+        await hook();
+      }
       const result = await actual.git(...args);
       if (args[1][0] === "read-tree" && args[1].includes("-m")
         && integrationHooks.afterReadTree !== undefined) {
         const hook = integrationHooks.afterReadTree;
         integrationHooks.afterReadTree = undefined;
+        await hook();
+      }
+      if (args[1][0] === "diff" && args[1].includes("--quiet")
+        && integrationHooks.afterWorktreeDiff !== undefined) {
+        const hook = integrationHooks.afterWorktreeDiff;
+        integrationHooks.afterWorktreeDiff = undefined;
         await hook();
       }
       return result;
@@ -85,6 +99,8 @@ async function freeze(f: Awaited<ReturnType<typeof fixture>>, runId: string): Pr
 afterEach(async () => {
   integrationHooks.beforeReadTree = undefined;
   integrationHooks.afterReadTree = undefined;
+  integrationHooks.afterWorktreeDiff = undefined;
+  integrationHooks.beforeAnchorDelete = undefined;
   if (originalPluginData === undefined) delete process.env.CLAUDE_PLUGIN_DATA;
   else process.env.CLAUDE_PLUGIN_DATA = originalPluginData;
   await Promise.all(temporaryPaths.splice(0).map(entry =>
@@ -246,6 +262,28 @@ describe("applyCandidateTree", () => {
     expect(await runGit(f.repoRoot, ["status", "--porcelain"])).toBe("");
   });
 
+  it("recomputes the artifact manifest from the immutable candidate tree", async () => {
+    const f = await fixture();
+    await writeFile(path.join(f.worktreePath, "a.txt"), "candidate\n");
+    const artifact = await freeze(f, "tampered-manifest");
+    const changedPaths = artifact.changedPaths.map(change => ({
+      ...change,
+      contentHash: "f".repeat(40),
+    }));
+
+    const result = await applyCandidateTree({
+      repoRoot: f.repoRoot,
+      artifact: { ...artifact, changedPaths },
+      expectedArtifactHash: artifact.manifestHash,
+    });
+
+    expect(result).toEqual({ integration: "aborted", detail: "artifact-identity-mismatch" });
+    expect(await readFile(path.join(f.repoRoot, "a.txt"), "utf8")).toBe("base\n");
+    expect(await runGit(f.repoRoot, ["rev-parse", artifact.anchorRef])).toBe(
+      artifact.candidateCommitOid,
+    );
+  });
+
   it("reports a read-tree conflict without overwriting a racing checkout edit", async () => {
     const f = await fixture();
     await writeFile(path.join(f.worktreePath, "a.txt"), "candidate\n");
@@ -267,7 +305,7 @@ describe("applyCandidateTree", () => {
     );
   });
 
-  it("rolls back when post-apply status reveals untracked divergence", async () => {
+  it("preserves applied and racing files when post-apply status diverges", async () => {
     const f = await fixture();
     await writeFile(path.join(f.worktreePath, "a.txt"), "candidate\n");
     const artifact = await freeze(f, "post-apply-divergence");
@@ -281,14 +319,78 @@ describe("applyCandidateTree", () => {
       expectedArtifactHash: artifact.manifestHash,
     });
 
-    expect(result).toEqual({ integration: "aborted", detail: "post-apply-sanity-failed" });
-    expect(await readFile(path.join(f.repoRoot, "a.txt"), "utf8")).toBe("base\n");
+    expect(result).toEqual({ integration: "conflicted", detail: "post-apply-divergence" });
+    expect(await readFile(path.join(f.repoRoot, "a.txt"), "utf8")).toBe("candidate\n");
     expect(await readFile(path.join(f.repoRoot, "external.txt"), "utf8")).toBe(
       "racing untracked file\n",
     );
     expect(await runGit(f.repoRoot, ["rev-parse", artifact.anchorRef])).toBe(
       artifact.candidateCommitOid,
     );
+  });
+
+  it("does not rewind a racing commit after the candidate tree is applied", async () => {
+    const f = await fixture();
+    await writeFile(path.join(f.worktreePath, "a.txt"), "candidate\n");
+    const artifact = await freeze(f, "racing-commit");
+    integrationHooks.afterReadTree = async () => {
+      await writeFile(path.join(f.repoRoot, "racing.txt"), "racing commit\n");
+      await runGit(f.repoRoot, ["add", "racing.txt"]);
+      await runGit(f.repoRoot, ["commit", "-q", "-m", "racing commit"]);
+    };
+
+    const result = await applyCandidateTree({
+      repoRoot: f.repoRoot,
+      artifact,
+      expectedArtifactHash: artifact.manifestHash,
+    });
+
+    expect(result).toEqual({ integration: "conflicted", detail: "post-apply-divergence" });
+    expect(await runGit(f.repoRoot, ["rev-parse", "HEAD"])).not.toBe(f.baseCommitOid);
+    expect(await readFile(path.join(f.repoRoot, "racing.txt"), "utf8")).toBe("racing commit\n");
+    expect(await runGit(f.repoRoot, ["rev-parse", artifact.anchorRef])).toBe(
+      artifact.candidateCommitOid,
+    );
+  });
+
+  it("detects a tracked race after the worktree diff check", async () => {
+    const f = await fixture();
+    await writeFile(path.join(f.worktreePath, "a.txt"), "candidate\n");
+    const artifact = await freeze(f, "late-tracked-race");
+    integrationHooks.afterWorktreeDiff = async () => {
+      await writeFile(path.join(f.repoRoot, "a.txt"), "late racing edit\n");
+    };
+
+    const result = await applyCandidateTree({
+      repoRoot: f.repoRoot,
+      artifact,
+      expectedArtifactHash: artifact.manifestHash,
+    });
+
+    expect(result).toEqual({ integration: "conflicted", detail: "post-apply-divergence" });
+    expect(await readFile(path.join(f.repoRoot, "a.txt"), "utf8")).toBe("late racing edit\n");
+    expect(await runGit(f.repoRoot, ["rev-parse", artifact.anchorRef])).toBe(
+      artifact.candidateCommitOid,
+    );
+  });
+
+  it("reports an applied tree when compare-and-delete anchor cleanup fails", async () => {
+    const f = await fixture();
+    await writeFile(path.join(f.worktreePath, "a.txt"), "candidate\n");
+    const artifact = await freeze(f, "anchor-cleanup-failure");
+    integrationHooks.beforeAnchorDelete = async () => {
+      await runGit(f.repoRoot, ["update-ref", artifact.anchorRef, f.baseCommitOid]);
+    };
+
+    const result = await applyCandidateTree({
+      repoRoot: f.repoRoot,
+      artifact,
+      expectedArtifactHash: artifact.manifestHash,
+    });
+
+    expect(result.integration).toBe("applied");
+    expect(result.detail).toContain("candidate anchor delete failed");
+    expect(await readFile(path.join(f.repoRoot, "a.txt"), "utf8")).toBe("candidate\n");
   });
 
   it.skipIf(process.platform === "win32")("reports an applied tree when lock cleanup fails", async () => {

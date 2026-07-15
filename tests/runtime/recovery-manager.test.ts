@@ -135,7 +135,7 @@ describe("recoverStaleRuns", () => {
     expect(terminated).toEqual([4242]);
   });
 
-  it("reclaims an orphan lock even when its recorded owner pid is still alive", async () => {
+  it("preserves a checkout lock whose recorded owner pid is still alive", async () => {
     const lockKey = "a".repeat(64);
     const lockPath = path.join(process.env.CLAUDE_PLUGIN_DATA!, "locks", `${lockKey}.lock`);
     await mkdir(path.dirname(lockPath), { recursive: true });
@@ -149,7 +149,43 @@ describe("recoverStaleRuns", () => {
       isProcessAlive: () => true,
     })).resolves.toEqual({ recovered: [] });
 
-    await expectMissing(lockPath);
+    await expect(readFile(lockPath, "utf8")).resolves.toBe(String(process.pid));
+  });
+
+  it("does not recover an unfinished run owned by a live locked session", async () => {
+    const repo = await initRepo();
+    const runId = "run-live-session";
+    const lockKey = createHash("sha256").update(repo.commonDir).digest("hex");
+    const store = new ArtifactStore(runId);
+    await store.writeLog("lifecycle", "attempt lock acquired\n");
+    await writeFile(path.join(store.runDirectory, "run-start.json"), `${JSON.stringify({
+      runId,
+      lockKey,
+      canonicalCommonDir: repo.commonDir,
+      pid: 4242,
+      startedAt: "2026-07-14T12:00:00.000Z",
+    })}\n`);
+    const worktree = await new WorktreeManager(repo.directory, runId).create(repo.head);
+    const anchorRef = `refs/claude-architect/candidates/${runId}`;
+    await runGit(repo.directory, ["update-ref", anchorRef, repo.head]);
+    const lockPath = path.join(process.env.CLAUDE_PLUGIN_DATA!, "locks", `${lockKey}.lock`);
+    await mkdir(path.dirname(lockPath), { recursive: true });
+    await writeFile(lockPath, "7777");
+    const terminated: number[] = [];
+
+    await expect(recoverStaleRuns({
+      platformServices: {
+        os: "darwin",
+        async terminateProcessTreeByPid(pid) { terminated.push(pid); },
+      },
+      isProcessAlive: pid => pid === 7777,
+    })).resolves.toEqual({ recovered: [] });
+
+    expect(terminated).toEqual([]);
+    await expect(access(worktree.path)).resolves.toBeUndefined();
+    expect(await runGit(repo.directory, ["rev-parse", anchorRef])).toBe(repo.head);
+    await expect(readFile(lockPath, "utf8")).resolves.toBe("7777");
+    await expect(store.readResult(runId)).resolves.toBeNull();
   });
 
   it("rejects a coercible non-string status instead of treating it as terminal", async () => {
@@ -176,7 +212,7 @@ describe("recoverStaleRuns", () => {
         os: "darwin",
         async terminateProcessTreeByPid() {},
       },
-    })).rejects.toThrow("terminal attempt result is malformed");
+    })).rejects.toThrow(/attempt result.*invalid|terminal attempt result is malformed/);
   });
 
   it("terminates the recorded producer before validating a missing repository", async () => {

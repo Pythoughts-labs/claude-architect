@@ -116,6 +116,69 @@ describe("structuralVerify", () => {
     expect(result.manifestHash).toBe(fixture.artifact.manifestHash);
   });
 
+  it("rejects a candidate whose anchor no longer resolves to its candidate commit", async () => {
+    const fixture = await frozenFixture();
+    await runGit(fixture.repoRoot, [
+      "update-ref",
+      fixture.artifact.anchorRef,
+      fixture.baseCommitOid,
+    ]);
+
+    const result = await verify(fixture);
+
+    expect(result.failures).toContain("artifact-divergence");
+  });
+
+  it("rejects a candidate commit whose tree differs from the claimed candidate tree", async () => {
+    const fixture = await frozenFixture();
+    const baseTreeOid = await runGit(
+      fixture.repoRoot,
+      ["rev-parse", `${fixture.baseCommitOid}^{tree}`],
+    );
+    const divergentCommitOid = await runGit(fixture.repoRoot, [
+      "commit-tree",
+      baseTreeOid,
+      "-p",
+      fixture.baseCommitOid,
+      "-m",
+      "divergent candidate",
+    ]);
+    await runGit(fixture.repoRoot, [
+      "update-ref",
+      fixture.artifact.anchorRef,
+      divergentCommitOid,
+    ]);
+
+    const result = await verify(fixture, {
+      ...fixture.artifact,
+      candidateCommitOid: divergentCommitOid,
+    });
+
+    expect(result.failures).toContain("artifact-divergence");
+  });
+
+  it("rejects a candidate commit without the claimed base as its sole parent", async () => {
+    const fixture = await frozenFixture();
+    const parentlessCommitOid = await runGit(fixture.repoRoot, [
+      "commit-tree",
+      fixture.artifact.candidateTreeOid,
+      "-m",
+      "parentless candidate",
+    ]);
+    await runGit(fixture.repoRoot, [
+      "update-ref",
+      fixture.artifact.anchorRef,
+      parentlessCommitOid,
+    ]);
+
+    const result = await verify(fixture, {
+      ...fixture.artifact,
+      candidateCommitOid: parentlessCommitOid,
+    });
+
+    expect(result.failures).toContain("artifact-divergence");
+  });
+
   it("rechecks allowlist and case-insensitive forbidden scope against the frozen tree", async () => {
     const fixture = await frozenFixture();
 

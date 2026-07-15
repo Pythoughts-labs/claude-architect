@@ -19,6 +19,22 @@ describe("validateSpec", () => {
   });
   it("rejects over-ceiling timeout", () =>
     expect(validateSpec({ ...base, timeoutMs: 9_000_000 }).ok).toBe(false));
+  it("rejects non-positive attempt and verification timeouts", () => {
+    expect(validateSpec({ ...base, timeoutMs: 0 }).ok).toBe(false);
+    expect(validateSpec({ ...base, timeoutMs: -1 }).ok).toBe(false);
+    expect(validateSpec({
+      ...base,
+      verification: [{
+        id: "check",
+        executable: "node",
+        args: [],
+        cwd: ".",
+        timeoutMs: 0,
+        network: "denied",
+        expectedExitCodes: [0],
+      }],
+    }).ok).toBe(false);
+  });
   it("rejects non-edit executionMode", () =>
     expect(validateSpec({ ...base, executionMode: "review" }).ok).toBe(false));
 });

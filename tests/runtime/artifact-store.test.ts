@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import {
   access,
   chmod,
+  link,
   mkdir,
   mkdtemp,
   readFile,
@@ -10,6 +11,7 @@ import {
   rm,
   stat,
   symlink,
+  truncate,
   utimes,
   writeFile,
 } from "node:fs/promises";
@@ -31,6 +33,8 @@ import {
 const filesystemHooks = vi.hoisted(() => ({
   beforeOpen: undefined as undefined | ((filename: string) => Promise<void>),
   beforeLstat: undefined as undefined | ((filename: string) => Promise<void>),
+  beforeDirectoryRead: undefined as undefined | ((filename: string) => Promise<void>),
+  beforeRm: undefined as undefined | ((filename: string) => Promise<void>),
 }));
 
 vi.mock("node:fs/promises", async importOriginal => {
@@ -47,11 +51,27 @@ vi.mock("node:fs/promises", async importOriginal => {
       if (hook !== undefined) await hook(String(args[0]));
       return actual.lstat(...args);
     },
+    opendir: async (...args: Parameters<typeof actual.opendir>) => {
+      const hook = filesystemHooks.beforeDirectoryRead;
+      if (hook !== undefined) await hook(String(args[0]));
+      return actual.opendir(...args);
+    },
+    readdir: async (...args: Parameters<typeof actual.readdir>) => {
+      const hook = filesystemHooks.beforeDirectoryRead;
+      if (hook !== undefined) await hook(String(args[0]));
+      return actual.readdir(...args);
+    },
+    rm: async (...args: Parameters<typeof actual.rm>) => {
+      const hook = filesystemHooks.beforeRm;
+      if (hook !== undefined) await hook(String(args[0]));
+      return actual.rm(...args);
+    },
   };
 });
 
 const execFileAsync = promisify(execFile);
 const temporaryPaths: string[] = [];
+const emptyCandidateManifestHash = createHash("sha256").update("[]").digest("hex");
 let previousPluginData: string | undefined;
 let previousPluginRoot: string | undefined;
 
@@ -77,12 +97,17 @@ function sampleResult(runId: string): AttemptResult {
   };
 }
 
-function manifestArgs(runId: string, repoRoot: string): BuildRunManifestArgs {
+function manifestArgs(
+  runId: string,
+  repoRoot: string,
+  candidateManifestHash: string | null = null,
+  baseCommitOid = "a".repeat(40),
+): BuildRunManifestArgs {
   return {
     runId,
     repoRoot,
-    baseCommitOid: "a".repeat(40),
-    candidateManifestHash: null,
+    baseCommitOid,
+    candidateManifestHash,
     producer: { id: "codex", version: "1.2.3", model: null },
     effectivePolicy: { isolation: "temporary-home", retries: 0 },
     repositoryInstructions: [
@@ -121,12 +146,16 @@ beforeEach(async () => {
   process.env.CLAUDE_PLUGIN_ROOT = join(stateRoot, "plugin-cache");
   filesystemHooks.beforeOpen = undefined;
   filesystemHooks.beforeLstat = undefined;
+  filesystemHooks.beforeDirectoryRead = undefined;
+  filesystemHooks.beforeRm = undefined;
   clearRegisteredSecrets();
 });
 
 afterEach(async () => {
   filesystemHooks.beforeOpen = undefined;
   filesystemHooks.beforeLstat = undefined;
+  filesystemHooks.beforeDirectoryRead = undefined;
+  filesystemHooks.beforeRm = undefined;
   if (previousPluginData === undefined) delete process.env.CLAUDE_PLUGIN_DATA;
   else process.env.CLAUDE_PLUGIN_DATA = previousPluginData;
   if (previousPluginRoot === undefined) delete process.env.CLAUDE_PLUGIN_ROOT;
@@ -170,6 +199,145 @@ describe("ArtifactStore", () => {
       code: "ENOENT",
     });
   });
+
+  it("rejects malformed and cross-run archived AttemptResults", async () => {
+    const malformedRunId = "run-malformed-result";
+    const malformedStore = new ArtifactStore(malformedRunId);
+    await malformedStore.writeLog("producer", "create run directory\n");
+    await writeFile(join(malformedStore.runDirectory, "result.json"), "{}\n");
+    await expect(malformedStore.readResult(malformedRunId)).rejects.toThrow(
+      /attempt result.*invalid|run id/i,
+    );
+
+    const crossRunId = "run-cross-result";
+    const crossStore = new ArtifactStore(crossRunId);
+    await crossStore.writeLog("producer", "create run directory\n");
+    await writeFile(
+      join(crossStore.runDirectory, "result.json"),
+      `${JSON.stringify(sampleResult("different-run"))}\n`,
+    );
+    await expect(crossStore.readResult(crossRunId)).rejects.toThrow(/attempt result.*run id/i);
+  });
+
+  it("rejects a runtime-invalid AttemptResult before writing it", async () => {
+    const runId = "run-invalid-result-write";
+    const store = new ArtifactStore(runId);
+    const invalid = {
+      ...sampleResult(runId),
+      status: "verified-candidate",
+      failure: null,
+      candidate: null,
+    } as AttemptResult;
+
+    await expect(store.writeResult(invalid)).rejects.toThrow(/attempt result.*invalid/i);
+  });
+
+  it("validates run ids before reading manifests", async () => {
+    const store = new ArtifactStore("run-manifest-id-check");
+
+    await expect(store.readManifest("../outside")).rejects.toThrow(/invalid run id/i);
+  });
+
+  it("rejects an oversized archive entry before reading it into memory", async () => {
+    const runId = "run-oversized-read";
+    const store = new ArtifactStore(runId);
+    await store.writeResult(sampleResult(runId));
+    await truncate(join(store.runDirectory, "result.json"), 8_000_001);
+
+    await expect(store.readResult(runId)).rejects.toThrow(/archive entry.*large|byte limit/i);
+  });
+
+  it("rejects a hardlinked archive entry", async () => {
+    const runId = "run-hardlinked-read";
+    const store = new ArtifactStore(runId);
+    await store.writeResult(sampleResult(runId));
+    const destination = join(store.runDirectory, "result.json");
+    const external = join(process.env.CLAUDE_PLUGIN_DATA!, "external-result.json");
+    await writeFile(external, `${JSON.stringify({
+      ...sampleResult(runId),
+      summary: "forged hardlink result",
+    })}\n`);
+    await rm(destination);
+    await link(external, destination);
+
+    await expect(store.readResult(runId)).rejects.toThrow(/hardlink|link count/i);
+  });
+
+  it("fails size accounting when a run directory is swapped for a symlink", async () => {
+    const runId = "run-size-swap";
+    const store = new ArtifactStore(runId);
+    await store.writeResult(sampleResult(runId));
+    const preserved = join(process.env.CLAUDE_PLUGIN_DATA!, "preserved-size-swap");
+    const external = await mkdtemp(join(tmpdir(), "claude-architect-size-external-"));
+    temporaryPaths.push(external);
+    await writeFile(join(external, "outside.txt"), "outside\n");
+    let swapped = false;
+    filesystemHooks.beforeDirectoryRead = async filename => {
+      if (swapped || filename !== store.runDirectory) return;
+      swapped = true;
+      filesystemHooks.beforeDirectoryRead = undefined;
+      await rename(store.runDirectory, preserved);
+      await symlink(external, store.runDirectory, "dir");
+    };
+
+    await expect(store.prune({
+      maxAgeMs: Number.MAX_SAFE_INTEGER,
+      maxBytes: Number.MAX_SAFE_INTEGER,
+    })).rejects.toThrow(/directory identity|symbolic link/i);
+
+    expect(swapped).toBe(true);
+    await expect(readFile(join(external, "outside.txt"), "utf8")).resolves.toBe("outside\n");
+  });
+
+  it("binds size accounting to the directory identity captured by listing", async () => {
+    const runId = "run-size-identity";
+    const store = new ArtifactStore(runId);
+    await store.writeResult(sampleResult(runId));
+    const preserved = join(process.env.CLAUDE_PLUGIN_DATA!, "preserved-size-identity");
+    let probes = 0;
+    filesystemHooks.beforeLstat = async filename => {
+      if (filename !== store.runDirectory || ++probes !== 2) return;
+      filesystemHooks.beforeLstat = undefined;
+      await rename(store.runDirectory, preserved);
+      await mkdir(store.runDirectory);
+      await writeFile(join(store.runDirectory, "replacement.txt"), "replacement\n");
+    };
+
+    await expect(store.prune({
+      maxAgeMs: Number.MAX_SAFE_INTEGER,
+      maxBytes: Number.MAX_SAFE_INTEGER,
+    })).rejects.toThrow(/directory identity/i);
+
+    expect(probes).toBe(2);
+    await expect(stat(preserved)).resolves.toBeDefined();
+  });
+
+  it.each(["../../outside.ts", "/absolute.ts", "C:\\outside.ts", "src/../outside.ts"])(
+    "rejects an unsafe candidate path %s",
+    async candidatePath => {
+      const runId = "run-unsafe-candidate-path";
+      const store = new ArtifactStore(runId);
+      const result = sampleResult(runId);
+      const changedPaths = [{
+        path: candidatePath,
+        changeType: "added" as const,
+        mode: "100644",
+        contentHash: "b".repeat(40),
+      }];
+      result.failure = "verification-failure";
+      result.candidate = {
+        baseCommitOid: "a".repeat(40),
+        candidateTreeOid: "b".repeat(40),
+        candidateCommitOid: "c".repeat(40),
+        anchorRef: `refs/claude-architect/candidates/${runId}`,
+        manifestHash: createHash("sha256").update(JSON.stringify(changedPaths)).digest("hex"),
+        changedPaths,
+        patch: "",
+      };
+
+      await expect(store.writeResult(result)).rejects.toThrow(/candidate path/i);
+    },
+  );
 
   it("persists and replaces the latest candidate decision", async () => {
     const runId = "run-decision";
@@ -289,6 +457,7 @@ describe("ArtifactStore", () => {
       mode: "100644",
       contentHash: "b".repeat(40),
     }];
+    result.failure = "verification-failure";
     result.candidate = {
       baseCommitOid: "a".repeat(40),
       candidateTreeOid: "b".repeat(40),
@@ -537,6 +706,7 @@ describe("ArtifactStore", () => {
 
     const store = new ArtifactStore("run-anchor");
     const result = sampleResult("run-anchor");
+    result.failure = "verification-failure";
     result.candidate = {
       baseCommitOid: commitOid,
       candidateTreeOid: await git(repoRoot, ["rev-parse", "HEAD^{tree}"]),
@@ -547,7 +717,12 @@ describe("ArtifactStore", () => {
       patch: "",
     };
     await store.writeResult(result);
-    await store.writeManifest(buildRunManifest(manifestArgs("run-anchor", repoRoot)));
+    await store.writeManifest(buildRunManifest(manifestArgs(
+      "run-anchor",
+      repoRoot,
+      emptyCandidateManifestHash,
+      commitOid,
+    )));
     const runDirectory = join(process.env.CLAUDE_PLUGIN_DATA!, "runs", "run-anchor");
     const oldTime = new Date(Date.now() - 60_000);
     await utimes(runDirectory, oldTime, oldTime);
@@ -574,6 +749,7 @@ describe("ArtifactStore", () => {
 
     const store = new ArtifactStore("run-intent");
     const result = sampleResult("run-intent");
+    result.failure = "verification-failure";
     result.candidate = {
       baseCommitOid: commitOid,
       candidateTreeOid: await git(repoRoot, ["rev-parse", "HEAD^{tree}"]),
@@ -584,7 +760,12 @@ describe("ArtifactStore", () => {
       patch: "",
     };
     await store.writeResult(result);
-    await store.writeManifest(buildRunManifest(manifestArgs("run-intent", repoRoot)));
+    await store.writeManifest(buildRunManifest(manifestArgs(
+      "run-intent",
+      repoRoot,
+      emptyCandidateManifestHash,
+      commitOid,
+    )));
     const runDirectory = join(process.env.CLAUDE_PLUGIN_DATA!, "runs", "run-intent");
     const oldTime = new Date(Date.now() - 60_000);
     await utimes(runDirectory, oldTime, oldTime);
@@ -617,6 +798,7 @@ describe("ArtifactStore", () => {
 
     const store = new ArtifactStore("run-intent-failure");
     const result = sampleResult("run-intent-failure");
+    result.failure = "verification-failure";
     result.candidate = {
       baseCommitOid: commitOid,
       candidateTreeOid: await git(repoRoot, ["rev-parse", "HEAD^{tree}"]),
@@ -627,7 +809,12 @@ describe("ArtifactStore", () => {
       patch: "",
     };
     await store.writeResult(result);
-    await store.writeManifest(buildRunManifest(manifestArgs("run-intent-failure", repoRoot)));
+    await store.writeManifest(buildRunManifest(manifestArgs(
+      "run-intent-failure",
+      repoRoot,
+      emptyCandidateManifestHash,
+      commitOid,
+    )));
     const runDirectory = join(process.env.CLAUDE_PLUGIN_DATA!, "runs", "run-intent-failure");
     const oldTime = new Date(Date.now() - 60_000);
     await utimes(runDirectory, oldTime, oldTime);
@@ -655,6 +842,7 @@ describe("ArtifactStore", () => {
 
     const store = new ArtifactStore("run-symref");
     const result = sampleResult("run-symref");
+    result.failure = "verification-failure";
     result.candidate = {
       baseCommitOid: commitOid,
       candidateTreeOid: await git(repoRoot, ["rev-parse", "HEAD^{tree}"]),
@@ -665,7 +853,12 @@ describe("ArtifactStore", () => {
       patch: "",
     };
     await store.writeResult(result);
-    await store.writeManifest(buildRunManifest(manifestArgs("run-symref", repoRoot)));
+    await store.writeManifest(buildRunManifest(manifestArgs(
+      "run-symref",
+      repoRoot,
+      emptyCandidateManifestHash,
+      commitOid,
+    )));
     const runDirectory = join(process.env.CLAUDE_PLUGIN_DATA!, "runs", "run-symref");
     const oldTime = new Date(Date.now() - 60_000);
     await utimes(runDirectory, oldTime, oldTime);
@@ -687,6 +880,7 @@ describe("ArtifactStore", () => {
 
     const store = new ArtifactStore("run-moved-ref");
     const result = sampleResult("run-moved-ref");
+    result.failure = "verification-failure";
     result.candidate = {
       baseCommitOid: candidateCommitOid,
       candidateTreeOid: await git(repoRoot, ["rev-parse", "HEAD^{tree}"]),
@@ -697,7 +891,12 @@ describe("ArtifactStore", () => {
       patch: "",
     };
     await store.writeResult(result);
-    await store.writeManifest(buildRunManifest(manifestArgs("run-moved-ref", repoRoot)));
+    await store.writeManifest(buildRunManifest(manifestArgs(
+      "run-moved-ref",
+      repoRoot,
+      emptyCandidateManifestHash,
+      candidateCommitOid,
+    )));
     await writeFile(join(repoRoot, "later.txt"), "later\n");
     await git(repoRoot, ["add", "later.txt"]);
     await git(repoRoot, ["commit", "-q", "-m", "later"]);
@@ -728,6 +927,7 @@ describe("ArtifactStore", () => {
 
     const store = new ArtifactStore("run-dangling-ref");
     const result = sampleResult("run-dangling-ref");
+    result.failure = "verification-failure";
     result.candidate = {
       baseCommitOid: candidateCommitOid,
       candidateTreeOid: await git(repoRoot, ["rev-parse", "HEAD^{tree}"]),
@@ -738,7 +938,12 @@ describe("ArtifactStore", () => {
       patch: "",
     };
     await store.writeResult(result);
-    await store.writeManifest(buildRunManifest(manifestArgs("run-dangling-ref", repoRoot)));
+    await store.writeManifest(buildRunManifest(manifestArgs(
+      "run-dangling-ref",
+      repoRoot,
+      emptyCandidateManifestHash,
+      candidateCommitOid,
+    )));
     const runDirectory = join(process.env.CLAUDE_PLUGIN_DATA!, "runs", "run-dangling-ref");
     const oldTime = new Date(Date.now() - 60_000);
     await utimes(runDirectory, oldTime, oldTime);
@@ -767,6 +972,7 @@ describe("ArtifactStore", () => {
 
     const store = new ArtifactStore("run-tampered-manifest");
     const result = sampleResult("run-tampered-manifest");
+    result.failure = "verification-failure";
     result.candidate = {
       baseCommitOid: candidateCommitOid,
       candidateTreeOid: await git(repoRoot, ["rev-parse", "HEAD^{tree}"]),
@@ -780,6 +986,8 @@ describe("ArtifactStore", () => {
     await store.writeManifest(buildRunManifest(manifestArgs(
       "run-tampered-manifest",
       repoRoot,
+      emptyCandidateManifestHash,
+      candidateCommitOid,
     )));
     const manifestPath = join(store.runDirectory, "manifest.json");
     const manifest = JSON.parse(await readFile(manifestPath, "utf8")) as Record<string, unknown>;
@@ -798,8 +1006,7 @@ describe("ArtifactStore", () => {
     await expect(stat(store.runDirectory)).resolves.toBeDefined();
   });
 
-  it("restores the candidate anchor when archive removal fails", async () => {
-    if (process.platform === "win32") return;
+  it("does not restore a partially deleted quarantine as a retained archive", async () => {
     const repoRoot = await mkdtemp(join(tmpdir(), "claude-architect-rollback-repo-"));
     temporaryPaths.push(repoRoot);
     await git(repoRoot, ["init", "-q"]);
@@ -810,6 +1017,7 @@ describe("ArtifactStore", () => {
 
     const store = new ArtifactStore("run-prune-rollback");
     const result = sampleResult("run-prune-rollback");
+    result.failure = "verification-failure";
     result.candidate = {
       baseCommitOid: candidateCommitOid,
       candidateTreeOid: await git(repoRoot, ["rev-parse", "HEAD^{tree}"]),
@@ -823,31 +1031,33 @@ describe("ArtifactStore", () => {
     await store.writeManifest(buildRunManifest(manifestArgs(
       "run-prune-rollback",
       repoRoot,
+      emptyCandidateManifestHash,
+      candidateCommitOid,
     )));
-    await store.writeLog("locked", "retain me");
-    const logsDirectory = join(store.runDirectory, "logs");
-    await chmod(logsDirectory, 0o500);
+    await store.writeLog("first", "first log\n");
+    await store.writeLog("second", "second log\n");
+    filesystemHooks.beforeRm = async filename => {
+      if (!filename.includes(".prune-run-prune-rollback-")) return;
+      filesystemHooks.beforeRm = undefined;
+      await rm(join(filename, "logs", "first.log"));
+      throw Object.assign(new Error("forced partial archive removal"), { code: "EACCES" });
+    };
     const oldTime = new Date(Date.now() - 60_000);
     await utimes(store.runDirectory, oldTime, oldTime);
 
-    try {
-      const pruned = await store.prune({
-        maxAgeMs: 1_000,
-        maxBytes: Number.MAX_SAFE_INTEGER,
-      });
+    const pruned = await store.prune({
+      maxAgeMs: 1_000,
+      maxBytes: Number.MAX_SAFE_INTEGER,
+    });
 
-      expect(pruned.removed).not.toContain("run-prune-rollback");
-      expect(pruned.retained.some(entry => entry.runId === "run-prune-rollback")).toBe(true);
-      expect(await git(repoRoot, ["rev-parse", anchorRef])).toBe(candidateCommitOid);
-      await expect(git(repoRoot, [
-        "show-ref",
-        "--verify",
-        "refs/claude-architect/prune-backups/run-prune-rollback",
-      ])).rejects.toBeDefined();
-      await expect(stat(store.runDirectory)).resolves.toBeDefined();
-    } finally {
-      await chmod(logsDirectory, 0o700).catch(() => {});
-    }
+    expect(pruned.removed).toContain("run-prune-rollback");
+    expect(pruned.retained.some(entry => entry.runId === "run-prune-rollback")).toBe(false);
+    await expect(git(repoRoot, ["show-ref", "--verify", anchorRef])).rejects.toBeDefined();
+    expect(await git(repoRoot, [
+      "rev-parse",
+      "refs/claude-architect/prune-backups/run-prune-rollback",
+    ])).toBe(candidateCommitOid);
+    await expect(stat(store.runDirectory)).rejects.toMatchObject({ code: "ENOENT" });
   });
 
   it("does not remove a replacement swapped into the quarantine path", async () => {
@@ -912,6 +1122,7 @@ exit 0
 
     const store = new ArtifactStore(runId);
     const result = sampleResult(runId);
+    result.failure = "verification-failure";
     result.candidate = {
       baseCommitOid: candidateCommitOid,
       candidateTreeOid: await git(repoRoot, ["rev-parse", "HEAD^{tree}"]),
@@ -922,7 +1133,12 @@ exit 0
       patch: "",
     };
     await store.writeResult(result);
-    await store.writeManifest(buildRunManifest(manifestArgs(runId, repoRoot)));
+    await store.writeManifest(buildRunManifest(manifestArgs(
+      runId,
+      repoRoot,
+      emptyCandidateManifestHash,
+      candidateCommitOid,
+    )));
     const oldTime = new Date(Date.now() - 60_000);
     await utimes(store.runDirectory, oldTime, oldTime);
 

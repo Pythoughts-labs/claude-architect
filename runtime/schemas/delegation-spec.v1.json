@@ -80,6 +80,7 @@
           },
           "timeoutMs": {
             "type": "integer",
+            "minimum": 1,
             "maximum": 1800000
           },
           "network": {
@@ -123,6 +124,7 @@
     },
     "timeoutMs": {
       "type": "integer",
+      "minimum": 1,
       "maximum": 1800000
     },
     "producerPreferences": {

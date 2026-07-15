@@ -2,7 +2,7 @@ import { git, type GitResult } from "../git/git-exec.js";
 import { checkPreconditions } from "../git/repo-preconditions.js";
 import { getPlatformServices } from "../platform/select-platform.js";
 import type { CandidateArtifact, ChangedPath } from "../protocol/attempt-result.js";
-import { RuntimeError } from "../util/errors.js";
+import { structuralVerify } from "../verify/structural-verifier.js";
 
 export interface ApplyCandidateTreeArgs {
   repoRoot: string;
@@ -24,11 +24,6 @@ function succeeded(result: GitResult): boolean {
 
 function aborted(detail: string): IntegrationResult {
   return { integration: "aborted", detail };
-}
-
-async function rollback(repoRoot: string, baseCommitOid: string): Promise<void> {
-  const result = await git(repoRoot, ["reset", "--hard", baseCommitOid]);
-  if (!succeeded(result)) throw new RuntimeError("failed to roll back candidate integration");
 }
 
 function statusMatchesArtifact(output: string, changedPaths: ChangedPath[]): boolean {
@@ -70,7 +65,6 @@ export async function applyCandidateTree(args: ApplyCandidateTreeArgs): Promise<
       || !OBJECT_ID.test(args.artifact.candidateTreeOid)) {
       return finish(aborted("invalid-candidate-identity"));
     }
-
     const anchor = await git(canonical, [
       "rev-parse",
       "--verify",
@@ -88,6 +82,17 @@ export async function applyCandidateTree(args: ApplyCandidateTreeArgs): Promise<
     if (!succeeded(candidateTree) || candidateTree.stdout.trim() !== args.artifact.candidateTreeOid) {
       return finish(aborted("candidate-tree-mismatch"));
     }
+    const identity = await structuralVerify({
+      repoRoot: canonical,
+      worktreePath: canonical,
+      baseCommitOid: args.artifact.baseCommitOid,
+      artifact: args.artifact,
+      writeAllowlist: ["**"],
+      forbiddenScope: [],
+    });
+    if (!identity.ok) {
+      return finish(aborted("artifact-identity-mismatch"));
+    }
 
     const refreshed = await git(canonical, ["update-index", "-q", "--refresh"]);
     if (!succeeded(refreshed)) {
@@ -104,6 +109,9 @@ export async function applyCandidateTree(args: ApplyCandidateTreeArgs): Promise<
       return finish({ integration: "conflicted", detail: "candidate-apply-conflict" });
     }
 
+    const stagedTree = await git(canonical, ["write-tree"]);
+    const worktreeDiff = await git(canonical, ["diff", "--quiet", "--no-ext-diff"]);
+    const head = await git(canonical, ["rev-parse", "--verify", "HEAD"]);
     const status = await git(canonical, [
       "status",
       "--porcelain=v1",
@@ -112,9 +120,6 @@ export async function applyCandidateTree(args: ApplyCandidateTreeArgs): Promise<
       "--ignore-submodules=none",
       "--no-renames",
     ]);
-    const stagedTree = await git(canonical, ["write-tree"]);
-    const worktreeDiff = await git(canonical, ["diff", "--quiet", "--no-ext-diff"]);
-    const head = await git(canonical, ["rev-parse", "--verify", "HEAD"]);
     if (!succeeded(stagedTree)
       || stagedTree.stdout.trim() !== args.artifact.candidateTreeOid
       || !succeeded(worktreeDiff)
@@ -122,8 +127,7 @@ export async function applyCandidateTree(args: ApplyCandidateTreeArgs): Promise<
       || head.stdout.trim() !== args.artifact.baseCommitOid
       || !succeeded(status)
       || !statusMatchesArtifact(status.stdout, args.artifact.changedPaths)) {
-      await rollback(canonical, args.artifact.baseCommitOid);
-      return finish(aborted("post-apply-sanity-failed"));
+      return finish({ integration: "conflicted", detail: "post-apply-divergence" });
     }
 
     const deleted = await git(canonical, [
@@ -134,8 +138,10 @@ export async function applyCandidateTree(args: ApplyCandidateTreeArgs): Promise<
       args.artifact.candidateCommitOid,
     ]);
     if (!succeeded(deleted)) {
-      await rollback(canonical, args.artifact.baseCommitOid);
-      return finish(aborted("candidate-anchor-delete-failed"));
+      return finish({
+        integration: "applied",
+        detail: "candidate tree applied; candidate anchor delete failed",
+      });
     }
     return finish({ integration: "applied", detail: "candidate tree applied" });
   } finally {

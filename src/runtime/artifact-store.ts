@@ -5,6 +5,7 @@ import {
   lstat,
   mkdir,
   open,
+  opendir,
   readdir,
   realpath,
   rename,
@@ -18,6 +19,7 @@ import type {
   CommandOutcome,
 } from "../protocol/attempt-result.js";
 import type { VerificationCommand } from "../protocol/delegation-spec.js";
+import { loadSchemas } from "../protocol/schema-loader.js";
 import { RuntimeError } from "../util/errors.js";
 import {
   containsRegisteredSecret,
@@ -38,6 +40,8 @@ const CANDIDATE_REF_PREFIX = "refs/claude-architect/candidates/";
 const PRUNE_BACKUP_REF_PREFIX = "refs/claude-architect/prune-backups/";
 const CLEANUP_JOURNAL = "cleanup.ndjson";
 const NO_FOLLOW = constants.O_NOFOLLOW ?? 0;
+const MAX_ARCHIVE_FILE_BYTES = 8_000_000;
+const attemptResultSchema = loadSchemas().attemptResult;
 
 export interface PrunePolicy {
   maxAgeMs: number;
@@ -229,33 +233,84 @@ async function readRegularFile(
     if (!metadata.isFile()) {
       throw new RuntimeError(`archive entry is not a regular file: ${redact(filename)}`);
     }
-    const contents = await handle.readFile({ encoding: "utf8" });
+    if (metadata.nlink !== 1) {
+      throw new RuntimeError(`archive entry has an unsafe link count: ${redact(filename)}`);
+    }
+    if (metadata.size > MAX_ARCHIVE_FILE_BYTES) {
+      throw new RuntimeError(`archive entry exceeds byte limit: ${redact(filename)}`);
+    }
+    const contents = Buffer.alloc(metadata.size + 1);
+    let offset = 0;
+    while (offset < contents.length) {
+      const read = await handle.read(contents, offset, contents.length - offset, offset);
+      if (read.bytesRead === 0) break;
+      offset += read.bytesRead;
+    }
+    if (offset > MAX_ARCHIVE_FILE_BYTES) {
+      throw new RuntimeError(`archive entry exceeds byte limit: ${redact(filename)}`);
+    }
+    const finalMetadata = await handle.stat();
+    if (!finalMetadata.isFile()
+      || finalMetadata.nlink !== 1
+      || finalMetadata.dev !== metadata.dev
+      || finalMetadata.ino !== metadata.ino
+      || finalMetadata.size !== metadata.size
+      || finalMetadata.mtimeMs !== metadata.mtimeMs
+      || finalMetadata.ctimeMs !== metadata.ctimeMs) {
+      throw new RuntimeError(`archive entry changed while being read: ${redact(filename)}`);
+    }
     if (parentIdentity !== undefined) {
       await assertDirectoryIdentity(path.dirname(filename), parentIdentity);
     }
-    return contents;
+    return contents.subarray(0, offset).toString("utf8");
   } finally {
     await handle.close();
   }
 }
 
-async function directoryBytes(directory: string): Promise<number> {
+async function directoryBytes(
+  directory: string,
+  expectedIdentity?: DirectoryIdentity,
+): Promise<number> {
+  const metadata = await lstat(directory);
+  if (metadata.isSymbolicLink() || !metadata.isDirectory()) {
+    throw new RuntimeError("archive size accounting requires a plain directory");
+  }
+  if (expectedIdentity !== undefined
+    && (metadata.dev !== expectedIdentity.dev || metadata.ino !== expectedIdentity.ino)) {
+    throw new RuntimeError("archive directory identity changed during size accounting");
+  }
+  const identity = { dev: metadata.dev, ino: metadata.ino };
   let total = 0;
   let entries;
   try {
-    entries = await readdir(directory, { withFileTypes: true });
+    entries = await opendir(directory);
   } catch (error) {
     if (isMissing(error)) return 0;
     throw error;
   }
-  for (const entry of entries) {
-    const entryPath = path.join(directory, entry.name);
-    try {
-      if (entry.isDirectory()) total += await directoryBytes(entryPath);
-      else if (entry.isFile()) total += (await lstat(entryPath)).size;
-    } catch (error) {
-      if (!isMissing(error)) throw error;
+  try {
+    await assertDirectoryIdentity(directory, identity);
+    for await (const entry of entries) {
+      await assertDirectoryIdentity(directory, identity);
+      const entryPath = path.join(directory, entry.name);
+      try {
+        const entryMetadata = await lstat(entryPath);
+        if (entryMetadata.isSymbolicLink()) {
+          throw new RuntimeError("archive size accounting encountered a symbolic link");
+        }
+        if (entryMetadata.isDirectory()) total += await directoryBytes(entryPath);
+        else if (entryMetadata.isFile()) total += entryMetadata.size;
+        await assertDirectoryIdentity(directory, identity);
+      } catch (error) {
+        if (!isMissing(error)) throw error;
+      }
     }
+    await assertDirectoryIdentity(directory, identity);
+  } finally {
+    await entries.close().catch(error => {
+      if (errorCode(error) !== "ERR_DIR_CLOSED") throw error;
+    });
   }
   return total;
 }
@@ -327,6 +382,21 @@ function preserveNullableIdentity(value: string | null, label: string): string |
   return value === null ? null : preserveIdentity(value, label);
 }
 
+function preserveCandidatePath(value: string): string {
+  const candidatePath = preserveIdentity(value, "candidate path");
+  const segments = candidatePath.split("/");
+  if (candidatePath === ""
+    || candidatePath.includes("\\")
+    || candidatePath.includes("\0")
+    || path.posix.isAbsolute(candidatePath)
+    || path.win32.isAbsolute(candidatePath)
+    || /^[A-Za-z]:/.test(candidatePath)
+    || segments.some(segment => segment === "" || segment === "." || segment === "..")) {
+    throw new RuntimeError("candidate path must be a normalized relative Git path");
+  }
+  return candidatePath;
+}
+
 function sanitizeVerificationCommand(command: VerificationCommand): VerificationCommand {
   const sanitized: VerificationCommand = {
     id: preserveIdentity(command.id, "verification command id"),
@@ -366,7 +436,7 @@ function sanitizeCommandOutcome(outcome: CommandOutcome): CommandOutcome {
 
 function sanitizeCandidate(candidate: CandidateArtifact): CandidateArtifact {
   const changedPaths = candidate.changedPaths.map(change => ({
-    path: preserveIdentity(change.path, "candidate path"),
+    path: preserveCandidatePath(change.path),
     changeType: change.changeType,
     mode: preserveIdentity(change.mode, "candidate mode"),
     contentHash: preserveNullableIdentity(change.contentHash, "candidate content hash"),
@@ -413,6 +483,17 @@ function sanitizeAttemptResult(result: AttemptResult): AttemptResult {
     durationMs: result.durationMs,
     sessionId: preserveNullableIdentity(result.sessionId, "producer session id"),
   };
+}
+
+function verifyAttemptResult(value: unknown, runId: string): AttemptResult {
+  if (!attemptResultSchema(value)) {
+    throw new RuntimeError("archived attempt result is invalid");
+  }
+  const result = value as AttemptResult;
+  if (result.runId !== runId) {
+    throw new RuntimeError("archived attempt result run id does not match");
+  }
+  return result;
 }
 
 export class ArtifactStore {
@@ -531,6 +612,12 @@ export class ArtifactStore {
   }
 
   private async replaceJson(relativePath: string, value: unknown): Promise<void> {
+    if (path.isAbsolute(relativePath)
+      || path.dirname(relativePath) !== "."
+      || path.basename(relativePath) !== relativePath
+      || !isSafeComponent(relativePath)) {
+      throw new RuntimeError("replacement archive path must be a safe relative leaf");
+    }
     const directory = await this.ensureRunDirectory(false);
     if (directory === null) throw new RuntimeError("run archive does not exist");
     const directoryIdentity = await ensurePlainDirectory(directory);
@@ -573,7 +660,9 @@ export class ArtifactStore {
     if (result.runId !== this.runId) {
       throw new RuntimeError("attempt result run id does not match artifact store");
     }
-    await this.writeJson("result.json", sanitizeAttemptResult(result));
+    const sanitized = sanitizeAttemptResult(result);
+    verifyAttemptResult(sanitized, this.runId);
+    await this.writeJson("result.json", sanitized);
   }
 
   async writeManifest(manifest: RunManifest): Promise<void> {
@@ -589,10 +678,13 @@ export class ArtifactStore {
     const validated = await this.ensureExistingRunDirectory(runDirectory);
     if (validated === null) return null;
     try {
-      return JSON.parse(await readRegularFile(
-        path.join(validated.path, "result.json"),
-        validated.identity,
-      )) as AttemptResult;
+      return verifyAttemptResult(
+        JSON.parse(await readRegularFile(
+          path.join(validated.path, "result.json"),
+          validated.identity,
+        )),
+        runId,
+      );
     } catch (error) {
       if (isMissing(error)) return null;
       throw error;
@@ -620,6 +712,7 @@ export class ArtifactStore {
   }
 
   async readManifest(runId: string): Promise<RunManifest | null> {
+    validateComponent(runId, "run id");
     const runDirectory = path.join(this.runsRoot, runId);
     const validated = await this.ensureExistingRunDirectory(runDirectory);
     if (validated === null) return null;
@@ -687,7 +780,7 @@ export class ArtifactStore {
           runId,
           directory,
           modifiedAtMs: metadata.mtimeMs,
-          bytes: await directoryBytes(directory),
+          bytes: await directoryBytes(directory, { dev: metadata.dev, ino: metadata.ino }),
           identity: { dev: metadata.dev, ino: metadata.ino },
         };
       } catch (error) {
@@ -723,6 +816,10 @@ export class ArtifactStore {
     const manifest = await this.readManifest(runId);
     if (manifest === null) {
       throw new RuntimeError("cannot remove candidate anchor without archived repository root");
+    }
+    if (manifest.baseCommitOid !== candidate.baseCommitOid
+      || manifest.candidateManifestHash !== candidate.manifestHash) {
+      throw new RuntimeError("archived candidate does not match its run manifest");
     }
     const canonicalRepoRoot = await realpath(manifest.repoRoot);
     const repositoryTopLevel = await git(canonicalRepoRoot, ["rev-parse", "--show-toplevel"]);
@@ -894,7 +991,7 @@ export class ArtifactStore {
       let prepared: PreparedAnchorCleanup | null = null;
       let transaction: AnchorCleanupTransaction | null = null;
       let runsRootIdentity: DirectoryIdentity | null = null;
-      let archiveDeleted = false;
+      let archiveRemovalCommitted = false;
       try {
         const result = await this.readResult(entry.runId);
         if (result === null) {
@@ -923,8 +1020,8 @@ export class ArtifactStore {
         await syncDirectory(this.runsRoot);
         await assertDirectoryIdentity(this.runsRoot, runsRootIdentity);
         await assertDirectoryIdentity(quarantinePath, entry.identity);
+        archiveRemovalCommitted = true;
         await rm(quarantinePath, { recursive: true, force: false });
-        archiveDeleted = true;
         await syncDirectory(this.runsRoot);
         await transaction.commit();
         await this.appendCleanupRecord({
@@ -944,7 +1041,7 @@ export class ArtifactStore {
         retainedBytes -= entry.bytes;
       } catch (error) {
         let rollbackError: unknown;
-        if (!archiveDeleted) {
+        if (!archiveRemovalCommitted) {
           try {
             const quarantineExists = await pathExists(quarantinePath);
             const runDirectoryExists = await pathExists(entry.directory);
@@ -991,7 +1088,7 @@ export class ArtifactStore {
         const rollback = rollbackError instanceof Error
           ? `; rollback failed: ${rollbackError.message}`
           : rollbackError === undefined ? "" : `; rollback failed: ${String(rollbackError)}`;
-        if (!archiveDeleted) {
+        if (!archiveRemovalCommitted) {
           retained.push({
             runId: entry.runId,
             reason: redact(`${primary}${rollback}`),

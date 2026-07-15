@@ -16,6 +16,8 @@ const IN_PROGRESS_PATHS = [
   "rebase-merge",
   "rebase-apply",
   "CHERRY_PICK_HEAD",
+  "REVERT_HEAD",
+  "sequencer",
   "BISECT_LOG",
 ] as const;
 const MAX_NESTED_REPOSITORY_SCAN_ENTRIES = 10_000;
@@ -81,7 +83,8 @@ async function findNestedRepositories(
   registeredSubmodules: Set<string>,
   writeAllowlist: string[],
 ): Promise<string[]> {
-  const nested: string[] = [];
+  const nested = [...registeredSubmodules].filter(submodulePath =>
+    writeAllowlist.some(pattern => patternOverlapsRepository(pattern, submodulePath)));
   let scannedEntries = 0;
   const pendingDirectories = [{ path: repositoryRoot, relativePath: "" }];
 
@@ -105,11 +108,16 @@ async function findNestedRepositories(
       if (scannedEntries > MAX_NESTED_REPOSITORY_SCAN_ENTRIES) {
         throw new Error("nested repository scan entry budget exceeded");
       }
-      if (entry.name === ".git" || !entry.isDirectory()) continue;
+      if (entry.name === ".git") continue;
       const child = path.join(directory.path, entry.name);
       const relativeChild = path.relative(repositoryRoot, child).split(path.sep).join("/");
       if (registeredSubmodules.has(relativeChild)) continue;
       if (!writeAllowlist.some(pattern => patternOverlapsRepository(pattern, relativeChild))) continue;
+      if (entry.isSymbolicLink()) {
+        nested.push(relativeChild);
+        continue;
+      }
+      if (!entry.isDirectory()) continue;
       childDirectories.push({ path: child, relativePath: relativeChild });
     }
 
@@ -146,7 +154,16 @@ export async function checkPreconditions(
     return { ok: false, reason: "in-progress-operation-scan-failed" };
   }
 
-  const status = await git(canonical, ["status", "--porcelain=v1", "--untracked-files=all", "--ignore-submodules=all"]);
+  const submodules = await git(canonical, ["submodule", "status", "--recursive"]);
+  if (!succeeded(submodules)) return { ok: false, reason: "git-command-failed" };
+  if (/^[+-]/m.test(submodules.stdout)) return { ok: false, reason: "changed-submodule" };
+
+  const status = await git(canonical, [
+    "status",
+    "--porcelain=v1",
+    "--untracked-files=all",
+    "--ignore-submodules=none",
+  ]);
   if (!succeeded(status)) return { ok: false, reason: "git-command-failed" };
   if (status.stdout.length > 0) return { ok: false, reason: "dirty-checkout" };
 
@@ -155,10 +172,6 @@ export async function checkPreconditions(
     return { ok: false, reason: "git-command-failed" };
   }
   if (sparseCheckout.stdout.trim() === "true") return { ok: false, reason: "sparse-checkout" };
-
-  const submodules = await git(canonical, ["submodule", "status"]);
-  if (!succeeded(submodules)) return { ok: false, reason: "git-command-failed" };
-  if (/^[+-]/m.test(submodules.stdout)) return { ok: false, reason: "changed-submodule" };
 
   const indexEntries = await git(canonical, ["ls-files", "-v"]);
   if (!succeeded(indexEntries)) return { ok: false, reason: "git-command-failed" };

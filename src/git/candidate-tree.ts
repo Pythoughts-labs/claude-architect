@@ -94,7 +94,13 @@ async function inventoryWorktree(worktreePath: string): Promise<WorktreeInventor
     "-z",
     "--untracked-files=all",
   ]);
-  const ignored = await checkedGit(worktreePath, ["status", "--porcelain=v1", "-z", "--ignored"]);
+  const ignored = await checkedGit(worktreePath, [
+    "status",
+    "--porcelain=v1",
+    "-z",
+    "--ignored",
+    "--untracked-files=all",
+  ]);
   return {
     changedPaths: parsePorcelainPaths(changed, "changed"),
     ignoredPaths: parsePorcelainPaths(ignored, "ignored"),
@@ -247,7 +253,7 @@ export async function freezeCandidate(args: FreezeCandidateArgs): Promise<Freeze
       args.baseCommitOid,
       candidateTreeOid,
     ]));
-    if (rawDiff.some(entry => entry.newMode === "120000")) {
+    if (rawDiff.some(entry => entry.oldMode === "120000" || entry.newMode === "120000")) {
       return { ok: false, reason: "modified-symlink" };
     }
 

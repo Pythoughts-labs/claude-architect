@@ -1,4 +1,4 @@
-import { mkdir, rm } from "node:fs/promises";
+import { mkdir } from "node:fs/promises";
 import path from "node:path";
 import type { PlatformServices } from "../platform/platform-services.js";
 import { getPlatformServices, UnsupportedPlatformError } from "../platform/select-platform.js";
@@ -35,7 +35,6 @@ export class WorktreeManager {
     await mkdir(worktreesRoot, { recursive: true });
     const result = await git(this.repoRoot, ["worktree", "add", "--detach", worktreePath, baseCommitOid]);
     if (result.exitCode !== 0) {
-      await rm(worktreePath, { recursive: true, force: true }).catch(() => {});
       throw failure("git worktree add", result);
     }
     return {
@@ -49,7 +48,6 @@ export class WorktreeManager {
       throw new RuntimeError("refusing to remove unmanaged worktree path");
     }
     const result = await git(this.repoRoot, ["worktree", "remove", "--force", worktreePath]);
-    await rm(worktreePath, { recursive: true, force: true }).catch(() => {});
     if (result.exitCode !== 0) throw failure("git worktree remove", result);
   }
 }

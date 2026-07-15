@@ -38,6 +38,7 @@ async function runGit(cwd: string, args: string[]): Promise<string> {
 
 async function initRepoAndWorktree(
   files: Record<string, string> = { "a.txt": "hello\n" },
+  symlinks: Record<string, string> = {},
 ): Promise<{ repoRoot: string; worktreePath: string; baseCommitOid: string; baseTreeOid: string }> {
   const root = await mkdtemp(join(tmpdir(), "ca-candidate-tree-"));
   temporaryPaths.push(root);
@@ -49,6 +50,11 @@ async function initRepoAndWorktree(
     const filePath = join(repoRoot, relativePath);
     await mkdir(join(filePath, ".."), { recursive: true });
     await writeFile(filePath, contents);
+  }
+  for (const [relativePath, target] of Object.entries(symlinks)) {
+    const filePath = join(repoRoot, relativePath);
+    await mkdir(join(filePath, ".."), { recursive: true });
+    await symlink(target, filePath);
   }
   await runGit(repoRoot, ["add", "-A"]);
   await runGit(repoRoot, ["commit", "-q", "-m", "init"]);
@@ -206,6 +212,41 @@ describe("freezeCandidate", () => {
     expect(result).toEqual({ ok: false, reason: "modified-symlink" });
   });
 
+  it.skipIf(process.platform === "win32")("rejects deletion of a tracked symlink", async () => {
+    const fixture = await initRepoAndWorktree(
+      { "a.txt": "target\n" },
+      { "link.txt": "a.txt" },
+    );
+    await rm(join(fixture.worktreePath, "link.txt"));
+
+    const result = await freezeCandidate({
+      ...fixture,
+      runId: "run-delete-symlink",
+      writeAllowlist: ["link.txt"],
+      forbiddenScope: [],
+    });
+
+    expect(result).toEqual({ ok: false, reason: "modified-symlink" });
+  });
+
+  it.skipIf(process.platform === "win32")("rejects replacement of a tracked symlink", async () => {
+    const fixture = await initRepoAndWorktree(
+      { "a.txt": "target\n" },
+      { "link.txt": "a.txt" },
+    );
+    await rm(join(fixture.worktreePath, "link.txt"));
+    await writeFile(join(fixture.worktreePath, "link.txt"), "regular replacement\n");
+
+    const result = await freezeCandidate({
+      ...fixture,
+      runId: "run-replace-symlink",
+      writeAllowlist: ["link.txt"],
+      forbiddenScope: [],
+    });
+
+    expect(result).toEqual({ ok: false, reason: "modified-symlink" });
+  });
+
   it("rejects an empty candidate", async () => {
     const fixture = await initRepoAndWorktree();
 
@@ -278,11 +319,16 @@ describe("freezeCandidate", () => {
   });
 
   it("returns sorted ignored paths as successful freeze evidence", async () => {
-    const fixture = await initRepoAndWorktree({ ".gitignore": "*.log\n", "a.txt": "hello\n" });
+    const fixture = await initRepoAndWorktree({
+      ".gitignore": "*.log\nignored-dir/\n",
+      "a.txt": "hello\n",
+    });
     await writeFile(join(fixture.worktreePath, "a.txt"), "changed\n");
     await writeFile(join(fixture.worktreePath, "z.log"), "ignored\n");
     await writeFile(join(fixture.worktreePath, "a.log"), "ignored\n");
     await writeFile(join(fixture.worktreePath, "API_KEY=abcdef123456.log"), "ignored\n");
+    await mkdir(join(fixture.worktreePath, "ignored-dir"));
+    await writeFile(join(fixture.worktreePath, "ignored-dir", "nested.log"), "ignored\n");
 
     const result = await freezeCandidate({
       ...fixture,
@@ -294,7 +340,7 @@ describe("freezeCandidate", () => {
     expect(result.ok).toBe(true);
     if (result.ok) {
       expect(result.evidence).toEqual({
-        ignoredPaths: ["API_KEY=[e]", "a.log", "z.log"],
+        ignoredPaths: ["API_KEY=[e]", "a.log", "ignored-dir/nested.log", "z.log"],
       });
       expect(result.artifact).not.toHaveProperty("ignoredPaths");
     }

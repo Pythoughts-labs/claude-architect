@@ -94,6 +94,27 @@ describe("checkPreconditions", () => {
     await expect(checkPreconditions(directory)).resolves.toEqual({ ok: false, reason: "in-progress-operation" });
   });
 
+  it("rejects revert and sequencer operation state", async () => {
+    const revertDirectory = await initRepo();
+    const revertGitDirectory = await runGit(revertDirectory, ["rev-parse", "--absolute-git-dir"]);
+    await writeFile(join(revertGitDirectory, "REVERT_HEAD"), "0".repeat(40));
+    await expect(checkPreconditions(revertDirectory)).resolves.toEqual({
+      ok: false,
+      reason: "in-progress-operation",
+    });
+
+    const sequencerDirectory = await initRepo();
+    const sequencerGitDirectory = await runGit(sequencerDirectory, [
+      "rev-parse",
+      "--absolute-git-dir",
+    ]);
+    await mkdir(join(sequencerGitDirectory, "sequencer"));
+    await expect(checkPreconditions(sequencerDirectory)).resolves.toEqual({
+      ok: false,
+      reason: "in-progress-operation",
+    });
+  });
+
   it("fails closed when an in-progress marker cannot be scanned", async () => {
     const directory = await initRepo();
     filesystemProbe.markerAccessErrorCode = "EACCES";
@@ -131,6 +152,46 @@ describe("checkPreconditions", () => {
     await expect(checkPreconditions(directory)).resolves.toEqual({ ok: false, reason: "changed-submodule" });
   }, 15_000);
 
+  it("rejects uncommitted changes inside a submodule", async () => {
+    const submoduleSource = await initRepo();
+    const directory = await initRepo();
+    await runGit(directory, [
+      "-c",
+      "protocol.file.allow=always",
+      "submodule",
+      "add",
+      "-q",
+      submoduleSource,
+      "dependency",
+    ]);
+    await runGit(directory, ["commit", "-q", "-am", "add submodule"]);
+    await writeFile(join(directory, "dependency", "a.txt"), "dirty submodule\n");
+
+    await expect(checkPreconditions(directory)).resolves.toEqual({
+      ok: false,
+      reason: "dirty-checkout",
+    });
+  }, 15_000);
+
+  it("rejects a write allowlist that enters a registered submodule", async () => {
+    const submoduleSource = await initRepo();
+    const directory = await initRepo();
+    await runGit(directory, [
+      "-c",
+      "protocol.file.allow=always",
+      "submodule",
+      "add",
+      "-q",
+      submoduleSource,
+      "dependency",
+    ]);
+    await runGit(directory, ["commit", "-q", "-am", "add submodule"]);
+
+    await expect(checkPreconditions(directory, {
+      writeAllowlist: ["dependency/**"],
+    })).resolves.toEqual({ ok: false, reason: "nested-repository" });
+  }, 15_000);
+
   it("rejects skip-worktree and assume-unchanged index entries", async () => {
     const skipWorktreeRepo = await initRepo();
     await runGit(skipWorktreeRepo, ["update-index", "--skip-worktree", "a.txt"]);
@@ -155,6 +216,23 @@ describe("checkPreconditions", () => {
     await expect(checkPreconditions(directory, { writeAllowlist: ["nested/file.txt"] })).resolves.toEqual({ ok: false, reason: "nested-repository" });
     await expect(checkPreconditions(directory, { writeAllowlist: ["nested/*"] })).resolves.toEqual({ ok: false, reason: "nested-repository" });
     await expect(checkPreconditions(directory, { writeAllowlist: ["**/*.txt"] })).resolves.toEqual({ ok: false, reason: "nested-repository" });
+  });
+
+  it.skipIf(process.platform === "win32")("rejects a filesystem symlink in write scope", async () => {
+    const directory = await initRepo();
+    const external = await temporaryDirectory("ca-symlink-target-");
+    await writeFile(join(external, "outside.txt"), "outside\n");
+    await symlink(external, join(directory, "linked"), "dir");
+    await runGit(directory, ["add", "linked"]);
+    await runGit(directory, ["commit", "-q", "-m", "add linked directory"]);
+
+    await expect(checkPreconditions(directory)).resolves.toMatchObject({ ok: true });
+    await expect(checkPreconditions(directory, {
+      writeAllowlist: ["src/**"],
+    })).resolves.toMatchObject({ ok: true });
+    await expect(checkPreconditions(directory, {
+      writeAllowlist: ["linked/**"],
+    })).resolves.toEqual({ ok: false, reason: "nested-repository" });
   });
 
   it("streams nested-repository discovery with opendir", async () => {

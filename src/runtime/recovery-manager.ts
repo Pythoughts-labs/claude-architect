@@ -525,7 +525,6 @@ function defaultIsProcessAlive(pid: number): boolean {
 
 async function reclaimLocks(
   locksRoot: string,
-  liveLockKeys: ReadonlySet<string>,
   isProcessAlive: (pid: number) => boolean,
 ): Promise<void> {
   let entries;
@@ -549,13 +548,24 @@ async function reclaimLocks(
     const parsed = Number(contents.trim());
     const ownerPid = Number.isSafeInteger(parsed) && parsed > 1 ? parsed : null;
     const ownerIsAlive = ownerPid !== null && isProcessAlive(ownerPid);
-    if (ownerIsAlive && liveLockKeys.has(match[1]!)) continue;
+    if (ownerIsAlive) continue;
     const identity = await lstat(lockPath);
     if (!identity.isFile() || identity.isSymbolicLink()) {
       throw new RuntimeError("checkout lock identity changed during recovery");
     }
     await rm(lockPath, { force: false });
   }
+}
+
+async function lockIsOwnedByLiveProcess(
+  locksRoot: string,
+  lockKey: string,
+  isProcessAlive: (pid: number) => boolean,
+): Promise<boolean> {
+  const contents = await readBoundedRegularFile(path.join(locksRoot, `${lockKey}.lock`));
+  if (contents === null) return false;
+  const ownerPid = Number(contents.trim());
+  return Number.isSafeInteger(ownerPid) && ownerPid > 1 && isProcessAlive(ownerPid);
 }
 
 export async function recoverStaleRuns(
@@ -568,7 +578,8 @@ export async function recoverStaleRuns(
   if (runsIdentity !== null) await replayInterruptedPrunes(runsRoot);
 
   const ps = dependencies.platformServices ?? getPlatformServices();
-  const liveLockKeys = new Set<string>();
+  const isProcessAlive = dependencies.isProcessAlive ?? defaultIsProcessAlive;
+  const locksRoot = path.join(root, "locks");
   const stale: RunStartRecord[] = [];
   if (runsIdentity !== null) {
     const runEntries = await readdir(runsRoot, { withFileTypes: true });
@@ -583,7 +594,7 @@ export async function recoverStaleRuns(
         validateTerminalResult(result, entry.name);
         continue;
       }
-      liveLockKeys.add(record.lockKey);
+      if (await lockIsOwnedByLiveProcess(locksRoot, record.lockKey, isProcessAlive)) continue;
       stale.push(record);
     }
   }
@@ -591,13 +602,11 @@ export async function recoverStaleRuns(
   const recovered: string[] = [];
   for (const record of stale) {
     await recoverRun(record, root, ps);
-    liveLockKeys.delete(record.lockKey);
     recovered.push(record.runId);
   }
   await reclaimLocks(
-    path.join(root, "locks"),
-    liveLockKeys,
-    dependencies.isProcessAlive ?? defaultIsProcessAlive,
+    locksRoot,
+    isProcessAlive,
   );
   return { recovered };
 }

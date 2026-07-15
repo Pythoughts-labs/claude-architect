@@ -175,7 +175,16 @@ async function initRepo(): Promise<string> {
   await runGit(directory, ["init", "-q"]);
   await writeFile(path.join(directory, "a.txt"), "base\n");
   await runGit(directory, ["add", "-A"]);
-  await runGit(directory, ["commit", "-q", "-m", "base"]);
+  await runGit(directory, [
+    "-c",
+    "user.name=Claude Architect Test",
+    "-c",
+    "user.email=claude-architect@example.invalid",
+    "commit",
+    "-q",
+    "-m",
+    "base",
+  ]);
   return directory;
 }
 

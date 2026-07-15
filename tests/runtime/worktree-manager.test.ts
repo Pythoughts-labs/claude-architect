@@ -1,4 +1,4 @@
-import { mkdtemp, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -90,6 +90,35 @@ describe("WorktreeManager", () => {
     await expect(manager.remove(outside)).rejects.toThrow("refusing to remove unmanaged worktree path");
 
     await expect(stat(outside)).resolves.toBeDefined();
+    await expect(stat(sentinel)).resolves.toBeDefined();
+  });
+
+  it("preserves a colliding managed directory when worktree creation fails", async () => {
+    const { directory, base } = await initRepo();
+    const collidingPath = join(process.env.CLAUDE_PLUGIN_DATA!, "worktrees", "run-collision");
+    const sentinel = join(collidingPath, "sentinel.txt");
+    await mkdir(collidingPath, { recursive: true });
+    await writeFile(sentinel, "keep\n");
+    const manager = new WorktreeManager(directory, "run-collision");
+
+    await expect(manager.create(base)).rejects.toThrow("git worktree add failed");
+
+    await expect(stat(collidingPath)).resolves.toBeDefined();
+    await expect(stat(sentinel)).resolves.toBeDefined();
+  });
+
+  it("preserves an unregistered managed directory when worktree removal fails", async () => {
+    const { directory, base } = await initRepo();
+    const manager = new WorktreeManager(directory, "run-remove-failure");
+    const attempt = await manager.create(base);
+    await runGit(directory, ["worktree", "remove", "--force", attempt.path]);
+    const sentinel = join(attempt.path, "sentinel.txt");
+    await mkdir(attempt.path, { recursive: true });
+    await writeFile(sentinel, "keep\n");
+
+    await expect(manager.remove(attempt.path)).rejects.toThrow("git worktree remove failed");
+
+    await expect(stat(attempt.path)).resolves.toBeDefined();
     await expect(stat(sentinel)).resolves.toBeDefined();
   });
 

@@ -8,6 +8,7 @@ const MAX_DIAGNOSTIC_LENGTH = 2_000;
 
 export type StructuralFailure =
   | "manifest-divergence"
+  | "artifact-divergence"
   | "out-of-scope-write"
   | "modified-symlink"
   | "empty-candidate"
@@ -193,9 +194,36 @@ async function recomputeManifest(args: StructuralVerifyArgs): Promise<{
   };
 }
 
+async function artifactIdentityMatches(args: StructuralVerifyArgs): Promise<boolean> {
+  const [anchorResult, treeResult, parentResult] = await Promise.all([
+    git(args.repoRoot, ["rev-parse", "--verify", `${args.artifact.anchorRef}^{commit}`]),
+    git(args.repoRoot, [
+      "rev-parse",
+      "--verify",
+      `${args.artifact.candidateCommitOid}^{tree}`,
+    ]),
+    git(args.repoRoot, [
+      "rev-list",
+      "--parents",
+      "-n",
+      "1",
+      args.artifact.candidateCommitOid,
+    ]),
+  ]);
+  if (anchorResult.exitCode !== 0 || treeResult.exitCode !== 0 || parentResult.exitCode !== 0) {
+    return false;
+  }
+  const commitAndParents = parentResult.stdout.trim().split(/\s+/);
+  return anchorResult.stdout.trim() === args.artifact.candidateCommitOid
+    && treeResult.stdout.trim() === args.artifact.candidateTreeOid
+    && commitAndParents.length === 2
+    && commitAndParents[0] === args.artifact.candidateCommitOid
+    && commitAndParents[1] === args.baseCommitOid;
+}
+
 export async function structuralVerify(args: StructuralVerifyArgs): Promise<StructuralVerifyResult> {
   const failures = new Set<StructuralFailure>();
-  const [manifest, baseTreeOid, currentHead, mainStatus] = await Promise.all([
+  const [manifest, baseTreeOid, currentHead, mainStatus, artifactIdentityValid] = await Promise.all([
     recomputeManifest(args),
     checkedGit(args.repoRoot, ["rev-parse", `${args.baseCommitOid}^{tree}`]),
     checkedGit(args.repoRoot, ["rev-parse", "--verify", "HEAD"]),
@@ -205,6 +233,7 @@ export async function structuralVerify(args: StructuralVerifyArgs): Promise<Stru
       "--untracked-files=all",
       "--ignore-submodules=none",
     ]),
+    artifactIdentityMatches(args),
   ]);
 
   if (args.artifact.baseCommitOid !== args.baseCommitOid
@@ -216,11 +245,14 @@ export async function structuralVerify(args: StructuralVerifyArgs): Promise<Stru
     || args.artifact.manifestHash !== manifest.manifestHash) {
     failures.add("manifest-divergence");
   }
+  if (!artifactIdentityValid) {
+    failures.add("artifact-divergence");
+  }
   if (manifest.changedPaths.some(change =>
     !isAllowed(change.path, args.writeAllowlist, args.forbiddenScope))) {
     failures.add("out-of-scope-write");
   }
-  if (manifest.rawDiff.some(entry => entry.newMode === "120000")) {
+  if (manifest.rawDiff.some(entry => entry.oldMode === "120000" || entry.newMode === "120000")) {
     failures.add("modified-symlink");
   }
   if (manifest.changedPaths.length === 0

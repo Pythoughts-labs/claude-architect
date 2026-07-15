@@ -16,6 +16,26 @@ const validDelegationSpec = {
   expectedOutput: "candidate-patch",
 };
 
+const validAttemptResult = {
+  resultVersion: "1",
+  runId: "run-schema",
+  status: "failed",
+  failure: "producer-failure",
+  summary: "producer failed",
+  producerSummary: null,
+  candidate: null,
+  requestedVerification: [],
+  executedVerification: [],
+  unresolvedIssues: [],
+  evidence: {},
+  logsRef: "logs/producer.log",
+  producerId: "codex",
+  producerVersion: "1.0.0",
+  producerModel: null,
+  durationMs: 1,
+  sessionId: null,
+};
+
 describe("schema loader", () => {
   it("compiles delegation-spec and attempt-result validators", () => {
     const v = loadSchemas();
@@ -38,35 +58,56 @@ describe("schema loader", () => {
 
   it("accepts a valid attempt result", () => {
     const v = loadSchemas();
-    expect(
-      v.attemptResult({
-        resultVersion: "1",
-        status: "verified-candidate",
-        failure: null,
-      }),
-    ).toBe(true);
+    expect(v.attemptResult(validAttemptResult)).toBe(true);
   });
 
   it("rejects an attempt result with a wrong status value", () => {
     const v = loadSchemas();
     expect(
-      v.attemptResult({
-        resultVersion: "1",
-        status: "nope",
-        failure: null,
-      }),
+      v.attemptResult({ ...validAttemptResult, status: "nope" }),
     ).toBe(false);
   });
 
   it("rejects an attempt result with a wrong failure value", () => {
     const v = loadSchemas();
     expect(
-      v.attemptResult({
-        resultVersion: "1",
-        status: "verified-candidate",
-        failure: "nope",
-      }),
+      v.attemptResult({ ...validAttemptResult, failure: "nope" }),
     ).toBe(false);
+  });
+
+  it("rejects incomplete and contradictory attempt results", () => {
+    const v = loadSchemas();
+    const { runId, ...missingRunId } = validAttemptResult;
+    expect(v.attemptResult(missingRunId)).toBe(false);
+    expect(v.attemptResult({
+      ...validAttemptResult,
+      status: "verified-candidate",
+      failure: "verification-failure",
+    })).toBe(false);
+    expect(v.attemptResult({
+      ...validAttemptResult,
+      status: "failed",
+      failure: null,
+    })).toBe(false);
+    const preservedCandidate = {
+      baseCommitOid: "1".repeat(40),
+      candidateTreeOid: "2".repeat(40),
+      candidateCommitOid: "3".repeat(40),
+      anchorRef: "refs/claude-architect/candidates/run-schema",
+      manifestHash: "4".repeat(64),
+      changedPaths: [],
+      patch: "",
+    };
+    expect(v.attemptResult({
+      ...validAttemptResult,
+      failure: "spawn-failure",
+      candidate: preservedCandidate,
+    })).toBe(false);
+    expect(v.attemptResult({
+      ...validAttemptResult,
+      failure: "verification-failure",
+      candidate: preservedCandidate,
+    })).toBe(true);
   });
 });
 

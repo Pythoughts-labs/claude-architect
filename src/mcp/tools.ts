@@ -124,6 +124,16 @@ function requireCandidate(run: ArchivedRun): CandidateArtifact {
   return run.result.candidate;
 }
 
+function requireVerifiedCandidate(run: ArchivedRun): CandidateArtifact {
+  if (run.result.status !== "verified-candidate" || run.result.failure !== null) {
+    throw runtimeError(
+      "candidate did not complete independent verification",
+      "candidate-not-verified",
+    );
+  }
+  return requireCandidate(run);
+}
+
 function schemaCompatibility(input: unknown): { ok: true } | { ok: false; diagnostic: string } {
   if (isRecord(input)
     && input.specVersion !== undefined
@@ -261,6 +271,7 @@ export async function handleDecideCandidate(
   try {
     const run = await loadArchivedRun(runId, deps);
     return await withRepoLock(run.lockKey, async () => {
+      if (decision === "accepted") requireVerifiedCandidate(run);
       const record: RunDecision = {
         decision,
         recordedAt: (deps.now ?? (() => new Date()))().toISOString(),
@@ -300,7 +311,7 @@ export async function handleIntegrateCandidate(
       }
       return (deps.applyCandidateTree ?? applyTree)({
         repoRoot: run.repoRoot,
-        artifact: requireCandidate(run),
+        artifact: requireVerifiedCandidate(run),
         expectedArtifactHash,
       });
     });

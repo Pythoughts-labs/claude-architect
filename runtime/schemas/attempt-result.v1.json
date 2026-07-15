@@ -1,18 +1,31 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "type": "object",
+  "additionalProperties": false,
   "required": [
+    "resultVersion",
+    "runId",
     "status",
-    "failure"
+    "failure",
+    "summary",
+    "producerSummary",
+    "candidate",
+    "requestedVerification",
+    "executedVerification",
+    "unresolvedIssues",
+    "evidence",
+    "logsRef",
+    "producerId",
+    "producerVersion",
+    "producerModel",
+    "durationMs",
+    "sessionId"
   ],
   "properties": {
+    "resultVersion": { "const": "1" },
+    "runId": { "type": "string", "minLength": 1 },
     "status": {
-      "enum": [
-        "unavailable",
-        "failed",
-        "cancelled",
-        "verified-candidate"
-      ]
+      "enum": ["unavailable", "failed", "cancelled", "verified-candidate"]
     },
     "failure": {
       "enum": [
@@ -28,6 +41,180 @@
         "producer-failure",
         "verification-failure"
       ]
+    },
+    "summary": { "type": "string" },
+    "producerSummary": { "type": ["string", "null"] },
+    "candidate": {
+      "anyOf": [
+        { "$ref": "#/$defs/candidate" },
+        { "type": "null" }
+      ]
+    },
+    "requestedVerification": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/verificationCommand" }
+    },
+    "executedVerification": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/commandOutcome" }
+    },
+    "unresolvedIssues": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "evidence": { "type": "object" },
+    "logsRef": { "type": "string" },
+    "producerId": { "type": ["string", "null"] },
+    "producerVersion": { "type": ["string", "null"] },
+    "producerModel": { "type": ["string", "null"] },
+    "durationMs": { "type": "number", "minimum": 0 },
+    "sessionId": { "type": ["string", "null"] }
+  },
+  "oneOf": [
+    {
+      "properties": {
+        "status": { "const": "verified-candidate" },
+        "failure": { "const": null },
+        "candidate": { "$ref": "#/$defs/candidate" }
+      }
+    },
+    {
+      "properties": {
+        "status": { "const": "unavailable" },
+        "failure": { "enum": ["unavailable", "authentication-required"] },
+        "candidate": { "type": "null" }
+      }
+    },
+    {
+      "properties": {
+        "status": { "const": "cancelled" },
+        "failure": { "const": "cancelled" },
+        "candidate": { "type": "null" }
+      }
+    },
+    {
+      "properties": {
+        "status": { "const": "failed" },
+        "failure": {
+          "enum": [
+            "invalid-specification",
+            "spawn-failure",
+            "timeout",
+            "sandbox-violation",
+            "invalid-output",
+            "producer-failure"
+          ]
+        },
+        "candidate": { "type": "null" }
+      }
+    },
+    {
+      "properties": {
+        "status": { "const": "failed" },
+        "failure": { "const": "verification-failure" }
+      }
+    }
+  ],
+  "$defs": {
+    "candidate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "baseCommitOid",
+        "candidateTreeOid",
+        "candidateCommitOid",
+        "anchorRef",
+        "manifestHash",
+        "changedPaths",
+        "patch"
+      ],
+      "properties": {
+        "baseCommitOid": { "type": "string" },
+        "candidateTreeOid": { "type": "string" },
+        "candidateCommitOid": { "type": "string" },
+        "anchorRef": { "type": "string" },
+        "manifestHash": { "type": "string" },
+        "changedPaths": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/changedPath" }
+        },
+        "patch": { "type": "string" }
+      }
+    },
+    "changedPath": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "changeType", "mode", "contentHash"],
+      "properties": {
+        "path": { "type": "string" },
+        "changeType": { "enum": ["added", "modified", "deleted"] },
+        "mode": { "type": "string" },
+        "contentHash": { "type": ["string", "null"] }
+      }
+    },
+    "verificationCommand": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "executable",
+        "args",
+        "cwd",
+        "timeoutMs",
+        "network",
+        "expectedExitCodes"
+      ],
+      "properties": {
+        "id": { "type": "string" },
+        "executable": { "type": "string" },
+        "args": { "type": "array", "items": { "type": "string" } },
+        "cwd": { "type": "string" },
+        "environment": {
+          "type": "object",
+          "additionalProperties": { "type": "string" }
+        },
+        "timeoutMs": { "type": "integer", "minimum": 1, "maximum": 1800000 },
+        "network": { "enum": ["denied", "allowed"] },
+        "expectedExitCodes": {
+          "type": "array",
+          "items": { "type": "integer" }
+        },
+        "platform": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "os": {
+              "type": "array",
+              "items": { "enum": ["darwin", "linux", "win32"] }
+            },
+            "arch": { "type": "array", "items": { "type": "string" } }
+          }
+        }
+      }
+    },
+    "commandOutcome": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "executable",
+        "args",
+        "exitCode",
+        "timedOut",
+        "durationMs",
+        "stdoutRef",
+        "stderrRef"
+      ],
+      "properties": {
+        "id": { "type": "string" },
+        "executable": { "type": "string" },
+        "args": { "type": "array", "items": { "type": "string" } },
+        "exitCode": { "type": ["integer", "null"] },
+        "timedOut": { "type": "boolean" },
+        "durationMs": { "type": "number", "minimum": 0 },
+        "stdoutRef": { "type": "string" },
+        "stderrRef": { "type": "string" }
+      }
     }
   }
 }

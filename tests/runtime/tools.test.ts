@@ -98,8 +98,10 @@ const validSpec: DelegationSpec = {
 class FakeStore implements ToolArtifactStore {
   decision: RunDecision | null = null;
 
+  constructor(private readonly storedResult: AttemptResult = result) {}
+
   async readResult(_runId: string): Promise<AttemptResult | null> {
-    return result;
+    return this.storedResult;
   }
 
   async readManifest(_runId: string): Promise<RunManifest | null> {
@@ -309,5 +311,32 @@ describe("MCP tool handlers", () => {
       candidate.manifestHash,
       deps,
     )).resolves.toEqual({ integration: "aborted", detail: "no-accepted-decision" });
+  });
+
+  it("refuses to accept or integrate a candidate that failed verification", async () => {
+    const failedResult: AttemptResult = {
+      ...result,
+      status: "failed",
+      failure: "verification-failure",
+      summary: "verification failed",
+    };
+    const store = new FakeStore(failedResult);
+    const deps = dependencies(store);
+
+    await expect(handleDecideCandidate("run-tools", "accepted", deps)).resolves.toEqual({
+      ok: false,
+      error: "candidate-not-verified",
+      diagnostic: "candidate did not complete independent verification",
+    });
+    store.decision = { decision: "accepted", recordedAt: "2026-07-14T00:00:00.000Z" };
+    await expect(handleIntegrateCandidate(
+      "run-tools",
+      candidate.manifestHash,
+      deps,
+    )).resolves.toEqual({
+      ok: false,
+      error: "candidate-not-verified",
+      diagnostic: "candidate did not complete independent verification",
+    });
   });
 });

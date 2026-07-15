@@ -22206,25 +22206,36 @@ async function supervise(ps, req, opts) {
   if (!(req.timeoutMs > 0 && req.timeoutMs <= RUNTIME_MAX_TIMEOUT_MS)) throw new Error("invalid timeout");
   const proc = await ps.spawnSupervised(req);
   let timedOut = false, cancelled = false;
+  let settled = false;
   const grace = opts.graceMs ?? 3e3;
   const graceTimers = /* @__PURE__ */ new Set();
-  const escalate = () => graceTimers.add(setTimeout(() => ps.terminateProcessTree(proc).catch(() => {
-  }), grace));
-  const timer = setTimeout(async () => {
+  const escalate = () => {
+    if (settled) return;
+    const timer2 = setTimeout(() => {
+      graceTimers.delete(timer2);
+      if (!settled) void ps.terminateProcessTree(proc).catch(() => {
+      });
+    }, grace);
+    graceTimers.add(timer2);
+  };
+  const cancelCooperatively = () => {
+    void Promise.resolve().then(() => ps.requestCooperativeCancellation(proc)).catch(() => {
+    }).then(escalate);
+  };
+  const timer = setTimeout(() => {
     timedOut = true;
-    await ps.requestCooperativeCancellation(proc);
-    escalate();
+    cancelCooperatively();
   }, req.timeoutMs);
-  const onAbort = async () => {
+  const onAbort = () => {
     cancelled = true;
-    await ps.requestCooperativeCancellation(proc);
-    escalate();
+    cancelCooperatively();
   };
   opts.onCancel?.addEventListener("abort", onAbort, { once: true });
   try {
     const exit = await proc.done;
     return { ...exit, timedOut: timedOut || exit.timedOut, cancelled: cancelled || exit.cancelled };
   } finally {
+    settled = true;
     clearTimeout(timer);
     for (const t of graceTimers) clearTimeout(t);
     opts.onCancel?.removeEventListener("abort", onAbort);
@@ -22833,6 +22844,8 @@ var IN_PROGRESS_PATHS = [
   "rebase-merge",
   "rebase-apply",
   "CHERRY_PICK_HEAD",
+  "REVERT_HEAD",
+  "sequencer",
   "BISECT_LOG"
 ];
 var MAX_NESTED_REPOSITORY_SCAN_ENTRIES = 1e4;
@@ -22882,7 +22895,7 @@ function submodulePaths(output) {
   return paths;
 }
 async function findNestedRepositories(repositoryRoot, registeredSubmodules, writeAllowlist) {
-  const nested = [];
+  const nested = [...registeredSubmodules].filter((submodulePath) => writeAllowlist.some((pattern) => patternOverlapsRepository(pattern, submodulePath)));
   let scannedEntries = 0;
   const pendingDirectories = [{ path: repositoryRoot, relativePath: "" }];
   while (pendingDirectories.length > 0) {
@@ -22903,11 +22916,16 @@ async function findNestedRepositories(repositoryRoot, registeredSubmodules, writ
       if (scannedEntries > MAX_NESTED_REPOSITORY_SCAN_ENTRIES) {
         throw new Error("nested repository scan entry budget exceeded");
       }
-      if (entry.name === ".git" || !entry.isDirectory()) continue;
+      if (entry.name === ".git") continue;
       const child = path2.join(directory.path, entry.name);
       const relativeChild = path2.relative(repositoryRoot, child).split(path2.sep).join("/");
       if (registeredSubmodules.has(relativeChild)) continue;
       if (!writeAllowlist.some((pattern) => patternOverlapsRepository(pattern, relativeChild))) continue;
+      if (entry.isSymbolicLink()) {
+        nested.push(relativeChild);
+        continue;
+      }
+      if (!entry.isDirectory()) continue;
       childDirectories.push({ path: child, relativePath: relativeChild });
     }
     for (let index = childDirectories.length - 1; index >= 0; index -= 1) {
@@ -22934,7 +22952,15 @@ async function checkPreconditions(repoRoot, options = {}) {
   } catch {
     return { ok: false, reason: "in-progress-operation-scan-failed" };
   }
-  const status = await git(canonical, ["status", "--porcelain=v1", "--untracked-files=all", "--ignore-submodules=all"]);
+  const submodules = await git(canonical, ["submodule", "status", "--recursive"]);
+  if (!succeeded(submodules)) return { ok: false, reason: "git-command-failed" };
+  if (/^[+-]/m.test(submodules.stdout)) return { ok: false, reason: "changed-submodule" };
+  const status = await git(canonical, [
+    "status",
+    "--porcelain=v1",
+    "--untracked-files=all",
+    "--ignore-submodules=none"
+  ]);
   if (!succeeded(status)) return { ok: false, reason: "git-command-failed" };
   if (status.stdout.length > 0) return { ok: false, reason: "dirty-checkout" };
   const sparseCheckout = await git(canonical, ["config", "--bool", "core.sparseCheckout"]);
@@ -22942,9 +22968,6 @@ async function checkPreconditions(repoRoot, options = {}) {
     return { ok: false, reason: "git-command-failed" };
   }
   if (sparseCheckout.stdout.trim() === "true") return { ok: false, reason: "sparse-checkout" };
-  const submodules = await git(canonical, ["submodule", "status"]);
-  if (!succeeded(submodules)) return { ok: false, reason: "git-command-failed" };
-  if (/^[+-]/m.test(submodules.stdout)) return { ok: false, reason: "changed-submodule" };
   const indexEntries = await git(canonical, ["ls-files", "-v"]);
   if (!succeeded(indexEntries)) return { ok: false, reason: "git-command-failed" };
   if (/^[Ssh] /m.test(indexEntries.stdout)) return { ok: false, reason: "skip-worktree-entries" };
@@ -22975,6 +22998,207 @@ async function checkPreconditions(repoRoot, options = {}) {
   return { ok: true, baseCommitOid, gitCommonDir: gitCommonDir2 };
 }
 
+// src/verify/structural-verifier.ts
+import { createHash as createHash2 } from "node:crypto";
+var MAX_DIAGNOSTIC_LENGTH2 = 2e3;
+function gitFailure(action, result) {
+  const diagnostic = redact(result.stderr || result.stdout).trim().slice(0, MAX_DIAGNOSTIC_LENGTH2);
+  return new RuntimeError(`${action} failed${diagnostic ? `: ${diagnostic}` : ""}`);
+}
+async function checkedGit(cwd, args) {
+  const result = await git(cwd, args);
+  if (result.exitCode !== 0) throw gitFailure(`git ${args[0] ?? "command"}`, result);
+  return result.stdout;
+}
+function splitNul(value) {
+  const fields = value.split("\0");
+  if (fields.at(-1) === "") fields.pop();
+  return fields;
+}
+function parseRawDiff(output) {
+  const fields = splitNul(output);
+  const entries = [];
+  for (let index = 0; index < fields.length; index += 2) {
+    const metadata = fields[index];
+    const entryPath = fields[index + 1];
+    const match = /^:(\d{6}) (\d{6}) [0-9a-f]+ [0-9a-f]+ [A-Z]$/.exec(metadata);
+    if (match === null || entryPath === void 0) {
+      throw new RuntimeError("git diff-tree returned invalid raw output");
+    }
+    entries.push({ path: entryPath, oldMode: match[1], newMode: match[2] });
+  }
+  return entries;
+}
+function parseNameStatus(output) {
+  const fields = splitNul(output);
+  if (fields.length % 2 !== 0) {
+    throw new RuntimeError("git diff-tree returned invalid name-status output");
+  }
+  const entries = [];
+  for (let index = 0; index < fields.length; index += 2) {
+    entries.push({ status: fields[index], path: fields[index + 1] });
+  }
+  return entries;
+}
+function parseTree(output) {
+  const entries = /* @__PURE__ */ new Map();
+  for (const record2 of splitNul(output)) {
+    const separator = record2.indexOf("	");
+    if (separator < 0) throw new RuntimeError("git ls-tree returned invalid output");
+    const [mode, , oid] = record2.slice(0, separator).split(" ");
+    if (mode === void 0 || oid === void 0) {
+      throw new RuntimeError("git ls-tree returned invalid output");
+    }
+    entries.set(record2.slice(separator + 1), { mode, oid });
+  }
+  return entries;
+}
+function changeType(status) {
+  if (status === "A") return "added";
+  if (status === "D") return "deleted";
+  return "modified";
+}
+function sortChangedPaths(changedPaths) {
+  return changedPaths.sort((left, right) => left.path < right.path ? -1 : left.path > right.path ? 1 : 0);
+}
+function escapeRegex2(character) {
+  return /[\\^$.*+?()[\]{}|]/.test(character) ? `\\${character}` : character;
+}
+function globMatches(pattern, candidate, caseInsensitive = false) {
+  let expression = "^";
+  for (let index = 0; index < pattern.length; index += 1) {
+    const character = pattern[index];
+    if (character !== "*") {
+      expression += escapeRegex2(character);
+      continue;
+    }
+    if (pattern[index + 1] !== "*") {
+      expression += "[^/]*";
+      continue;
+    }
+    index += 1;
+    if (pattern[index + 1] === "/") {
+      expression += "(?:.*/)?";
+      index += 1;
+    } else {
+      expression += ".*";
+    }
+  }
+  return new RegExp(`${expression}$`, caseInsensitive ? "i" : void 0).test(candidate);
+}
+function isAllowed(pathname, writeAllowlist, forbiddenScope) {
+  return writeAllowlist.some((pattern) => globMatches(pattern, pathname)) && !forbiddenScope.some((pattern) => globMatches(pattern, pathname, true));
+}
+async function recomputeManifest(args) {
+  const [rawOutput, nameStatusOutput, treeOutput] = await Promise.all([
+    checkedGit(args.worktreePath, [
+      "diff-tree",
+      "-r",
+      "--no-commit-id",
+      "--no-renames",
+      "--raw",
+      "-z",
+      args.baseCommitOid,
+      args.artifact.candidateTreeOid
+    ]),
+    checkedGit(args.worktreePath, [
+      "diff-tree",
+      "-r",
+      "--no-commit-id",
+      "--no-renames",
+      "--name-status",
+      "-z",
+      args.baseCommitOid,
+      args.artifact.candidateTreeOid
+    ]),
+    checkedGit(args.worktreePath, ["ls-tree", "-r", "-z", args.artifact.candidateTreeOid])
+  ]);
+  const rawDiff = parseRawDiff(rawOutput);
+  const rawByPath = new Map(rawDiff.map((entry) => [entry.path, entry]));
+  const treeByPath = parseTree(treeOutput);
+  const changedPaths = sortChangedPaths(parseNameStatus(nameStatusOutput).map(({ path: path9, status }) => {
+    const rawEntry = rawByPath.get(path9);
+    const treeEntry = treeByPath.get(path9);
+    if (treeEntry === void 0 && status !== "D") {
+      throw new RuntimeError("candidate tree is missing a changed path");
+    }
+    if (treeEntry === void 0 && rawEntry === void 0) {
+      throw new RuntimeError("git diff-tree outputs disagree");
+    }
+    return {
+      path: path9,
+      changeType: changeType(status),
+      mode: treeEntry?.mode ?? rawEntry.oldMode,
+      contentHash: treeEntry?.oid ?? null
+    };
+  }));
+  return {
+    changedPaths,
+    manifestHash: createHash2("sha256").update(JSON.stringify(changedPaths)).digest("hex"),
+    rawDiff
+  };
+}
+async function artifactIdentityMatches(args) {
+  const [anchorResult, treeResult, parentResult] = await Promise.all([
+    git(args.repoRoot, ["rev-parse", "--verify", `${args.artifact.anchorRef}^{commit}`]),
+    git(args.repoRoot, [
+      "rev-parse",
+      "--verify",
+      `${args.artifact.candidateCommitOid}^{tree}`
+    ]),
+    git(args.repoRoot, [
+      "rev-list",
+      "--parents",
+      "-n",
+      "1",
+      args.artifact.candidateCommitOid
+    ])
+  ]);
+  if (anchorResult.exitCode !== 0 || treeResult.exitCode !== 0 || parentResult.exitCode !== 0) {
+    return false;
+  }
+  const commitAndParents = parentResult.stdout.trim().split(/\s+/);
+  return anchorResult.stdout.trim() === args.artifact.candidateCommitOid && treeResult.stdout.trim() === args.artifact.candidateTreeOid && commitAndParents.length === 2 && commitAndParents[0] === args.artifact.candidateCommitOid && commitAndParents[1] === args.baseCommitOid;
+}
+async function structuralVerify(args) {
+  const failures = /* @__PURE__ */ new Set();
+  const [manifest, baseTreeOid, currentHead, mainStatus, artifactIdentityValid] = await Promise.all([
+    recomputeManifest(args),
+    checkedGit(args.repoRoot, ["rev-parse", `${args.baseCommitOid}^{tree}`]),
+    checkedGit(args.repoRoot, ["rev-parse", "--verify", "HEAD"]),
+    checkedGit(args.repoRoot, [
+      "status",
+      "--porcelain=v1",
+      "--untracked-files=all",
+      "--ignore-submodules=none"
+    ]),
+    artifactIdentityMatches(args)
+  ]);
+  if (args.artifact.baseCommitOid !== args.baseCommitOid || currentHead.trim() !== args.baseCommitOid || mainStatus.length > 0) {
+    failures.add("base-changed");
+  }
+  if (JSON.stringify(args.artifact.changedPaths) !== JSON.stringify(manifest.changedPaths) || args.artifact.manifestHash !== manifest.manifestHash) {
+    failures.add("manifest-divergence");
+  }
+  if (!artifactIdentityValid) {
+    failures.add("artifact-divergence");
+  }
+  if (manifest.changedPaths.some((change) => !isAllowed(change.path, args.writeAllowlist, args.forbiddenScope))) {
+    failures.add("out-of-scope-write");
+  }
+  if (manifest.rawDiff.some((entry) => entry.oldMode === "120000" || entry.newMode === "120000")) {
+    failures.add("modified-symlink");
+  }
+  if (manifest.changedPaths.length === 0 || args.artifact.candidateTreeOid === baseTreeOid.trim()) {
+    failures.add("empty-candidate");
+  }
+  return {
+    ok: failures.size === 0,
+    failures: [...failures],
+    manifestHash: manifest.manifestHash
+  };
+}
+
 // src/integrate/controlled-integrator.ts
 var CANDIDATE_REF = /^refs\/claude-architect\/candidates\/[A-Za-z0-9][A-Za-z0-9._-]*$/;
 var OBJECT_ID = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/;
@@ -22983,10 +23207,6 @@ function succeeded2(result) {
 }
 function aborted2(detail) {
   return { integration: "aborted", detail };
-}
-async function rollback(repoRoot, baseCommitOid) {
-  const result = await git(repoRoot, ["reset", "--hard", baseCommitOid]);
-  if (!succeeded2(result)) throw new RuntimeError("failed to roll back candidate integration");
 }
 function statusMatchesArtifact(output, changedPaths) {
   const records = output.split("\0");
@@ -23039,6 +23259,17 @@ async function applyCandidateTree(args) {
     if (!succeeded2(candidateTree) || candidateTree.stdout.trim() !== args.artifact.candidateTreeOid) {
       return finish(aborted2("candidate-tree-mismatch"));
     }
+    const identity = await structuralVerify({
+      repoRoot: canonical,
+      worktreePath: canonical,
+      baseCommitOid: args.artifact.baseCommitOid,
+      artifact: args.artifact,
+      writeAllowlist: ["**"],
+      forbiddenScope: []
+    });
+    if (!identity.ok) {
+      return finish(aborted2("artifact-identity-mismatch"));
+    }
     const refreshed = await git(canonical, ["update-index", "-q", "--refresh"]);
     if (!succeeded2(refreshed)) {
       return finish({ integration: "conflicted", detail: "index-refresh-failed" });
@@ -23053,6 +23284,9 @@ async function applyCandidateTree(args) {
     if (!succeeded2(applied)) {
       return finish({ integration: "conflicted", detail: "candidate-apply-conflict" });
     }
+    const stagedTree = await git(canonical, ["write-tree"]);
+    const worktreeDiff = await git(canonical, ["diff", "--quiet", "--no-ext-diff"]);
+    const head = await git(canonical, ["rev-parse", "--verify", "HEAD"]);
     const status = await git(canonical, [
       "status",
       "--porcelain=v1",
@@ -23061,12 +23295,8 @@ async function applyCandidateTree(args) {
       "--ignore-submodules=none",
       "--no-renames"
     ]);
-    const stagedTree = await git(canonical, ["write-tree"]);
-    const worktreeDiff = await git(canonical, ["diff", "--quiet", "--no-ext-diff"]);
-    const head = await git(canonical, ["rev-parse", "--verify", "HEAD"]);
     if (!succeeded2(stagedTree) || stagedTree.stdout.trim() !== args.artifact.candidateTreeOid || !succeeded2(worktreeDiff) || !succeeded2(head) || head.stdout.trim() !== args.artifact.baseCommitOid || !succeeded2(status) || !statusMatchesArtifact(status.stdout, args.artifact.changedPaths)) {
-      await rollback(canonical, args.artifact.baseCommitOid);
-      return finish(aborted2("post-apply-sanity-failed"));
+      return finish({ integration: "conflicted", detail: "post-apply-divergence" });
     }
     const deleted = await git(canonical, [
       "update-ref",
@@ -23076,8 +23306,10 @@ async function applyCandidateTree(args) {
       args.artifact.candidateCommitOid
     ]);
     if (!succeeded2(deleted)) {
-      await rollback(canonical, args.artifact.baseCommitOid);
-      return finish(aborted2("candidate-anchor-delete-failed"));
+      return finish({
+        integration: "applied",
+        detail: "candidate tree applied; candidate anchor delete failed"
+      });
     }
     return finish({ integration: "applied", detail: "candidate tree applied" });
   } finally {
@@ -23176,6 +23408,7 @@ var delegation_spec_v1_default = {
           },
           timeoutMs: {
             type: "integer",
+            minimum: 1,
             maximum: 18e5
           },
           network: {
@@ -23219,6 +23452,7 @@ var delegation_spec_v1_default = {
     },
     timeoutMs: {
       type: "integer",
+      minimum: 1,
       maximum: 18e5
     },
     producerPreferences: {
@@ -23248,18 +23482,31 @@ var delegation_spec_v1_default = {
 var attempt_result_v1_default = {
   $schema: "https://json-schema.org/draft/2020-12/schema",
   type: "object",
+  additionalProperties: false,
   required: [
+    "resultVersion",
+    "runId",
     "status",
-    "failure"
+    "failure",
+    "summary",
+    "producerSummary",
+    "candidate",
+    "requestedVerification",
+    "executedVerification",
+    "unresolvedIssues",
+    "evidence",
+    "logsRef",
+    "producerId",
+    "producerVersion",
+    "producerModel",
+    "durationMs",
+    "sessionId"
   ],
   properties: {
+    resultVersion: { const: "1" },
+    runId: { type: "string", minLength: 1 },
     status: {
-      enum: [
-        "unavailable",
-        "failed",
-        "cancelled",
-        "verified-candidate"
-      ]
+      enum: ["unavailable", "failed", "cancelled", "verified-candidate"]
     },
     failure: {
       enum: [
@@ -23275,6 +23522,180 @@ var attempt_result_v1_default = {
         "producer-failure",
         "verification-failure"
       ]
+    },
+    summary: { type: "string" },
+    producerSummary: { type: ["string", "null"] },
+    candidate: {
+      anyOf: [
+        { $ref: "#/$defs/candidate" },
+        { type: "null" }
+      ]
+    },
+    requestedVerification: {
+      type: "array",
+      items: { $ref: "#/$defs/verificationCommand" }
+    },
+    executedVerification: {
+      type: "array",
+      items: { $ref: "#/$defs/commandOutcome" }
+    },
+    unresolvedIssues: {
+      type: "array",
+      items: { type: "string" }
+    },
+    evidence: { type: "object" },
+    logsRef: { type: "string" },
+    producerId: { type: ["string", "null"] },
+    producerVersion: { type: ["string", "null"] },
+    producerModel: { type: ["string", "null"] },
+    durationMs: { type: "number", minimum: 0 },
+    sessionId: { type: ["string", "null"] }
+  },
+  oneOf: [
+    {
+      properties: {
+        status: { const: "verified-candidate" },
+        failure: { const: null },
+        candidate: { $ref: "#/$defs/candidate" }
+      }
+    },
+    {
+      properties: {
+        status: { const: "unavailable" },
+        failure: { enum: ["unavailable", "authentication-required"] },
+        candidate: { type: "null" }
+      }
+    },
+    {
+      properties: {
+        status: { const: "cancelled" },
+        failure: { const: "cancelled" },
+        candidate: { type: "null" }
+      }
+    },
+    {
+      properties: {
+        status: { const: "failed" },
+        failure: {
+          enum: [
+            "invalid-specification",
+            "spawn-failure",
+            "timeout",
+            "sandbox-violation",
+            "invalid-output",
+            "producer-failure"
+          ]
+        },
+        candidate: { type: "null" }
+      }
+    },
+    {
+      properties: {
+        status: { const: "failed" },
+        failure: { const: "verification-failure" }
+      }
+    }
+  ],
+  $defs: {
+    candidate: {
+      type: "object",
+      additionalProperties: false,
+      required: [
+        "baseCommitOid",
+        "candidateTreeOid",
+        "candidateCommitOid",
+        "anchorRef",
+        "manifestHash",
+        "changedPaths",
+        "patch"
+      ],
+      properties: {
+        baseCommitOid: { type: "string" },
+        candidateTreeOid: { type: "string" },
+        candidateCommitOid: { type: "string" },
+        anchorRef: { type: "string" },
+        manifestHash: { type: "string" },
+        changedPaths: {
+          type: "array",
+          items: { $ref: "#/$defs/changedPath" }
+        },
+        patch: { type: "string" }
+      }
+    },
+    changedPath: {
+      type: "object",
+      additionalProperties: false,
+      required: ["path", "changeType", "mode", "contentHash"],
+      properties: {
+        path: { type: "string" },
+        changeType: { enum: ["added", "modified", "deleted"] },
+        mode: { type: "string" },
+        contentHash: { type: ["string", "null"] }
+      }
+    },
+    verificationCommand: {
+      type: "object",
+      additionalProperties: false,
+      required: [
+        "id",
+        "executable",
+        "args",
+        "cwd",
+        "timeoutMs",
+        "network",
+        "expectedExitCodes"
+      ],
+      properties: {
+        id: { type: "string" },
+        executable: { type: "string" },
+        args: { type: "array", items: { type: "string" } },
+        cwd: { type: "string" },
+        environment: {
+          type: "object",
+          additionalProperties: { type: "string" }
+        },
+        timeoutMs: { type: "integer", minimum: 1, maximum: 18e5 },
+        network: { enum: ["denied", "allowed"] },
+        expectedExitCodes: {
+          type: "array",
+          items: { type: "integer" }
+        },
+        platform: {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            os: {
+              type: "array",
+              items: { enum: ["darwin", "linux", "win32"] }
+            },
+            arch: { type: "array", items: { type: "string" } }
+          }
+        }
+      }
+    },
+    commandOutcome: {
+      type: "object",
+      additionalProperties: false,
+      required: [
+        "id",
+        "executable",
+        "args",
+        "exitCode",
+        "timedOut",
+        "durationMs",
+        "stdoutRef",
+        "stderrRef"
+      ],
+      properties: {
+        id: { type: "string" },
+        executable: { type: "string" },
+        args: { type: "array", items: { type: "string" } },
+        exitCode: { type: ["integer", "null"] },
+        timedOut: { type: "boolean" },
+        durationMs: { type: "number", minimum: 0 },
+        stdoutRef: { type: "string" },
+        stderrRef: { type: "string" }
+      }
     }
   }
 };
@@ -23310,13 +23731,14 @@ function validateSpec(input) {
 }
 
 // src/runtime/artifact-store.ts
-import { createHash as createHash3, randomUUID } from "node:crypto";
+import { createHash as createHash4, randomUUID } from "node:crypto";
 import { constants as constants2 } from "node:fs";
 import {
   link,
   lstat as lstat2,
   mkdir,
   open as open2,
+  opendir as opendir2,
   readdir,
   realpath as realpath2,
   rename,
@@ -23325,12 +23747,12 @@ import {
 import path3 from "node:path";
 
 // src/runtime/run-manifest.ts
-import { createHash as createHash2 } from "node:crypto";
+import { createHash as createHash3 } from "node:crypto";
 function compareText(left, right) {
   return left < right ? -1 : left > right ? 1 : 0;
 }
 function sha256(value) {
-  return createHash2("sha256").update(value).digest("hex");
+  return createHash3("sha256").update(value).digest("hex");
 }
 function canonicalize(value) {
   if (Array.isArray(value)) return value.map(canonicalize);
@@ -23459,6 +23881,8 @@ var CANDIDATE_REF_PREFIX = "refs/claude-architect/candidates/";
 var PRUNE_BACKUP_REF_PREFIX = "refs/claude-architect/prune-backups/";
 var CLEANUP_JOURNAL = "cleanup.ndjson";
 var NO_FOLLOW = constants2.O_NOFOLLOW ?? 0;
+var MAX_ARCHIVE_FILE_BYTES = 8e6;
+var attemptResultSchema = loadSchemas().attemptResult;
 var cleanupJournalTail = Promise.resolve();
 function isSafeComponent(value) {
   const base = value.split(".", 1)[0] ?? value;
@@ -23556,32 +23980,73 @@ async function readRegularFile(filename, parentIdentity) {
     if (!metadata.isFile()) {
       throw new RuntimeError(`archive entry is not a regular file: ${redact(filename)}`);
     }
-    const contents = await handle.readFile({ encoding: "utf8" });
+    if (metadata.nlink !== 1) {
+      throw new RuntimeError(`archive entry has an unsafe link count: ${redact(filename)}`);
+    }
+    if (metadata.size > MAX_ARCHIVE_FILE_BYTES) {
+      throw new RuntimeError(`archive entry exceeds byte limit: ${redact(filename)}`);
+    }
+    const contents = Buffer.alloc(metadata.size + 1);
+    let offset = 0;
+    while (offset < contents.length) {
+      const read = await handle.read(contents, offset, contents.length - offset, offset);
+      if (read.bytesRead === 0) break;
+      offset += read.bytesRead;
+    }
+    if (offset > MAX_ARCHIVE_FILE_BYTES) {
+      throw new RuntimeError(`archive entry exceeds byte limit: ${redact(filename)}`);
+    }
+    const finalMetadata = await handle.stat();
+    if (!finalMetadata.isFile() || finalMetadata.nlink !== 1 || finalMetadata.dev !== metadata.dev || finalMetadata.ino !== metadata.ino || finalMetadata.size !== metadata.size || finalMetadata.mtimeMs !== metadata.mtimeMs || finalMetadata.ctimeMs !== metadata.ctimeMs) {
+      throw new RuntimeError(`archive entry changed while being read: ${redact(filename)}`);
+    }
     if (parentIdentity !== void 0) {
       await assertDirectoryIdentity(path3.dirname(filename), parentIdentity);
     }
-    return contents;
+    return contents.subarray(0, offset).toString("utf8");
   } finally {
     await handle.close();
   }
 }
-async function directoryBytes(directory) {
+async function directoryBytes(directory, expectedIdentity) {
+  const metadata = await lstat2(directory);
+  if (metadata.isSymbolicLink() || !metadata.isDirectory()) {
+    throw new RuntimeError("archive size accounting requires a plain directory");
+  }
+  if (expectedIdentity !== void 0 && (metadata.dev !== expectedIdentity.dev || metadata.ino !== expectedIdentity.ino)) {
+    throw new RuntimeError("archive directory identity changed during size accounting");
+  }
+  const identity = { dev: metadata.dev, ino: metadata.ino };
   let total = 0;
   let entries;
   try {
-    entries = await readdir(directory, { withFileTypes: true });
+    entries = await opendir2(directory);
   } catch (error2) {
     if (isMissing(error2)) return 0;
     throw error2;
   }
-  for (const entry of entries) {
-    const entryPath = path3.join(directory, entry.name);
-    try {
-      if (entry.isDirectory()) total += await directoryBytes(entryPath);
-      else if (entry.isFile()) total += (await lstat2(entryPath)).size;
-    } catch (error2) {
-      if (!isMissing(error2)) throw error2;
+  try {
+    await assertDirectoryIdentity(directory, identity);
+    for await (const entry of entries) {
+      await assertDirectoryIdentity(directory, identity);
+      const entryPath = path3.join(directory, entry.name);
+      try {
+        const entryMetadata = await lstat2(entryPath);
+        if (entryMetadata.isSymbolicLink()) {
+          throw new RuntimeError("archive size accounting encountered a symbolic link");
+        }
+        if (entryMetadata.isDirectory()) total += await directoryBytes(entryPath);
+        else if (entryMetadata.isFile()) total += entryMetadata.size;
+        await assertDirectoryIdentity(directory, identity);
+      } catch (error2) {
+        if (!isMissing(error2)) throw error2;
+      }
     }
+    await assertDirectoryIdentity(directory, identity);
+  } finally {
+    await entries.close().catch((error2) => {
+      if (errorCode2(error2) !== "ERR_DIR_CLOSED") throw error2;
+    });
   }
   return total;
 }
@@ -23646,6 +24111,14 @@ function preserveIdentity2(value, label) {
 function preserveNullableIdentity2(value, label) {
   return value === null ? null : preserveIdentity2(value, label);
 }
+function preserveCandidatePath(value) {
+  const candidatePath = preserveIdentity2(value, "candidate path");
+  const segments = candidatePath.split("/");
+  if (candidatePath === "" || candidatePath.includes("\\") || candidatePath.includes("\0") || path3.posix.isAbsolute(candidatePath) || path3.win32.isAbsolute(candidatePath) || /^[A-Za-z]:/.test(candidatePath) || segments.some((segment) => segment === "" || segment === "." || segment === "..")) {
+    throw new RuntimeError("candidate path must be a normalized relative Git path");
+  }
+  return candidatePath;
+}
 function sanitizeVerificationCommand(command) {
   const sanitized = {
     id: preserveIdentity2(command.id, "verification command id"),
@@ -23681,12 +24154,12 @@ function sanitizeCommandOutcome(outcome) {
 }
 function sanitizeCandidate(candidate) {
   const changedPaths = candidate.changedPaths.map((change) => ({
-    path: preserveIdentity2(change.path, "candidate path"),
+    path: preserveCandidatePath(change.path),
     changeType: change.changeType,
     mode: preserveIdentity2(change.mode, "candidate mode"),
     contentHash: preserveNullableIdentity2(change.contentHash, "candidate content hash")
   }));
-  const expectedManifestHash = createHash3("sha256").update(JSON.stringify(changedPaths)).digest("hex");
+  const expectedManifestHash = createHash4("sha256").update(JSON.stringify(changedPaths)).digest("hex");
   if (candidate.manifestHash !== expectedManifestHash) {
     throw new RuntimeError("candidate manifest hash does not match changed paths");
   }
@@ -23723,6 +24196,16 @@ function sanitizeAttemptResult(result) {
     durationMs: result.durationMs,
     sessionId: preserveNullableIdentity2(result.sessionId, "producer session id")
   };
+}
+function verifyAttemptResult(value, runId) {
+  if (!attemptResultSchema(value)) {
+    throw new RuntimeError("archived attempt result is invalid");
+  }
+  const result = value;
+  if (result.runId !== runId) {
+    throw new RuntimeError("archived attempt result run id does not match");
+  }
+  return result;
 }
 var ArtifactStore = class {
   runDirectory;
@@ -23831,6 +24314,9 @@ var ArtifactStore = class {
     await this.writeArchiveFile(relativePath, serialized);
   }
   async replaceJson(relativePath, value) {
+    if (path3.isAbsolute(relativePath) || path3.dirname(relativePath) !== "." || path3.basename(relativePath) !== relativePath || !isSafeComponent(relativePath)) {
+      throw new RuntimeError("replacement archive path must be a safe relative leaf");
+    }
     const directory = await this.ensureRunDirectory(false);
     if (directory === null) throw new RuntimeError("run archive does not exist");
     const directoryIdentity = await ensurePlainDirectory(directory);
@@ -23872,7 +24358,9 @@ var ArtifactStore = class {
     if (result.runId !== this.runId) {
       throw new RuntimeError("attempt result run id does not match artifact store");
     }
-    await this.writeJson("result.json", sanitizeAttemptResult(result));
+    const sanitized = sanitizeAttemptResult(result);
+    verifyAttemptResult(sanitized, this.runId);
+    await this.writeJson("result.json", sanitized);
   }
   async writeManifest(manifest) {
     if (manifest.runId !== this.runId) {
@@ -23886,10 +24374,13 @@ var ArtifactStore = class {
     const validated = await this.ensureExistingRunDirectory(runDirectory);
     if (validated === null) return null;
     try {
-      return JSON.parse(await readRegularFile(
-        path3.join(validated.path, "result.json"),
-        validated.identity
-      ));
+      return verifyAttemptResult(
+        JSON.parse(await readRegularFile(
+          path3.join(validated.path, "result.json"),
+          validated.identity
+        )),
+        runId
+      );
     } catch (error2) {
       if (isMissing(error2)) return null;
       throw error2;
@@ -23915,6 +24406,7 @@ var ArtifactStore = class {
     }
   }
   async readManifest(runId) {
+    validateComponent(runId, "run id");
     const runDirectory = path3.join(this.runsRoot, runId);
     const validated = await this.ensureExistingRunDirectory(runDirectory);
     if (validated === null) return null;
@@ -23971,7 +24463,7 @@ var ArtifactStore = class {
           runId,
           directory,
           modifiedAtMs: metadata.mtimeMs,
-          bytes: await directoryBytes(directory),
+          bytes: await directoryBytes(directory, { dev: metadata.dev, ino: metadata.ino }),
           identity: { dev: metadata.dev, ino: metadata.ino }
         };
       } catch (error2) {
@@ -24002,6 +24494,9 @@ var ArtifactStore = class {
     const manifest = await this.readManifest(runId);
     if (manifest === null) {
       throw new RuntimeError("cannot remove candidate anchor without archived repository root");
+    }
+    if (manifest.baseCommitOid !== candidate.baseCommitOid || manifest.candidateManifestHash !== candidate.manifestHash) {
+      throw new RuntimeError("archived candidate does not match its run manifest");
     }
     const canonicalRepoRoot = await realpath2(manifest.repoRoot);
     const repositoryTopLevel = await git(canonicalRepoRoot, ["rev-parse", "--show-toplevel"]);
@@ -24161,7 +24656,7 @@ var ArtifactStore = class {
       let prepared = null;
       let transaction = null;
       let runsRootIdentity = null;
-      let archiveDeleted = false;
+      let archiveRemovalCommitted = false;
       try {
         const result = await this.readResult(entry.runId);
         if (result === null) {
@@ -24190,8 +24685,8 @@ var ArtifactStore = class {
         await syncDirectory(this.runsRoot);
         await assertDirectoryIdentity(this.runsRoot, runsRootIdentity);
         await assertDirectoryIdentity(quarantinePath, entry.identity);
+        archiveRemovalCommitted = true;
         await rm(quarantinePath, { recursive: true, force: false });
-        archiveDeleted = true;
         await syncDirectory(this.runsRoot);
         await transaction.commit();
         await this.appendCleanupRecord({
@@ -24211,7 +24706,7 @@ var ArtifactStore = class {
         retainedBytes -= entry.bytes;
       } catch (error2) {
         let rollbackError;
-        if (!archiveDeleted) {
+        if (!archiveRemovalCommitted) {
           try {
             const quarantineExists = await pathExists(quarantinePath);
             const runDirectoryExists = await pathExists(entry.directory);
@@ -24255,11 +24750,11 @@ var ArtifactStore = class {
           retainedBytes -= entry.bytes;
         }
         const primary = error2 instanceof Error ? error2.message : String(error2);
-        const rollback2 = rollbackError instanceof Error ? `; rollback failed: ${rollbackError.message}` : rollbackError === void 0 ? "" : `; rollback failed: ${String(rollbackError)}`;
-        if (!archiveDeleted) {
+        const rollback = rollbackError instanceof Error ? `; rollback failed: ${rollbackError.message}` : rollbackError === void 0 ? "" : `; rollback failed: ${String(rollbackError)}`;
+        if (!archiveRemovalCommitted) {
           retained.push({
             runId: entry.runId,
-            reason: redact(`${primary}${rollback2}`)
+            reason: redact(`${primary}${rollback}`)
           });
         }
       }
@@ -24284,33 +24779,33 @@ import {
   open as open3,
   realpath as realpath3,
   rename as rename2,
-  rm as rm4
+  rm as rm3
 } from "node:fs/promises";
 import path6 from "node:path";
 
 // src/git/candidate-tree.ts
-import { createHash as createHash4 } from "node:crypto";
+import { createHash as createHash5 } from "node:crypto";
 import { lstat as lstat3, mkdtemp, rm as rm2 } from "node:fs/promises";
 import { tmpdir as tmpdir3 } from "node:os";
 import path4 from "node:path";
-var MAX_DIAGNOSTIC_LENGTH2 = 2e3;
+var MAX_DIAGNOSTIC_LENGTH3 = 2e3;
 var BINARY_PATCH_PAYLOAD_MARKER = "[[BINARY_PATCH_PAYLOAD_OMITTED]]";
-function gitFailure(action, result) {
-  const diagnostic = redact(result.stderr || result.stdout).trim().slice(0, MAX_DIAGNOSTIC_LENGTH2);
+function gitFailure2(action, result) {
+  const diagnostic = redact(result.stderr || result.stdout).trim().slice(0, MAX_DIAGNOSTIC_LENGTH3);
   return new RuntimeError(`${action} failed${diagnostic ? `: ${diagnostic}` : ""}`);
 }
-async function checkedGit(cwd, args, indexFile) {
+async function checkedGit2(cwd, args, indexFile) {
   const result = await git(cwd, args, indexFile);
-  if (result.exitCode !== 0) throw gitFailure(`git ${args[0] ?? "command"}`, result);
+  if (result.exitCode !== 0) throw gitFailure2(`git ${args[0] ?? "command"}`, result);
   return result.stdout;
 }
-function splitNul(value) {
+function splitNul2(value) {
   const fields = value.split("\0");
   if (fields.at(-1) === "") fields.pop();
   return fields;
 }
 function parsePorcelainPaths(output, kind) {
-  const fields = splitNul(output);
+  const fields = splitNul2(output);
   const paths = [];
   for (let index = 0; index < fields.length; index += 1) {
     const entry = fields[index];
@@ -24330,27 +24825,33 @@ function parsePorcelainPaths(output, kind) {
   return [...new Set(paths)];
 }
 async function inventoryWorktree(worktreePath) {
-  const changed = await checkedGit(worktreePath, [
+  const changed = await checkedGit2(worktreePath, [
     "status",
     "--porcelain=v1",
     "-z",
     "--untracked-files=all"
   ]);
-  const ignored = await checkedGit(worktreePath, ["status", "--porcelain=v1", "-z", "--ignored"]);
+  const ignored = await checkedGit2(worktreePath, [
+    "status",
+    "--porcelain=v1",
+    "-z",
+    "--ignored",
+    "--untracked-files=all"
+  ]);
   return {
     changedPaths: parsePorcelainPaths(changed, "changed"),
     ignoredPaths: parsePorcelainPaths(ignored, "ignored")
   };
 }
-function escapeRegex2(character) {
+function escapeRegex3(character) {
   return /[\\^$.*+?()[\]{}|]/.test(character) ? `\\${character}` : character;
 }
-function globMatches(pattern, candidate, caseInsensitive = false) {
+function globMatches2(pattern, candidate, caseInsensitive = false) {
   let expression = "^";
   for (let index = 0; index < pattern.length; index += 1) {
     const character = pattern[index];
     if (character !== "*") {
-      expression += escapeRegex2(character);
+      expression += escapeRegex3(character);
       continue;
     }
     if (pattern[index + 1] !== "*") {
@@ -24367,8 +24868,8 @@ function globMatches(pattern, candidate, caseInsensitive = false) {
   }
   return new RegExp(`${expression}$`, caseInsensitive ? "i" : void 0).test(candidate);
 }
-function isAllowed(pathname, writeAllowlist, forbiddenScope) {
-  return writeAllowlist.some((pattern) => globMatches(pattern, pathname)) && !forbiddenScope.some((pattern) => globMatches(pattern, pathname, true));
+function isAllowed2(pathname, writeAllowlist, forbiddenScope) {
+  return writeAllowlist.some((pattern) => globMatches2(pattern, pathname)) && !forbiddenScope.some((pattern) => globMatches2(pattern, pathname, true));
 }
 async function advisoryLstatScan(worktreePath, changedPaths) {
   const symlinkResults = await Promise.all(changedPaths.map(async (changedPath) => {
@@ -24381,8 +24882,8 @@ async function advisoryLstatScan(worktreePath, changedPaths) {
   }));
   return symlinkResults.some(Boolean);
 }
-function parseRawDiff(output) {
-  const fields = splitNul(output);
+function parseRawDiff2(output) {
+  const fields = splitNul2(output);
   const entries = [];
   for (let index = 0; index < fields.length; index += 2) {
     const metadata = fields[index];
@@ -24395,8 +24896,8 @@ function parseRawDiff(output) {
   }
   return entries;
 }
-function parseNameStatus(output) {
-  const fields = splitNul(output);
+function parseNameStatus2(output) {
+  const fields = splitNul2(output);
   if (fields.length % 2 !== 0) throw new RuntimeError("git diff-tree returned invalid name-status output");
   const entries = [];
   for (let index = 0; index < fields.length; index += 2) {
@@ -24404,9 +24905,9 @@ function parseNameStatus(output) {
   }
   return entries;
 }
-function parseTree(output) {
+function parseTree2(output) {
   const entries = /* @__PURE__ */ new Map();
-  for (const record2 of splitNul(output)) {
+  for (const record2 of splitNul2(output)) {
     const separator = record2.indexOf("	");
     if (separator < 0) throw new RuntimeError("git ls-tree returned invalid output");
     const [mode, , oid] = record2.slice(0, separator).split(" ");
@@ -24415,12 +24916,12 @@ function parseTree(output) {
   }
   return entries;
 }
-function changeType(status) {
+function changeType2(status) {
   if (status === "A") return "added";
   if (status === "D") return "deleted";
   return "modified";
 }
-function sortChangedPaths(changedPaths) {
+function sortChangedPaths2(changedPaths) {
   return changedPaths.sort((left, right) => left.path < right.path ? -1 : left.path > right.path ? 1 : 0);
 }
 function sanitizeReviewPatch(patch) {
@@ -24442,7 +24943,7 @@ function sanitizeReviewPatch(patch) {
 }
 async function freezeCandidate(args) {
   const inventory = await inventoryWorktree(args.worktreePath);
-  if (inventory.changedPaths.some((changedPath) => !isAllowed(changedPath, args.writeAllowlist, args.forbiddenScope))) {
+  if (inventory.changedPaths.some((changedPath) => !isAllowed2(changedPath, args.writeAllowlist, args.forbiddenScope))) {
     return { ok: false, reason: "out-of-scope-write" };
   }
   if (await advisoryLstatScan(args.worktreePath, inventory.changedPaths)) {
@@ -24451,18 +24952,18 @@ async function freezeCandidate(args) {
   const indexDirectory = await mkdtemp(path4.join(tmpdir3(), "claude-architect-index-"));
   const indexFile = path4.join(indexDirectory, "index");
   try {
-    await checkedGit(args.worktreePath, ["read-tree", args.baseCommitOid], indexFile);
+    await checkedGit2(args.worktreePath, ["read-tree", args.baseCommitOid], indexFile);
     if (inventory.changedPaths.length > 0) {
       const literalPathspecs = inventory.changedPaths.map((changedPath) => `:(literal)${changedPath}`);
-      await checkedGit(args.worktreePath, ["add", "--all", "--", ...literalPathspecs], indexFile);
+      await checkedGit2(args.worktreePath, ["add", "--all", "--", ...literalPathspecs], indexFile);
     }
-    const candidateTreeOid = (await checkedGit(args.worktreePath, ["write-tree"], indexFile)).trim();
-    const baseTreeOid = (await checkedGit(
+    const candidateTreeOid = (await checkedGit2(args.worktreePath, ["write-tree"], indexFile)).trim();
+    const baseTreeOid = (await checkedGit2(
       args.worktreePath,
       ["rev-parse", `${args.baseCommitOid}^{tree}`]
     )).trim();
     if (candidateTreeOid === baseTreeOid) return { ok: false, reason: "empty-candidate" };
-    const rawDiff = parseRawDiff(await checkedGit(args.worktreePath, [
+    const rawDiff = parseRawDiff2(await checkedGit2(args.worktreePath, [
       "diff-tree",
       "-r",
       "--no-commit-id",
@@ -24472,10 +24973,10 @@ async function freezeCandidate(args) {
       args.baseCommitOid,
       candidateTreeOid
     ]));
-    if (rawDiff.some((entry) => entry.newMode === "120000")) {
+    if (rawDiff.some((entry) => entry.oldMode === "120000" || entry.newMode === "120000")) {
       return { ok: false, reason: "modified-symlink" };
     }
-    const nameStatus = parseNameStatus(await checkedGit(args.repoRoot, [
+    const nameStatus = parseNameStatus2(await checkedGit2(args.repoRoot, [
       "diff-tree",
       "-r",
       "--no-commit-id",
@@ -24485,12 +24986,12 @@ async function freezeCandidate(args) {
       args.baseCommitOid,
       candidateTreeOid
     ]));
-    const treeEntries = parseTree(await checkedGit(
+    const treeEntries = parseTree2(await checkedGit2(
       args.repoRoot,
       ["ls-tree", "-r", "-z", candidateTreeOid]
     ));
     const rawEntries = new Map(rawDiff.map((entry) => [entry.path, entry]));
-    const changedPaths = sortChangedPaths(nameStatus.map(({ path: changedPath, status }) => {
+    const changedPaths = sortChangedPaths2(nameStatus.map(({ path: changedPath, status }) => {
       const treeEntry = treeEntries.get(changedPath);
       const rawEntry = rawEntries.get(changedPath);
       if (treeEntry === void 0 && status !== "D") {
@@ -24501,13 +25002,13 @@ async function freezeCandidate(args) {
       }
       return {
         path: changedPath,
-        changeType: changeType(status),
+        changeType: changeType2(status),
         mode: treeEntry?.mode ?? rawEntry.oldMode,
         contentHash: treeEntry?.oid ?? null
       };
     }));
-    const manifestHash = createHash4("sha256").update(JSON.stringify(changedPaths)).digest("hex");
-    const patch = sanitizeReviewPatch(await checkedGit(args.repoRoot, [
+    const manifestHash = createHash5("sha256").update(JSON.stringify(changedPaths)).digest("hex");
+    const patch = sanitizeReviewPatch(await checkedGit2(args.repoRoot, [
       "diff",
       "--no-ext-diff",
       "--no-textconv",
@@ -24517,7 +25018,7 @@ async function freezeCandidate(args) {
       candidateTreeOid
     ]));
     const anchorRef = `refs/claude-architect/candidates/${args.runId}`;
-    const candidateCommitOid = (await checkedGit(args.repoRoot, [
+    const candidateCommitOid = (await checkedGit2(args.repoRoot, [
       "commit-tree",
       candidateTreeOid,
       "-p",
@@ -24525,7 +25026,7 @@ async function freezeCandidate(args) {
       "-m",
       `candidate ${args.runId}`
     ])).trim();
-    await checkedGit(args.repoRoot, ["update-ref", anchorRef, candidateCommitOid]);
+    await checkedGit2(args.repoRoot, ["update-ref", anchorRef, candidateCommitOid]);
     return {
       ok: true,
       artifact: {
@@ -24547,11 +25048,11 @@ async function freezeCandidate(args) {
 }
 
 // src/git/worktree-manager.ts
-import { mkdir as mkdir2, rm as rm3 } from "node:fs/promises";
+import { mkdir as mkdir2 } from "node:fs/promises";
 import path5 from "node:path";
-var MAX_DIAGNOSTIC_LENGTH3 = 2e3;
+var MAX_DIAGNOSTIC_LENGTH4 = 2e3;
 function failure(action, result) {
-  const diagnostic = (result.stderr || result.stdout).trim().slice(0, MAX_DIAGNOSTIC_LENGTH3);
+  const diagnostic = (result.stderr || result.stdout).trim().slice(0, MAX_DIAGNOSTIC_LENGTH4);
   return new RuntimeError(`${action} failed${diagnostic ? `: ${diagnostic}` : ""}`);
 }
 var WorktreeManager = class {
@@ -24574,8 +25075,6 @@ var WorktreeManager = class {
     await mkdir2(worktreesRoot, { recursive: true });
     const result = await git(this.repoRoot, ["worktree", "add", "--detach", worktreePath, baseCommitOid]);
     if (result.exitCode !== 0) {
-      await rm3(worktreePath, { recursive: true, force: true }).catch(() => {
-      });
       throw failure("git worktree add", result);
     }
     return {
@@ -24588,8 +25087,6 @@ var WorktreeManager = class {
       throw new RuntimeError("refusing to remove unmanaged worktree path");
     }
     const result = await git(this.repoRoot, ["worktree", "remove", "--force", worktreePath]);
-    await rm3(worktreePath, { recursive: true, force: true }).catch(() => {
-    });
     if (result.exitCode !== 0) throw failure("git worktree remove", result);
   }
 };
@@ -24889,7 +25386,7 @@ async function writeRunStart(target, record2, create) {
     await assertDirectoryIdentity2(target);
   } finally {
     await handle?.close();
-    if (created) await rm4(temporaryPath, { force: true });
+    if (created) await rm3(temporaryPath, { force: true });
   }
 }
 async function initializeRunStart(store, record2) {
@@ -25015,7 +25512,7 @@ async function cleanupAttemptResources(args) {
   }
   if (args.tempHome !== null) {
     try {
-      await rm4(args.tempHome, { recursive: true, force: true });
+      await rm3(args.tempHome, { recursive: true, force: true });
     } catch (error2) {
       failures.push(error2);
     }
@@ -25249,7 +25746,7 @@ import { randomUUID as randomUUID3 } from "node:crypto";
 import { realpath as realpath4 } from "node:fs/promises";
 import path7 from "node:path";
 var MAX_COMMAND_OUTPUT_BYTES = 1e6;
-var MAX_DIAGNOSTIC_LENGTH4 = 2e3;
+var MAX_DIAGNOSTIC_LENGTH5 = 2e3;
 var POSIX_ESSENTIAL_ENV2 = [
   "HOME",
   "PATH",
@@ -25262,13 +25759,13 @@ var POSIX_ESSENTIAL_ENV2 = [
   "XDG_STATE_HOME",
   "XDG_RUNTIME_DIR"
 ];
-function gitFailure2(action, result) {
-  const diagnostic = redact(result.stderr || result.stdout).trim().slice(0, MAX_DIAGNOSTIC_LENGTH4);
+function gitFailure3(action, result) {
+  const diagnostic = redact(result.stderr || result.stdout).trim().slice(0, MAX_DIAGNOSTIC_LENGTH5);
   return new RuntimeError(`${action} failed${diagnostic ? `: ${diagnostic}` : ""}`);
 }
-async function checkedGit2(cwd, args) {
+async function checkedGit3(cwd, args) {
   const result = await git(cwd, args);
-  if (result.exitCode !== 0) throw gitFailure2(`git ${args[0] ?? "command"}`, result);
+  if (result.exitCode !== 0) throw gitFailure3(`git ${args[0] ?? "command"}`, result);
   return result.stdout;
 }
 function defineEnvironmentValue(environment, name, value) {
@@ -25427,7 +25924,7 @@ async function projectVerify(args) {
   const materialized = await manager.create(args.artifact.candidateCommitOid);
   let primaryError;
   try {
-    const materializedTree = (await checkedGit2(
+    const materializedTree = (await checkedGit3(
       materialized.path,
       ["rev-parse", "HEAD^{tree}"]
     )).trim();
@@ -25475,7 +25972,7 @@ async function projectVerify(args) {
       outputLogs.push(...executed.outputLogs);
       if (executed.failed) failures.push(`command-failed:${executed.outcome.id}`);
       const [status, currentHead] = await Promise.all([
-        checkedGit2(materialized.path, [
+        checkedGit3(materialized.path, [
           "status",
           "--porcelain=v2",
           "-z",
@@ -25483,7 +25980,7 @@ async function projectVerify(args) {
           "--ignored=matching",
           "--ignore-submodules=none"
         ]),
-        checkedGit2(materialized.path, ["rev-parse", "--verify", "HEAD"])
+        checkedGit3(materialized.path, ["rev-parse", "--verify", "HEAD"])
       ]);
       if (status.length > 0 || currentHead.trim() !== args.artifact.candidateCommitOid) {
         mutated = true;
@@ -25512,181 +26009,6 @@ async function projectVerify(args) {
       );
     }
   }
-}
-
-// src/verify/structural-verifier.ts
-import { createHash as createHash5 } from "node:crypto";
-var MAX_DIAGNOSTIC_LENGTH5 = 2e3;
-function gitFailure3(action, result) {
-  const diagnostic = redact(result.stderr || result.stdout).trim().slice(0, MAX_DIAGNOSTIC_LENGTH5);
-  return new RuntimeError(`${action} failed${diagnostic ? `: ${diagnostic}` : ""}`);
-}
-async function checkedGit3(cwd, args) {
-  const result = await git(cwd, args);
-  if (result.exitCode !== 0) throw gitFailure3(`git ${args[0] ?? "command"}`, result);
-  return result.stdout;
-}
-function splitNul2(value) {
-  const fields = value.split("\0");
-  if (fields.at(-1) === "") fields.pop();
-  return fields;
-}
-function parseRawDiff2(output) {
-  const fields = splitNul2(output);
-  const entries = [];
-  for (let index = 0; index < fields.length; index += 2) {
-    const metadata = fields[index];
-    const entryPath = fields[index + 1];
-    const match = /^:(\d{6}) (\d{6}) [0-9a-f]+ [0-9a-f]+ [A-Z]$/.exec(metadata);
-    if (match === null || entryPath === void 0) {
-      throw new RuntimeError("git diff-tree returned invalid raw output");
-    }
-    entries.push({ path: entryPath, oldMode: match[1], newMode: match[2] });
-  }
-  return entries;
-}
-function parseNameStatus2(output) {
-  const fields = splitNul2(output);
-  if (fields.length % 2 !== 0) {
-    throw new RuntimeError("git diff-tree returned invalid name-status output");
-  }
-  const entries = [];
-  for (let index = 0; index < fields.length; index += 2) {
-    entries.push({ status: fields[index], path: fields[index + 1] });
-  }
-  return entries;
-}
-function parseTree2(output) {
-  const entries = /* @__PURE__ */ new Map();
-  for (const record2 of splitNul2(output)) {
-    const separator = record2.indexOf("	");
-    if (separator < 0) throw new RuntimeError("git ls-tree returned invalid output");
-    const [mode, , oid] = record2.slice(0, separator).split(" ");
-    if (mode === void 0 || oid === void 0) {
-      throw new RuntimeError("git ls-tree returned invalid output");
-    }
-    entries.set(record2.slice(separator + 1), { mode, oid });
-  }
-  return entries;
-}
-function changeType2(status) {
-  if (status === "A") return "added";
-  if (status === "D") return "deleted";
-  return "modified";
-}
-function sortChangedPaths2(changedPaths) {
-  return changedPaths.sort((left, right) => left.path < right.path ? -1 : left.path > right.path ? 1 : 0);
-}
-function escapeRegex3(character) {
-  return /[\\^$.*+?()[\]{}|]/.test(character) ? `\\${character}` : character;
-}
-function globMatches2(pattern, candidate, caseInsensitive = false) {
-  let expression = "^";
-  for (let index = 0; index < pattern.length; index += 1) {
-    const character = pattern[index];
-    if (character !== "*") {
-      expression += escapeRegex3(character);
-      continue;
-    }
-    if (pattern[index + 1] !== "*") {
-      expression += "[^/]*";
-      continue;
-    }
-    index += 1;
-    if (pattern[index + 1] === "/") {
-      expression += "(?:.*/)?";
-      index += 1;
-    } else {
-      expression += ".*";
-    }
-  }
-  return new RegExp(`${expression}$`, caseInsensitive ? "i" : void 0).test(candidate);
-}
-function isAllowed2(pathname, writeAllowlist, forbiddenScope) {
-  return writeAllowlist.some((pattern) => globMatches2(pattern, pathname)) && !forbiddenScope.some((pattern) => globMatches2(pattern, pathname, true));
-}
-async function recomputeManifest(args) {
-  const [rawOutput, nameStatusOutput, treeOutput] = await Promise.all([
-    checkedGit3(args.worktreePath, [
-      "diff-tree",
-      "-r",
-      "--no-commit-id",
-      "--no-renames",
-      "--raw",
-      "-z",
-      args.baseCommitOid,
-      args.artifact.candidateTreeOid
-    ]),
-    checkedGit3(args.worktreePath, [
-      "diff-tree",
-      "-r",
-      "--no-commit-id",
-      "--no-renames",
-      "--name-status",
-      "-z",
-      args.baseCommitOid,
-      args.artifact.candidateTreeOid
-    ]),
-    checkedGit3(args.worktreePath, ["ls-tree", "-r", "-z", args.artifact.candidateTreeOid])
-  ]);
-  const rawDiff = parseRawDiff2(rawOutput);
-  const rawByPath = new Map(rawDiff.map((entry) => [entry.path, entry]));
-  const treeByPath = parseTree2(treeOutput);
-  const changedPaths = sortChangedPaths2(parseNameStatus2(nameStatusOutput).map(({ path: path9, status }) => {
-    const rawEntry = rawByPath.get(path9);
-    const treeEntry = treeByPath.get(path9);
-    if (treeEntry === void 0 && status !== "D") {
-      throw new RuntimeError("candidate tree is missing a changed path");
-    }
-    if (treeEntry === void 0 && rawEntry === void 0) {
-      throw new RuntimeError("git diff-tree outputs disagree");
-    }
-    return {
-      path: path9,
-      changeType: changeType2(status),
-      mode: treeEntry?.mode ?? rawEntry.oldMode,
-      contentHash: treeEntry?.oid ?? null
-    };
-  }));
-  return {
-    changedPaths,
-    manifestHash: createHash5("sha256").update(JSON.stringify(changedPaths)).digest("hex"),
-    rawDiff
-  };
-}
-async function structuralVerify(args) {
-  const failures = /* @__PURE__ */ new Set();
-  const [manifest, baseTreeOid, currentHead, mainStatus] = await Promise.all([
-    recomputeManifest(args),
-    checkedGit3(args.repoRoot, ["rev-parse", `${args.baseCommitOid}^{tree}`]),
-    checkedGit3(args.repoRoot, ["rev-parse", "--verify", "HEAD"]),
-    checkedGit3(args.repoRoot, [
-      "status",
-      "--porcelain=v1",
-      "--untracked-files=all",
-      "--ignore-submodules=none"
-    ])
-  ]);
-  if (args.artifact.baseCommitOid !== args.baseCommitOid || currentHead.trim() !== args.baseCommitOid || mainStatus.length > 0) {
-    failures.add("base-changed");
-  }
-  if (JSON.stringify(args.artifact.changedPaths) !== JSON.stringify(manifest.changedPaths) || args.artifact.manifestHash !== manifest.manifestHash) {
-    failures.add("manifest-divergence");
-  }
-  if (manifest.changedPaths.some((change) => !isAllowed2(change.path, args.writeAllowlist, args.forbiddenScope))) {
-    failures.add("out-of-scope-write");
-  }
-  if (manifest.rawDiff.some((entry) => entry.newMode === "120000")) {
-    failures.add("modified-symlink");
-  }
-  if (manifest.changedPaths.length === 0 || args.artifact.candidateTreeOid === baseTreeOid.trim()) {
-    failures.add("empty-candidate");
-  }
-  return {
-    ok: failures.size === 0,
-    failures: [...failures],
-    manifestHash: manifest.manifestHash
-  };
 }
 
 // src/verify/acceptance-verifier.ts
@@ -25882,6 +26204,15 @@ function requireCandidate(run) {
   }
   return run.result.candidate;
 }
+function requireVerifiedCandidate(run) {
+  if (run.result.status !== "verified-candidate" || run.result.failure !== null) {
+    throw runtimeError(
+      "candidate did not complete independent verification",
+      "candidate-not-verified"
+    );
+  }
+  return requireCandidate(run);
+}
 function schemaCompatibility(input) {
   if (isRecord3(input) && input.specVersion !== void 0 && input.specVersion !== DELEGATION_SPEC_VERSION) {
     return {
@@ -25980,6 +26311,7 @@ async function handleDecideCandidate(runId, decision, deps = {}) {
   try {
     const run = await loadArchivedRun(runId, deps);
     return await withRepoLock(run.lockKey, async () => {
+      if (decision === "accepted") requireVerifiedCandidate(run);
       const record2 = {
         decision,
         recordedAt: (deps.now ?? (() => /* @__PURE__ */ new Date()))().toISOString()
@@ -26014,7 +26346,7 @@ async function handleIntegrateCandidate(runId, expectedArtifactHash, deps = {}) 
       }
       return (deps.applyCandidateTree ?? applyCandidateTree)({
         repoRoot: run.repoRoot,
-        artifact: requireCandidate(run),
+        artifact: requireVerifiedCandidate(run),
         expectedArtifactHash
       });
     });
@@ -26031,7 +26363,7 @@ import {
   open as open4,
   readdir as readdir2,
   realpath as realpath5,
-  rm as rm5
+  rm as rm4
 } from "node:fs/promises";
 import path8 from "node:path";
 import nodeProcess3 from "node:process";
@@ -26130,7 +26462,7 @@ async function removePlainDirectory(directory, expected) {
   if (!isPlainDirectory(metadata) || !sameIdentity(metadata, expected)) {
     throw new RuntimeError("recovery directory identity changed before removal");
   }
-  await rm5(directory, { recursive: true, force: false });
+  await rm4(directory, { recursive: true, force: false });
 }
 function parseRunStart(text, expectedRunId) {
   let value;
@@ -26424,7 +26756,7 @@ function defaultIsProcessAlive(pid) {
     throw error2;
   }
 }
-async function reclaimLocks(locksRoot, liveLockKeys, isProcessAlive) {
+async function reclaimLocks(locksRoot, isProcessAlive) {
   let entries;
   try {
     const rootIdentity = await plainDirectoryIdentity(locksRoot);
@@ -26446,13 +26778,19 @@ async function reclaimLocks(locksRoot, liveLockKeys, isProcessAlive) {
     const parsed = Number(contents.trim());
     const ownerPid = Number.isSafeInteger(parsed) && parsed > 1 ? parsed : null;
     const ownerIsAlive = ownerPid !== null && isProcessAlive(ownerPid);
-    if (ownerIsAlive && liveLockKeys.has(match[1])) continue;
+    if (ownerIsAlive) continue;
     const identity = await lstat5(lockPath);
     if (!identity.isFile() || identity.isSymbolicLink()) {
       throw new RuntimeError("checkout lock identity changed during recovery");
     }
-    await rm5(lockPath, { force: false });
+    await rm4(lockPath, { force: false });
   }
+}
+async function lockIsOwnedByLiveProcess(locksRoot, lockKey, isProcessAlive) {
+  const contents = await readBoundedRegularFile(path8.join(locksRoot, `${lockKey}.lock`));
+  if (contents === null) return false;
+  const ownerPid = Number(contents.trim());
+  return Number.isSafeInteger(ownerPid) && ownerPid > 1 && isProcessAlive(ownerPid);
 }
 async function recoverStaleRuns(dependencies = {}) {
   const root = await stateRoot();
@@ -26461,7 +26799,8 @@ async function recoverStaleRuns(dependencies = {}) {
   const runsIdentity = await plainDirectoryIdentity(runsRoot);
   if (runsIdentity !== null) await replayInterruptedPrunes(runsRoot);
   const ps = dependencies.platformServices ?? getPlatformServices();
-  const liveLockKeys = /* @__PURE__ */ new Set();
+  const isProcessAlive = dependencies.isProcessAlive ?? defaultIsProcessAlive;
+  const locksRoot = path8.join(root, "locks");
   const stale = [];
   if (runsIdentity !== null) {
     const runEntries = await readdir2(runsRoot, { withFileTypes: true });
@@ -26476,20 +26815,18 @@ async function recoverStaleRuns(dependencies = {}) {
         validateTerminalResult(result, entry.name);
         continue;
       }
-      liveLockKeys.add(record2.lockKey);
+      if (await lockIsOwnedByLiveProcess(locksRoot, record2.lockKey, isProcessAlive)) continue;
       stale.push(record2);
     }
   }
   const recovered = [];
   for (const record2 of stale) {
     await recoverRun(record2, root, ps);
-    liveLockKeys.delete(record2.lockKey);
     recovered.push(record2.runId);
   }
   await reclaimLocks(
-    path8.join(root, "locks"),
-    liveLockKeys,
-    dependencies.isProcessAlive ?? defaultIsProcessAlive
+    locksRoot,
+    isProcessAlive
   );
   return { recovered };
 }
