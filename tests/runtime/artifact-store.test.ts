@@ -109,6 +109,22 @@ afterEach(async () => {
 });
 
 describe("ArtifactStore", () => {
+  it("creates each missing plugin-data directory before archiving", async () => {
+    const parent = await mkdtemp(join(tmpdir(), "claude-architect-missing-state-"));
+    temporaryPaths.push(parent);
+    process.env.CLAUDE_PLUGIN_DATA = join(parent, "nested", "plugin-data");
+    const store = new ArtifactStore("run-missing-state");
+
+    await store.writeResult(sampleResult("run-missing-state"));
+
+    await expect(stat(join(
+      process.env.CLAUDE_PLUGIN_DATA,
+      "runs",
+      "run-missing-state",
+      "result.json",
+    ))).resolves.toBeDefined();
+  });
+
   it("round-trips an AttemptResult under plugin data", async () => {
     const store = new ArtifactStore("run-round-trip");
     const result = sampleResult("run-round-trip");
@@ -164,6 +180,24 @@ describe("ArtifactStore", () => {
     await expect(store.writeResult(sampleResult("run-status-collision"))).rejects.toThrow(
       /safely persist|status/,
     );
+    await expect(access(join(store.runDirectory, "result.json"))).rejects.toMatchObject({
+      code: "ENOENT",
+    });
+    registration.dispose();
+  });
+
+  it.each([
+    ["producer id", (result: AttemptResult) => { result.producerId = "identity-secret"; }],
+    ["producer version", (result: AttemptResult) => { result.producerVersion = "identity-secret"; }],
+    ["producer model", (result: AttemptResult) => { result.producerModel = "identity-secret"; }],
+    ["session id", (result: AttemptResult) => { result.sessionId = "identity-secret"; }],
+  ])("fails closed instead of redacting the AttemptResult %s", async (_label, assign) => {
+    const registration = registerSecretValue("identity-secret");
+    const store = new ArtifactStore("run-result-identity");
+    const result = sampleResult("run-result-identity");
+    assign(result);
+
+    await expect(store.writeResult(result)).rejects.toThrow(/safely persist/);
     await expect(access(join(store.runDirectory, "result.json"))).rejects.toMatchObject({
       code: "ENOENT",
     });
@@ -711,6 +745,108 @@ describe("ArtifactStore", () => {
       await chmod(logsDirectory, 0o700).catch(() => {});
     }
   });
+
+  it("does not remove a replacement swapped into the quarantine path", async () => {
+    if (process.platform === "win32") return;
+    const store = new ArtifactStore("run-quarantine-swap");
+    await store.writeResult(sampleResult("run-quarantine-swap"));
+    const runsRoot = join(process.env.CLAUDE_PLUGIN_DATA!, "runs");
+    const oldTime = new Date(Date.now() - 60_000);
+    await utimes(store.runDirectory, oldTime, oldTime);
+    const preservedPath = join(runsRoot, ".preserved-run-quarantine-swap");
+    const swap = execFileAsync("/bin/sh", [
+      "-c",
+      `while :; do
+  for quarantine in "$1"/.prune-run-quarantine-swap-*; do
+    if [ -d "$quarantine" ]; then
+      mv "$quarantine" "$2"
+      mkdir "$quarantine"
+      printf 'do not delete\\n' > "$quarantine/replacement.txt"
+      printf '%s\\n' "$quarantine"
+      exit 0
+    fi
+  done
+done`,
+      "swap-quarantine",
+      runsRoot,
+      preservedPath,
+    ], { timeout: 5_000 });
+
+    const pruned = await store.prune({
+      maxAgeMs: 1_000,
+      maxBytes: Number.MAX_SAFE_INTEGER,
+    });
+    const swappedPath = (await swap).stdout.trim();
+
+    expect(swappedPath).not.toBe("");
+    expect(pruned.removed).not.toContain("run-quarantine-swap");
+    expect(pruned.retained.some(entry => entry.runId === "run-quarantine-swap")).toBe(true);
+    await expect(readFile(join(swappedPath, "replacement.txt"), "utf8")).resolves.toBe(
+      "do not delete\n",
+    );
+    await expect(stat(preservedPath)).resolves.toBeDefined();
+  });
+
+  it("does not journal cleanup complete or retain a run after backup deletion fails", async () => {
+    if (process.platform === "win32") return;
+    const repoRoot = await mkdtemp(join(tmpdir(), "claude-architect-backup-failure-repo-"));
+    temporaryPaths.push(repoRoot);
+    await git(repoRoot, ["init", "-q"]);
+    await git(repoRoot, ["commit", "--allow-empty", "-q", "-m", "base"]);
+    const candidateCommitOid = await git(repoRoot, ["rev-parse", "HEAD"]);
+    const runId = "run-backup-failure";
+    const anchorRef = `refs/claude-architect/candidates/${runId}`;
+    const backupRef = `refs/claude-architect/prune-backups/${runId}`;
+    await git(repoRoot, ["update-ref", anchorRef, candidateCommitOid]);
+    await git(repoRoot, ["config", "core.hooksPath", ".git/hooks"]);
+    const hookPath = join(repoRoot, ".git", "hooks", "reference-transaction");
+    await writeFile(hookPath, `#!/bin/sh
+if [ "$1" = "prepared" ]; then
+  while read old new ref; do
+    case "$ref" in
+      refs/claude-architect/prune-backups/*)
+        case "$new" in
+          000000*) exit 1 ;;
+        esac
+        ;;
+    esac
+  done
+fi
+exit 0
+`);
+    await chmod(hookPath, 0o700);
+
+    const store = new ArtifactStore(runId);
+    const result = sampleResult(runId);
+    result.candidate = {
+      baseCommitOid: candidateCommitOid,
+      candidateTreeOid: await git(repoRoot, ["rev-parse", "HEAD^{tree}"]),
+      candidateCommitOid,
+      anchorRef,
+      manifestHash: createHash("sha256").update("[]").digest("hex"),
+      changedPaths: [],
+      patch: "",
+    };
+    await store.writeResult(result);
+    await store.writeManifest(buildRunManifest(manifestArgs(runId, repoRoot)));
+    const oldTime = new Date(Date.now() - 60_000);
+    await utimes(store.runDirectory, oldTime, oldTime);
+
+    const pruned = await store.prune({
+      maxAgeMs: 1_000,
+      maxBytes: Number.MAX_SAFE_INTEGER,
+    });
+
+    expect(pruned.removed).toContain(runId);
+    expect(pruned.retained.some(entry => entry.runId === runId)).toBe(false);
+    expect(await git(repoRoot, ["rev-parse", backupRef])).toBe(candidateCommitOid);
+    const records = (await readFile(join(
+      process.env.CLAUDE_PLUGIN_DATA!,
+      "runs",
+      "cleanup.ndjson",
+    ), "utf8")).trim().split("\n").map(line => JSON.parse(line) as { event: string });
+    expect(records.map(record => record.event)).toEqual(["prune-cleanup-intent"]);
+  });
 });
 
 describe("buildRunManifest", () => {
@@ -721,6 +857,35 @@ describe("buildRunManifest", () => {
     expect(() => buildRunManifest(manifestArgs("run-repo-collision", repoRoot))).toThrow(
       /repository root|safely persist/,
     );
+    registration.dispose();
+  });
+
+  it.each([
+    ["repository instruction path", (args: BuildRunManifestArgs) => {
+      args.repositoryInstructions[0]!.path = "identity-secret";
+    }],
+    ["producer id", (args: BuildRunManifestArgs) => { args.producer.id = "identity-secret"; }],
+    ["producer version", (args: BuildRunManifestArgs) => {
+      args.producer.version = "identity-secret";
+    }],
+    ["producer model", (args: BuildRunManifestArgs) => {
+      args.producer.model = "identity-secret";
+    }],
+    ["environment name", (args: BuildRunManifestArgs) => {
+      args.environment[0]!.name = "identity-secret";
+    }],
+    ["environment source", (args: BuildRunManifestArgs) => {
+      args.environment[0]!.source = "identity-secret";
+    }],
+    ["packaged verifier version", (args: BuildRunManifestArgs) => {
+      args.packagedVerifier.version = "identity-secret";
+    }],
+  ])("fails closed instead of redacting the manifest %s", (_label, assign) => {
+    const registration = registerSecretValue("identity-secret");
+    const args = manifestArgs("run-manifest-identity", "/canonical/repo");
+    assign(args);
+
+    expect(() => buildRunManifest(args)).toThrow(/safely persist/);
     registration.dispose();
   });
 
@@ -772,7 +937,7 @@ describe("buildRunManifest", () => {
     const registration = registerSecretValue("secret");
     const store = new ArtifactStore("run-manifest-hash");
     const args = manifestArgs("run-manifest-hash", "/canonical/repo");
-    args.producer.version = "secret";
+    args.effectivePolicy = { profile: "secret" };
     await store.writeManifest(buildRunManifest(args));
 
     const persisted = JSON.parse(await readFile(
@@ -798,11 +963,10 @@ describe("buildRunManifest", () => {
   });
 
   it("rehashes a manifest when a secret is registered after construction", async () => {
-    const manifest = buildRunManifest(manifestArgs(
-      "run-manifest-late-secret",
-      "/canonical/repo",
-    ));
-    const registration = registerSecretValue("platform");
+    const args = manifestArgs("run-manifest-late-secret", "/canonical/repo");
+    args.effectivePolicy = { profile: "policy-secret" };
+    const manifest = buildRunManifest(args);
+    const registration = registerSecretValue("policy-secret");
     const store = new ArtifactStore("run-manifest-late-secret");
 
     await store.writeManifest(manifest);
@@ -825,7 +989,7 @@ describe("buildRunManifest", () => {
     expect(manifestHash).toBe(createHash("sha256")
       .update(JSON.stringify(canonicalize(persisted)))
       .digest("hex"));
-    expect(JSON.stringify(persisted)).not.toContain("platform");
+    expect(JSON.stringify(persisted)).not.toContain("policy-secret");
     registration.dispose();
   });
 

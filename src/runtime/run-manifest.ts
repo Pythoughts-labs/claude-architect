@@ -117,21 +117,24 @@ function sanitizeBody(body: ManifestBody): ManifestBody {
       "candidate manifest hash",
     ),
     producer: {
-      id: body.producer.id === null ? null : redact(body.producer.id),
-      version: body.producer.version === null ? null : redact(body.producer.version),
-      model: body.producer.model === null ? null : redact(body.producer.model),
+      id: preserveNullableIdentity(body.producer.id, "producer id"),
+      version: preserveNullableIdentity(body.producer.version, "producer version"),
+      model: preserveNullableIdentity(body.producer.model, "producer model"),
     },
     effectivePolicy: redactRecord(body.effectivePolicy),
     repositoryInstructions: body.repositoryInstructions
       .map(instruction => ({
-        path: redact(instruction.path),
+        path: preserveIdentity(instruction.path, "repository instruction path"),
         hash: preserveIdentity(instruction.hash, "repository instruction hash"),
       }))
       .sort((left, right) => compareText(left.path, right.path)),
     promptHash: preserveIdentity(body.promptHash, "prompt hash"),
     executionPolicy: redactRecord(body.executionPolicy),
     environment: body.environment
-      .map(entry => ({ name: redact(entry.name), source: redact(entry.source) }))
+      .map(entry => ({
+        name: preserveIdentity(entry.name, "environment name"),
+        source: preserveIdentity(entry.source, "environment provenance"),
+      }))
       .sort((left, right) => {
         const nameOrder = compareText(left.name, right.name);
         return nameOrder === 0 ? compareText(left.source, right.source) : nameOrder;
@@ -140,7 +143,7 @@ function sanitizeBody(body: ManifestBody): ManifestBody {
     protocolVersion: body.protocolVersion,
     schemaVersions: { ...body.schemaVersions },
     packagedVerifier: {
-      version: redact(body.packagedVerifier.version),
+      version: preserveIdentity(body.packagedVerifier.version, "packaged verifier version"),
       hash: preserveIdentity(body.packagedVerifier.hash, "packaged verifier hash"),
     },
   };

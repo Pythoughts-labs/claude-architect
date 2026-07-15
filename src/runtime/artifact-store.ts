@@ -165,6 +165,18 @@ async function ensurePlainDirectory(directory: string): Promise<DirectoryIdentit
   return { dev: metadata.dev, ino: metadata.ino };
 }
 
+async function ensurePlainDirectoryTree(directory: string): Promise<DirectoryIdentity> {
+  try {
+    return await ensurePlainDirectory(directory);
+  } catch (error) {
+    if (!isMissing(error)) throw error;
+    const parent = path.dirname(directory);
+    if (parent === directory) throw error;
+    await ensurePlainDirectoryTree(parent);
+    return ensurePlainDirectory(directory);
+  }
+}
+
 async function assertDirectoryIdentity(
   directory: string,
   expected: DirectoryIdentity,
@@ -373,11 +385,11 @@ function sanitizeAttemptResult(result: AttemptResult): AttemptResult {
     unresolvedIssues: result.unresolvedIssues.map(redact),
     evidence: redactRecord(result.evidence),
     logsRef: preserveIdentity(result.logsRef, "logs archive ref"),
-    producerId: result.producerId === null ? null : redact(result.producerId),
-    producerVersion: result.producerVersion === null ? null : redact(result.producerVersion),
-    producerModel: result.producerModel === null ? null : redact(result.producerModel),
+    producerId: preserveNullableIdentity(result.producerId, "producer id"),
+    producerVersion: preserveNullableIdentity(result.producerVersion, "producer version"),
+    producerModel: preserveNullableIdentity(result.producerModel, "producer model"),
     durationMs: result.durationMs,
-    sessionId: result.sessionId === null ? null : redact(result.sessionId),
+    sessionId: preserveNullableIdentity(result.sessionId, "producer session id"),
   };
 }
 
@@ -394,7 +406,7 @@ export class ArtifactStore {
   }
 
   private async ensureRunsRoot(): Promise<string> {
-    await mkdir(path.dirname(this.runsRoot), { recursive: true, mode: 0o700 });
+    await ensurePlainDirectoryTree(path.dirname(this.runsRoot));
     await ensurePlainDirectory(this.runsRoot);
     return realpath(this.runsRoot);
   }
@@ -781,6 +793,7 @@ export class ArtifactStore {
       const quarantinePath = path.join(this.runsRoot, quarantineName);
       let prepared: PreparedAnchorCleanup | null = null;
       let transaction: AnchorCleanupTransaction | null = null;
+      let runsRootIdentity: DirectoryIdentity | null = null;
       let archiveDeleted = false;
       try {
         const result = await this.readResult(entry.runId);
@@ -803,15 +816,17 @@ export class ArtifactStore {
           recordedAt: new Date().toISOString(),
         });
         transaction = await this.beginCandidateAnchorCleanup(prepared, entry.runId);
-        const runsRootIdentity = await ensurePlainDirectory(this.runsRoot);
+        runsRootIdentity = await ensurePlainDirectory(this.runsRoot);
         await assertDirectoryIdentity(entry.directory, entry.identity);
         await assertDirectoryIdentity(this.runsRoot, runsRootIdentity);
         await rename(entry.directory, quarantinePath);
         await syncDirectory(this.runsRoot);
         await assertDirectoryIdentity(this.runsRoot, runsRootIdentity);
+        await assertDirectoryIdentity(quarantinePath, entry.identity);
         await rm(quarantinePath, { recursive: true, force: false });
         archiveDeleted = true;
         await syncDirectory(this.runsRoot);
+        await transaction.commit();
         await this.appendCleanupRecord({
           event: "prune-cleanup-complete",
           runId: entry.runId,
@@ -825,16 +840,29 @@ export class ArtifactStore {
           candidateCommitOid: prepared.candidateCommitOid,
           recordedAt: new Date().toISOString(),
         });
-        await transaction.commit();
         removed.add(entry.runId);
         retainedBytes -= entry.bytes;
       } catch (error) {
         let rollbackError: unknown;
         if (!archiveDeleted) {
           try {
-            if (await pathExists(quarantinePath) && !await pathExists(entry.directory)) {
+            const quarantineExists = await pathExists(quarantinePath);
+            const runDirectoryExists = await pathExists(entry.directory);
+            if (quarantineExists) {
+              if (runDirectoryExists) {
+                throw new RuntimeError("archive run directory was replaced during rollback");
+              }
+              const expectedRunsRoot = runsRootIdentity ?? await ensurePlainDirectory(this.runsRoot);
+              await assertDirectoryIdentity(this.runsRoot, expectedRunsRoot);
+              await assertDirectoryIdentity(quarantinePath, entry.identity);
               await rename(quarantinePath, entry.directory);
               await syncDirectory(this.runsRoot);
+              await assertDirectoryIdentity(this.runsRoot, expectedRunsRoot);
+              await assertDirectoryIdentity(entry.directory, entry.identity);
+            } else if (runDirectoryExists) {
+              await assertDirectoryIdentity(entry.directory, entry.identity);
+            } else {
+              throw new RuntimeError("archive run directory disappeared during rollback");
             }
             await transaction?.rollback();
             if (prepared !== null) {
@@ -863,10 +891,12 @@ export class ArtifactStore {
         const rollback = rollbackError instanceof Error
           ? `; rollback failed: ${rollbackError.message}`
           : rollbackError === undefined ? "" : `; rollback failed: ${String(rollbackError)}`;
-        retained.push({
-          runId: entry.runId,
-          reason: redact(`${primary}${rollback}`),
-        });
+        if (!archiveDeleted) {
+          retained.push({
+            runId: entry.runId,
+            reason: redact(`${primary}${rollback}`),
+          });
+        }
       }
     };
 
