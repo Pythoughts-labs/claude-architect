@@ -47,6 +47,10 @@ if ! cmp -s "$BUNDLE_SNAPSHOT" runtime/server.mjs; then
   printf 'ERROR: runtime/server.mjs was stale; run scripts/build-runtime.sh and commit it.\n' >&2
   exit 1
 fi
+if ! git diff --exit-code -- runtime/server.mjs runtime/bootstrap.mjs; then
+  printf 'ERROR: runtime artifacts differ from the committed release state.\n' >&2
+  exit 1
+fi
 
 claude plugin validate --strict .
 node tests/plugin-manifest.test.mjs

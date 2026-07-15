@@ -82,6 +82,13 @@ describe("P0-A plugin wiring", () => {
     assert.match(readme, /features\.multi_agent_v2=\{enabled=false,max_concurrent_threads_per_session=1\}/u);
 
     const releaseValidator = read("scripts/validate-release.sh");
+    const buildRuntime = read("scripts/build-runtime.sh");
+    assert.match(buildRuntime, /npm run build/u, "build wrapper must use the package build contract");
+    assert.match(
+      releaseValidator,
+      /git diff --exit-code -- runtime\/server\.mjs runtime\/bootstrap\.mjs/u,
+      "release validation must reject dirty runtime artifacts after rebuilding",
+    );
     for (const required of [
       "runtime/bootstrap.mjs",
       "runtime/server.mjs",
