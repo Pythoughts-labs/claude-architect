@@ -6,6 +6,24 @@ All notable changes to Claude Architect are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-07-15
+
+### Added
+
+- Added a 3-OS GitHub Actions CI matrix covering macOS 14, Ubuntu, and Windows, with the Windows leg compiling the native helper with MSVC. Evidence: [first fully green run](https://github.com/Pythoughts-labs/claude-architect/actions/runs/29451055892).
+- Committed `native/bin/win32-job-kill-x64.exe` (SHA-256 `a96636f4d9e564b978172662e005e2a521205dd3b2eaea271b511854a05ccd10`), including its new `token <pid>` creation-FILETIME mode for process-identity tokens without PowerShell.
+- Enabled Windows worktrees with removal retries for transient Windows file locking.
+
+### Fixed
+
+- Made candidate materialization byte-exact under hostile `core.autocrlf` settings by pinning Git runs to `-c core.autocrlf=false`.
+- Gave Win32 verification commands the Windows essential environment set. They previously ran without an essential environment, which could leave repository mutations undetected; verification now fails closed.
+- Made release validation fail when the native helper binary is missing or empty, or when release version pins drift.
+
+### Notes
+
+- Sandbox backend states are intentionally unchanged: Linux and native Windows remain `unsupported` for the edit Lane because no real confinement evidence exists for them yet.
+
 ## [0.10.0] - 2026-07-15
 
 ### Added
@@ -116,7 +134,8 @@ Initial public release.
 - Native OpenCode assets under `.opencode/` and `opencode.json`, so the same lanes and skill work outside Claude Code.
 - SVG banner and shields badges for the README.
 
-[Unreleased]: https://github.com/Pythoughts-labs/claude-architect/compare/v0.10.0...HEAD
+[Unreleased]: https://github.com/Pythoughts-labs/claude-architect/compare/v0.11.0...HEAD
+[0.11.0]: https://github.com/Pythoughts-labs/claude-architect/compare/v0.10.0...v0.11.0
 [0.10.0]: https://github.com/Pythoughts-labs/claude-architect/compare/v0.9.3...v0.10.0
 [0.9.3]: https://github.com/Pythoughts-labs/claude-architect/compare/v0.9.2...v0.9.3
 [0.9.2]: https://github.com/Pythoughts-labs/claude-architect/compare/v0.9.1...v0.9.2

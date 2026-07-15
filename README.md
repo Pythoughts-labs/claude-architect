@@ -14,7 +14,7 @@
 <p align="center">
   <img alt="Claude Code" src="https://img.shields.io/badge/Claude_Code-plugin-d97757?style=flat-square&labelColor=0b0e14">
   <img alt="OpenCode" src="https://img.shields.io/badge/OpenCode-native-58a6ff?style=flat-square&labelColor=0b0e14">
-  <img alt="version" src="https://img.shields.io/badge/version-0.10.0-9aa4b2?style=flat-square&labelColor=0b0e14">
+  <img alt="version" src="https://img.shields.io/badge/version-0.11.0-9aa4b2?style=flat-square&labelColor=0b0e14">
   <img alt="license" src="https://img.shields.io/badge/license-MIT-3fb950?style=flat-square&labelColor=0b0e14">
 </p>
 
@@ -87,14 +87,15 @@ Claude Code owns MCP startup timeout and restart behavior. If the server does no
 
 Installed marketplace copies must update and reload Claude Code before the P0-A runtime and Codex single-agent controls take effect. The Codex adapter enforces `--disable multi_agent` together with `features.multi_agent_v2={enabled=false,max_concurrent_threads_per_session=1}`; an already loaded marketplace copy continues using its previous adapter until update and reload.
 
-### P0-A support matrix
+### Support matrix
 
-| Host | P0-A state | Implementation eligibility |
-|---|---|---|
-| macOS arm64 | **Certified P0-A** | Codex edit Lane only when its live capability report names `codex-native-sandbox`; otherwise diagnostics-only. |
-| macOS x64 | **Pending P0-B** | Diagnostics-only; no certified write-confinement backend yet. |
-| Linux x64/arm64, including WSL reported as Linux | **Pending P0-B** | Diagnostics-only; certification and a proven write-confinement backend remain pending. |
-| Native Windows x64/arm64 | **Pending P0-B** | The runtime loads for structured diagnostics, but Producer execution and native confinement remain pending. |
+| Sandbox backend | Host | Environment | State |
+|---|---|---|---|
+| `codex-native-sandbox` | macOS arm64 | native | **certified** |
+| `codex-native-sandbox` | Linux | native | **unsupported** |
+| `codex-native-sandbox` | Windows | native | **unsupported** |
+
+The runtime itself—worktrees, byte-exact candidate materialization, independent verification, and process-tree control via the committed Job Object helper—is exercised by a 3-OS CI matrix (macOS 14, Ubuntu, Windows), while edit-Lane write confinement remains certified only on macOS arm64.
 
 Verification commands are recorded honestly as `confinement: "none"` and `networkPolicy: "unenforced"` in P0-A. Those checks are Host-authorized evidence; they are not described as sandboxed. Platform/Producer combinations without proven write confinement remain ineligible for the edit Lane.
 

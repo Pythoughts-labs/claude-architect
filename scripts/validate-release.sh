@@ -29,6 +29,31 @@ for artifact in runtime/bootstrap.mjs runtime/server.mjs; do
   fi
 done
 
+if [[ ! -s native/bin/win32-job-kill-x64.exe ]]; then
+  printf 'ERROR: missing or empty native helper native/bin/win32-job-kill-x64.exe.\n' >&2
+  exit 1
+fi
+
+PLUGIN_VERSION=$(node -p 'JSON.parse(require("node:fs").readFileSync(".claude-plugin/plugin.json", "utf8")).version')
+MARKETPLACE_VERSION=$(node -p 'JSON.parse(require("node:fs").readFileSync(".claude-plugin/marketplace.json", "utf8")).plugins[0].version')
+README_VERSION=$(sed -nE 's/.*badge\/version-([0-9]+\.[0-9]+\.[0-9]+)-.*/\1/p' README.md | head -n 1)
+CHANGELOG_VERSION=$(sed -nE 's/^## \[([0-9]+\.[0-9]+\.[0-9]+)\].*/\1/p' CHANGELOG.md | head -n 1)
+RUNTIME_VERSION=$(sed -nE 's/^export const RUNTIME_VERSION = "([^"]+)".*/\1/p' src/protocol/versions.ts)
+
+for version_pin in \
+  "marketplace.json:$MARKETPLACE_VERSION" \
+  "README.md badge:$README_VERSION" \
+  "CHANGELOG.md first released heading:$CHANGELOG_VERSION" \
+  "src/protocol/versions.ts RUNTIME_VERSION:$RUNTIME_VERSION"; do
+  version_name=${version_pin%%:*}
+  version_value=${version_pin#*:}
+  if [[ "$version_value" != "$PLUGIN_VERSION" ]]; then
+    printf 'ERROR: %s version (%s) does not match plugin.json version (%s).\n' \
+      "$version_name" "${version_value:-missing}" "$PLUGIN_VERSION" >&2
+    exit 1
+  fi
+done
+
 node -e 'JSON.parse(require("node:fs").readFileSync(".mcp.json", "utf8"))'
 
 RUNTIME_PROTOCOL=$(sed -nE 's/^export const PROTOCOL_VERSION = "([^"]+)".*/\1/p' src/protocol/versions.ts)
