@@ -25897,7 +25897,13 @@ async function handleDelegate(checkoutPath, input, deps = {}) {
   const schema = schemaCompatibility(input);
   if (!schema.ok) return schema;
   const validation = validateSpec(input);
-  if (!validation.ok) return { ok: false, validationErrors: validation.errors };
+  if (!validation.ok) {
+    return {
+      ok: false,
+      error: "invalid-specification",
+      validationErrors: validation.errors
+    };
+  }
   try {
     const ps = services2(deps);
     const canonical = await ps.canonicalizePath(checkoutPath);

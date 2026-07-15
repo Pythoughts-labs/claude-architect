@@ -143,7 +143,11 @@ export async function handleDelegate(
   deps: ToolDependencies = {},
 ): Promise<
   | { ok: true; result: AttemptResult }
-  | { ok: false; validationErrors: Array<{ path: string; message: string }> }
+  | {
+    ok: false;
+    error: "invalid-specification";
+    validationErrors: Array<{ path: string; message: string }>;
+  }
   | { ok: false; diagnostic: string }
   | { ok: false; error: "nested-delegation-denied" }
   | ToolErrorResult
@@ -153,7 +157,13 @@ export async function handleDelegate(
   const schema = schemaCompatibility(input);
   if (!schema.ok) return schema;
   const validation = validateSpec(input);
-  if (!validation.ok) return { ok: false, validationErrors: validation.errors };
+  if (!validation.ok) {
+    return {
+      ok: false,
+      error: "invalid-specification",
+      validationErrors: validation.errors,
+    };
+  }
 
   try {
     const ps = services(deps);
