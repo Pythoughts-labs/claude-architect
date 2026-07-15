@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { access, chmod, mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -55,6 +55,31 @@ describe("read-only Git tools", () => {
     }
   });
 
+  it.skipIf(process.platform === "win32")(
+    "does not execute a repository-configured fsmonitor hook",
+    async () => {
+      const root = await mkdtemp(path.join(tmpdir(), "ca-git-read-fsmonitor-"));
+      temporaryPaths.push(root);
+      const repo = path.join(root, "repo");
+      const marker = path.join(root, "fsmonitor-ran");
+      const hook = path.join(root, "fsmonitor.sh");
+      await mkdir(repo);
+      await execGit(repo, ["init", "-q"]);
+      await execGit(repo, ["config", "user.name", "Test"]);
+      await execGit(repo, ["config", "user.email", "test@example.com"]);
+      await writeFile(path.join(repo, "tracked.txt"), "initial\n", "utf8");
+      await execGit(repo, ["add", "tracked.txt"]);
+      await execGit(repo, ["commit", "-qm", "initial"]);
+      await writeFile(hook, `#!/bin/sh\n: > ${JSON.stringify(marker)}\n`, "utf8");
+      await chmod(hook, 0o755);
+      await execGit(repo, ["config", "core.fsmonitor", hook]);
+      await writeFile(path.join(repo, "tracked.txt"), "changed\n", "utf8");
+
+      await expect(gitStatus(repo)).resolves.toMatchObject({ ok: true });
+      await expect(access(marker)).rejects.toThrow();
+    },
+  );
+
   it("uses only fixed argv and fails closed when output is truncated", async () => {
     const calls: string[][] = [];
     const deps: GitReadDependencies = {
@@ -65,7 +90,7 @@ describe("read-only Git tools", () => {
       git: async (cwd, args) => {
         expect(cwd).toBe("/canonical/repo");
         calls.push(args);
-        return args[1] === "diff" && args[2] === "--no-ext-diff" && args.includes("--full-index")
+        return args.includes("--full-index")
           ? {
             stdout: "partial",
             stderr: "",
@@ -86,10 +111,10 @@ describe("read-only Git tools", () => {
     await expect(gitChangedFiles("/repo", deps)).resolves.toEqual({ ok: true, output: "ok" });
 
     expect(calls).toEqual([
-      ["--no-pager", "status", "--porcelain=v1", "--branch", "--untracked-files=all"],
-      ["--no-pager", "diff", "--no-ext-diff", "--no-textconv", "--no-color", "--full-index", "HEAD", "--"],
-      ["--no-pager", "log", "-n", "20", "--no-color", "--format=%H%x09%aI%x09%s", "--"],
-      ["--no-pager", "diff", "--no-ext-diff", "--no-textconv", "--no-color", "--name-status", "HEAD", "--"],
+      ["--no-optional-locks", "-c", "core.fsmonitor=false", "--no-pager", "status", "--porcelain=v1", "--branch", "--untracked-files=all"],
+      ["--no-optional-locks", "-c", "core.fsmonitor=false", "--no-pager", "diff", "--no-ext-diff", "--no-textconv", "--no-color", "--full-index", "HEAD", "--"],
+      ["--no-optional-locks", "-c", "core.fsmonitor=false", "--no-pager", "log", "-n", "20", "--no-color", "--format=%H%x09%aI%x09%s", "--"],
+      ["--no-optional-locks", "-c", "core.fsmonitor=false", "--no-pager", "diff", "--no-ext-diff", "--no-textconv", "--no-color", "--name-status", "HEAD", "--"],
     ]);
   });
 });

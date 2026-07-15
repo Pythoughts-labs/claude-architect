@@ -12,15 +12,21 @@ export type GitReadResult =
   | { ok: true; output: string }
   | { ok: false; error: "git-read-failed"; diagnostic: string };
 
-const STATUS_ARGS = [
+const READ_ONLY_GLOBAL_ARGS = [
+  "--no-optional-locks",
+  "-c",
+  "core.fsmonitor=false",
   "--no-pager",
+] as const;
+const STATUS_ARGS = [
+  ...READ_ONLY_GLOBAL_ARGS,
   "status",
   "--porcelain=v1",
   "--branch",
   "--untracked-files=all",
 ] as const;
 const DIFF_ARGS = [
-  "--no-pager",
+  ...READ_ONLY_GLOBAL_ARGS,
   "diff",
   "--no-ext-diff",
   "--no-textconv",
@@ -30,7 +36,7 @@ const DIFF_ARGS = [
   "--",
 ] as const;
 const LOG_ARGS = [
-  "--no-pager",
+  ...READ_ONLY_GLOBAL_ARGS,
   "log",
   "-n",
   "20",
@@ -39,7 +45,7 @@ const LOG_ARGS = [
   "--",
 ] as const;
 const CHANGED_FILES_ARGS = [
-  "--no-pager",
+  ...READ_ONLY_GLOBAL_ARGS,
   "diff",
   "--no-ext-diff",
   "--no-textconv",

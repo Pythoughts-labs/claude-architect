@@ -22725,15 +22725,21 @@ async function doctor(deps = {}) {
 }
 
 // src/mcp/git-read-tools.ts
+var READ_ONLY_GLOBAL_ARGS = [
+  "--no-optional-locks",
+  "-c",
+  "core.fsmonitor=false",
+  "--no-pager"
+];
 var STATUS_ARGS = [
-  "--no-pager",
+  ...READ_ONLY_GLOBAL_ARGS,
   "status",
   "--porcelain=v1",
   "--branch",
   "--untracked-files=all"
 ];
 var DIFF_ARGS = [
-  "--no-pager",
+  ...READ_ONLY_GLOBAL_ARGS,
   "diff",
   "--no-ext-diff",
   "--no-textconv",
@@ -22743,7 +22749,7 @@ var DIFF_ARGS = [
   "--"
 ];
 var LOG_ARGS = [
-  "--no-pager",
+  ...READ_ONLY_GLOBAL_ARGS,
   "log",
   "-n",
   "20",
@@ -22752,7 +22758,7 @@ var LOG_ARGS = [
   "--"
 ];
 var CHANGED_FILES_ARGS = [
-  "--no-pager",
+  ...READ_ONLY_GLOBAL_ARGS,
   "diff",
   "--no-ext-diff",
   "--no-textconv",
