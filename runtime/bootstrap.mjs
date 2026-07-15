@@ -66,7 +66,20 @@ async function runServerWith(nodePath, entrypoint) {
     const forwardSignal = signal => child.kill(signal);
     const forwardedSignals = process.platform === "win32"
       ? ["SIGINT", "SIGTERM", "SIGBREAK"]
-      : ["SIGHUP", "SIGINT", "SIGTERM", "SIGQUIT", "SIGUSR1", "SIGUSR2"];
+      : [
+        "SIGHUP",
+        "SIGINT",
+        "SIGQUIT",
+        "SIGABRT",
+        "SIGALRM",
+        "SIGTERM",
+        "SIGUSR1",
+        "SIGUSR2",
+        "SIGXCPU",
+        "SIGXFSZ",
+        "SIGVTALRM",
+        "SIGPROF",
+      ];
     const signalHandlers = new Map(forwardedSignals.map(signal => [
       signal,
       () => forwardSignal(signal),

@@ -201,7 +201,7 @@ describe("runtime bootstrap", () => {
     expect(result.stderr).toContain("PATH");
   });
 
-  it.skipIf(process.platform === "win32")("forwards SIGQUIT to a re-executed server", async () => {
+  it.skipIf(process.platform === "win32")("forwards SIGALRM to a re-executed server", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "ca-bootstrap-signal-"));
     temporaryPaths.push(root);
     const preludePath = await nodeVersionPrelude(root, "20.19.0");
@@ -229,11 +229,11 @@ describe("runtime bootstrap", () => {
     let serverPid = 0;
     try {
       serverPid = Number(await waitForFile(pidFile));
-      child.kill("SIGQUIT");
+      child.kill("SIGALRM");
       const exit = await waitForExit(child);
       await waitForProcessGone(serverPid);
       expect(Number.isSafeInteger(serverPid) && serverPid > 1).toBe(true);
-      expect(exit).toEqual({ code: null, signal: "SIGQUIT" });
+      expect(exit).toEqual({ code: null, signal: "SIGALRM" });
       expect(isProcessAlive(serverPid)).toBe(false);
     } finally {
       if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
