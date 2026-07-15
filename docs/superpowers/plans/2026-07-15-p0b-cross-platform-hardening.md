@@ -270,11 +270,11 @@ git commit -m "feat(platform): Windows executable resolution with PATHEXT, npm e
 - Consumes: `SpawnRequest`, `CheckoutLock`, `CanonicalPath`; `normalizeWindowsEnv` from Task 2.
 - Produces: working `spawnSupervised`, `requestCooperativeCancellation`, `acquireCheckoutLock`, `createSecureTempDirectory`, `canonicalizePath`, `getProcessStartToken` on win32. `terminateProcessTree*` lands in Task 4.
 
-- [ ] **Step 1: Write failing tests** — Windows-gated: spawn `node -e "console.log('hi')"` and assert bounded stdout + exit 0; spawn with an env containing `PATH` and `Path` and assert the child sees exactly one `Path`; lock the same checkout twice and assert the second acquire times out with `checkout is locked`; `canonicalizePath("C:\\Repo\\..\\Repo")` returns a canonical drive-letter path and the git common dir for a temp repo; UNC input `\\\\?\\C:\\Repo` canonicalizes without throwing; `createSecureTempDirectory` returns a writable dir under `%TEMP%`. Pure (all-OS) case: `canonicalizeForScope("C:\\Repo\\SRC\\a.ts", "c:\\repo")` (exported helper) treats the paths as inside-scope case-insensitively.
+- [x] **Step 1: Write failing tests** — Windows-gated: spawn `node -e "console.log('hi')"` and assert bounded stdout + exit 0; spawn with an env containing `PATH` and `Path` and assert the child sees exactly one `Path`; lock the same checkout twice and assert the second acquire times out with `checkout is locked`; `canonicalizePath("C:\\Repo\\..\\Repo")` returns a canonical drive-letter path and the git common dir for a temp repo; UNC input `\\\\?\\C:\\Repo` canonicalizes without throwing; `createSecureTempDirectory` returns a writable dir under `%TEMP%`. Pure (all-OS) case: `canonicalizeForScope("C:\\Repo\\SRC\\a.ts", "c:\\repo")` (exported helper) treats the paths as inside-scope case-insensitively.
 
-- [ ] **Step 2: Run to verify failure** — on win32 FAIL (stubs throw); on POSIX the gated suite skips, pure cases FAIL: helper missing.
+- [x] **Step 2: Run to verify failure** — on win32 FAIL (stubs throw); on POSIX the gated suite skips, pure cases FAIL: helper missing.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
   - `spawnSupervised`: same shape as POSIX (`src/platform/posix-platform-services.ts:72-97`) but `detached: false`, `windowsHide: true`, and `env: normalizeWindowsEnv(req.env)`. Keep the mandatory `error`-listener spawn-failure settlement and BoundedBuffer drains verbatim.
   - `requestCooperativeCancellation`: `child.kill("SIGTERM")` equivalent via stored ChildProcess handle (keep a `WeakMap<SupervisedProcess, ChildProcess>`), it is best-effort on Windows; forced kill is Task 4.
@@ -283,9 +283,9 @@ git commit -m "feat(platform): Windows executable resolution with PATHEXT, npm e
   - `getProcessStartToken`: `wmic` is dead; use PowerShell-free `execFile("cmd.exe", ["/d","/s","/c", ...])`? No — user values in command string are banned. Use Node: `execFile(process.execPath, ["-e", ...])` is silly. Correct approach: `Get-Process` is PowerShell; instead read `CreationDate` via `execFile("powershell.exe", ["-NoProfile","-Command", "(Get-Process -Id " + pid + ").StartTime.ToFileTimeUtc()"])` — pid is a validated safe integer, not a user string, so interpolation is safe; return `win32:<filetime>` or `null` on any error.
   - `createSecureTempDirectory`: `fs.mkdtemp(path.join(os.tmpdir(), "claude-architect-"))` (same as POSIX).
 
-- [ ] **Step 4: Run** — POSIX: pure cases PASS, gated skip; full `npm test` green. (Windows CI proves the gated cases in Task 9.)
+- [x] **Step 4: Run** — POSIX: pure cases PASS, gated skip; full `npm test` green. (Windows CI proves the gated cases in Task 9.)
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/platform/ tests/runtime/windows-platform.test.ts
