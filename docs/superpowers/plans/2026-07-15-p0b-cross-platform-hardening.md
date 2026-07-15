@@ -462,18 +462,18 @@ git commit -m "feat(runtime): named write-confinement backends with fail-closed 
 - Consumes: `codex-adapter.normalizeEvents` (already splits `/\r?\n/u`, `codex-adapter.ts:231`), `canonicalizeForScope` (Task 3), existing verifier scope checks.
 - Produces: regression proof, not new API.
 
-- [ ] **Step 1: Write failing/regression tests**
+- [x] **Step 1: Write failing/regression tests**
   - CRLF: feed `normalizeEvents` a `SupervisedExit` whose stdout uses `\r\n` line endings and a BOM-free UTF-8 payload with a Unicode path (`src/ünï cödé/α.ts`); assert identical events to the `\n` variant. Also a mixed `\r\n`/`\n` stream.
   - Env keys: `normalizeWindowsEnv` fuzz cases — `TEMP`/`temp`/`Temp`, `ComSpec`/`COMSPEC`.
   - Path scope: structural-verifier case-evasion test already exists for case-insensitive forbidden scope; ADD drive-letter (`C:\repo` vs `c:\repo`) and UNC (`\\\\server\\share\\repo` prefix) cases as pure unit tests against the exported scope helper, win32-gated where a real filesystem is needed; ADD a space-and-Unicode worktree path e2e case on POSIX (temp dir named `wt ünïcode`) driving the existing fake-producer attempt to `verified-candidate`.
 
-- [ ] **Step 2: Run** — expect the CRLF and Unicode-path cases to PASS already (they are regression locks); expect drive/UNC scope cases to FAIL until the helper is wired into the verifiers' scope comparison on win32.
+- [x] **Step 2: Run** — expect the CRLF and Unicode-path cases to PASS already (they are regression locks); expect drive/UNC scope cases to FAIL until the helper is wired into the verifiers' scope comparison on win32.
 
-- [ ] **Step 3: Implement the minimal scope fix** — route the verifiers' allowlist/forbidden comparisons through a platform-aware normalizer: on win32 lowercase + strip `\\\\?\\` prefix before prefix-compare; POSIX behavior byte-identical to today.
+- [x] **Step 3: Implement the minimal scope fix** — route the verifiers' allowlist/forbidden comparisons through a platform-aware normalizer: on win32 lowercase + strip `\\\\?\\` prefix before prefix-compare; POSIX behavior byte-identical to today.
 
-- [ ] **Step 4: Run** — focused + full suite green on POSIX.
+- [x] **Step 4: Run** — focused + full suite green on POSIX.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit** — landed as `a13ffd6`
 
 ```bash
 git add src/verify/ tests/runtime/
