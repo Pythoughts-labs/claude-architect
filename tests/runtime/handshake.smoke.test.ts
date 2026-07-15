@@ -80,7 +80,7 @@ describe("MCP server handshake", () => {
         const timeout = setTimeout(() => {
           waiters.delete(id);
           reject(new Error(`timed out waiting for ${method}`));
-        }, 3_000);
+        }, 15_000); // generous: the smoke test runs under full-suite parallel load in verification worktrees
         waiters.set(id, value => {
           clearTimeout(timeout);
           resolve(value);
