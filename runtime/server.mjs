@@ -22560,6 +22560,35 @@ import { existsSync } from "node:fs";
 import { open } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
+
+// src/platform/sandbox/backends.ts
+var SANDBOX_BACKENDS = [{
+  id: "codex-native-sandbox",
+  kind: "producer-native",
+  platforms: [
+    { os: "darwin", arch: "arm64", environmentType: "native", state: "certified" },
+    { os: "linux", environmentType: "native", state: "unsupported" },
+    { os: "win32", environmentType: "native", state: "unsupported" }
+  ]
+}];
+function selectSandboxBackend(report) {
+  if (report.writeConfinementBackend === null) {
+    return { backend: null, reason: "no-write-confinement-backend" };
+  }
+  const backend = SANDBOX_BACKENDS.find(
+    (candidate) => candidate.id === report.writeConfinementBackend
+  );
+  if (backend === void 0) {
+    return { backend: null, reason: "unrecognized-write-confinement-backend" };
+  }
+  const platform = backend.platforms.find((candidate) => candidate.os === report.os && candidate.environmentType === report.environmentType && (candidate.arch === void 0 || candidate.arch === report.arch));
+  if (platform === void 0 || platform.state === "unsupported") {
+    return { backend: null, reason: "no-write-confinement-backend" };
+  }
+  return { backend, state: platform.state };
+}
+
+// src/producers/codex-adapter.ts
 var CODEX_REQUIRED_ENV = [
   "CODEX_HOME",
   "CODEX_API_KEY",
@@ -22598,6 +22627,10 @@ function unavailableReport(ctx, reason, resolvedExecutable = null) {
 function parseVersion(stdout) {
   const match = /(?:^|\s)(\d+\.\d+\.\d+(?:[-+][^\s]+)?)(?:\s|$)/u.exec(stdout.trim());
   return match?.[1] ?? null;
+}
+function selectCodexWriteConfinementBackend(ctx) {
+  const backend = SANDBOX_BACKENDS.find((candidate) => candidate.id === "codex-native-sandbox" && candidate.platforms.some((platform) => platform.os === ctx.os && platform.environmentType === ctx.environmentType && (platform.arch === void 0 || platform.arch === ctx.arch) && (platform.state === "certified" || platform.state === "tested")));
+  return backend?.id ?? null;
 }
 async function normalizeCodexExecutable(executable) {
   if (executable.kind !== "native") return executable;
@@ -22677,8 +22710,7 @@ var CodexAdapter = class {
       }, {});
       const version2 = result.spawnError === void 0 && result.exitCode === 0 ? parseVersion(result.stdout) : null;
       if (version2 === null) return unavailableReport(ctx, "probe-failed", executable);
-      const certified = ctx.os === "darwin" && ctx.arch === "arm64" && ctx.environmentType === "native";
-      const writeConfinementBackend = certified ? "codex-native-sandbox" : null;
+      const writeConfinementBackend = selectCodexWriteConfinementBackend(ctx);
       return {
         producerId: this.producerId,
         available: true,
@@ -25976,6 +26008,34 @@ async function runAttempt(checkoutPath, spec, deps) {
       capabilityReport: report,
       executable: report.resolvedExecutable
     });
+    if (spec.executionMode === "edit") {
+      const selection = selectSandboxBackend(report);
+      if (selection.backend === null) {
+        return await archiveTerminal({
+          store,
+          spec,
+          runId,
+          startedAtMs,
+          now,
+          repoRoot: canonical.canonical,
+          baseCommitOid: preconditions.baseCommitOid,
+          signals: { unavailable: true },
+          report,
+          profile,
+          invocation,
+          environment: [],
+          temporaryHomeApplied: tempHome !== null,
+          producerSummary: null,
+          candidate: null,
+          commandOutcomes: [],
+          unresolvedIssues: [selection.reason],
+          evidence: { routing: selection.reason },
+          producerLog: producerLog(null),
+          repositoryInstructions,
+          packagedVerifier
+        });
+      }
+    }
     builtEnvironment = buildEnvironment({
       os: ps.os,
       adapterAllowlist: invocation.requiredEnv,

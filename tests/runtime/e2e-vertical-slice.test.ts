@@ -70,9 +70,9 @@ class FakeAdapter implements ProducerAdapter {
       producerId: this.producerId,
       available: eligible,
       reason: this.options.reason ?? (eligible ? null : "missing-executable"),
-      os: context.os,
-      arch: context.arch,
-      environmentType: context.environmentType,
+      os: "darwin",
+      arch: "arm64",
+      environmentType: "native",
       resolvedExecutable: eligible ? nodeExecutable : null,
       version: eligible ? "1.0.0" : null,
       authState: this.options.reason === "authentication-required"
@@ -80,7 +80,7 @@ class FakeAdapter implements ProducerAdapter {
         : "unknown",
       executionModes: ["edit"],
       structuredOutput: true,
-      writeConfinementBackend: eligible ? "fake-sandbox" : null,
+      writeConfinementBackend: eligible ? "codex-native-sandbox" : null,
       laneEligibility: { edit: eligible },
     };
   }

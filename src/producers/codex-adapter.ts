@@ -4,6 +4,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { supervise } from "../platform/process-supervisor.js";
 import type { ResolvedExecutable } from "../platform/platform-services.js";
+import { SANDBOX_BACKENDS } from "../platform/sandbox/backends.js";
 import type { DelegationSpec } from "../protocol/delegation-spec.js";
 import type {
   AdapterEvent,
@@ -62,6 +63,17 @@ function unavailableReport(
 function parseVersion(stdout: string): string | null {
   const match = /(?:^|\s)(\d+\.\d+\.\d+(?:[-+][^\s]+)?)(?:\s|$)/u.exec(stdout.trim());
   return match?.[1] ?? null;
+}
+
+function selectCodexWriteConfinementBackend(ctx: ProbeContext): string | null {
+  const backend = SANDBOX_BACKENDS.find(candidate =>
+    candidate.id === "codex-native-sandbox"
+    && candidate.platforms.some(platform =>
+      platform.os === ctx.os
+      && platform.environmentType === ctx.environmentType
+      && (platform.arch === undefined || platform.arch === ctx.arch)
+      && (platform.state === "certified" || platform.state === "tested")));
+  return backend?.id ?? null;
 }
 
 async function normalizeCodexExecutable(
@@ -166,10 +178,7 @@ export class CodexAdapter implements ProducerAdapter {
         : null;
       if (version === null) return unavailableReport(ctx, "probe-failed", executable);
 
-      const certified = ctx.os === "darwin"
-        && ctx.arch === "arm64"
-        && ctx.environmentType === "native";
-      const writeConfinementBackend = certified ? "codex-native-sandbox" : null;
+      const writeConfinementBackend = selectCodexWriteConfinementBackend(ctx);
       return {
         producerId: this.producerId,
         available: true,

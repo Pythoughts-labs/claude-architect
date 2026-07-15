@@ -48,6 +48,7 @@ interface FakeAdapterOptions {
   sleepMs?: number;
   requiredEnv?: string[];
   isolationState?: ProducerConfigurationProfile["isolationState"];
+  writeConfinementBackend?: string | null;
 }
 
 class FakeAdapter implements ProducerAdapter {
@@ -61,15 +62,19 @@ class FakeAdapter implements ProducerAdapter {
       producerId: this.producerId,
       available: eligible,
       reason: this.options.reason ?? (eligible ? null : "missing-executable"),
-      os: ctx.os,
-      arch: ctx.arch,
-      environmentType: ctx.environmentType,
+      os: "darwin",
+      arch: "arm64",
+      environmentType: "native",
       resolvedExecutable: eligible ? nodeExecutable : null,
       version: eligible ? "1.0.0" : null,
       authState: "unknown",
       executionModes: ["edit"],
       structuredOutput: true,
-      writeConfinementBackend: eligible ? "fake-sandbox" : null,
+      writeConfinementBackend: eligible
+        ? (this.options.writeConfinementBackend === undefined
+          ? "codex-native-sandbox"
+          : this.options.writeConfinementBackend)
+        : null,
       laneEligibility: { edit: eligible },
     };
   }
@@ -389,6 +394,38 @@ describe("runAttempt", () => {
       status: "unavailable",
       failure: "unavailable",
     });
+  });
+
+  it("rejects an edit attempt without a write-confinement backend", async () => {
+    const repoRoot = await initRepo();
+    const runId = "run-no-write-confinement";
+
+    const result = await runAttempt(
+      repoRoot,
+      validSpec(),
+      dependencies(new FakeAdapter({ writeConfinementBackend: null }), runId),
+    );
+
+    expect(result.status).toBe("unavailable");
+    expect(result.unresolvedIssues).toContain("no-write-confinement-backend");
+    expect(await archivedJson(runId, "run-start.json")).toMatchObject({ pid: null });
+    await expectAttemptResourcesCleaned(runId);
+  });
+
+  it("rejects an unrecognized write-confinement backend", async () => {
+    const repoRoot = await initRepo();
+    const runId = "run-unrecognized-write-confinement";
+
+    const result = await runAttempt(
+      repoRoot,
+      validSpec(),
+      dependencies(new FakeAdapter({ writeConfinementBackend: "bogus-backend" }), runId),
+    );
+
+    expect(result.status).toBe("unavailable");
+    expect(result.unresolvedIssues).toContain("unrecognized-write-confinement-backend");
+    expect(await archivedJson(runId, "run-start.json")).toMatchObject({ pid: null });
+    await expectAttemptResourcesCleaned(runId);
   });
 
   it("stops without fallback when the preferred producer needs authentication", async () => {

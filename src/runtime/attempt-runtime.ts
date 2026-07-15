@@ -19,6 +19,7 @@ import type {
   SupervisedProcess,
 } from "../platform/platform-services.js";
 import { supervise } from "../platform/process-supervisor.js";
+import { selectSandboxBackend } from "../platform/sandbox/backends.js";
 import { getPlatformServices } from "../platform/select-platform.js";
 import type {
   AttemptResult,
@@ -553,6 +554,34 @@ export async function runAttempt(
       capabilityReport: report,
       executable: report.resolvedExecutable,
     });
+    if (spec.executionMode === "edit") {
+      const selection = selectSandboxBackend(report);
+      if (selection.backend === null) {
+        return await archiveTerminal({
+          store,
+          spec,
+          runId,
+          startedAtMs,
+          now,
+          repoRoot: canonical.canonical,
+          baseCommitOid: preconditions.baseCommitOid,
+          signals: { unavailable: true },
+          report,
+          profile,
+          invocation,
+          environment: [],
+          temporaryHomeApplied: tempHome !== null,
+          producerSummary: null,
+          candidate: null,
+          commandOutcomes: [],
+          unresolvedIssues: [selection.reason],
+          evidence: { routing: selection.reason },
+          producerLog: producerLog(null),
+          repositoryInstructions,
+          packagedVerifier,
+        });
+      }
+    }
     builtEnvironment = buildEnvironment({
       os: ps.os,
       adapterAllowlist: invocation.requiredEnv,
