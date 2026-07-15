@@ -1,5 +1,6 @@
 import { git as runGit } from "../git/git-exec.js";
 import type { PlatformServices } from "../platform/platform-services.js";
+import { SANDBOX_BACKENDS } from "../platform/sandbox/backends.js";
 import { getPlatformServices } from "../platform/select-platform.js";
 import { probeAll as probeProducers } from "../producers/capability-probe.js";
 import {
@@ -18,6 +19,11 @@ export interface DoctorResult {
   node: { version: string; ok: boolean };
   git: { version: string | null; ok: boolean };
   producers: CapabilityReport[];
+  sandboxBackends: Array<{
+    id: string;
+    kind: string;
+    state: "certified" | "tested" | "unsupported";
+  }>;
   runtimeVersion: string;
   schemaVersion: string;
   protocolVersion: string;
@@ -50,6 +56,14 @@ export async function doctor(deps: DoctorDependencies = {}): Promise<DoctorResul
   const arch = deps.arch ?? process.arch;
   const environmentType = deps.environmentType ?? detectEnvironmentType();
   const issues: string[] = [];
+  const sandboxBackends = SANDBOX_BACKENDS.map(backend => ({
+    id: backend.id,
+    kind: backend.kind,
+    state: backend.platforms.find(candidate =>
+      candidate.os === ps.os
+      && candidate.environmentType === environmentType
+      && (candidate.arch === undefined || candidate.arch === arch))?.state ?? "unsupported",
+  }));
 
   const supportedNodeVersion = nodeIsSupported(nodeVersion);
   let initialNodeAvailable = false;
@@ -99,6 +113,7 @@ export async function doctor(deps: DoctorDependencies = {}): Promise<DoctorResul
     node,
     git,
     producers,
+    sandboxBackends,
     runtimeVersion: RUNTIME_VERSION,
     schemaVersion: DELEGATION_SPEC_VERSION,
     protocolVersion: PROTOCOL_VERSION,

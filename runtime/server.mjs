@@ -22599,12 +22599,6 @@ async function git(cwd, args, indexFile) {
   };
 }
 
-// src/producers/codex-adapter.ts
-import { existsSync } from "node:fs";
-import { open } from "node:fs/promises";
-import { homedir } from "node:os";
-import { join } from "node:path";
-
 // src/platform/sandbox/backends.ts
 var SANDBOX_BACKENDS = [{
   id: "codex-native-sandbox",
@@ -22633,6 +22627,10 @@ function selectSandboxBackend(report) {
 }
 
 // src/producers/codex-adapter.ts
+import { existsSync } from "node:fs";
+import { open } from "node:fs/promises";
+import { homedir } from "node:os";
+import { join } from "node:path";
 var CODEX_REQUIRED_ENV = [
   "CODEX_HOME",
   "CODEX_API_KEY",
@@ -23062,6 +23060,11 @@ async function doctor(deps = {}) {
   const arch = deps.arch ?? process.arch;
   const environmentType = deps.environmentType ?? detectEnvironmentType();
   const issues = [];
+  const sandboxBackends = SANDBOX_BACKENDS.map((backend) => ({
+    id: backend.id,
+    kind: backend.kind,
+    state: backend.platforms.find((candidate) => candidate.os === ps.os && candidate.environmentType === environmentType && (candidate.arch === void 0 || candidate.arch === arch))?.state ?? "unsupported"
+  }));
   const supportedNodeVersion = nodeIsSupported(nodeVersion);
   let initialNodeAvailable = false;
   try {
@@ -23104,6 +23107,7 @@ async function doctor(deps = {}) {
     node,
     git: git2,
     producers,
+    sandboxBackends,
     runtimeVersion: RUNTIME_VERSION,
     schemaVersion: DELEGATION_SPEC_VERSION,
     protocolVersion: PROTOCOL_VERSION,

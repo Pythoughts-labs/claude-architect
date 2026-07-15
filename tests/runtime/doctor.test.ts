@@ -69,6 +69,11 @@ describe("doctor", () => {
       node: { version: "22.17.0", ok: true },
       git: { version: "2.49.0", ok: true },
       producers: [codexReport("darwin")],
+      sandboxBackends: [{
+        id: "codex-native-sandbox",
+        kind: "producer-native",
+        state: "certified",
+      }],
       runtimeVersion: RUNTIME_VERSION,
       schemaVersion: DELEGATION_SPEC_VERSION,
       protocolVersion: PROTOCOL_VERSION,
@@ -99,6 +104,24 @@ describe("doctor", () => {
       "git-unavailable",
     ]));
     expect(JSON.stringify(result)).not.toContain("sk-doctorsecret");
+  });
+
+  it("reports unsupported for a sandbox backend without a matching host row", async () => {
+    const result = await doctor({
+      ps: platform("win32"),
+      env: { CLAUDE_PLUGIN_DATA: "/plugin-data" },
+      nodeVersion: "22.17.0",
+      arch: "x64",
+      environmentType: "wsl",
+      git: async () => ({ stdout: "git version 2.49.0\n", stderr: "", exitCode: 0 }),
+      probeAll: async () => [],
+    });
+
+    expect(result.sandboxBackends).toEqual([{
+      id: "codex-native-sandbox",
+      kind: "producer-native",
+      state: "unsupported",
+    }]);
   });
 
   it("reports when the host cannot resolve the initial Node executable", async () => {
