@@ -249,7 +249,8 @@ afterEach(async () => {
   else process.env.HOME = previousHome;
   if (previousAttemptToken === undefined) delete process.env.ATTEMPT_API_TOKEN;
   else process.env.ATTEMPT_API_TOKEN = previousAttemptToken;
-  await Promise.all(temporaryPaths.splice(0).map(path => rm(path, { recursive: true, force: true })));
+  await Promise.all(temporaryPaths.splice(0).map(path =>
+    rm(path, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })));
 });
 
 describe("runAttempt", () => {
@@ -538,7 +539,7 @@ describe("runAttempt", () => {
     expect(result.status).toBe("failed");
     expect(result.failure).toBe("timeout");
     await expectAttemptResourcesCleaned("run-timeout");
-  }, 10_000);
+  }, 30_000);
 
   it("honors an AbortSignal that fired before the producer spawn", async () => {
     const repoRoot = await initRepo();

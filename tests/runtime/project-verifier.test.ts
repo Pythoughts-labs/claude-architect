@@ -315,7 +315,11 @@ describe("projectVerify", () => {
       })],
     });
 
-    expect(result.commandOutcomes[0]).toMatchObject({ exitCode: 0, timedOut: true });
+    // Windows termination is forced, so the SIGTERM handler never runs there;
+    // the timeout classification must fail the command either way.
+    expect(result.commandOutcomes[0]).toMatchObject(
+      process.platform === "win32" ? { timedOut: true } : { exitCode: 0, timedOut: true },
+    );
     expect(result.failures).toContain("command-failed:timeout");
   });
 

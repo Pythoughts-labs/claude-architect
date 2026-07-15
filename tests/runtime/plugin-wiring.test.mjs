@@ -24,7 +24,7 @@ describe("P0-A plugin wiring", () => {
     }
 
     const advisor = read("agents/advisor.md");
-    const frontmatterMatch = /^---\n([\s\S]*?)\n---\n/u.exec(advisor);
+    const frontmatterMatch = /^---\r?\n([\s\S]*?)\r?\n---\r?\n/u.exec(advisor);
     assert.ok(frontmatterMatch, "advisor must have frontmatter");
     const frontmatter = frontmatterMatch[1];
     const keys = new Set([...frontmatter.matchAll(/^([A-Za-z][A-Za-z0-9]*):/gmu)]

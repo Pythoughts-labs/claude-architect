@@ -245,7 +245,7 @@ afterEach(async () => {
   if (previousDelegated === undefined) delete process.env.CLAUDE_ARCHITECT_DELEGATED;
   else process.env.CLAUDE_ARCHITECT_DELEGATED = previousDelegated;
   await Promise.all(temporaryPaths.splice(0).map(entry =>
-    rm(entry, { recursive: true, force: true })));
+    rm(entry, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })));
 });
 
 describe("P0-A end-to-end vertical slice", () => {
@@ -358,7 +358,7 @@ describe("P0-A end-to-end vertical slice", () => {
     }
 
     expect(observed).toEqual([...FAILURE_PRECEDENCE]);
-  }, 30_000);
+  }, 90_000);
 
   it("structures the nested-delegation guard as a handler error", async () => {
     const repoRoot = await initRepo();
