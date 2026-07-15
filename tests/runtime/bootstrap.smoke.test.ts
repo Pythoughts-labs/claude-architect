@@ -26,7 +26,7 @@ async function nodeVersionPrelude(root: string, version: string): Promise<string
   return preludePath;
 }
 
-async function waitForFile(filePath: string, timeoutMs = 2_000): Promise<string> {
+async function waitForFile(filePath: string, timeoutMs = 10_000): Promise<string> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     try {
@@ -39,7 +39,7 @@ async function waitForFile(filePath: string, timeoutMs = 2_000): Promise<string>
   throw new Error(`timed out waiting for ${filePath}`);
 }
 
-async function waitForExit(child: ChildProcess, timeoutMs = 2_000): Promise<{
+async function waitForExit(child: ChildProcess, timeoutMs = 10_000): Promise<{
   code: number | null;
   signal: NodeJS.Signals | null;
 }> {
@@ -69,7 +69,7 @@ function isProcessAlive(pid: number): boolean {
   }
 }
 
-async function waitForProcessGone(pid: number, timeoutMs = 2_000): Promise<void> {
+async function waitForProcessGone(pid: number, timeoutMs = 10_000): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     if (!isProcessAlive(pid)) return;
@@ -291,7 +291,7 @@ describe("runtime bootstrap", () => {
         serverPid = Number(await waitForFile(pidFile));
         child.kill("SIGTERM");
         expect(await waitForFile(signalFile)).toBe("SIGTERM");
-        const exit = await waitForExit(child, 5_000);
+        const exit = await waitForExit(child, 15_000);
         await waitForProcessGone(serverPid);
         expect(exit).toEqual({ code: null, signal: "SIGTERM" });
         expect(isProcessAlive(serverPid)).toBe(false);

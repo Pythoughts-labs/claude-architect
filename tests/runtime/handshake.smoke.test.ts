@@ -43,8 +43,11 @@ describe("MCP server handshake", () => {
   it("lists lifecycle tools without non-protocol stdout", async () => {
     const stateRoot = await mkdtemp(path.join(tmpdir(), "ca-handshake-"));
     temporaryPaths.push(stateRoot);
+    // Hermetic: when this suite itself runs under a delegated verification environment,
+    // the inherited nested-delegation guard must not deny the server under test.
+    const { CLAUDE_ARCHITECT_DELEGATED: _delegated, ...parentEnv } = process.env;
     const child = spawn(process.execPath, [bootstrapPath], {
-      env: { ...process.env, CLAUDE_PLUGIN_DATA: stateRoot },
+      env: { ...parentEnv, CLAUDE_PLUGIN_DATA: stateRoot },
       stdio: ["pipe", "pipe", "pipe"],
     });
     child.stdin.on("error", () => {});
