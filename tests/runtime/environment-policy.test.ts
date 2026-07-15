@@ -50,6 +50,22 @@ describe("buildEnvironment", () => {
     expect(JSON.stringify(result.provenance)).not.toContain("spec-value");
   });
 
+  it("applies adapter-supplied values without overriding host-provided allowlisted values", () => {
+    process.env.TASK10_ALLOWED = "adapter-value";
+    delete process.env.CODEX_HOME;
+    const result = buildEnvironment({
+      os: "darwin",
+      adapterAllowlist: ["TASK10_ALLOWED", "CODEX_HOME"],
+      adapterValues: { CODEX_HOME: "/hosthome/.codex", TASK10_ALLOWED: "must-not-win" },
+    });
+
+    expect(result.env.CODEX_HOME).toBe("/hosthome/.codex");
+    expect(result.env.TASK10_ALLOWED).toBe("adapter-value");
+    expect(result.provenance).toEqual(expect.arrayContaining([
+      { name: "CODEX_HOME", source: "adapter" },
+    ]));
+  });
+
   it("merges platform, adapter, and spec layers in order and applies a temporary home", () => {
     process.env.HOME = "/adapter/home";
 

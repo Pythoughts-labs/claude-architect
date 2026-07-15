@@ -15,6 +15,7 @@ export type EnvProvenance = EnvProvenanceEntry[];
 export interface BuildEnvironmentArgs {
   os: EnvironmentOS;
   adapterAllowlist: string[];
+  adapterValues?: Record<string, string>;
   specAdditions?: Record<string, string>;
   tempHome?: string;
 }
@@ -163,6 +164,13 @@ export function buildEnvironment(
       if (value !== undefined) {
         setEnvironmentValue(env, provenance, name, value, "adapter");
       }
+    }
+
+    for (const [name, value] of Object.entries(args.adapterValues ?? {})) {
+      validateEnvironmentName(name);
+      if (args.tempHome !== undefined && name.startsWith("XDG_")) continue;
+      if (Object.prototype.hasOwnProperty.call(env, name)) continue;
+      setEnvironmentValue(env, provenance, name, value, "adapter");
     }
 
     for (const [name, value] of Object.entries(args.specAdditions ?? {})) {

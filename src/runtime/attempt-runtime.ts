@@ -544,6 +544,7 @@ export async function runAttempt(
     builtEnvironment = buildEnvironment({
       os: ps.os,
       adapterAllowlist: invocation.requiredEnv,
+      ...(invocation.env === undefined ? {} : { adapterValues: invocation.env }),
       ...(tempHome === null ? {} : { tempHome }),
     });
     const recordingServices = withRunStartPidRecording(ps, runStartTarget, runStart);

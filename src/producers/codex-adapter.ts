@@ -1,4 +1,7 @@
+import { existsSync } from "node:fs";
 import { open } from "node:fs/promises";
+import { homedir } from "node:os";
+import { join } from "node:path";
 import { supervise } from "../platform/process-supervisor.js";
 import type { ResolvedExecutable } from "../platform/platform-services.js";
 import type { DelegationSpec } from "../protocol/delegation-spec.js";
@@ -117,6 +120,23 @@ function renderPrompt(spec: DelegationSpec): string {
   ].join("\n");
 }
 
+export interface DefaultCodexEnvDeps {
+  env: Record<string, string | undefined>;
+  homeDirectory: string;
+  hasAuthStore: (directory: string) => boolean;
+}
+
+/**
+ * The isolated per-attempt HOME hides the host `~/.codex` auth store. When the
+ * Host has not set CODEX_HOME explicitly, default it to the real auth store so
+ * Codex authentication survives HOME isolation.
+ */
+export function defaultCodexEnv(deps: DefaultCodexEnvDeps): Record<string, string> {
+  if (deps.env.CODEX_HOME !== undefined) return {};
+  const store = join(deps.homeDirectory, ".codex");
+  return deps.hasAuthStore(store) ? { CODEX_HOME: store } : {};
+}
+
 export class CodexAdapter implements ProducerAdapter {
   readonly producerId = "codex";
 
@@ -216,6 +236,11 @@ export class CodexAdapter implements ProducerAdapter {
       args,
       stdin: renderPrompt(spec),
       requiredEnv: [...CODEX_REQUIRED_ENV],
+      env: defaultCodexEnv({
+        env: process.env,
+        homeDirectory: homedir(),
+        hasAuthStore: directory => existsSync(join(directory, "auth.json")),
+      }),
       network: "denied",
     };
   }

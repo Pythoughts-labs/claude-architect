@@ -22276,7 +22276,10 @@ async function git(cwd, args, indexFile) {
 }
 
 // src/producers/codex-adapter.ts
+import { existsSync } from "node:fs";
 import { open } from "node:fs/promises";
+import { homedir } from "node:os";
+import { join } from "node:path";
 var CODEX_REQUIRED_ENV = [
   "CODEX_HOME",
   "CODEX_API_KEY",
@@ -22365,6 +22368,11 @@ function renderPrompt(spec) {
     "",
     "Make only the requested edits. Return a concise final summary of the work performed."
   ].join("\n");
+}
+function defaultCodexEnv(deps) {
+  if (deps.env.CODEX_HOME !== void 0) return {};
+  const store = join(deps.homeDirectory, ".codex");
+  return deps.hasAuthStore(store) ? { CODEX_HOME: store } : {};
 }
 var CodexAdapter = class {
   producerId = "codex";
@@ -22455,6 +22463,11 @@ var CodexAdapter = class {
       args,
       stdin: renderPrompt(spec),
       requiredEnv: [...CODEX_REQUIRED_ENV],
+      env: defaultCodexEnv({
+        env: process.env,
+        homeDirectory: homedir(),
+        hasAuthStore: (directory) => existsSync(join(directory, "auth.json"))
+      }),
       network: "denied"
     };
   }
@@ -25233,6 +25246,12 @@ function buildEnvironment(args) {
         setEnvironmentValue(env, provenance, name, value, "adapter");
       }
     }
+    for (const [name, value] of Object.entries(args.adapterValues ?? {})) {
+      validateEnvironmentName(name);
+      if (args.tempHome !== void 0 && name.startsWith("XDG_")) continue;
+      if (Object.prototype.hasOwnProperty.call(env, name)) continue;
+      setEnvironmentValue(env, provenance, name, value, "adapter");
+    }
     for (const [name, value] of Object.entries(args.specAdditions ?? {})) {
       setEnvironmentValue(env, provenance, name, value, "spec");
     }
@@ -25635,6 +25654,7 @@ async function runAttempt(checkoutPath, spec, deps) {
     builtEnvironment = buildEnvironment({
       os: ps.os,
       adapterAllowlist: invocation.requiredEnv,
+      ...invocation.env === void 0 ? {} : { adapterValues: invocation.env },
       ...tempHome === null ? {} : { tempHome }
     });
     const recordingServices = withRunStartPidRecording(ps, runStartTarget, runStart);

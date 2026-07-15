@@ -6,6 +6,12 @@ All notable changes to Claude Architect are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.9.1] - 2026-07-15
+
+### Fixed
+
+- Codex authentication now survives HOME isolation. When the Host has not set `CODEX_HOME`, the Codex adapter defaults it to the real `~/.codex` auth store (only when `auth.json` exists), supplied through a new adapter-values environment layer that never overrides a host-provided allowlisted value. Previously every sandboxed invocation failed with 401 Unauthorized because the per-attempt temporary HOME hid the auth store.
+
 ## [0.9.0] - 2026-07-15
 
 ### Fixed
@@ -83,7 +89,8 @@ Initial public release.
 - Native OpenCode assets under `.opencode/` and `opencode.json`, so the same lanes and skill work outside Claude Code.
 - SVG banner and shields badges for the README.
 
-[Unreleased]: https://github.com/Pythoughts-labs/claude-architect/compare/v0.9.0...HEAD
+[Unreleased]: https://github.com/Pythoughts-labs/claude-architect/compare/v0.9.1...HEAD
+[0.9.1]: https://github.com/Pythoughts-labs/claude-architect/compare/v0.9.0...v0.9.1
 [0.9.0]: https://github.com/Pythoughts-labs/claude-architect/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/Pythoughts-labs/claude-architect/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/Pythoughts-labs/claude-architect/compare/v0.6.0...v0.7.0

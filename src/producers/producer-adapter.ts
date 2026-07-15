@@ -36,6 +36,8 @@ export interface ProducerInvocation {
   args: string[];
   stdin?: string;
   requiredEnv: string[];
+  /** Adapter-supplied defaults; never override a host-provided allowlisted value. */
+  env?: Record<string, string>;
   network: "denied" | "allowed";
 }
 

@@ -1,7 +1,7 @@
 {
   "name": "claude-architect",
   "displayName": "Claude Architect",
-  "version": "0.9.0",
+  "version": "0.9.1",
   "description": "Verified MCP delegation for Claude, with a certified Codex edit Lane on macOS arm64 and explicit legacy fallbacks for OpenCode, Pi, and Pythinker.",
   "author": {
     "name": "elkaix",

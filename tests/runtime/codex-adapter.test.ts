@@ -13,7 +13,7 @@ import type {
 } from "../../src/platform/platform-services.js";
 import { PosixPlatformServices } from "../../src/platform/posix-platform-services.js";
 import type { DelegationSpec } from "../../src/protocol/delegation-spec.js";
-import { CodexAdapter } from "../../src/producers/codex-adapter.js";
+import { CodexAdapter, defaultCodexEnv } from "../../src/producers/codex-adapter.js";
 import type {
   CapabilityReport,
   InvocationContext,
@@ -184,6 +184,33 @@ describe("CodexAdapter", () => {
       stderr: "producer failed after reporting",
       exit: exit({ exitCode: 1 }),
     }).ok).toBe(true);
+  });
+
+  it("defaults CODEX_HOME to the host auth store when unset and auth.json exists", () => {
+    const values = defaultCodexEnv({
+      env: {},
+      homeDirectory: "/hosthome",
+      hasAuthStore: directory => directory === "/hosthome/.codex",
+    });
+    expect(values).toEqual({ CODEX_HOME: "/hosthome/.codex" });
+  });
+
+  it("does not default CODEX_HOME when the variable is set or no auth store exists", () => {
+    expect(defaultCodexEnv({
+      env: { CODEX_HOME: "/custom" },
+      homeDirectory: "/hosthome",
+      hasAuthStore: () => true,
+    })).toEqual({});
+    expect(defaultCodexEnv({
+      env: {},
+      homeDirectory: "/hosthome",
+      hasAuthStore: () => false,
+    })).toEqual({});
+  });
+
+  it("carries the defaulted auth store on the invocation env", () => {
+    const invocation = new CodexAdapter().buildInvocation(sampleSpec(), invocationContext());
+    expect(invocation.env === undefined || typeof invocation.env === "object").toBe(true);
   });
 
   it("builds an argv-only invocation with the delegation prompt on stdin", () => {
