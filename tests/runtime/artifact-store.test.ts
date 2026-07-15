@@ -2,6 +2,7 @@ import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
   access,
+  chmod,
   mkdir,
   mkdtemp,
   readFile,
@@ -156,6 +157,44 @@ describe("ArtifactStore", () => {
     registration.dispose();
   });
 
+  it("fails closed instead of redacting an AttemptResult status", async () => {
+    const registration = registerSecretValue("failed");
+    const store = new ArtifactStore("run-status-collision");
+
+    await expect(store.writeResult(sampleResult("run-status-collision"))).rejects.toThrow(
+      /safely persist|status/,
+    );
+    await expect(access(join(store.runDirectory, "result.json"))).rejects.toMatchObject({
+      code: "ENOENT",
+    });
+    registration.dispose();
+  });
+
+  it("fails closed instead of changing hash-bound candidate paths", async () => {
+    const secretPath = "enterprise-secret-path.ts";
+    const registration = registerSecretValue(secretPath);
+    const store = new ArtifactStore("run-candidate-path-collision");
+    const result = sampleResult("run-candidate-path-collision");
+    const changedPaths = [{
+      path: secretPath,
+      changeType: "added" as const,
+      mode: "100644",
+      contentHash: "b".repeat(40),
+    }];
+    result.candidate = {
+      baseCommitOid: "a".repeat(40),
+      candidateTreeOid: "b".repeat(40),
+      candidateCommitOid: "c".repeat(40),
+      anchorRef: "refs/claude-architect/candidates/run-candidate-path-collision",
+      manifestHash: createHash("sha256").update(JSON.stringify(changedPaths)).digest("hex"),
+      changedPaths,
+      patch: "",
+    };
+
+    await expect(store.writeResult(result)).rejects.toThrow(/candidate path|safely persist/);
+    registration.dispose();
+  });
+
   it("writes redacted logs and returns a relative archive ref", async () => {
     const registration = registerSecretValue("enterprise-secret-value");
     const store = new ArtifactStore("run-log");
@@ -165,12 +204,12 @@ describe("ArtifactStore", () => {
     expect(ref).toBe("logs/producer.log");
     const stored = await readFile(join(process.env.CLAUDE_PLUGIN_DATA!, "runs", "run-log", ref), "utf8");
     expect(stored).not.toContain("enterprise-secret-value");
-    expect(stored).toContain("[x]");
+    expect(stored).toContain("[s]");
     registration.dispose();
   });
 
   it("redacts registered secrets containing literal marker text from logs", async () => {
-    const secret = "prefix[x]suffix";
+    const secret = "prefix[s]suffix";
     const registration = registerSecretValue(secret);
     const store = new ArtifactStore("run-marker-secret-log");
 
@@ -178,12 +217,12 @@ describe("ArtifactStore", () => {
 
     const stored = await readFile(join(store.runDirectory, ref), "utf8");
     expect(stored).not.toContain(secret);
-    expect(stored).toBe("output [x]\n");
+    expect(stored).toBe("output [s]\n");
     registration.dispose();
   });
 
   it("redacts registered marker secrets before JSON escaping can hide them", async () => {
-    const secret = 'prefix"[x]\\suffix';
+    const secret = 'prefix"[s]\\suffix';
     const registration = registerSecretValue(secret);
     const store = new ArtifactStore("run-marker-secret-json");
     const result = sampleResult("run-marker-secret-json");
@@ -193,13 +232,13 @@ describe("ArtifactStore", () => {
 
     const stored = await readFile(join(store.runDirectory, "result.json"), "utf8");
     const parsed = JSON.parse(stored) as AttemptResult;
-    expect(parsed.summary).toBe("[x]");
+    expect(parsed.summary).toBe("[s]");
     expect(JSON.stringify(parsed)).not.toContain(secret);
     registration.dispose();
   });
 
   it("does not persist a registered secret created by pattern redaction", async () => {
-    const secret = "prefix [x] suffix";
+    const secret = "prefix [k] suffix";
     const registration = registerSecretValue(secret);
     const store = new ArtifactStore("run-cascading-secret-log");
 
@@ -209,7 +248,7 @@ describe("ArtifactStore", () => {
     );
 
     const stored = await readFile(join(store.runDirectory, ref), "utf8");
-    expect(stored).toBe("[x]");
+    expect(stored).toBe("[s]");
     expect(stored).not.toContain(secret);
     registration.dispose();
   });
@@ -231,7 +270,7 @@ describe("ArtifactStore", () => {
     ), "utf8");
     expect(stored).not.toContain(secret);
     const parsed = JSON.parse(stored) as AttemptResult;
-    expect(Object.keys(parsed.evidence)).toContain("[x]");
+    expect(Object.keys(parsed.evidence)).toContain("[s]");
     registration.dispose();
   });
 
@@ -378,6 +417,11 @@ describe("ArtifactStore", () => {
     await store.prune({ maxAgeMs: 1_000, maxBytes: Number.MAX_SAFE_INTEGER });
 
     await expect(git(repoRoot, ["show-ref", "--verify", anchorRef])).rejects.toBeDefined();
+    await expect(git(repoRoot, [
+      "show-ref",
+      "--verify",
+      "refs/claude-architect/prune-backups/run-anchor",
+    ])).rejects.toBeDefined();
     await expect(stat(runDirectory)).rejects.toMatchObject({ code: "ENOENT" });
   });
 
@@ -570,9 +614,116 @@ describe("ArtifactStore", () => {
     expect(await git(repoRoot, ["symbolic-ref", anchorRef])).toBe("refs/heads/missing");
     await expect(stat(runDirectory)).resolves.toBeDefined();
   });
+
+  it("rejects a tampered manifest before pruning a candidate anchor", async () => {
+    const repoRoot = await mkdtemp(join(tmpdir(), "claude-architect-integrity-repo-"));
+    const otherRepo = await mkdtemp(join(tmpdir(), "claude-architect-other-repo-"));
+    temporaryPaths.push(repoRoot, otherRepo);
+    for (const repository of [repoRoot, otherRepo]) {
+      await git(repository, ["init", "-q"]);
+      await git(repository, ["commit", "--allow-empty", "-q", "-m", "base"]);
+    }
+    const candidateCommitOid = await git(repoRoot, ["rev-parse", "HEAD"]);
+    const anchorRef = "refs/claude-architect/candidates/run-tampered-manifest";
+    await git(repoRoot, ["update-ref", anchorRef, candidateCommitOid]);
+
+    const store = new ArtifactStore("run-tampered-manifest");
+    const result = sampleResult("run-tampered-manifest");
+    result.candidate = {
+      baseCommitOid: candidateCommitOid,
+      candidateTreeOid: await git(repoRoot, ["rev-parse", "HEAD^{tree}"]),
+      candidateCommitOid,
+      anchorRef,
+      manifestHash: createHash("sha256").update("[]").digest("hex"),
+      changedPaths: [],
+      patch: "",
+    };
+    await store.writeResult(result);
+    await store.writeManifest(buildRunManifest(manifestArgs(
+      "run-tampered-manifest",
+      repoRoot,
+    )));
+    const manifestPath = join(store.runDirectory, "manifest.json");
+    const manifest = JSON.parse(await readFile(manifestPath, "utf8")) as Record<string, unknown>;
+    manifest.repoRoot = otherRepo;
+    await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
+    const oldTime = new Date(Date.now() - 60_000);
+    await utimes(store.runDirectory, oldTime, oldTime);
+
+    const pruned = await store.prune({
+      maxAgeMs: 1_000,
+      maxBytes: Number.MAX_SAFE_INTEGER,
+    });
+
+    expect(pruned.removed).not.toContain("run-tampered-manifest");
+    expect(await git(repoRoot, ["rev-parse", anchorRef])).toBe(candidateCommitOid);
+    await expect(stat(store.runDirectory)).resolves.toBeDefined();
+  });
+
+  it("restores the candidate anchor when archive removal fails", async () => {
+    if (process.platform === "win32") return;
+    const repoRoot = await mkdtemp(join(tmpdir(), "claude-architect-rollback-repo-"));
+    temporaryPaths.push(repoRoot);
+    await git(repoRoot, ["init", "-q"]);
+    await git(repoRoot, ["commit", "--allow-empty", "-q", "-m", "base"]);
+    const candidateCommitOid = await git(repoRoot, ["rev-parse", "HEAD"]);
+    const anchorRef = "refs/claude-architect/candidates/run-prune-rollback";
+    await git(repoRoot, ["update-ref", anchorRef, candidateCommitOid]);
+
+    const store = new ArtifactStore("run-prune-rollback");
+    const result = sampleResult("run-prune-rollback");
+    result.candidate = {
+      baseCommitOid: candidateCommitOid,
+      candidateTreeOid: await git(repoRoot, ["rev-parse", "HEAD^{tree}"]),
+      candidateCommitOid,
+      anchorRef,
+      manifestHash: createHash("sha256").update("[]").digest("hex"),
+      changedPaths: [],
+      patch: "",
+    };
+    await store.writeResult(result);
+    await store.writeManifest(buildRunManifest(manifestArgs(
+      "run-prune-rollback",
+      repoRoot,
+    )));
+    await store.writeLog("locked", "retain me");
+    const logsDirectory = join(store.runDirectory, "logs");
+    await chmod(logsDirectory, 0o500);
+    const oldTime = new Date(Date.now() - 60_000);
+    await utimes(store.runDirectory, oldTime, oldTime);
+
+    try {
+      const pruned = await store.prune({
+        maxAgeMs: 1_000,
+        maxBytes: Number.MAX_SAFE_INTEGER,
+      });
+
+      expect(pruned.removed).not.toContain("run-prune-rollback");
+      expect(pruned.retained.some(entry => entry.runId === "run-prune-rollback")).toBe(true);
+      expect(await git(repoRoot, ["rev-parse", anchorRef])).toBe(candidateCommitOid);
+      await expect(git(repoRoot, [
+        "show-ref",
+        "--verify",
+        "refs/claude-architect/prune-backups/run-prune-rollback",
+      ])).rejects.toBeDefined();
+      await expect(stat(store.runDirectory)).resolves.toBeDefined();
+    } finally {
+      await chmod(logsDirectory, 0o700).catch(() => {});
+    }
+  });
 });
 
 describe("buildRunManifest", () => {
+  it("fails closed when redaction would change repository identity", () => {
+    const repoRoot = "/canonical/enterprise-secret-repository";
+    const registration = registerSecretValue(repoRoot);
+
+    expect(() => buildRunManifest(manifestArgs("run-repo-collision", repoRoot))).toThrow(
+      /repository root|safely persist/,
+    );
+    registration.dispose();
+  });
+
   it("records reproducibility hashes and names-only environment provenance", () => {
     const registration = registerSecretValue("manifest-secret-value");
     const args = manifestArgs("run-manifest", "/canonical/repo");

@@ -135,7 +135,7 @@ describe("buildEnvironment", () => {
       specAdditions: { [name]: secret },
     });
 
-    expect(redact(secret)).toBe("[x]");
+    expect(redact(secret)).toBe("[s]");
     result.secretRegistration.dispose();
   });
 
@@ -153,7 +153,7 @@ describe("buildEnvironment", () => {
 
     first.secretRegistration.dispose();
     first.secretRegistration.dispose();
-    expect(redact("shared-attempt-secret")).toBe("[x]");
+    expect(redact("shared-attempt-secret")).toBe("[s]");
 
     second.secretRegistration.dispose();
     expect(redact("shared-attempt-secret")).toBe("shared-attempt-secret");

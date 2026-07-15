@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { constants } from "node:fs";
 import {
   link,
@@ -7,25 +7,35 @@ import {
   open,
   readdir,
   realpath,
+  rename,
   rm,
 } from "node:fs/promises";
 import path from "node:path";
 import { git } from "../git/git-exec.js";
-import type { AttemptResult } from "../protocol/attempt-result.js";
+import type {
+  AttemptResult,
+  CandidateArtifact,
+  CommandOutcome,
+} from "../protocol/attempt-result.js";
+import type { VerificationCommand } from "../protocol/delegation-spec.js";
 import { RuntimeError } from "../util/errors.js";
 import {
   containsRegisteredSecret,
   containsRegisteredSecretValue,
   redact,
   redactRecord,
-  redactValues,
 } from "./redaction.js";
-import { sanitizeRunManifest, type RunManifest } from "./run-manifest.js";
+import {
+  sanitizeRunManifest,
+  verifyRunManifest,
+  type RunManifest,
+} from "./run-manifest.js";
 import { resolveStateDir } from "./state-dir.js";
 
 const SAFE_COMPONENT = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 const WINDOWS_RESERVED_COMPONENT = /^(?:CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])$/i;
 const CANDIDATE_REF_PREFIX = "refs/claude-architect/candidates/";
+const PRUNE_BACKUP_REF_PREFIX = "refs/claude-architect/prune-backups/";
 const CLEANUP_JOURNAL = "cleanup.ndjson";
 const NO_FOLLOW = constants.O_NOFOLLOW ?? 0;
 
@@ -44,18 +54,43 @@ interface RunEntry {
   directory: string;
   modifiedAtMs: number;
   bytes: number;
+  identity: DirectoryIdentity;
+}
+
+interface DirectoryIdentity {
+  dev: number;
+  ino: number;
 }
 
 type PruneReason = "max-age" | "max-bytes";
 type AnchorCleanup = "not-applicable" | "deleted" | "already-absent";
 
 interface CleanupRecord {
-  event: "prune-cleanup-intent" | "prune-cleanup-complete";
+  event: "prune-cleanup-intent" | "prune-cleanup-complete" | "prune-cleanup-rollback";
   runId: string;
   reason: PruneReason;
   anchorCleanup: AnchorCleanup | "pending";
   archiveBytes: number;
+  quarantineName: string;
+  repoRoot: string | null;
+  anchorRef: string | null;
+  backupRef: string | null;
+  candidateCommitOid: string | null;
   recordedAt: string;
+}
+
+interface PreparedAnchorCleanup {
+  outcome: AnchorCleanup;
+  repoRoot: string | null;
+  anchorRef: string | null;
+  backupRef: string | null;
+  candidateCommitOid: string | null;
+}
+
+interface AnchorCleanupTransaction {
+  outcome: AnchorCleanup;
+  commit(): Promise<void>;
+  rollback(): Promise<void>;
 }
 
 let cleanupJournalTail: Promise<void> = Promise.resolve();
@@ -85,6 +120,16 @@ function isAlreadyPresent(error: unknown): boolean {
   return errorCode(error) === "EEXIST";
 }
 
+async function pathExists(filename: string): Promise<boolean> {
+  try {
+    await lstat(filename);
+    return true;
+  } catch (error) {
+    if (isMissing(error)) return false;
+    throw error;
+  }
+}
+
 function validatePruneLimit(value: number, name: string): void {
   if (!Number.isFinite(value) || value < 0) {
     throw new RuntimeError(`invalid ${name}`);
@@ -104,9 +149,11 @@ function isWithin(root: string, candidate: string): boolean {
     || (!path.isAbsolute(relative) && relative !== ".." && !relative.startsWith(`..${path.sep}`));
 }
 
-async function ensurePlainDirectory(directory: string): Promise<void> {
+async function ensurePlainDirectory(directory: string): Promise<DirectoryIdentity> {
+  let created = false;
   try {
     await mkdir(directory, { mode: 0o700 });
+    created = true;
   } catch (error) {
     if (!isAlreadyPresent(error)) throw error;
   }
@@ -114,12 +161,27 @@ async function ensurePlainDirectory(directory: string): Promise<void> {
   if (metadata.isSymbolicLink() || !metadata.isDirectory()) {
     throw new RuntimeError(`archive directory must not be a symbolic link: ${redact(directory)}`);
   }
+  if (created) await syncDirectory(path.dirname(directory));
+  return { dev: metadata.dev, ino: metadata.ino };
+}
+
+async function assertDirectoryIdentity(
+  directory: string,
+  expected: DirectoryIdentity,
+): Promise<void> {
+  const metadata = await lstat(directory);
+  if (metadata.isSymbolicLink()
+    || !metadata.isDirectory()
+    || metadata.dev !== expected.dev
+    || metadata.ino !== expected.ino) {
+    throw new RuntimeError("archive directory identity changed during operation");
+  }
 }
 
 async function syncDirectory(directory: string): Promise<void> {
   let handle;
   try {
-    handle = await open(directory, constants.O_RDONLY);
+    handle = await open(directory, constants.O_RDONLY | NO_FOLLOW);
     await handle.sync();
   } catch (error) {
     const unsupportedOnWindows = process.platform === "win32"
@@ -220,6 +282,105 @@ function serializeJson(value: unknown, indentation?: number): string {
   return serialized;
 }
 
+function preserveIdentity(value: string, label: string): string {
+  if (redact(value) !== value) {
+    throw new RuntimeError(`${label} cannot be safely persisted after redaction`);
+  }
+  return value;
+}
+
+function preserveNullableIdentity(value: string | null, label: string): string | null {
+  return value === null ? null : preserveIdentity(value, label);
+}
+
+function sanitizeVerificationCommand(command: VerificationCommand): VerificationCommand {
+  const sanitized: VerificationCommand = {
+    id: preserveIdentity(command.id, "verification command id"),
+    executable: redact(command.executable),
+    args: command.args.map(redact),
+    cwd: redact(command.cwd),
+    timeoutMs: command.timeoutMs,
+    network: command.network,
+    expectedExitCodes: [...command.expectedExitCodes],
+  };
+  if (command.environment !== undefined) {
+    sanitized.environment = redactRecord(command.environment);
+  }
+  if (command.platform !== undefined) {
+    sanitized.platform = {
+      ...(command.platform.os === undefined ? {} : { os: [...command.platform.os] }),
+      ...(command.platform.arch === undefined
+        ? {}
+        : { arch: command.platform.arch.map(arch => preserveIdentity(arch, "platform arch")) }),
+    };
+  }
+  return sanitized;
+}
+
+function sanitizeCommandOutcome(outcome: CommandOutcome): CommandOutcome {
+  return {
+    id: preserveIdentity(outcome.id, "command outcome id"),
+    executable: redact(outcome.executable),
+    args: outcome.args.map(redact),
+    exitCode: outcome.exitCode,
+    timedOut: outcome.timedOut,
+    durationMs: outcome.durationMs,
+    stdoutRef: preserveIdentity(outcome.stdoutRef, "stdout archive ref"),
+    stderrRef: preserveIdentity(outcome.stderrRef, "stderr archive ref"),
+  };
+}
+
+function sanitizeCandidate(candidate: CandidateArtifact): CandidateArtifact {
+  const changedPaths = candidate.changedPaths.map(change => ({
+    path: preserveIdentity(change.path, "candidate path"),
+    changeType: change.changeType,
+    mode: preserveIdentity(change.mode, "candidate mode"),
+    contentHash: preserveNullableIdentity(change.contentHash, "candidate content hash"),
+  }));
+  const expectedManifestHash = createHash("sha256")
+    .update(JSON.stringify(changedPaths))
+    .digest("hex");
+  if (candidate.manifestHash !== expectedManifestHash) {
+    throw new RuntimeError("candidate manifest hash does not match changed paths");
+  }
+  return {
+    baseCommitOid: preserveIdentity(candidate.baseCommitOid, "candidate base commit oid"),
+    candidateTreeOid: preserveIdentity(candidate.candidateTreeOid, "candidate tree oid"),
+    candidateCommitOid: preserveIdentity(candidate.candidateCommitOid, "candidate commit oid"),
+    anchorRef: preserveIdentity(candidate.anchorRef, "candidate anchor ref"),
+    manifestHash: preserveIdentity(candidate.manifestHash, "candidate manifest hash"),
+    changedPaths,
+    patch: redact(candidate.patch),
+  };
+}
+
+function sanitizeAttemptResult(result: AttemptResult): AttemptResult {
+  return {
+    resultVersion: result.resultVersion,
+    runId: preserveIdentity(result.runId, "attempt run id"),
+    status: preserveIdentity(result.status, "attempt status") as AttemptResult["status"],
+    failure: result.failure === null
+      ? null
+      : preserveIdentity(
+        result.failure,
+        "failure classification",
+      ) as NonNullable<AttemptResult["failure"]>,
+    summary: redact(result.summary),
+    producerSummary: result.producerSummary === null ? null : redact(result.producerSummary),
+    candidate: result.candidate === null ? null : sanitizeCandidate(result.candidate),
+    requestedVerification: result.requestedVerification.map(sanitizeVerificationCommand),
+    executedVerification: result.executedVerification.map(sanitizeCommandOutcome),
+    unresolvedIssues: result.unresolvedIssues.map(redact),
+    evidence: redactRecord(result.evidence),
+    logsRef: preserveIdentity(result.logsRef, "logs archive ref"),
+    producerId: result.producerId === null ? null : redact(result.producerId),
+    producerVersion: result.producerVersion === null ? null : redact(result.producerVersion),
+    producerModel: result.producerModel === null ? null : redact(result.producerModel),
+    durationMs: result.durationMs,
+    sessionId: result.sessionId === null ? null : redact(result.sessionId),
+  };
+}
+
 export class ArtifactStore {
   readonly runDirectory: string;
   private readonly runsRoot: string;
@@ -272,7 +433,7 @@ export class ArtifactStore {
     const relativeDirectory = path.dirname(normalized);
     if (relativeDirectory === ".") return canonicalRunDirectory;
 
-    let current = this.runDirectory;
+    let current = canonicalRunDirectory;
     for (const component of relativeDirectory.split(path.sep)) {
       validateComponent(component, "log name");
       current = path.join(current, component);
@@ -281,32 +442,39 @@ export class ArtifactStore {
       if (!isWithin(canonicalRunDirectory, canonicalCurrent)) {
         throw new RuntimeError("archive directory escapes run directory");
       }
+      current = canonicalCurrent;
     }
     return current;
   }
 
   private async writeArchiveFile(relativePath: string, text: string): Promise<void> {
     const directory = await this.ensureArchiveDirectory(relativePath);
+    const directoryIdentity = await ensurePlainDirectory(directory);
     const destination = path.join(directory, path.basename(relativePath));
     const temporaryPath = path.join(directory, `.${path.basename(destination)}.${randomUUID()}.tmp`);
     let handle;
     let temporaryCreated = false;
     try {
+      await assertDirectoryIdentity(directory, directoryIdentity);
       handle = await open(
         temporaryPath,
         constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | NO_FOLLOW,
         0o600,
       );
       temporaryCreated = true;
+      await assertDirectoryIdentity(directory, directoryIdentity);
       await handle.writeFile(text, { encoding: "utf8" });
       await handle.sync();
       await handle.close();
       handle = undefined;
 
       try {
+        await assertDirectoryIdentity(directory, directoryIdentity);
         await link(temporaryPath, destination);
+        await assertDirectoryIdentity(directory, directoryIdentity);
       } catch (error) {
         if (!isAlreadyPresent(error)) throw error;
+        await assertDirectoryIdentity(directory, directoryIdentity);
         const existing = await readRegularFile(destination);
         if (existing !== text) {
           throw new RuntimeError(`archive entry already exists with different content: ${relativePath}`);
@@ -315,19 +483,16 @@ export class ArtifactStore {
     } finally {
       await handle?.close();
       if (temporaryCreated) {
+        await assertDirectoryIdentity(directory, directoryIdentity);
         await rm(temporaryPath, { force: true });
         await syncDirectory(directory);
+        await assertDirectoryIdentity(directory, directoryIdentity);
       }
     }
   }
 
-  private async writeJson(
-    relativePath: string,
-    value: unknown,
-    sanitizeValues = true,
-  ): Promise<void> {
-    const sanitized = sanitizeValues ? redactValues(value) : value;
-    const serialized = `${serializeJson(sanitized, 2)}\n`;
+  private async writeJson(relativePath: string, value: unknown): Promise<void> {
+    const serialized = `${serializeJson(value, 2)}\n`;
     await this.writeArchiveFile(relativePath, serialized);
   }
 
@@ -342,23 +507,14 @@ export class ArtifactStore {
     if (result.runId !== this.runId) {
       throw new RuntimeError("attempt result run id does not match artifact store");
     }
-    const sanitized = redactValues(result);
-    sanitized.evidence = redactRecord(result.evidence);
-    sanitized.requestedVerification = result.requestedVerification.map(command => {
-      const sanitizedCommand = redactValues(command);
-      if (command.environment !== undefined) {
-        sanitizedCommand.environment = redactRecord(command.environment);
-      }
-      return sanitizedCommand;
-    });
-    await this.writeJson("result.json", sanitized);
+    await this.writeJson("result.json", sanitizeAttemptResult(result));
   }
 
   async writeManifest(manifest: RunManifest): Promise<void> {
     if (manifest.runId !== this.runId) {
       throw new RuntimeError("run manifest id does not match artifact store");
     }
-    await this.writeJson("manifest.json", sanitizeRunManifest(manifest), false);
+    await this.writeJson("manifest.json", sanitizeRunManifest(manifest));
   }
 
   async readResult(runId: string): Promise<AttemptResult | null> {
@@ -395,7 +551,10 @@ export class ArtifactStore {
     const runDirectory = path.join(this.runsRoot, runId);
     if (await this.ensureExistingRunDirectory(runDirectory) === null) return null;
     try {
-      return JSON.parse(await readRegularFile(path.join(runDirectory, "manifest.json"))) as RunManifest;
+      return verifyRunManifest(
+        JSON.parse(await readRegularFile(path.join(runDirectory, "manifest.json"))),
+        runId,
+      );
     } catch (error) {
       if (isMissing(error)) return null;
       throw error;
@@ -422,6 +581,7 @@ export class ArtifactStore {
           directory,
           modifiedAtMs: metadata.mtimeMs,
           bytes: await directoryBytes(directory),
+          identity: { dev: metadata.dev, ino: metadata.ino },
         };
       } catch (error) {
         if (isMissing(error)) return null;
@@ -431,41 +591,155 @@ export class ArtifactStore {
     return entries.filter((entry): entry is RunEntry => entry !== null).sort(compareEntries);
   }
 
-  private async deleteCandidateAnchor(
+  private async prepareCandidateAnchorCleanup(
     runId: string,
     result: AttemptResult,
-  ): Promise<AnchorCleanup> {
-    if (result.candidate === null) return "not-applicable";
+  ): Promise<PreparedAnchorCleanup> {
+    if (result.candidate === null) {
+      return {
+        outcome: "not-applicable",
+        repoRoot: null,
+        anchorRef: null,
+        backupRef: null,
+        candidateCommitOid: null,
+      };
+    }
 
+    const candidate = sanitizeCandidate(result.candidate);
     const expectedRef = `${CANDIDATE_REF_PREFIX}${runId}`;
-    if (result.candidate.anchorRef !== expectedRef) {
+    if (candidate.anchorRef !== expectedRef) {
       throw new RuntimeError("archived candidate anchor does not match run id");
     }
-    if (!/^[0-9a-f]{40}(?:[0-9a-f]{24})?$/.test(result.candidate.candidateCommitOid)) {
+    if (!/^[0-9a-f]{40}(?:[0-9a-f]{24})?$/.test(candidate.candidateCommitOid)) {
       throw new RuntimeError("archived candidate commit oid is invalid");
     }
     const manifest = await this.readManifest(runId);
     if (manifest === null) {
       throw new RuntimeError("cannot remove candidate anchor without archived repository root");
     }
-    const deletion = await git(manifest.repoRoot, [
+    const canonicalRepoRoot = await realpath(manifest.repoRoot);
+    const repositoryTopLevel = await git(canonicalRepoRoot, ["rev-parse", "--show-toplevel"]);
+    if (repositoryTopLevel.exitCode !== 0
+      || await realpath(repositoryTopLevel.stdout.trim()) !== canonicalRepoRoot) {
+      throw new RuntimeError("archived repository root is not a canonical repository root");
+    }
+    const commit = await git(canonicalRepoRoot, [
+      "cat-file",
+      "-e",
+      `${candidate.candidateCommitOid}^{commit}`,
+    ]);
+    if (commit.exitCode !== 0) {
+      throw new RuntimeError("archived candidate commit does not belong to repository");
+    }
+
+    const direct = await git(canonicalRepoRoot, ["rev-parse", "--verify", "--quiet", expectedRef]);
+    if (direct.exitCode === 1) {
+      const symbolic = await git(canonicalRepoRoot, ["symbolic-ref", "--quiet", expectedRef]);
+      if (symbolic.exitCode === 0) {
+        throw new RuntimeError("archived candidate anchor is a dangling symbolic ref");
+      }
+      return {
+        outcome: "already-absent",
+        repoRoot: canonicalRepoRoot,
+        anchorRef: expectedRef,
+        backupRef: null,
+        candidateCommitOid: candidate.candidateCommitOid,
+      };
+    }
+    if (direct.exitCode !== 0 || direct.stdout.trim() !== candidate.candidateCommitOid) {
+      throw new RuntimeError("archived candidate anchor moved");
+    }
+    return {
+      outcome: "deleted",
+      repoRoot: canonicalRepoRoot,
+      anchorRef: expectedRef,
+      backupRef: `${PRUNE_BACKUP_REF_PREFIX}${runId}`,
+      candidateCommitOid: candidate.candidateCommitOid,
+    };
+  }
+
+  private async beginCandidateAnchorCleanup(
+    prepared: PreparedAnchorCleanup,
+    runId: string,
+  ): Promise<AnchorCleanupTransaction> {
+    if (prepared.outcome !== "deleted"
+      || prepared.repoRoot === null
+      || prepared.anchorRef === null
+      || prepared.backupRef === null
+      || prepared.candidateCommitOid === null) {
+      return {
+        outcome: prepared.outcome,
+        async commit() {},
+        async rollback() {},
+      };
+    }
+    const { repoRoot, anchorRef, backupRef, candidateCommitOid } = prepared;
+    const zeroOid = "0".repeat(candidateCommitOid.length);
+    const backup = await git(repoRoot, [
+      "update-ref",
+      "--no-deref",
+      "-m",
+      `claude-architect prune backup ${runId}`,
+      backupRef,
+      candidateCommitOid,
+      zeroOid,
+    ]);
+    if (backup.exitCode !== 0) {
+      throw new RuntimeError("failed to create candidate prune backup");
+    }
+    const deletion = await git(repoRoot, [
       "update-ref",
       "--no-deref",
       "-m",
       `claude-architect prune ${runId}`,
       "-d",
-      expectedRef,
-      result.candidate.candidateCommitOid,
+      anchorRef,
+      candidateCommitOid,
     ]);
-    if (deletion.exitCode === 0) return "deleted";
+    if (deletion.exitCode !== 0) {
+      await git(repoRoot, ["update-ref", "--no-deref", "-d", backupRef, candidateCommitOid]);
+      throw new RuntimeError("failed to remove candidate anchor");
+    }
 
-    const symbolic = await git(manifest.repoRoot, ["symbolic-ref", "--quiet", expectedRef]);
-    const direct = await git(manifest.repoRoot, ["show-ref", "--verify", "--quiet", expectedRef]);
-    if (symbolic.exitCode === 1 && direct.exitCode === 1) return "already-absent";
-    const diagnostic = redact(deletion.stderr || deletion.stdout).trim().slice(0, 2_000);
-    throw new RuntimeError(
-      `failed to remove candidate anchor${diagnostic ? `: ${diagnostic}` : ""}`,
-    );
+    return {
+      outcome: "deleted",
+      async commit(): Promise<void> {
+        const deleted = await git(repoRoot, [
+          "update-ref",
+          "--no-deref",
+          "-d",
+          backupRef,
+          candidateCommitOid,
+        ]);
+        if (deleted.exitCode !== 0) {
+          throw new RuntimeError("failed to remove candidate prune backup");
+        }
+      },
+      async rollback(): Promise<void> {
+        const restored = await git(repoRoot, [
+          "update-ref",
+          "--no-deref",
+          "-m",
+          `claude-architect prune rollback ${runId}`,
+          anchorRef,
+          candidateCommitOid,
+          zeroOid,
+        ]);
+        if (restored.exitCode !== 0) {
+          throw new RuntimeError("failed to restore candidate anchor from prune backup");
+        }
+        const deleted = await git(repoRoot, [
+          "update-ref",
+          "--no-deref",
+          "-d",
+          backupRef,
+          candidateCommitOid,
+        ]);
+        if (deleted.exitCode !== 0) {
+          throw new RuntimeError("failed to remove restored candidate prune backup");
+        }
+      },
+    };
   }
 
   private async appendCleanupRecord(record: CleanupRecord): Promise<void> {
@@ -480,7 +754,7 @@ export class ArtifactStore {
       try {
         const metadata = await handle.stat();
         if (!metadata.isFile()) throw new RuntimeError("cleanup journal is not a regular file");
-        const line = `${serializeJson(redactValues(record))}\n`;
+        const line = `${serializeJson(record)}\n`;
         await handle.writeFile(line, { encoding: "utf8" });
         await handle.sync();
       } finally {
@@ -503,37 +777,95 @@ export class ArtifactStore {
     const removeEntry = async (entry: RunEntry, reason: PruneReason): Promise<void> => {
       if (attempted.has(entry.runId)) return;
       attempted.add(entry.runId);
+      const quarantineName = `.prune-${entry.runId}-${randomUUID()}`;
+      const quarantinePath = path.join(this.runsRoot, quarantineName);
+      let prepared: PreparedAnchorCleanup | null = null;
+      let transaction: AnchorCleanupTransaction | null = null;
+      let archiveDeleted = false;
       try {
         const result = await this.readResult(entry.runId);
         if (result === null) {
           retained.push({ runId: entry.runId, reason: "incomplete-run" });
           return;
         }
+        prepared = await this.prepareCandidateAnchorCleanup(entry.runId, result);
         await this.appendCleanupRecord({
           event: "prune-cleanup-intent",
           runId: entry.runId,
           reason,
           anchorCleanup: "pending",
           archiveBytes: entry.bytes,
+          quarantineName,
+          repoRoot: prepared.repoRoot,
+          anchorRef: prepared.anchorRef,
+          backupRef: prepared.backupRef,
+          candidateCommitOid: prepared.candidateCommitOid,
           recordedAt: new Date().toISOString(),
         });
-        const anchorCleanup = await this.deleteCandidateAnchor(entry.runId, result);
+        transaction = await this.beginCandidateAnchorCleanup(prepared, entry.runId);
+        const runsRootIdentity = await ensurePlainDirectory(this.runsRoot);
+        await assertDirectoryIdentity(entry.directory, entry.identity);
+        await assertDirectoryIdentity(this.runsRoot, runsRootIdentity);
+        await rename(entry.directory, quarantinePath);
+        await syncDirectory(this.runsRoot);
+        await assertDirectoryIdentity(this.runsRoot, runsRootIdentity);
+        await rm(quarantinePath, { recursive: true, force: false });
+        archiveDeleted = true;
+        await syncDirectory(this.runsRoot);
         await this.appendCleanupRecord({
           event: "prune-cleanup-complete",
           runId: entry.runId,
           reason,
-          anchorCleanup,
+          anchorCleanup: transaction.outcome,
           archiveBytes: entry.bytes,
+          quarantineName,
+          repoRoot: prepared.repoRoot,
+          anchorRef: prepared.anchorRef,
+          backupRef: prepared.backupRef,
+          candidateCommitOid: prepared.candidateCommitOid,
           recordedAt: new Date().toISOString(),
         });
-        await rm(entry.directory, { recursive: true, force: true });
-        await syncDirectory(this.runsRoot);
+        await transaction.commit();
         removed.add(entry.runId);
         retainedBytes -= entry.bytes;
       } catch (error) {
+        let rollbackError: unknown;
+        if (!archiveDeleted) {
+          try {
+            if (await pathExists(quarantinePath) && !await pathExists(entry.directory)) {
+              await rename(quarantinePath, entry.directory);
+              await syncDirectory(this.runsRoot);
+            }
+            await transaction?.rollback();
+            if (prepared !== null) {
+              await this.appendCleanupRecord({
+                event: "prune-cleanup-rollback",
+                runId: entry.runId,
+                reason,
+                anchorCleanup: prepared.outcome,
+                archiveBytes: entry.bytes,
+                quarantineName,
+                repoRoot: prepared.repoRoot,
+                anchorRef: prepared.anchorRef,
+                backupRef: prepared.backupRef,
+                candidateCommitOid: prepared.candidateCommitOid,
+                recordedAt: new Date().toISOString(),
+              });
+            }
+          } catch (rollbackFailure) {
+            rollbackError = rollbackFailure;
+          }
+        } else {
+          removed.add(entry.runId);
+          retainedBytes -= entry.bytes;
+        }
+        const primary = error instanceof Error ? error.message : String(error);
+        const rollback = rollbackError instanceof Error
+          ? `; rollback failed: ${rollbackError.message}`
+          : rollbackError === undefined ? "" : `; rollback failed: ${String(rollbackError)}`;
         retained.push({
           runId: entry.runId,
-          reason: redact(error instanceof Error ? error.message : String(error)),
+          reason: redact(`${primary}${rollback}`),
         });
       }
     };

@@ -9,7 +9,7 @@ describe("redact", () => {
   it("masks bearer tokens and known key prefixes", () => {
     expect(redact("Authorization: Bearer abc.def.ghi")).not.toContain("abc.def.ghi");
     expect(redact("key sk-ABCDEF0123456789")).not.toContain("sk-ABCDEF0123456789");
-    expect(redact("AWS AKIAIOSFODNN7EXAMPLE here")).toContain("[x]");
+    expect(redact("AWS AKIAIOSFODNN7EXAMPLE here")).toContain("[a]");
     expect(redact("AWS AKIAIOSFODNN7EXAMPLE here")).not.toContain("AKIAIOSFODNN7EXAMPLE");
   });
   it("leaves ordinary text intact", () => {
@@ -44,7 +44,7 @@ describe("redact", () => {
     );
 
     clearRegisteredSecrets();
-    expect(redact("hunter2-enterprise-token appears again")).not.toContain("[x]");
+    expect(redact("hunter2-enterprise-token appears again")).not.toContain("[s]");
   });
 
   it("ignores registered values shorter than six characters", () => {
@@ -68,19 +68,19 @@ describe("redact", () => {
 
   it("does not treat literal marker text inside a registered secret as trusted", () => {
     clearRegisteredSecrets();
-    const registration = registerSecretValue("prefix[x]suffix");
+    const registration = registerSecretValue("prefix[s]suffix");
 
-    expect(redact("before prefix[x]suffix after")).toBe("before [x] after");
+    expect(redact("before prefix[s]suffix after")).toBe("before [s] after");
     registration.dispose();
   });
 
   it("reaches a fixed point when pattern redaction creates a registered secret", () => {
     clearRegisteredSecrets();
-    const registration = registerSecretValue("prefix [x] suffix");
+    const registration = registerSecretValue("prefix [k] suffix");
 
     const output = redact("prefix sk-ABCDEF0123456789 suffix");
 
-    expect(output).toBe("[x]");
+    expect(output).toBe("[s]");
     expect(redact(output)).toBe(output);
     registration.dispose();
   });
@@ -99,7 +99,7 @@ describe("redact", () => {
       attempt: 2,
       complete: false,
       detail: null,
-      nested: ["Bearer [x]", { message: "ordinary" }],
+      nested: ["Bearer [b]", { message: "ordinary" }],
     });
   });
 
@@ -135,7 +135,7 @@ describe("redact", () => {
     const output = redactRecord({ "enterprise-secret-key": "ordinary" });
 
     expect(JSON.stringify(output)).not.toContain("enterprise-secret-key");
-    expect(JSON.stringify(output)).toContain("[x]");
+    expect(JSON.stringify(output)).toContain("[s]");
     registration.dispose();
   });
 });

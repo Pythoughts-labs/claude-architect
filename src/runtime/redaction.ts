@@ -1,20 +1,32 @@
 const registeredSecrets = new Map<string, number>();
-const REDACTION_MARKER_TEXT = "[x]";
+const SECRET_MARKER = "[s]";
 
 export interface SecretRegistration {
   dispose(): void;
 }
 
-const rules: RegExp[] = [
-  /(?<=\bBearer[ \t]+)[A-Za-z0-9._~+/=-]+/gi,
-  /\bsk-[A-Za-z0-9_-]{8,}\b/g,
-  /\bgh[pousr]_[A-Za-z0-9]{8,}\b/g,
-  /\bAKIA[A-Z0-9]{12,}\b/g,
-  /\bxox[baprs]-[A-Za-z0-9-]{8,}\b/g,
-  /\beyJ[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b/g,
-  /(?<=\b(?:(?:[A-Za-z][A-Za-z0-9]*_)*(?:TOKEN|SECRET|PASSWORD|KEY|CREDENTIAL)(?:_[A-Za-z0-9]+)*)=")[^"\r\n]+/gi,
-  /(?<=\b(?:(?:[A-Za-z][A-Za-z0-9]*_)*(?:TOKEN|SECRET|PASSWORD|KEY|CREDENTIAL)(?:_[A-Za-z0-9]+)*)=')[^'\r\n]+/gi,
-  /(?<=\b(?:(?:[A-Za-z][A-Za-z0-9]*_)*(?:TOKEN|SECRET|PASSWORD|KEY|CREDENTIAL)(?:_[A-Za-z0-9]+)*)=)[^\s,;"']+/gi,
+const rules: Array<{ marker: string; pattern: RegExp }> = [
+  { marker: "[b]", pattern: /(?<=\bBearer[ \t]+)[A-Za-z0-9._~+/=-]+/gi },
+  { marker: "[k]", pattern: /\bsk-[A-Za-z0-9_-]{8,}\b/g },
+  { marker: "[g]", pattern: /\bgh[pousr]_[A-Za-z0-9]{8,}\b/g },
+  { marker: "[a]", pattern: /\bAKIA[A-Z0-9]{12,}\b/g },
+  { marker: "[l]", pattern: /\bxox[baprs]-[A-Za-z0-9-]{8,}\b/g },
+  {
+    marker: "[j]",
+    pattern: /\beyJ[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b/g,
+  },
+  {
+    marker: "[e]",
+    pattern: /(?<=\b(?:(?:[A-Za-z][A-Za-z0-9]*_)*(?:TOKEN|SECRET|PASSWORD|KEY|CREDENTIAL)(?:_[A-Za-z0-9]+)*)=")[^"\r\n]+/gi,
+  },
+  {
+    marker: "[e]",
+    pattern: /(?<=\b(?:(?:[A-Za-z][A-Za-z0-9]*_)*(?:TOKEN|SECRET|PASSWORD|KEY|CREDENTIAL)(?:_[A-Za-z0-9]+)*)=')[^'\r\n]+/gi,
+  },
+  {
+    marker: "[e]",
+    pattern: /(?<=\b(?:(?:[A-Za-z][A-Za-z0-9]*_)*(?:TOKEN|SECRET|PASSWORD|KEY|CREDENTIAL)(?:_[A-Za-z0-9]+)*)=)[^\s,;"']+/gi,
+  },
 ];
 
 export function registerSecretValue(value: string): SecretRegistration {
@@ -67,7 +79,7 @@ function replaceRegisteredSecrets(text: string): string {
       }
     }
     if (nextIndex < 0) break;
-    result += text.slice(cursor, nextIndex) + REDACTION_MARKER_TEXT;
+    result += text.slice(cursor, nextIndex) + SECRET_MARKER;
     cursor = nextIndex + nextSecret.length;
   }
   return result + text.slice(cursor);
@@ -75,7 +87,7 @@ function replaceRegisteredSecrets(text: string): string {
 
 function redactUnmarked(text: string): string {
   let result = replaceRegisteredSecrets(text);
-  for (const rule of rules) result = result.replace(rule, REDACTION_MARKER_TEXT);
+  for (const rule of rules) result = result.replace(rule.pattern, rule.marker);
   return result;
 }
 
