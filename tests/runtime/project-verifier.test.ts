@@ -4,6 +4,8 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { freezeCandidate } from "../../src/git/candidate-tree.js";
 import { git } from "../../src/git/git-exec.js";
+import type { PlatformServices } from "../../src/platform/platform-services.js";
+import { getPlatformServices } from "../../src/platform/select-platform.js";
 import type { CandidateArtifact } from "../../src/protocol/attempt-result.js";
 import type { VerificationCommand } from "../../src/protocol/delegation-spec.js";
 import { clearRegisteredSecrets, redact } from "../../src/runtime/redaction.js";
@@ -237,6 +239,24 @@ describe("projectVerify", () => {
     });
     expect(result.failures).toContain("command-failed:missing");
     expect(result.outputLogs[1]?.text).toContain("executable is not accessible");
+  });
+
+  it("bounds a thrown executable-resolution diagnostic before returning it as a log", async () => {
+    const fixture = await frozenFixture();
+    const ps = Object.create(getPlatformServices()) as PlatformServices;
+    ps.resolveExecutable = async () => {
+      throw new Error("x".repeat(1_100_000));
+    };
+
+    const result = await projectVerify({
+      repoRoot: fixture.repoRoot,
+      artifact: fixture.artifact,
+      commands: [command({ id: "huge-error", executable: "missing" })],
+      ps,
+    });
+
+    expect(Buffer.byteLength(result.outputLogs[1]?.text ?? "")).toBeLessThanOrEqual(1_000_000);
+    expect(result.evidence.commands[0]?.truncated?.stderr).toBe(true);
   });
 
   it("fails a timed-out command even when its SIGTERM handler exits zero", async () => {

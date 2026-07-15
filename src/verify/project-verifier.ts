@@ -154,6 +154,14 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+function boundText(text: string): { text: string; truncated: boolean } {
+  const bytes = Buffer.from(text);
+  if (bytes.length <= MAX_COMMAND_OUTPUT_BYTES) return { text, truncated: false };
+  let end = MAX_COMMAND_OUTPUT_BYTES;
+  while (end > 0 && (bytes[end]! & 0xc0) === 0x80) end -= 1;
+  return { text: bytes.subarray(0, end).toString("utf8"), truncated: true };
+}
+
 async function executeCommand(args: {
   command: VerificationCommand;
   index: number;
@@ -190,12 +198,12 @@ async function executeCommand(args: {
 
   try {
     const actualArgs = [...(executable?.prefixArgs ?? []), ...command.args].map(redact);
-    const stdout = redact(exit?.stdout ?? "");
-    const stderr = redact(exit === null
+    const stdout = boundText(redact(exit?.stdout ?? ""));
+    const stderr = boundText(redact(exit === null
       ? failureText
       : [exit.stderr, exit.spawnError === undefined ? "" : errorMessage(exit.spawnError)]
         .filter(Boolean)
-        .join("\n"));
+        .join("\n")));
     const exitCode = exit?.exitCode ?? null;
     const failed = exitCode === null
       || exit?.timedOut === true
@@ -220,12 +228,15 @@ async function executeCommand(args: {
         requestedNetwork: command.network,
         skipped: false,
         resolvedFrom: executable === null ? null : redact(executable.resolvedFrom),
-        truncated: exit?.truncated ?? { stdout: false, stderr: false },
+        truncated: {
+          stdout: (exit?.truncated.stdout ?? false) || stdout.truncated,
+          stderr: (exit?.truncated.stderr ?? false) || stderr.truncated,
+        },
         spawnError: exit?.spawnError !== undefined,
       },
       outputLogs: [
-        { name: stdoutName, text: stdout },
-        { name: stderrName, text: stderr },
+        { name: stdoutName, text: stdout.text },
+        { name: stderrName, text: stderr.text },
       ],
       failed,
     };
