@@ -15,7 +15,7 @@ All notable changes to Claude Architect are recorded here. The format follows
 
 ### Changed
 
-- `/claude-architect:delegate` now drives the MCP `delegate` → `reviewCandidate` → `decideCandidate` → `integrateCandidate` flow. The four prose implementer lanes remain documented as migration fallbacks until their runtime adapters are certified.
+- `/claude-architect:delegate` now drives the MCP `delegate` → `reviewCandidate` → `decideCandidate` → `integrateCandidate` flow. Legacy lane definitions remain packaged for migration; OpenCode, Pi, and Pythinker use them while their runtime adapters are pending, but Codex cannot bypass a failed confinement/edit-eligibility gate.
 - Published the reduced P0-A support matrix: macOS arm64 is certified only when Codex reports its proven native sandbox; Linux and native Windows remain pending P0-B and diagnostics-only.
 - Codex runtime invocations explicitly disable multi-agent behavior. Installed marketplace copies must update and reload Claude Code before the new runtime and controls take effect.
 

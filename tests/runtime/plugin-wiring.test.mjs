@@ -62,6 +62,8 @@ describe("P0-A plugin wiring", () => {
     for (const fallback of ["codex-implementer", "opencode-implementer", "pi-implementer", "pythinker-implementer"]) {
       assert.ok(skill.includes(`\`${fallback}\``), `delegate skill must retain ${fallback} as migration fallback`);
     }
+    assert.match(skill, /laneEligibility\.edit=false/u);
+    assert.match(skill, /must not fall back to `claude-architect:codex-implementer`/u);
 
     const plugin = JSON.parse(read(".claude-plugin/plugin.json"));
     const marketplace = JSON.parse(read(".claude-plugin/marketplace.json"));

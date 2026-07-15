@@ -190,7 +190,7 @@ The spec it produces always names the objective, the exact files, the interfaces
 
 ## Requirements
 
-- **Codex lane:** install and authenticate the [OpenAI Codex CLI](https://github.com/openai/codex). The certified MCP edit Lane currently requires macOS arm64 and a successful native confinement probe; other environments remain diagnostics-only or use the legacy fallback.
+- **Codex lane:** install and authenticate the [OpenAI Codex CLI](https://github.com/openai/codex). The certified MCP edit Lane currently requires macOS arm64 and a successful native confinement probe; other environments remain diagnostics-only and must not fall back around a failed confinement or edit-eligibility gate.
 - **OpenCode lane:** install the [OpenCode CLI](https://opencode.ai) and authenticate a provider with `opencode auth login`. The lane runs `opencode run --agent build --auto`; optional model and variant overrides otherwise defer to OpenCode configuration.
 - **Pi lane:** install the [Pi coding agent](https://pi.dev) and start a local model server. Optional model and thinking overrides otherwise defer to Pi configuration.
 - **Pythinker lane:** install the [Pythinker CLI](https://pythoughts-labs.github.io/pythinker-code/), authenticate a provider, and optionally pass a model or `--thinking-effort off|minimal|low|medium|high|xhigh|max` override. Absent overrides defer to Pythinker configuration. This lane runs unattended in `--yolo` mode.
