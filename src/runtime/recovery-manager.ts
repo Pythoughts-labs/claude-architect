@@ -30,6 +30,7 @@ interface RunStartRecord {
   lockKey: string;
   canonicalCommonDir: string;
   pid: number | null;
+  processToken: string | null;
   startedAt: string;
 }
 
@@ -188,6 +189,9 @@ function parseRunStart(text: string, expectedRunId: string): RunStartRecord {
     || !path.isAbsolute(record.canonicalCommonDir)
     || (record.pid !== null
       && (record.pid === undefined || !Number.isSafeInteger(record.pid) || record.pid <= 1))
+    || (record.processToken !== undefined
+      && record.processToken !== null
+      && typeof record.processToken !== "string")
     || typeof record.startedAt !== "string"
     || !Number.isFinite(Date.parse(record.startedAt))) {
     throw new RuntimeError("run-start recovery record is malformed");
@@ -198,7 +202,7 @@ function parseRunStart(text: string, expectedRunId: string): RunStartRecord {
   if (record.lockKey !== expectedLockKey) {
     throw new RuntimeError("run-start lock key does not match its canonical common directory");
   }
-  return record as RunStartRecord;
+  return { ...record, processToken: record.processToken ?? null } as RunStartRecord;
 }
 
 function validateTerminalResult(result: unknown, runId: string): void {
@@ -474,7 +478,9 @@ async function recoverRun(
   root: string,
   ps: Pick<PlatformServices, "os" | "terminateProcessTreeByPid">,
 ): Promise<void> {
-  if (record.pid !== null) await ps.terminateProcessTreeByPid(record.pid);
+  if (record.pid !== null) {
+    await ps.terminateProcessTreeByPid(record.pid, record.processToken);
+  }
   const commonDir = await validateGitCommonDir(record.canonicalCommonDir);
   const store = new ArtifactStore(record.runId);
   const logsRef = await store.writeLog(

@@ -135,6 +135,47 @@ describe("recoverStaleRuns", () => {
     expect(terminated).toEqual([4242]);
   });
 
+  it("does not kill a stale run when its recorded process token differs", async () => {
+    const repo = await initRepo();
+    const runId = "run-recycled-pid";
+    const lockKey = createHash("sha256").update(repo.commonDir).digest("hex");
+    const store = new ArtifactStore(runId);
+    await store.writeLog("lifecycle", "attempt lock acquired\n");
+    await writeFile(path.join(store.runDirectory, "run-start.json"), `${JSON.stringify({
+      runId,
+      lockKey,
+      canonicalCommonDir: repo.commonDir,
+      pid: 4242,
+      processToken: "darwin:recorded-start",
+      startedAt: "2026-07-14T12:00:00.000Z",
+    })}\n`);
+    const worktree = await new WorktreeManager(repo.directory, runId).create(repo.head);
+    const calls: Array<{ pid: number; expectedToken?: string | null }> = [];
+    const liveToken = "darwin:live-start";
+
+    const result = await recoverStaleRuns({
+      platformServices: {
+        os: "darwin",
+        async terminateProcessTreeByPid(pid, expectedToken) {
+          calls.push({ pid, expectedToken });
+          if (expectedToken === undefined || expectedToken === liveToken) {
+            throw new Error("test would have killed the live process");
+          }
+        },
+      },
+      isProcessAlive: () => false,
+    });
+
+    expect(result).toEqual({ recovered: [runId] });
+    expect(calls).toEqual([{ pid: 4242, expectedToken: "darwin:recorded-start" }]);
+    await expectMissing(worktree.path);
+    await expect(store.readResult(runId)).resolves.toMatchObject({
+      runId,
+      status: "cancelled",
+      evidence: { recovery: "startup-stale-run" },
+    });
+  });
+
   it("preserves a checkout lock whose recorded owner pid is still alive", async () => {
     const lockKey = "a".repeat(64);
     const lockPath = path.join(process.env.CLAUDE_PLUGIN_DATA!, "locks", `${lockKey}.lock`);
@@ -213,6 +254,29 @@ describe("recoverStaleRuns", () => {
         async terminateProcessTreeByPid() {},
       },
     })).rejects.toThrow(/attempt result.*invalid|terminal attempt result is malformed/);
+  });
+
+  it("rejects a non-string process token", async () => {
+    const runId = "run-malformed-process-token";
+    const commonDir = path.join(process.env.CLAUDE_PLUGIN_DATA!, "missing-common-dir");
+    const lockKey = createHash("sha256").update(commonDir).digest("hex");
+    const runDirectory = path.join(process.env.CLAUDE_PLUGIN_DATA!, "runs", runId);
+    await mkdir(runDirectory, { recursive: true });
+    await writeFile(path.join(runDirectory, "run-start.json"), `${JSON.stringify({
+      runId,
+      lockKey,
+      canonicalCommonDir: commonDir,
+      pid: 4242,
+      processToken: 123,
+      startedAt: "2026-07-14T12:00:00.000Z",
+    })}\n`);
+
+    await expect(recoverStaleRuns({
+      platformServices: {
+        os: "darwin",
+        async terminateProcessTreeByPid() {},
+      },
+    })).rejects.toThrow("run-start recovery record is malformed");
   });
 
   it("terminates the recorded producer before validating a missing repository", async () => {

@@ -98,6 +98,7 @@ interface RunStartRecord {
   lockKey: string;
   canonicalCommonDir: string;
   pid: number | null;
+  processToken: string | null;
   startedAt: string;
 }
 
@@ -300,7 +301,8 @@ function withRunStartPidRecording(
       const process = await ps.spawnSupervised(request);
       if (process.pid > 1) {
         try {
-          await writeRunStart(target, { ...record, pid: process.pid }, false);
+          const processToken = await ps.getProcessStartToken(process.pid).catch(() => null);
+          await writeRunStart(target, { ...record, pid: process.pid, processToken }, false);
         } catch (error) {
           await ps.terminateProcessTree(process).catch(() => {});
           throw error;
@@ -310,7 +312,9 @@ function withRunStartPidRecording(
     },
     requestCooperativeCancellation: process => ps.requestCooperativeCancellation(process),
     terminateProcessTree: process => ps.terminateProcessTree(process),
-    terminateProcessTreeByPid: pid => ps.terminateProcessTreeByPid(pid),
+    getProcessStartToken: pid => ps.getProcessStartToken(pid),
+    terminateProcessTreeByPid: (pid, expectedToken) =>
+      ps.terminateProcessTreeByPid(pid, expectedToken),
     acquireCheckoutLock: checkout => ps.acquireCheckoutLock(checkout),
     createSecureTempDirectory: () => ps.createSecureTempDirectory(),
     canonicalizePath: input => ps.canonicalizePath(input),
@@ -526,6 +530,7 @@ export async function runAttempt(
       lockKey: lock.key,
       canonicalCommonDir: preconditions.gitCommonDir,
       pid: null,
+      processToken: null,
       startedAt: new Date(startedAtMs).toISOString(),
     };
     const runStartTarget = await initializeRunStart(store, runStart);

@@ -104,7 +104,35 @@ export class PosixPlatformServices implements PlatformServices {
     killProcessGroup(proc.pid, "SIGKILL");
   }
 
-  async terminateProcessTreeByPid(pid: number): Promise<void> {
+  async getProcessStartToken(pid: number): Promise<string | null> {
+    if (!Number.isSafeInteger(pid) || pid <= 1) return null;
+    if (nodeProcess.platform === "linux") {
+      try {
+        const stat = await fs.readFile(`/proc/${pid}/stat`, "utf8");
+        const afterComm = stat.slice(stat.lastIndexOf(")") + 2).split(" ");
+        const starttime = afterComm[19];
+        return starttime ? `linux:${starttime}` : null;
+      } catch {
+        return null;
+      }
+    }
+    return new Promise(resolve => {
+      try {
+        execFile("ps", ["-o", "lstart=", "-p", String(pid)], (error, stdout) => {
+          const line = stdout.trim();
+          resolve(error || line.length === 0 ? null : `darwin:${line}`);
+        });
+      } catch {
+        resolve(null);
+      }
+    });
+  }
+
+  async terminateProcessTreeByPid(pid: number, expectedToken?: string | null): Promise<void> {
+    if (typeof expectedToken === "string") {
+      const liveToken = await this.getProcessStartToken(pid);
+      if (liveToken !== expectedToken) return;
+    }
     killProcessGroup(pid, "SIGKILL");
   }
 

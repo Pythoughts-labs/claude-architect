@@ -23,7 +23,8 @@ class DiagnosticsOnlyPlatformServices implements PlatformServices {
   async spawnSupervised(_request: SpawnRequest): Promise<SupervisedProcess> { throw new UnsupportedPlatformError(); }
   async requestCooperativeCancellation(_process: SupervisedProcess): Promise<void> { throw new UnsupportedPlatformError(); }
   async terminateProcessTree(_process: SupervisedProcess): Promise<void> { throw new UnsupportedPlatformError(); }
-  async terminateProcessTreeByPid(_pid: number): Promise<void> { throw new UnsupportedPlatformError(); }
+  async getProcessStartToken(_pid: number): Promise<string | null> { throw new UnsupportedPlatformError(); }
+  async terminateProcessTreeByPid(_pid: number, _expectedToken?: string | null): Promise<void> { throw new UnsupportedPlatformError(); }
   async acquireCheckoutLock(_checkout: string): Promise<CheckoutLock> { throw new UnsupportedPlatformError(); }
   async createSecureTempDirectory(): Promise<string> { throw new UnsupportedPlatformError(); }
 }

@@ -22113,7 +22113,34 @@ var PosixPlatformServices = class {
   async terminateProcessTree(proc) {
     killProcessGroup(proc.pid, "SIGKILL");
   }
-  async terminateProcessTreeByPid(pid) {
+  async getProcessStartToken(pid) {
+    if (!Number.isSafeInteger(pid) || pid <= 1) return null;
+    if (nodeProcess2.platform === "linux") {
+      try {
+        const stat = await fs.readFile(`/proc/${pid}/stat`, "utf8");
+        const afterComm = stat.slice(stat.lastIndexOf(")") + 2).split(" ");
+        const starttime = afterComm[19];
+        return starttime ? `linux:${starttime}` : null;
+      } catch {
+        return null;
+      }
+    }
+    return new Promise((resolve) => {
+      try {
+        execFile("ps", ["-o", "lstart=", "-p", String(pid)], (error2, stdout) => {
+          const line = stdout.trim();
+          resolve(error2 || line.length === 0 ? null : `darwin:${line}`);
+        });
+      } catch {
+        resolve(null);
+      }
+    });
+  }
+  async terminateProcessTreeByPid(pid, expectedToken) {
+    if (typeof expectedToken === "string") {
+      const liveToken = await this.getProcessStartToken(pid);
+      if (liveToken !== expectedToken) return;
+    }
     killProcessGroup(pid, "SIGKILL");
   }
   async acquireCheckoutLock(checkout) {
@@ -22182,7 +22209,10 @@ var DiagnosticsOnlyPlatformServices = class {
   async terminateProcessTree(_process) {
     throw new UnsupportedPlatformError();
   }
-  async terminateProcessTreeByPid(_pid) {
+  async getProcessStartToken(_pid) {
+    throw new UnsupportedPlatformError();
+  }
+  async terminateProcessTreeByPid(_pid, _expectedToken) {
     throw new UnsupportedPlatformError();
   }
   async acquireCheckoutLock(_checkout) {
@@ -25437,7 +25467,8 @@ function withRunStartPidRecording(ps, target, record2) {
       const process3 = await ps.spawnSupervised(request);
       if (process3.pid > 1) {
         try {
-          await writeRunStart(target, { ...record2, pid: process3.pid }, false);
+          const processToken = await ps.getProcessStartToken(process3.pid).catch(() => null);
+          await writeRunStart(target, { ...record2, pid: process3.pid, processToken }, false);
         } catch (error2) {
           await ps.terminateProcessTree(process3).catch(() => {
           });
@@ -25448,7 +25479,8 @@ function withRunStartPidRecording(ps, target, record2) {
     },
     requestCooperativeCancellation: (process3) => ps.requestCooperativeCancellation(process3),
     terminateProcessTree: (process3) => ps.terminateProcessTree(process3),
-    terminateProcessTreeByPid: (pid) => ps.terminateProcessTreeByPid(pid),
+    getProcessStartToken: (pid) => ps.getProcessStartToken(pid),
+    terminateProcessTreeByPid: (pid, expectedToken) => ps.terminateProcessTreeByPid(pid, expectedToken),
     acquireCheckoutLock: (checkout) => ps.acquireCheckoutLock(checkout),
     createSecureTempDirectory: () => ps.createSecureTempDirectory(),
     canonicalizePath: (input) => ps.canonicalizePath(input)
@@ -25642,6 +25674,7 @@ async function runAttempt(checkoutPath, spec, deps) {
       lockKey: lock.key,
       canonicalCommonDir: preconditions.gitCommonDir,
       pid: null,
+      processToken: null,
       startedAt: new Date(startedAtMs).toISOString()
     };
     const runStartTarget = await initializeRunStart(store, runStart);
@@ -26514,14 +26547,14 @@ function parseRunStart(text, expectedRunId) {
   }
   const record2 = value;
   validateRunId(record2.runId);
-  if (record2.runId !== expectedRunId || typeof record2.lockKey !== "string" || !/^[0-9a-f]{64}$/.test(record2.lockKey) || typeof record2.canonicalCommonDir !== "string" || !path8.isAbsolute(record2.canonicalCommonDir) || record2.pid !== null && (record2.pid === void 0 || !Number.isSafeInteger(record2.pid) || record2.pid <= 1) || typeof record2.startedAt !== "string" || !Number.isFinite(Date.parse(record2.startedAt))) {
+  if (record2.runId !== expectedRunId || typeof record2.lockKey !== "string" || !/^[0-9a-f]{64}$/.test(record2.lockKey) || typeof record2.canonicalCommonDir !== "string" || !path8.isAbsolute(record2.canonicalCommonDir) || record2.pid !== null && (record2.pid === void 0 || !Number.isSafeInteger(record2.pid) || record2.pid <= 1) || record2.processToken !== void 0 && record2.processToken !== null && typeof record2.processToken !== "string" || typeof record2.startedAt !== "string" || !Number.isFinite(Date.parse(record2.startedAt))) {
     throw new RuntimeError("run-start recovery record is malformed");
   }
   const expectedLockKey = createHash7("sha256").update(record2.canonicalCommonDir).digest("hex");
   if (record2.lockKey !== expectedLockKey) {
     throw new RuntimeError("run-start lock key does not match its canonical common directory");
   }
-  return record2;
+  return { ...record2, processToken: record2.processToken ?? null };
 }
 function validateTerminalResult(result, runId) {
   if (typeof result !== "object" || result === null) {
@@ -26747,7 +26780,9 @@ async function replayInterruptedPrunes(runsRoot) {
   }
 }
 async function recoverRun(record2, root, ps) {
-  if (record2.pid !== null) await ps.terminateProcessTreeByPid(record2.pid);
+  if (record2.pid !== null) {
+    await ps.terminateProcessTreeByPid(record2.pid, record2.processToken);
+  }
   const commonDir = await validateGitCommonDir(record2.canonicalCommonDir);
   const store = new ArtifactStore(record2.runId);
   const logsRef = await store.writeLog(

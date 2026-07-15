@@ -43,7 +43,9 @@ export interface PlatformServices {
   spawnSupervised(request: SpawnRequest): Promise<SupervisedProcess>;
   requestCooperativeCancellation(process: SupervisedProcess): Promise<void>;
   terminateProcessTree(process: SupervisedProcess): Promise<void>;
-  terminateProcessTreeByPid(pid: number): Promise<void>;   // crash recovery: kill a tree by recorded pid (no live SupervisedProcess). POSIX: kill(-pid); ESRCH treated as success.
+  /** Opaque per-boot-stable identity for a live pid; null when dead/undeterminable. */
+  getProcessStartToken(pid: number): Promise<string | null>;
+  terminateProcessTreeByPid(pid: number, expectedToken?: string | null): Promise<void>;   // crash recovery: kill a tree by recorded pid (no live SupervisedProcess). POSIX: kill(-pid); ESRCH treated as success.
   acquireCheckoutLock(checkout: string): Promise<CheckoutLock>;
   createSecureTempDirectory(): Promise<string>;
   canonicalizePath(path: string): Promise<CanonicalPath>;
