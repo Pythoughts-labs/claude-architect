@@ -22331,11 +22331,13 @@ function canonicalizeForScope(candidate, root) {
   return normalizedCandidate === normalizedRoot || normalizedCandidate.startsWith(`${normalizedRoot}\\`);
 }
 var WindowsPlatformServices = class {
-  constructor(pluginRoot, arch = nodeProcess3.arch) {
+  constructor(pluginRoot, arch = nodeProcess3.arch, tokenExecFile = execFile2) {
     this.pluginRoot = pluginRoot;
     this.arch = arch;
+    this.tokenExecFile = tokenExecFile;
   }
   os = "win32";
+  ownProcessStartToken;
   async jobKillHelper() {
     return resolveJobKillHelper(this.pluginRoot ?? await findPluginRoot(), this.arch);
   }
@@ -22436,11 +22438,41 @@ var WindowsPlatformServices = class {
   }
   async getProcessStartToken(pid) {
     if (!Number.isSafeInteger(pid) || pid <= 1) return null;
-    return new Promise((resolve) => {
+    if (pid === nodeProcess3.pid && this.ownProcessStartToken !== void 0) {
+      return this.ownProcessStartToken;
+    }
+    try {
+      const helper = await this.jobKillHelper();
+      if (await helper.checkAvailable()) {
+        const nativeToken = await new Promise((resolve) => {
+          try {
+            this.tokenExecFile(
+              helper.path,
+              ["token", String(pid)],
+              { windowsHide: true, shell: false },
+              (error2, stdout) => {
+                const token = stdout.trim();
+                if (error2 === null && token.length > 0) resolve(`win32:${token}`);
+                else if (error2?.code === 2) resolve(null);
+                else resolve(void 0);
+              }
+            );
+          } catch {
+            resolve(void 0);
+          }
+        });
+        if (nativeToken !== void 0) {
+          if (pid === nodeProcess3.pid && nativeToken !== null) this.ownProcessStartToken = nativeToken;
+          return nativeToken;
+        }
+      }
+    } catch {
+    }
+    const powershellToken = await new Promise((resolve) => {
       try {
-        execFile2(
+        this.tokenExecFile(
           "powershell.exe",
-          ["-NoProfile", "-Command", `(Get-Process -Id ${pid}).StartTime.ToFileTimeUtc()`],
+          ["-NoProfile", "-NonInteractive", "-Command", `(Get-Process -Id ${pid}).StartTime.ToFileTimeUtc()`],
           (error2, stdout) => {
             const token = stdout.trim();
             resolve(error2 || token.length === 0 ? null : `win32:${token}`);
@@ -22450,6 +22482,10 @@ var WindowsPlatformServices = class {
         resolve(null);
       }
     });
+    if (pid === nodeProcess3.pid && powershellToken !== null) {
+      this.ownProcessStartToken = powershellToken;
+    }
+    return powershellToken;
   }
   async terminateProcessTreeByPid(pid, expectedToken) {
     if (typeof expectedToken === "string") {

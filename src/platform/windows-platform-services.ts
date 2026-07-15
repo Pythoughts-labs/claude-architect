@@ -33,6 +33,8 @@ export interface JobKillHelper {
   checkAvailable(): Promise<boolean>;
 }
 
+type TokenExecFile = typeof execFile;
+
 export function resolveJobKillHelper(pluginRoot: string, arch: string): JobKillHelper {
   const helperPath = path.join(pluginRoot, "native", "bin", `win32-job-kill-${arch}.exe`);
   return {
@@ -159,10 +161,12 @@ export function canonicalizeForScope(candidate: string, root: string): boolean {
 
 export class WindowsPlatformServices implements PlatformServices {
   readonly os = "win32";
+  private ownProcessStartToken?: string;
 
   constructor(
     private readonly pluginRoot?: string,
     private readonly arch = nodeProcess.arch,
+    private readonly tokenExecFile: TokenExecFile = execFile,
   ) {}
 
   private async jobKillHelper(): Promise<JobKillHelper> {
@@ -244,11 +248,40 @@ export class WindowsPlatformServices implements PlatformServices {
   }
   async getProcessStartToken(pid: number): Promise<string | null> {
     if (!Number.isSafeInteger(pid) || pid <= 1) return null;
-    return new Promise(resolve => {
+    if (pid === nodeProcess.pid && this.ownProcessStartToken !== undefined) {
+      return this.ownProcessStartToken;
+    }
+    try {
+      const helper = await this.jobKillHelper();
+      if (await helper.checkAvailable()) {
+        const nativeToken = await new Promise<string | null | undefined>(resolve => {
+          try {
+            this.tokenExecFile(
+              helper.path,
+              ["token", String(pid)],
+              { windowsHide: true, shell: false },
+              (error, stdout) => {
+                const token = stdout.trim();
+                if (error === null && token.length > 0) resolve(`win32:${token}`);
+                else if (error?.code === 2) resolve(null);
+                else resolve(undefined);
+              },
+            );
+          } catch {
+            resolve(undefined);
+          }
+        });
+        if (nativeToken !== undefined) {
+          if (pid === nodeProcess.pid && nativeToken !== null) this.ownProcessStartToken = nativeToken;
+          return nativeToken;
+        }
+      }
+    } catch { /* fall back to PowerShell */ }
+    const powershellToken = await new Promise<string | null>(resolve => {
       try {
-        execFile(
+        this.tokenExecFile(
           "powershell.exe",
-          ["-NoProfile", "-Command", `(Get-Process -Id ${pid}).StartTime.ToFileTimeUtc()`],
+          ["-NoProfile", "-NonInteractive", "-Command", `(Get-Process -Id ${pid}).StartTime.ToFileTimeUtc()`],
           (error, stdout) => {
             const token = stdout.trim();
             resolve(error || token.length === 0 ? null : `win32:${token}`);
@@ -258,6 +291,10 @@ export class WindowsPlatformServices implements PlatformServices {
         resolve(null);
       }
     });
+    if (pid === nodeProcess.pid && powershellToken !== null) {
+      this.ownProcessStartToken = powershellToken;
+    }
+    return powershellToken;
   }
   async terminateProcessTreeByPid(pid: number, expectedToken?: string | null): Promise<void> {
     if (typeof expectedToken === "string") {

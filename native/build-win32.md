@@ -14,4 +14,7 @@ Or cross-compile with MinGW:
 x86_64-w64-mingw32-gcc -O2 -o bin/win32-job-kill-x64.exe win32-job-kill.c
 ```
 
+In addition to terminating a process tree with `<pid>`, the helper accepts
+`token <pid>` and prints that process's creation FILETIME as a decimal value.
+
 On every rebuild, record the SHA-256 of the committed binary in this file.
