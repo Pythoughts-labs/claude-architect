@@ -1,23 +1,21 @@
 ---
 name: delegate
-description: Delegate implementation, exploration, and review from an Opus or Fable architect session to the cheapest adequate subagent or CLI lane. Use when splitting work, writing subagent specs, selecting codex-implementer/opencode-implementer/pi-implementer/pythinker-implementer, controlling token cost, or consulting claude-advisor.
+description: Let Claude Architect route a versioned implementation spec through the trusted MCP runtime, independently review the Candidate Artifact, record a decision, and integrate only accepted bytes. Use for implementation delegation, Producer selection, or commitment-boundary review.
 ---
 
 # Delegate
 
-The session is the architect and should run Claude's strongest available tier (Fable 5, or Opus). It owns requirements, decomposition, interfaces, routing, and acceptance. Delegate implementation and broad exploration; keep decisions and review with the architect.
+```claude-architect-protocol
+PROTOCOL_VERSION: 1.0.0
+```
 
-## Cost discipline
+The current session is the architect. It owns requirements, the Delegation Spec, Producer selection, review, and acceptance. Producers are untrusted: their output is only a candidate until the runtime freezes it, independently verifies it, and the architect reviews the exact anchored bytes.
 
-- Emit judgment, not volume. Hand off implementation, tests, boilerplate, and mechanical edits.
-- Keep context lean. Delegate broad searches and return conclusions rather than raw output.
-- Reason once, then put the decision into a complete delegation spec.
+Always present this skill as `/claude-architect:delegate`. Never show a shorter command.
 
-## Lane selection
+## Producer selection
 
-Before preparing a spec or launching a subagent, check whether the user explicitly named a CLI or implementer. Treat `Codex` or `Codex CLI` as `codex-implementer`, `OpenCode` as `opencode-implementer`, `Pi` as `pi-implementer`, and `Pythinker` as `pythinker-implementer`.
-
-If the user invokes `/delegate` without naming a CLI, implementer, or agent, use the host's structured question tool when available, ask this question, and wait for the answer. Include the producer and reasoning control in each option so the user knows what the lane will run:
+If the user invokes `/claude-architect:delegate` without naming a CLI, implementer, or agent, use the host's structured question tool when available, ask this question, and wait for the answer. Include the producer and reasoning control in each option so the user knows what the lane will run:
 
 > Which CLI should handle this delegation? Each choice shows its model and reasoning default. Use a custom answer to name a different supported reasoning level.
 
@@ -28,52 +26,41 @@ Offer exactly these choices:
 - **Pi** - `pi-implementer`; configured model unless overridden, with optional `--thinking off|minimal|low|medium|high|xhigh|max`; Pi configuration supplies the default.
 - **Pythinker** - `pythinker-implementer`; configured provider/model unless overridden, with optional `--thinking-effort off|minimal|low|medium|high|xhigh|max`; Pythinker configuration supplies the default.
 
-There is no implicit lane default. Do not prepare or launch a delegation until the user selects a lane. Model selection within a harness lane is optional. If the answer names a supported model or reasoning override, include it in the delegation spec; otherwise let the selected harness use its CLI-configured default.
+There is no implicit lane default. If the answer names a supported model or reasoning override, include it in the delegation spec; otherwise let the selected Producer use its configured default.
 
-## Lanes
+P0-A certifies the MCP implementation path only for Codex on macOS arm64 when its capability report names `codex-native-sandbox` and marks the edit Lane eligible. OpenCode, Pi, and Pythinker remain available through the legacy fallback below until their MCP Producer adapters are certified.
 
-| Lane | Invoke | Route here when |
-|---|---|---|
-| Cloud | `codex-implementer` | Routine or correctness-sensitive implementation through GPT-5.6 Sol and Codex CLI. |
-| Provider pool | `opencode-implementer` | The right model lives behind an OpenCode credential the other lanes can't reach (Zen/Go Kimi/GLM/DeepSeek, MiniMax coding plan). Override the configured provider/model when needed. |
-| Local / $0 | `pi-implementer` | Routine work suitable for a local open-weight model through Pi. Override the configured model when needed. |
-| In-house / autonomous | `pythinker-implementer` | A trusted spec should run unattended through Pythinker `--yolo`. Override the configured provider/model when needed. |
-| Exploration | OpenCode `explore` or Claude Code `Explore` | Broad read-only codebase searches and implementation-surface mapping. |
-| Judgment | Opus architect or `claude-advisor` | Architecture, migrations, API shapes, major refactors, repeated failures, and final review of multi-step work. |
+## Build the Delegation Spec
 
-When the user asks for routing advice, recommend Codex for routine or correctness-sensitive implementation, OpenCode when the target model is only reachable through its provider pool, Pi when local execution and zero marginal cost matter, and Pythinker when full unattended execution is the defining requirement. A recommendation does not replace the explicit selection required for an unspecified `/delegate` invocation. Race independent lanes only when the added implementation is worth the cost, and isolate races in separate worktrees because concurrent writers must not touch the same files.
+Construct a candidate spec with every required field:
 
-Route all delegated Codex work explicitly to `claude-architect:codex-implementer`, including work started from long-running flows such as `/goal`. Do **not** use `codex:codex-rescue`, `codex-companion.mjs`, or `codex app-server` as an implementation lane: the official rescue companion keeps a detached app-server broker alive for the Claude session, and fresh threads can leave configured MCP workers such as `node_repl` attached to that broker after the task reports completion. The one-shot lane ignores user config, runs ephemerally, and terminates its isolated process group when the task ends.
+1. `specVersion: "1"`.
+2. `objective`: one observable outcome.
+3. `context`: only relevant repository and design context.
+4. `writeAllowlist`: explicit repository-relative globs; use `["**"]` only for genuinely repository-wide work.
+5. `forbiddenScope`: explicit paths the Producer must never change.
+6. `successCriteria`: reviewable conditions.
+7. `verification`: Host-authorized commands with executable, argv, relative cwd, timeout, network policy, expected exit codes, and optional platform filters.
+8. `executionMode: "edit"`, a bounded `timeoutMs`, ordered `producerPreferences`, optional supported overrides, and `expectedOutput: "candidate-patch"`.
 
-If a CLI lane returns `unavailable` or `timeout`, reroute the unchanged spec and report the substitution. Never silently implement inside a wrapper agent that promised a different producer.
+Resolve ambiguity before calling the runtime. Do not give the Producer credentials, hidden instructions, acceptance authority, or permission to expand scope.
 
-## Spec contract
+## Trusted MCP lifecycle
 
-Every delegation prompt contains:
+1. Call `delegate` through `mcp__plugin_claude-architect_runtime__delegate` with the explicit checkout path, candidate spec, and `protocolVersion: "1.0.0"` copied from this skill's `PROTOCOL_VERSION` marker.
+2. When it returns `ok:false` with `validationErrors`, repair only the reported spec defects and resubmit. This repair loop must not touch a Producer.
+3. When it returns a protocol/schema diagnostic, stop and tell the user to update the installed marketplace copy and reload Claude Code. Never guess across a version mismatch.
+4. When the result is `unavailable`, `failed`, or `cancelled`, report the structured classification and evidence. Do not claim a candidate exists. A Codex report with `laneEligibility.edit=false`, a missing `codex-native-sandbox`, or an unsupported Host is diagnostics-only and must not enter any legacy implementation lane.
+5. When the result is `verified-candidate`, call `reviewCandidate` with the run id. Read the exact unredacted patch, changed-path manifest, and verification evidence; compare them with every success criterion and repository convention.
+6. Present the review outcome. Call `decideCandidate` with `accepted`, `rejected`, or `revision-requested`. Rejection discards the candidate anchor; a revision requires a new spec/attempt rather than editing frozen bytes.
+7. Only after an accepted decision, call `integrateCandidate` with the run id and exact candidate `manifestHash` as `expectedArtifactHash`. Report `applied`, `conflicted`, or `aborted` truthfully. Integration stages the reviewed tree but does not commit it.
 
-1. **Objective**: the observable outcome.
-2. **Files**: exact paths to inspect, create, or modify.
-3. **Interfaces**: signatures, types, commands, or API shapes to preserve.
-4. **Constraints**: conventions, safety boundaries, and exclusions.
-5. **Verification**: exact commands and expected evidence.
+Never accept a Producer self-report as evidence, bypass `reviewCandidate`, call integration before an accepted decision, or substitute a different artifact hash.
 
-If the spec cannot name these, resolve the ambiguity before delegating.
+## Legacy migration fallback
 
-## Parallelism
+The pre-0.8 prose lane definitions remain packaged during migration: `codex-implementer`, `opencode-implementer`, `pi-implementer`, and `pythinker-implementer`. OpenCode, Pi, and Pythinker may use their selected legacy lane while their MCP adapters are not yet certified. Keep the objective, files, interfaces, constraints, and verification unchanged, isolate writes in the lane's worktree, and independently inspect its diff and verification output. Never silently substitute Claude implementation for a named Producer.
 
-Launch independent read-only investigations or tasks with disjoint files in parallel. Keep dependent work and same-file edits serial. Do not race writing agents in one working tree.
+The `codex-implementer` definition is retained only for administrators migrating a pre-0.8 installation. This 0.8 flow must not fall back to `claude-architect:codex-implementer` when the MCP runtime denies Codex edit eligibility or confinement; stop with the structured diagnostic. If an administrator deliberately invokes the old pre-0.8 surface outside this flow, route Codex fallback work explicitly to `claude-architect:codex-implementer`, never `codex:codex-rescue`, its persistent `app-server`, or any detached companion.
 
-## Commitment boundaries
-
-The architect may run on Opus and own these judgments directly, or consult `claude-advisor`. Use one of those paths before architecture decisions, migrations, public API changes, or broad refactors; after two failed approaches; and once before accepting a multi-step deliverable. Pass the decision, constraints, and options considered when consulting the advisor.
-
-## Acceptance
-
-A lane report is a claim, not evidence. Before accepting delegated work, the architect must:
-
-1. Read the actual diff.
-2. Check it against the spec and project conventions.
-3. Re-run or independently confirm the verification command.
-4. Return a corrected spec to the lane when the implementation is wrong.
-
-Never accept “should work,” a producer's self-report, or test output without reviewing the resulting code.
+Use `claude-architect:advisor` for architecture, migrations, public API changes, broad refactors, two failed approaches, or final review of a multi-step deliverable. The advisor is read-only and has no Bash or mutation tools.

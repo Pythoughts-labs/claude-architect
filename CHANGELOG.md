@@ -6,6 +6,20 @@ All notable changes to Claude Architect are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-07-14
+
+### Added
+
+- Added the trusted Node.js MCP runtime for the versioned delegation lifecycle: validated specs, isolated Codex production, content-addressed Candidate Artifacts, independent structural/project verification, explicit review decisions, and controlled integration.
+- Added a strictly non-mutating `claude-architect:advisor` with only file reads and redacted read-only Git observations.
+
+### Changed
+
+- `/claude-architect:delegate` now drives the MCP `delegate` → `reviewCandidate` → `decideCandidate` → `integrateCandidate` flow. Legacy lane definitions remain packaged for migration; OpenCode, Pi, and Pythinker use them while their runtime adapters are pending, but Codex cannot bypass a failed confinement/edit-eligibility gate.
+- Published the reduced P0-A support matrix: macOS arm64 is certified only when Codex reports its proven native sandbox; Linux and native Windows remain pending P0-B and diagnostics-only.
+- Codex runtime invocations explicitly disable multi-agent behavior. Installed marketplace copies must update and reload Claude Code before the new runtime and controls take effect.
+- Runtime startup now recovers interrupted attempts and prune transactions before serving, while the release gate exercises every canonical failure classification and the complete review/decision/integration lifecycle.
+
 ## [0.7.0] - 2026-07-14
 
 ### Added
@@ -63,7 +77,8 @@ Initial public release.
 - Native OpenCode assets under `.opencode/` and `opencode.json`, so the same lanes and skill work outside Claude Code.
 - SVG banner and shields badges for the README.
 
-[Unreleased]: https://github.com/Pythoughts-labs/claude-architect/compare/v0.7.0...HEAD
+[Unreleased]: https://github.com/Pythoughts-labs/claude-architect/compare/v0.8.0...HEAD
+[0.8.0]: https://github.com/Pythoughts-labs/claude-architect/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/Pythoughts-labs/claude-architect/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/Pythoughts-labs/claude-architect/releases/tag/v0.6.0
 [0.5.0]: https://github.com/Pythoughts-labs/claude-architect/releases/tag/v0.5.0

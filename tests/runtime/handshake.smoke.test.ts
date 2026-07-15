@@ -1,0 +1,187 @@
+import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import { LATEST_PROTOCOL_VERSION } from "@modelcontextprotocol/sdk/types.js";
+import { afterEach, describe, expect, it } from "vitest";
+import { PROTOCOL_VERSION } from "../../src/protocol/versions.js";
+
+const bootstrapPath = fileURLToPath(new URL("../../runtime/bootstrap.mjs", import.meta.url));
+const serverPath = fileURLToPath(new URL("../../runtime/server.mjs", import.meta.url));
+const temporaryPaths: string[] = [];
+
+interface JsonRpcResponse {
+  jsonrpc: "2.0";
+  id?: number;
+  result?: Record<string, unknown>;
+  error?: Record<string, unknown>;
+}
+
+async function waitForExit(child: ChildProcessWithoutNullStreams, timeoutMs = 2_000): Promise<{
+  code: number | null;
+  signal: NodeJS.Signals | null;
+}> {
+  if (child.exitCode !== null || child.signalCode !== null) {
+    return { code: child.exitCode, signal: child.signalCode };
+  }
+  return await new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => reject(new Error("timed out waiting for MCP server exit")), timeoutMs);
+    child.once("exit", (code, signal) => {
+      clearTimeout(timeout);
+      resolve({ code, signal });
+    });
+  });
+}
+
+afterEach(async () => {
+  await Promise.all(temporaryPaths.splice(0).map(entry =>
+    rm(entry, { recursive: true, force: true })));
+});
+
+describe("MCP server handshake", () => {
+  it("lists lifecycle tools without non-protocol stdout", async () => {
+    const stateRoot = await mkdtemp(path.join(tmpdir(), "ca-handshake-"));
+    temporaryPaths.push(stateRoot);
+    const child = spawn(process.execPath, [bootstrapPath], {
+      env: { ...process.env, CLAUDE_PLUGIN_DATA: stateRoot },
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    child.stdin.on("error", () => {});
+    let stdout = "";
+    let stderr = "";
+    let buffered = "";
+    const responses = new Map<number, JsonRpcResponse>();
+    const waiters = new Map<number, (response: JsonRpcResponse) => void>();
+    child.stdout.setEncoding("utf8");
+    child.stderr.setEncoding("utf8");
+    child.stderr.on("data", chunk => {
+      stderr += chunk;
+    });
+    child.stdout.on("data", chunk => {
+      stdout += chunk;
+      buffered += chunk;
+      while (buffered.includes("\n")) {
+        const newline = buffered.indexOf("\n");
+        const line = buffered.slice(0, newline).replace(/\r$/, "");
+        buffered = buffered.slice(newline + 1);
+        if (line === "") continue;
+        const response = JSON.parse(line) as JsonRpcResponse;
+        if (typeof response.id === "number") {
+          responses.set(response.id, response);
+          waiters.get(response.id)?.(response);
+          waiters.delete(response.id);
+        }
+      }
+    });
+
+    const request = async (id: number, method: string, params: Record<string, unknown>) => {
+      const response = responses.get(id) ?? await new Promise<JsonRpcResponse>((resolve, reject) => {
+        const timeout = setTimeout(() => {
+          waiters.delete(id);
+          reject(new Error(`timed out waiting for ${method}`));
+        }, 3_000);
+        waiters.set(id, value => {
+          clearTimeout(timeout);
+          resolve(value);
+        });
+        child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id, method, params })}\n`);
+      });
+      if (response.error !== undefined) throw new Error(JSON.stringify(response.error));
+      return response.result ?? {};
+    };
+
+    try {
+      await request(1, "initialize", {
+        protocolVersion: LATEST_PROTOCOL_VERSION,
+        capabilities: {},
+        clientInfo: { name: "claude-architect-test", version: "1.0.0" },
+      });
+      child.stdin.write(`${JSON.stringify({
+        jsonrpc: "2.0",
+        method: "notifications/initialized",
+        params: {},
+      })}\n`);
+      const listed = await request(2, "tools/list", {});
+      const tools = listed.tools as Array<{ name: string; outputSchema?: Record<string, unknown> }>;
+      const names = tools.map(tool => tool.name).sort();
+      const called = await request(3, "tools/call", {
+        name: "delegate",
+        arguments: {
+          checkoutPath: "/unused-invalid-spec",
+          protocolVersion: PROTOCOL_VERSION,
+          spec: { specVersion: "1" },
+        },
+      });
+      const diagnosed = await request(4, "tools/call", {
+        name: "doctor",
+        arguments: {},
+      });
+
+      expect(names).toEqual([
+        "decideCandidate",
+        "delegate",
+        "doctor",
+        "gitChangedFiles",
+        "gitDiff",
+        "gitLog",
+        "gitStatus",
+        "integrateCandidate",
+        "reviewCandidate",
+      ]);
+      expect(tools.every(tool => tool.outputSchema !== undefined)).toBe(true);
+      expect(called.structuredContent).toMatchObject({ ok: false });
+      expect(called.content).toEqual([{
+        type: "text",
+        text: JSON.stringify(called.structuredContent),
+      }]);
+      expect(diagnosed.structuredContent).toMatchObject({
+        runtimeVersion: expect.any(String),
+        protocolVersion: PROTOCOL_VERSION,
+        producers: expect.any(Array),
+        issues: expect.any(Array),
+      });
+      expect(stdout.trim().split(/\r?\n/).every(line => {
+        try {
+          JSON.parse(line);
+          return true;
+        } catch {
+          return false;
+        }
+      })).toBe(true);
+      expect(stderr).toContain("claude-architect MCP server ready");
+    } finally {
+      if (child.exitCode === null && child.signalCode === null) child.kill("SIGTERM");
+      await waitForExit(child);
+    }
+  });
+
+  it("refuses nested startup on stderr without protocol output", async () => {
+    const result = await new Promise<{
+      code: number | null;
+      stdout: string;
+      stderr: string;
+    }>((resolve, reject) => {
+      const child = spawn(process.execPath, [serverPath], {
+        env: { ...process.env, CLAUDE_ARCHITECT_DELEGATED: "1" },
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+      let stdout = "";
+      let stderr = "";
+      child.stdout.setEncoding("utf8");
+      child.stderr.setEncoding("utf8");
+      child.stdout.on("data", chunk => {
+        stdout += chunk;
+      });
+      child.stderr.on("data", chunk => {
+        stderr += chunk;
+      });
+      child.once("error", reject);
+      child.once("exit", code => resolve({ code, stdout, stderr }));
+    });
+
+    expect(result.code).not.toBe(0);
+    expect(result.stdout).toBe("");
+    expect(result.stderr).toContain("CLAUDE_ARCHITECT_DELEGATED");
+  });
+});

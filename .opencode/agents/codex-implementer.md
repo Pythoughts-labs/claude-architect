@@ -69,7 +69,7 @@ Invoke the adapter from the workspace with the spec on stdin:
   --output-last-message "$FINAL" - < "$SPEC"
 ```
 
-The adapter supplies `--ignore-user-config` and `--ephemeral`. `low` is the default; honor an explicitly supported `medium`, `high`, `xhigh`, or `max` override and any other supported Codex option named by the contract. Do not impose a default wall-clock cap.
+The adapter supplies `--ignore-user-config` and `--ephemeral`, then appends `--disable multi_agent` and `-c features.multi_agent_v2={enabled=false,max_concurrent_threads_per_session=1}` after caller arguments. GPT-5.6 Sol can force the V2 tool surface through model metadata, but V2 counts the root thread in that one-thread cap, leaving zero capacity for internal subagents. `low` is the default; honor an explicitly supported `medium`, `high`, `xhigh`, or `max` override and other supported Codex options named by the contract, except options that would weaken these enforced single-agent controls. Do not impose a default wall-clock cap.
 
 After Codex exits, remove `SPEC` and `FINAL` as soon as their contents are consumed. Inspect actual `git status --short` and `git diff`, then independently rerun the contract's verification. A producer self-report is not evidence. Never repair the work here.
 

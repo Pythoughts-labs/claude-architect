@@ -1,0 +1,151 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": [
+    "specVersion",
+    "objective",
+    "context",
+    "writeAllowlist",
+    "forbiddenScope",
+    "successCriteria",
+    "verification",
+    "executionMode",
+    "timeoutMs",
+    "producerPreferences",
+    "expectedOutput"
+  ],
+  "properties": {
+    "specVersion": {
+      "const": "1"
+    },
+    "objective": {
+      "type": "string"
+    },
+    "context": {
+      "type": "string"
+    },
+    "writeAllowlist": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "minItems": 1
+    },
+    "forbiddenScope": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "successCriteria": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "verification": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "id",
+          "executable",
+          "args",
+          "cwd",
+          "timeoutMs",
+          "network",
+          "expectedExitCodes"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "executable": {
+            "type": "string"
+          },
+          "args": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "cwd": {
+            "type": "string"
+          },
+          "environment": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            }
+          },
+          "timeoutMs": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 1800000
+          },
+          "network": {
+            "enum": [
+              "denied",
+              "allowed"
+            ]
+          },
+          "expectedExitCodes": {
+            "type": "array",
+            "items": {
+              "type": "integer"
+            }
+          },
+          "platform": {
+            "type": "object",
+            "properties": {
+              "os": {
+                "type": "array",
+                "items": {
+                  "enum": [
+                    "darwin",
+                    "linux",
+                    "win32"
+                  ]
+                }
+              },
+              "arch": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "executionMode": {
+      "const": "edit"
+    },
+    "timeoutMs": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 1800000
+    },
+    "producerPreferences": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "producerOverrides": {
+      "type": "object",
+      "properties": {
+        "model": {
+          "type": "string"
+        },
+        "reasoningEffort": {
+          "type": "string"
+        }
+      }
+    },
+    "expectedOutput": {
+      "const": "candidate-patch"
+    }
+  }
+}

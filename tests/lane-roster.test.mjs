@@ -13,6 +13,7 @@ function markdownRoster(relativeDirectory) {
 }
 
 assert.deepEqual(markdownRoster("agents"), [
+  "advisor.md",
   "claude-advisor.md",
   "codex-implementer.md",
   "opencode-implementer.md",

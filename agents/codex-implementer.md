@@ -112,10 +112,12 @@ Flag discipline (non-negotiable):
 | `--sandbox workspace-write` | Codex writes code, scoped to the working tree, with no network access. Never `danger-full-access`. |
 | `--ignore-user-config` | Prevents delegated runs from loading interactive user MCP servers such as `node_repl`, browser tools, and their worker subprocesses. |
 | `--ephemeral` | Prevents a finished delegation from persisting a resumable Codex session. |
+| `--disable multi_agent` | Disables the normal multi-agent feature; GPT-5.6 Sol can still force the V2 tool surface through model metadata, so this is paired with the hard V2 thread cap below. |
+| `-c features.multi_agent_v2={enabled=false,max_concurrent_threads_per_session=1}` | V2 counts the root thread, so one total slot leaves zero child capacity and rejects every internal spawn. |
 | `-c model_reasoning_effort=low` | Uses low reasoning by default. If the caller selects `medium`, `high`, `xhigh`, or `max`, pass that value instead. |
 | `--skip-git-repo-check` + `--cd "$(pwd)"` | Deterministic working root; works outside git repos. |
 | `- < spec file` | Prompt via stdin. No quoting hazards, no truncated specs. |
-| isolated runner | Adds `--ignore-user-config --ephemeral` and terminates the run's isolated process group on exit. It has no wall-clock cap by default so healthy long tasks can finish. Set a positive `CODEX_TIMEOUT_SECONDS` for a task-specific cap (`timeout`/`gtimeout` required); `0` leaves it uncapped, and malformed or unenforceable values fail before Codex starts. On timeout, report `STATUS: timeout` with whatever landed. |
+| isolated runner | Adds `--ignore-user-config --ephemeral`, then appends `--disable multi_agent` and the V2 one-thread cap after caller arguments so they cannot be overridden. It terminates the run's isolated process group on exit. It has no wall-clock cap by default so healthy long tasks can finish. Set a positive `CODEX_TIMEOUT_SECONDS` for a task-specific cap (`timeout`/`gtimeout` required); `0` leaves it uncapped, and malformed or unenforceable values fail before Codex starts. On timeout, report `STATUS: timeout` with whatever landed. |
 
 `--model gpt-5.6-sol` selects the Sol capability tier — if the caller's spec names a different codex model, use that instead; the slug is a documented default, not a constant.
 

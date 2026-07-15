@@ -14,9 +14,32 @@ assert_contains() {
   fi
 }
 
+assert_adjacent_args() {
+  local file=$1
+  local first=$2
+  local second=$3
+  local label=$4
+  local arg
+  local previous_arg=
+
+  while IFS= read -r arg; do
+    if [[ "$previous_arg" == "$first" && "$arg" == "$second" ]]; then
+      return 0
+    fi
+    previous_arg=$arg
+  done < "$file"
+
+  printf 'FAIL: %s missing adjacent args: %s %s\n' "$label" "$first" "$second" >&2
+  exit 1
+}
+
 assert_contains "$ROOT/agents/codex-implementer.md" 'run-codex-isolated\.sh'
+assert_contains "$ROOT/agents/codex-implementer.md" '--disable multi_agent'
+assert_contains "$ROOT/agents/codex-implementer.md" 'max_concurrent_threads_per_session=1'
 assert_contains "$ROOT/.opencode/agents/codex-implementer.md" '--ignore-user-config'
 assert_contains "$ROOT/.opencode/agents/codex-implementer.md" '--ephemeral'
+assert_contains "$ROOT/.opencode/agents/codex-implementer.md" '--disable multi_agent'
+assert_contains "$ROOT/.opencode/agents/codex-implementer.md" 'max_concurrent_threads_per_session=1'
 assert_contains "$ROOT/skills/delegate/SKILL.md" 'claude-architect:codex-implementer'
 assert_contains "$ROOT/skills/delegate/SKILL.md" 'codex:codex-rescue'
 assert_contains "$ROOT/skills/delegate/SKILL.md" 'app-server'
@@ -88,6 +111,11 @@ run_case() {
   grep -Fxq -- 'exec' "$state/args"
   grep -Fxq -- '--ignore-user-config' "$state/args"
   grep -Fxq -- '--ephemeral' "$state/args"
+  assert_adjacent_args "$state/args" --disable multi_agent "$mode branch"
+  assert_adjacent_args "$state/args" -c \
+    'features.multi_agent_v2={enabled=false,max_concurrent_threads_per_session=1}' \
+    "$mode branch"
+
   grep -Fxq -- '--model' "$state/args"
   grep -Fxq -- 'test-model' "$state/args"
 
@@ -259,6 +287,7 @@ assert_codex_stderr_capture() {
   ln -s "$PERL_BIN" "$bin/perl"
   cat > "$bin/codex" <<EOF
 #!$BASH_BIN
+printf '%s\n' "\$@" > "$state/args"
 printf 'codex-diagnostic-line\n' >&2
 exit 5
 EOF
@@ -276,6 +305,11 @@ EOF
     printf 'FAIL: codex stderr capture altered exit status (%s != 5)\n' "$status" >&2
     exit 1
   fi
+
+  assert_adjacent_args "$state/args" --disable multi_agent 'stderr logging branch'
+  assert_adjacent_args "$state/args" -c \
+    'features.multi_agent_v2={enabled=false,max_concurrent_threads_per_session=1}' \
+    'stderr logging branch'
 
   # stderr must still stream to the caller, and also be persisted per-run.
   # The tee child is orphaned by exec, so poll briefly for its flush.
