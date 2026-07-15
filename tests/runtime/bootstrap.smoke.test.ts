@@ -69,6 +69,15 @@ function isProcessAlive(pid: number): boolean {
   }
 }
 
+async function waitForProcessGone(pid: number, timeoutMs = 2_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (!isProcessAlive(pid)) return;
+    await new Promise(resolve => setTimeout(resolve, 20));
+  }
+  throw new Error(`timed out waiting for process ${pid} to exit`);
+}
+
 afterEach(async () => {
   await Promise.all(temporaryPaths.splice(0).map(entry =>
     rm(entry, { recursive: true, force: true })));
@@ -199,16 +208,11 @@ describe("runtime bootstrap", () => {
     const bin = path.join(root, "bin");
     const serverPath = path.join(root, "signal-server.mjs");
     const pidFile = path.join(root, "server.pid");
-    const terminatedFile = path.join(root, "server.terminated");
     await mkdir(bin);
     await symlink(process.execPath, path.join(bin, "node"));
     await writeFile(serverPath, [
       "import { writeFileSync } from 'node:fs';",
       "writeFileSync(process.env.TEST_SERVER_PID_FILE, String(process.pid));",
-      "process.once('SIGTERM', () => {",
-      "  writeFileSync(process.env.TEST_SERVER_TERMINATED_FILE, 'terminated');",
-      "  process.exit(0);",
-      "});",
       "setInterval(() => {}, 1000);",
       "",
     ].join("\n"));
@@ -219,7 +223,6 @@ describe("runtime bootstrap", () => {
         PATH: bin,
         CLAUDE_ARCHITECT_SERVER_PATH: serverPath,
         TEST_SERVER_PID_FILE: pidFile,
-        TEST_SERVER_TERMINATED_FILE: terminatedFile,
       },
       stdio: ["ignore", "pipe", "pipe"],
     });
@@ -227,10 +230,10 @@ describe("runtime bootstrap", () => {
     try {
       serverPid = Number(await waitForFile(pidFile));
       child.kill("SIGTERM");
-      await waitForFile(terminatedFile);
       const exit = await waitForExit(child);
+      await waitForProcessGone(serverPid);
       expect(Number.isSafeInteger(serverPid) && serverPid > 1).toBe(true);
-      expect(exit).toEqual({ code: 0, signal: null });
+      expect(exit).toEqual({ code: null, signal: "SIGTERM" });
       expect(isProcessAlive(serverPid)).toBe(false);
     } finally {
       if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");

@@ -85,8 +85,7 @@ async function runServerWith(nodePath, entrypoint) {
       cleanup();
       if (signal !== null) {
         if (forwarded.has(signal)) {
-          process.exitCode = 1;
-          resolve();
+          process.kill(process.pid, signal);
           return;
         }
         reject(new Error(`server exited from signal ${signal}`));
