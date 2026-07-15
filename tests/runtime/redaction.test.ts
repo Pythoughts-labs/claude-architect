@@ -66,6 +66,14 @@ describe("redact", () => {
     registration.dispose();
   });
 
+  it("does not treat literal marker text inside a registered secret as trusted", () => {
+    clearRegisteredSecrets();
+    const registration = registerSecretValue("prefix[x]suffix");
+
+    expect(redact("before prefix[x]suffix after")).toBe("before [x] after");
+    registration.dispose();
+  });
+
   it("redacts string leaves in nested records without changing other values", () => {
     const input = {
       attempt: 2,

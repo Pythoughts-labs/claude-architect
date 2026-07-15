@@ -169,6 +169,35 @@ describe("ArtifactStore", () => {
     registration.dispose();
   });
 
+  it("redacts registered secrets containing literal marker text from logs", async () => {
+    const secret = "prefix[x]suffix";
+    const registration = registerSecretValue(secret);
+    const store = new ArtifactStore("run-marker-secret-log");
+
+    const ref = await store.writeLog("producer", `output ${secret}\n`);
+
+    const stored = await readFile(join(store.runDirectory, ref), "utf8");
+    expect(stored).not.toContain(secret);
+    expect(stored).toBe("output [x]\n");
+    registration.dispose();
+  });
+
+  it("redacts registered marker secrets before JSON escaping can hide them", async () => {
+    const secret = 'prefix"[x]\\suffix';
+    const registration = registerSecretValue(secret);
+    const store = new ArtifactStore("run-marker-secret-json");
+    const result = sampleResult("run-marker-secret-json");
+    result.summary = secret;
+
+    await store.writeResult(result);
+
+    const stored = await readFile(join(store.runDirectory, "result.json"), "utf8");
+    const parsed = JSON.parse(stored) as AttemptResult;
+    expect(parsed.summary).toBe("[x]");
+    expect(JSON.stringify(parsed)).not.toContain(secret);
+    registration.dispose();
+  });
+
   it("redacts registered secrets used as JSON property names", async () => {
     const secret = "enterprise-secret-key";
     const registration = registerSecretValue(secret);

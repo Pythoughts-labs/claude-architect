@@ -1,6 +1,5 @@
 const registeredSecrets = new Map<string, number>();
 const REDACTION_MARKER_TEXT = "[x]";
-const REDACTION_MARKER = /\[x\]/g;
 
 export interface SecretRegistration {
   dispose(): void;
@@ -43,6 +42,13 @@ export function containsRegisteredSecret(text: string): boolean {
   return [...registeredSecrets.keys()].some(secret => text.includes(secret));
 }
 
+export function containsRegisteredSecretValue(value: unknown): boolean {
+  if (typeof value === "string") return containsRegisteredSecret(value);
+  if (Array.isArray(value)) return value.some(containsRegisteredSecretValue);
+  if (value === null || typeof value !== "object") return false;
+  return Object.values(value as Record<string, unknown>).some(containsRegisteredSecretValue);
+}
+
 function replaceRegisteredSecrets(text: string): string {
   const secrets = [...registeredSecrets.keys()];
   if (secrets.length === 0) return text;
@@ -74,14 +80,7 @@ function redactUnmarked(text: string): string {
 }
 
 export function redact(text: string): string {
-  let cursor = 0;
-  let result = "";
-  for (const match of text.matchAll(REDACTION_MARKER)) {
-    const index = match.index;
-    result += redactUnmarked(text.slice(cursor, index)) + match[0];
-    cursor = index + match[0].length;
-  }
-  return result + redactUnmarked(text.slice(cursor));
+  return redactUnmarked(text);
 }
 
 const DANGEROUS_KEYS = new Set(["__proto__", "constructor", "prototype"]);

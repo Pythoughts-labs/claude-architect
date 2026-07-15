@@ -15,6 +15,7 @@ import type { AttemptResult } from "../protocol/attempt-result.js";
 import { RuntimeError } from "../util/errors.js";
 import {
   containsRegisteredSecret,
+  containsRegisteredSecretValue,
   redact,
   redactRecord,
   redactValues,
@@ -209,6 +210,9 @@ function escapeJsonPropertyKeys(serialized: string): string {
 }
 
 function serializeJson(value: unknown, indentation?: number): string {
+  if (containsRegisteredSecretValue(value)) {
+    throw new RuntimeError("archive JSON cannot be safely persisted after redaction");
+  }
   const serialized = escapeJsonPropertyKeys(JSON.stringify(value, null, indentation));
   if (containsRegisteredSecret(serialized)) {
     throw new RuntimeError("archive JSON cannot be safely persisted after redaction");
