@@ -25,6 +25,30 @@ function delay(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
+export async function acquireWxFileLock(
+  key: string,
+  timeoutMessage?: string,
+): Promise<CheckoutLock> {
+  const lockDirectory = path.join(resolveStateDir(), "locks");
+  const lockPath = path.join(lockDirectory, `${key}.lock`);
+  await fs.mkdir(lockDirectory, { recursive: true });
+  const deadline = Date.now() + LOCK_TIMEOUT_MS;
+  for (;;) {
+    try {
+      const handle = await fs.open(lockPath, "wx");
+      try { await handle.writeFile(String(nodeProcess.pid)); }
+      finally { await handle.close(); }
+      return { key, release: async () => { await fs.rm(lockPath, { force: true }); } };
+    } catch (error) {
+      if (errorCode(error) !== "EEXIST") throw error;
+      if (Date.now() >= deadline) {
+        throw new RuntimeError(timeoutMessage ?? `lock is held: ${key}`, { key });
+      }
+      await delay(LOCK_RETRY_MS);
+    }
+  }
+}
+
 async function gitCommonDir(cwd: string): Promise<string> {
   // Intentional bootstrap exception until Task 8 provides the shared argv-based Git helper.
   return new Promise((resolve, reject) => {
@@ -139,22 +163,7 @@ export class PosixPlatformServices implements PlatformServices {
   async acquireCheckoutLock(checkout: string): Promise<CheckoutLock> {
     const { canonical, gitCommonDir: commonDir } = await this.canonicalizePath(checkout);
     const key = createHash("sha256").update(commonDir ?? canonical).digest("hex");
-    const lockDirectory = path.join(resolveStateDir(), "locks");
-    const lockPath = path.join(lockDirectory, `${key}.lock`);
-    await fs.mkdir(lockDirectory, { recursive: true });
-    const deadline = Date.now() + LOCK_TIMEOUT_MS;
-    for (;;) {
-      try {
-        const handle = await fs.open(lockPath, "wx");
-        try { await handle.writeFile(String(nodeProcess.pid)); }
-        finally { await handle.close(); }
-        return { key, release: async () => { await fs.rm(lockPath, { force: true }); } };
-      } catch (error) {
-        if (errorCode(error) !== "EEXIST") throw error;
-        if (Date.now() >= deadline) throw new RuntimeError(`checkout is locked: ${checkout}`, { key });
-        await delay(LOCK_RETRY_MS);
-      }
-    }
+    return acquireWxFileLock(key, `checkout is locked: ${checkout}`);
   }
 
   async createSecureTempDirectory(): Promise<string> {

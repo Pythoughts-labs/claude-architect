@@ -1,11 +1,19 @@
+import { execFile, spawn, type ChildProcess } from "node:child_process";
+import { createHash } from "node:crypto";
 import { promises as fs } from "node:fs";
+import { tmpdir } from "node:os";
 import path from "node:path";
 import nodeProcess from "node:process";
+import { BoundedBuffer } from "../util/bounded-buffer.js";
 import { RuntimeError } from "../util/errors.js";
 import type {
   CanonicalPath, CheckoutLock, ExecutableRequest, PlatformServices, ResolvedExecutable,
-  SpawnRequest, SupervisedProcess,
+  SpawnRequest, SupervisedExit, SupervisedProcess,
 } from "./platform-services.js";
+import { acquireWxFileLock } from "./posix-platform-services.js";
+import { normalizeWindowsEnv } from "./windows-env.js";
+
+const childHandles = new WeakMap<SupervisedProcess, ChildProcess>();
 
 interface WindowsExecutableDependencies {
   pathEntries: string[];
@@ -101,6 +109,25 @@ function notImplemented(): never {
   throw new RuntimeError("not implemented until P0-B Task 3/4");
 }
 
+async function gitCommonDir(cwd: string): Promise<string> {
+  // Intentional bootstrap exception until Task 8 provides the shared argv-based Git helper.
+  return new Promise((resolve, reject) => {
+    execFile("git", ["rev-parse", "--path-format=absolute", "--git-common-dir"], { cwd }, (error, stdout) => {
+      if (error) reject(error);
+      else resolve(stdout.trim());
+    });
+  });
+}
+
+export function canonicalizeForScope(candidate: string, root: string): boolean {
+  const normalizedCandidate = path.win32.normalize(candidate).toLowerCase();
+  let normalizedRoot = path.win32.normalize(root).toLowerCase();
+  if (normalizedRoot.endsWith("\\") && path.win32.parse(normalizedRoot).root !== normalizedRoot) {
+    normalizedRoot = normalizedRoot.slice(0, -1);
+  }
+  return normalizedCandidate === normalizedRoot || normalizedCandidate.startsWith(`${normalizedRoot}\\`);
+}
+
 export class WindowsPlatformServices implements PlatformServices {
   readonly os = "win32";
 
@@ -122,14 +149,78 @@ export class WindowsPlatformServices implements PlatformServices {
       : resolveWindowsExecutable(request, { ...commonDeps, comSpec: nodeProcess.env.ComSpec });
   }
 
-  async spawnSupervised(_request: SpawnRequest): Promise<SupervisedProcess> { return notImplemented(); }
-  async requestCooperativeCancellation(_process: SupervisedProcess): Promise<void> { return notImplemented(); }
+  async spawnSupervised(req: SpawnRequest): Promise<SupervisedProcess> {
+    const child = spawn(req.executable.command, [...req.executable.prefixArgs, ...req.args], {
+      cwd: req.cwd, env: normalizeWindowsEnv(req.env), detached: false, windowsHide: true,
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    const outBuf = new BoundedBuffer(req.maxOutputBytes), errBuf = new BoundedBuffer(req.maxOutputBytes);
+    child.stdout.on("data", (c: Buffer) => outBuf.push(c));   // always drain, even after truncation, to avoid deadlock
+    child.stderr.on("data", (c: Buffer) => errBuf.push(c));
+    if (req.stdin != null) { child.stdin?.on("error", () => {}); child.stdin?.write(req.stdin); child.stdin?.end(); }
+    let settled = false;
+    const done = new Promise<SupervisedExit>((resolve) => {
+      const finish = (e: SupervisedExit) => { if (!settled) { settled = true; resolve(e); } };
+      // MANDATORY: without this, a failed spawn (ENOENT/EACCES) emits 'error' with no listener → uncaught
+      // exception crashes the MCP server. Instead settle done with a spawn-failure marker.
+      child.on("error", (err) => finish({
+        exitCode: null, signal: null, timedOut: false, cancelled: false,
+        stdout: outBuf.toString(), stderr: errBuf.toString(),
+        truncated: { stdout: outBuf.truncated, stderr: errBuf.truncated }, spawnError: err,
+      }));
+      child.on("close", (code, signal) => finish({
+        exitCode: code, signal: signal as NodeJS.Signals | null, timedOut: false, cancelled: false,
+        stdout: outBuf.toString(), stderr: errBuf.toString(),
+        truncated: { stdout: outBuf.truncated, stderr: errBuf.truncated },
+      }));
+    });
+    const proc = { pid: child.pid ?? -1, done, stdout: child.stdout, stderr: child.stderr };
+    childHandles.set(proc, child);
+    return proc;
+  }
+
+  async requestCooperativeCancellation(proc: SupervisedProcess): Promise<void> {
+    const child = childHandles.get(proc);
+    if (child === undefined) return;
+    try { child.kill("SIGTERM"); }
+    catch { /* process already exited */ }
+  }
   async terminateProcessTree(_process: SupervisedProcess): Promise<void> { return notImplemented(); }
-  async getProcessStartToken(_pid: number): Promise<string | null> { return notImplemented(); }
+  async getProcessStartToken(pid: number): Promise<string | null> {
+    if (!Number.isSafeInteger(pid) || pid <= 1) return null;
+    return new Promise(resolve => {
+      try {
+        execFile(
+          "powershell.exe",
+          ["-NoProfile", "-Command", `(Get-Process -Id ${pid}).StartTime.ToFileTimeUtc()`],
+          (error, stdout) => {
+            const token = stdout.trim();
+            resolve(error || token.length === 0 ? null : `win32:${token}`);
+          },
+        );
+      } catch {
+        resolve(null);
+      }
+    });
+  }
   async terminateProcessTreeByPid(_pid: number, _expectedToken?: string | null): Promise<void> {
     return notImplemented();
   }
-  async acquireCheckoutLock(_checkout: string): Promise<CheckoutLock> { return notImplemented(); }
-  async createSecureTempDirectory(): Promise<string> { return notImplemented(); }
-  async canonicalizePath(_path: string): Promise<CanonicalPath> { return notImplemented(); }
+  async acquireCheckoutLock(checkout: string): Promise<CheckoutLock> {
+    const { canonical, gitCommonDir: commonDir } = await this.canonicalizePath(checkout);
+    const key = createHash("sha256").update(commonDir ?? canonical).digest("hex");
+    return acquireWxFileLock(key, `checkout is locked: ${checkout}`);
+  }
+
+  async createSecureTempDirectory(): Promise<string> {
+    return fs.mkdtemp(path.join(tmpdir(), "claude-architect-"));
+  }
+
+  async canonicalizePath(input: string): Promise<CanonicalPath> {
+    const canonical = await fs.realpath(input);
+    let commonDir: string | null = null;
+    try { commonDir = await fs.realpath(await gitCommonDir(canonical)); }
+    catch { commonDir = null; }
+    return { input, canonical, gitCommonDir: commonDir };
+  }
 }
