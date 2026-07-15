@@ -6,7 +6,10 @@ import {
   AcceptanceVerifier,
   type AcceptanceVerifyArgs,
 } from "../../src/verify/acceptance-verifier.js";
-import type { ProjectVerifyResult } from "../../src/verify/project-verifier.js";
+import type {
+  ProjectCommandEvidence,
+  ProjectVerifyResult,
+} from "../../src/verify/project-verifier.js";
 import type { StructuralVerifyResult } from "../../src/verify/structural-verifier.js";
 
 const artifact: CandidateArtifact = {
@@ -148,6 +151,14 @@ describe("AcceptanceVerifier", () => {
     expect(project).toHaveBeenCalledWith(expect.objectContaining({
       commands: spec.verification,
     }));
+    const evidence = result.evidence as {
+      project: { commands: ProjectCommandEvidence[] };
+      verificationPolicy: ProjectCommandEvidence[];
+    };
+    expect(evidence.project.commands).not.toBe(evidence.verificationPolicy);
+    expect(evidence.project.commands[0]).not.toBe(evidence.verificationPolicy[0]);
+    evidence.project.commands[0]!.skipped = true;
+    expect(evidence.verificationPolicy[0]!.skipped).toBe(false);
   });
 
   it("fails when project verification reports mutation without a failure string", async () => {

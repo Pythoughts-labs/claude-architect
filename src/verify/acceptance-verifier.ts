@@ -6,6 +6,7 @@ import { RuntimeError } from "../util/errors.js";
 import {
   projectVerify,
   type ProjectVerifyArgs,
+  type ProjectCommandEvidence,
   type ProjectVerifyResult,
 } from "./project-verifier.js";
 import {
@@ -64,6 +65,13 @@ async function archiveProjectLogs(
       throw new RuntimeError("artifact store returned an unexpected verification log reference");
     }
   }
+}
+
+function cloneCommandEvidence(command: ProjectCommandEvidence): ProjectCommandEvidence {
+  return {
+    ...command,
+    ...(command.truncated === undefined ? {} : { truncated: { ...command.truncated } }),
+  };
 }
 
 function outcomesMatchHostCommands(
@@ -161,7 +169,7 @@ export class AcceptanceVerifier {
       && !failures.includes("command-outcome-mismatch")) {
       failures.push("command-outcome-mismatch");
     }
-    const verificationPolicy = project.evidence.commands.map(command => ({ ...command }));
+    const verificationPolicy = project.evidence.commands.map(cloneCommandEvidence);
 
     return {
       ok: failures.length === 0,
@@ -171,7 +179,7 @@ export class AcceptanceVerifier {
         project: {
           mutated: project.mutated,
           failures: [...project.failures],
-          commands: verificationPolicy,
+          commands: verificationPolicy.map(cloneCommandEvidence),
         },
         verificationPolicy,
       },
