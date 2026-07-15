@@ -467,6 +467,33 @@ describe("runAttempt", () => {
     expect(result.evidence).toMatchObject({ project: "failed" });
   });
 
+  it("archives a frozen candidate when the verifier throws", async () => {
+    const repoRoot = await initRepo();
+    const throwingVerifier: AcceptanceVerifierLike = {
+      async verify() {
+        throw new Error("verifier infrastructure failed");
+      },
+    };
+
+    const result = await runAttempt(
+      repoRoot,
+      validSpec(),
+      dependencies(new FakeAdapter(), "run-verifier-error", {
+        verifier: throwingVerifier,
+      }),
+    );
+
+    expect(result.status).toBe("failed");
+    expect(result.failure).toBe("verification-failure");
+    expect(result.candidate?.candidateTreeOid).toMatch(/^[0-9a-f]{40}$/);
+    expect(result.unresolvedIssues).toEqual(["verifier-error"]);
+    expect(await archivedJson("run-verifier-error", "result.json")).toMatchObject({
+      failure: "verification-failure",
+      candidate: { candidateTreeOid: result.candidate?.candidateTreeOid },
+    });
+    await expectAttemptResourcesCleaned("run-verifier-error");
+  });
+
   it("uses a temporary HOME for a controlled configuration profile", async () => {
     const repoRoot = await initRepo();
     const realHome = await temporaryDirectory("ca-real-home-");

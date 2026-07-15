@@ -593,19 +593,25 @@ export async function runAttempt(
       } else {
         candidate = frozen.artifact;
         evidence = { ...frozen.evidence };
-        const verification = await deps.verifier.verify({
-          repoRoot: canonical.canonical,
-          worktreePath: worktree.path,
-          baseCommitOid: preconditions.baseCommitOid,
-          artifact: frozen.artifact,
-          spec,
-          ps,
-          artifactStore: store,
-        });
-        commandOutcomes = verification.commandOutcomes;
-        unresolvedIssues = verification.failures;
-        evidence = { ...evidence, ...verification.evidence };
-        if (!verification.ok) signals["verification-failure"] = true;
+        try {
+          const verification = await deps.verifier.verify({
+            repoRoot: canonical.canonical,
+            worktreePath: worktree.path,
+            baseCommitOid: preconditions.baseCommitOid,
+            artifact: frozen.artifact,
+            spec,
+            ps,
+            artifactStore: store,
+          });
+          commandOutcomes = verification.commandOutcomes;
+          unresolvedIssues = verification.failures;
+          evidence = { ...evidence, ...verification.evidence };
+          if (!verification.ok) signals["verification-failure"] = true;
+        } catch {
+          signals["verification-failure"] = true;
+          unresolvedIssues = ["verifier-error"];
+          evidence = { ...evidence, verifierError: true };
+        }
       }
     }
 
