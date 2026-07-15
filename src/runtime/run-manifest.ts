@@ -6,7 +6,7 @@ import {
   RUNTIME_VERSION,
 } from "../protocol/versions.js";
 import type { EnvProvenance } from "./environment-policy.js";
-import { redact, redactRecord } from "./redaction.js";
+import { redact, redactRecord, redactValues } from "./redaction.js";
 
 export interface RunManifestProducer {
   id: string | null;
@@ -94,6 +94,21 @@ function stableJson(value: unknown): string {
   return JSON.stringify(canonicalize(value));
 }
 
+function withManifestHash(body: ManifestBody): RunManifest {
+  const sanitized = redactValues(body);
+  sanitized.effectivePolicy = redactRecord(body.effectivePolicy);
+  sanitized.executionPolicy = redactRecord(body.executionPolicy);
+  return {
+    ...sanitized,
+    manifestHash: sha256(stableJson(sanitized)),
+  };
+}
+
+export function sanitizeRunManifest(manifest: RunManifest): RunManifest {
+  const { manifestHash: _manifestHash, ...body } = manifest;
+  return withManifestHash(body);
+}
+
 export function buildRunManifest(args: BuildRunManifestArgs): RunManifest {
   const body: ManifestBody = {
     manifestVersion: "1",
@@ -129,8 +144,5 @@ export function buildRunManifest(args: BuildRunManifestArgs): RunManifest {
     },
   };
 
-  return {
-    ...body,
-    manifestHash: sha256(stableJson(body)),
-  };
+  return withManifestHash(body);
 }

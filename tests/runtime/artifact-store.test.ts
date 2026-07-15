@@ -135,8 +135,23 @@ describe("ArtifactStore", () => {
 
     const stored = await readFile(join(store.runDirectory, "result.json"), "utf8");
     expect(() => JSON.parse(stored)).not.toThrow();
+    expect(stored).not.toContain('"runId"');
     await expect(store.readResult("run-json-syntax")).resolves.toMatchObject({
       runId: "run-json-syntax",
+    });
+    registration.dispose();
+  });
+
+  it("preserves required result keys when their names equal registered values", async () => {
+    const registration = registerSecretValue("summary");
+    const store = new ArtifactStore("run-required-key");
+
+    await store.writeResult(sampleResult("run-required-key"));
+
+    const stored = await readFile(join(store.runDirectory, "result.json"), "utf8");
+    expect(stored).not.toContain('"summary"');
+    await expect(store.readResult("run-required-key")).resolves.toMatchObject({
+      summary: "producer exited non-zero",
     });
     registration.dispose();
   });
@@ -170,7 +185,8 @@ describe("ArtifactStore", () => {
       "result.json",
     ), "utf8");
     expect(stored).not.toContain(secret);
-    expect(stored).toContain("«redacted:secret»");
+    const parsed = JSON.parse(stored) as AttemptResult;
+    expect(Object.keys(parsed.evidence)).toContain("«redacted:secret»");
     registration.dispose();
   });
 
@@ -557,12 +573,11 @@ describe("buildRunManifest", () => {
   });
 
   it("keeps the persisted manifest hash consistent after value redaction", async () => {
-    const registration = registerSecretValue("platform");
+    const registration = registerSecretValue("secret");
     const store = new ArtifactStore("run-manifest-hash");
-    await store.writeManifest(buildRunManifest(manifestArgs(
-      "run-manifest-hash",
-      "/canonical/repo",
-    )));
+    const args = manifestArgs("run-manifest-hash", "/canonical/repo");
+    args.producer.version = "secret";
+    await store.writeManifest(buildRunManifest(args));
 
     const persisted = JSON.parse(await readFile(
       join(store.runDirectory, "manifest.json"),
@@ -583,6 +598,37 @@ describe("buildRunManifest", () => {
       .digest("hex");
 
     expect(manifestHash).toBe(recomputed);
+    registration.dispose();
+  });
+
+  it("rehashes a manifest when a secret is registered after construction", async () => {
+    const manifest = buildRunManifest(manifestArgs(
+      "run-manifest-late-secret",
+      "/canonical/repo",
+    ));
+    const registration = registerSecretValue("platform");
+    const store = new ArtifactStore("run-manifest-late-secret");
+
+    await store.writeManifest(manifest);
+
+    const persisted = JSON.parse(await readFile(
+      join(store.runDirectory, "manifest.json"),
+      "utf8",
+    )) as Record<string, unknown>;
+    const manifestHash = persisted.manifestHash;
+    delete persisted.manifestHash;
+    const canonicalize = (value: unknown): unknown => {
+      if (Array.isArray(value)) return value.map(canonicalize);
+      if (value === null || typeof value !== "object") return value;
+      return Object.fromEntries(Object.entries(value as Record<string, unknown>)
+        .filter(([, child]) => child !== undefined)
+        .sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0)
+        .map(([key, child]) => [key, canonicalize(child)]));
+    };
+
+    expect(manifestHash).toBe(createHash("sha256")
+      .update(JSON.stringify(canonicalize(persisted)))
+      .digest("hex"));
     expect(JSON.stringify(persisted)).not.toContain("platform");
     registration.dispose();
   });

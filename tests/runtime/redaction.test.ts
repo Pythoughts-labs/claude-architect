@@ -55,6 +55,16 @@ describe("redact", () => {
     clearRegisteredSecrets();
   });
 
+  it("is idempotent when a registered value appears in the redaction marker", () => {
+    clearRegisteredSecrets();
+    const registration = registerSecretValue("secret");
+
+    const once = redact("secret");
+
+    expect(redact(once)).toBe(once);
+    registration.dispose();
+  });
+
   it("redacts string leaves in nested records without changing other values", () => {
     const input = {
       attempt: 2,

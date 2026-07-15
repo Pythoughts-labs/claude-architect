@@ -1,5 +1,6 @@
 const registeredSecrets = new Map<string, number>();
 const SECRET_MARKER = "«redacted:secret»";
+const REDACTION_MARKER = /«redacted:(?:secret|bearer|key|github|aws|slack|jwt|env)»/g;
 
 export interface SecretRegistration {
   dispose(): void;
@@ -50,28 +51,61 @@ export function clearRegisteredSecrets(): void {
   registeredSecrets.clear();
 }
 
-export function redact(text: string): string {
-  let result = text;
-  const secrets = [...registeredSecrets.keys()].sort((a, b) => b.length - a.length);
-  for (const secret of secrets) result = result.replaceAll(secret, SECRET_MARKER);
+function replaceRegisteredSecrets(text: string): string {
+  const secrets = [...registeredSecrets.keys()];
+  if (secrets.length === 0) return text;
+
+  let cursor = 0;
+  let result = "";
+  while (cursor < text.length) {
+    let nextIndex = -1;
+    let nextSecret = "";
+    for (const secret of secrets) {
+      const index = text.indexOf(secret, cursor);
+      if (index < 0) continue;
+      if (nextIndex < 0 || index < nextIndex || (index === nextIndex && secret.length > nextSecret.length)) {
+        nextIndex = index;
+        nextSecret = secret;
+      }
+    }
+    if (nextIndex < 0) break;
+    result += text.slice(cursor, nextIndex) + SECRET_MARKER;
+    cursor = nextIndex + nextSecret.length;
+  }
+  return result + text.slice(cursor);
+}
+
+function redactUnmarked(text: string): string {
+  let result = replaceRegisteredSecrets(text);
   for (const rule of rules) {
     result = result.replace(rule.re, `«redacted:${rule.kind}»`);
   }
   return result;
 }
 
+export function redact(text: string): string {
+  let cursor = 0;
+  let result = "";
+  for (const match of text.matchAll(REDACTION_MARKER)) {
+    const index = match.index;
+    result += redactUnmarked(text.slice(cursor, index)) + match[0];
+    cursor = index + match[0].length;
+  }
+  return result + redactUnmarked(text.slice(cursor));
+}
+
 const DANGEROUS_KEYS = new Set(["__proto__", "constructor", "prototype"]);
 
-function redactValue(value: unknown): unknown {
+function redactValue(value: unknown, redactKeys: boolean): unknown {
   if (typeof value === "string") return redact(value);
-  if (Array.isArray(value)) return value.map(redactValue);
+  if (Array.isArray(value)) return value.map(child => redactValue(child, redactKeys));
   if (value === null || typeof value !== "object") return value;
 
   const result: Record<string, unknown> = {};
   for (const [key, child] of Object.entries(value).sort(([left], [right]) =>
     left < right ? -1 : left > right ? 1 : 0)) {
-    const redacted = redactValue(child);
-    const redactedKeyBase = redact(key);
+    const redacted = redactValue(child, redactKeys);
+    const redactedKeyBase = redactKeys ? redact(key) : key;
     let redactedKey = redactedKeyBase;
     let suffix = 2;
     while (Object.prototype.hasOwnProperty.call(result, redactedKey)) {
@@ -95,5 +129,9 @@ function redactValue(value: unknown): unknown {
 }
 
 export function redactRecord<T>(obj: T): T {
-  return redactValue(obj) as T;
+  return redactValue(obj, true) as T;
+}
+
+export function redactValues<T>(obj: T): T {
+  return redactValue(obj, false) as T;
 }

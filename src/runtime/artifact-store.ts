@@ -13,8 +13,8 @@ import path from "node:path";
 import { git } from "../git/git-exec.js";
 import type { AttemptResult } from "../protocol/attempt-result.js";
 import { RuntimeError } from "../util/errors.js";
-import { redact, redactRecord } from "./redaction.js";
-import type { RunManifest } from "./run-manifest.js";
+import { redact, redactRecord, redactValues } from "./redaction.js";
+import { sanitizeRunManifest, type RunManifest } from "./run-manifest.js";
 import { resolveStateDir } from "./state-dir.js";
 
 const SAFE_COMPONENT = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
@@ -164,6 +164,51 @@ function enqueueCleanupJournalWrite(write: () => Promise<void>): Promise<void> {
   return result;
 }
 
+function escapeJsonPropertyKeys(serialized: string): string {
+  let result = "";
+  let cursor = 0;
+  while (cursor < serialized.length) {
+    if (serialized[cursor] !== '"') {
+      result += serialized[cursor];
+      cursor += 1;
+      continue;
+    }
+
+    let end = cursor + 1;
+    while (end < serialized.length) {
+      if (serialized[end] === "\\") {
+        end += 2;
+        continue;
+      }
+      if (serialized[end] === '"') break;
+      end += 1;
+    }
+    const token = serialized.slice(cursor, end + 1);
+    let next = end + 1;
+    while (/\s/.test(serialized[next] ?? "")) next += 1;
+    if (serialized[next] !== ":") {
+      result += token;
+      cursor = end + 1;
+      continue;
+    }
+
+    const key = JSON.parse(token) as string;
+    if (key.length === 0) {
+      result += token;
+    } else {
+      const first = key.charCodeAt(0).toString(16).padStart(4, "0");
+      const rest = JSON.stringify(key.slice(1)).slice(1, -1);
+      result += `"\\u${first}${rest}"`;
+    }
+    cursor = end + 1;
+  }
+  return result;
+}
+
+function serializeJson(value: unknown, indentation?: number): string {
+  return escapeJsonPropertyKeys(JSON.stringify(value, null, indentation));
+}
+
 export class ArtifactStore {
   readonly runDirectory: string;
   private readonly runsRoot: string;
@@ -266,8 +311,8 @@ export class ArtifactStore {
   }
 
   private async writeJson(relativePath: string, value: unknown): Promise<void> {
-    const sanitized = redactRecord(value);
-    const serialized = `${JSON.stringify(sanitized, null, 2)}\n`;
+    const sanitized = redactValues(value);
+    const serialized = `${serializeJson(sanitized, 2)}\n`;
     await this.writeArchiveFile(relativePath, serialized);
   }
 
@@ -282,14 +327,23 @@ export class ArtifactStore {
     if (result.runId !== this.runId) {
       throw new RuntimeError("attempt result run id does not match artifact store");
     }
-    await this.writeJson("result.json", result);
+    const sanitized = redactValues(result);
+    sanitized.evidence = redactRecord(result.evidence);
+    sanitized.requestedVerification = result.requestedVerification.map(command => {
+      const sanitizedCommand = redactValues(command);
+      if (command.environment !== undefined) {
+        sanitizedCommand.environment = redactRecord(command.environment);
+      }
+      return sanitizedCommand;
+    });
+    await this.writeJson("result.json", sanitized);
   }
 
   async writeManifest(manifest: RunManifest): Promise<void> {
     if (manifest.runId !== this.runId) {
       throw new RuntimeError("run manifest id does not match artifact store");
     }
-    await this.writeJson("manifest.json", manifest);
+    await this.writeJson("manifest.json", sanitizeRunManifest(manifest));
   }
 
   async readResult(runId: string): Promise<AttemptResult | null> {
@@ -411,7 +465,7 @@ export class ArtifactStore {
       try {
         const metadata = await handle.stat();
         if (!metadata.isFile()) throw new RuntimeError("cleanup journal is not a regular file");
-        const line = `${JSON.stringify(redactRecord(record))}\n`;
+        const line = `${serializeJson(redactValues(record))}\n`;
         await handle.writeFile(line, { encoding: "utf8" });
         await handle.sync();
       } finally {
