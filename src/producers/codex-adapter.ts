@@ -138,6 +138,18 @@ export interface DefaultCodexEnvDeps {
   hasAuthStore: (directory: string) => boolean;
 }
 
+export interface CodexAdapterDeps {
+  env: Record<string, string | undefined>;
+  homeDirectory: string;
+  hasAuthStore?: (directory: string) => boolean;
+}
+
+function resolveCodexStore(
+  deps: Pick<DefaultCodexEnvDeps, "env" | "homeDirectory">,
+): string {
+  return deps.env.CODEX_HOME ?? join(deps.homeDirectory, ".codex");
+}
+
 /**
  * The isolated per-attempt HOME hides the host `~/.codex` auth store. When the
  * Host has not set CODEX_HOME explicitly, default it to the real auth store so
@@ -145,12 +157,21 @@ export interface DefaultCodexEnvDeps {
  */
 export function defaultCodexEnv(deps: DefaultCodexEnvDeps): Record<string, string> {
   if (deps.env.CODEX_HOME !== undefined) return {};
-  const store = join(deps.homeDirectory, ".codex");
+  const store = resolveCodexStore(deps);
   return deps.hasAuthStore(store) ? { CODEX_HOME: store } : {};
 }
 
 export class CodexAdapter implements ProducerAdapter {
   readonly producerId = "codex";
+
+  constructor(private readonly deps: CodexAdapterDeps = {
+    env: process.env,
+    homeDirectory: homedir(),
+  }) {}
+
+  private hasAuthStore(directory: string): boolean {
+    return (this.deps.hasAuthStore ?? (store => existsSync(join(store, "auth.json"))))(directory);
+  }
 
   async probe(ctx: ProbeContext): Promise<CapabilityReport> {
     if (ctx.os === "win32") return unavailableReport(ctx, "unsupported-platform");
@@ -179,6 +200,9 @@ export class CodexAdapter implements ProducerAdapter {
       if (version === null) return unavailableReport(ctx, "probe-failed", executable);
 
       const writeConfinementBackend = selectCodexWriteConfinementBackend(ctx);
+      const authState = this.hasAuthStore(resolveCodexStore(this.deps))
+        ? "authenticated"
+        : "unauthenticated";
       return {
         producerId: this.producerId,
         available: true,
@@ -188,7 +212,7 @@ export class CodexAdapter implements ProducerAdapter {
         environmentType: ctx.environmentType,
         resolvedExecutable: executable,
         version,
-        authState: "unknown",
+        authState,
         executionModes: ["edit"],
         structuredOutput: true,
         writeConfinementBackend,
@@ -246,9 +270,9 @@ export class CodexAdapter implements ProducerAdapter {
       stdin: renderPrompt(spec),
       requiredEnv: [...CODEX_REQUIRED_ENV],
       env: defaultCodexEnv({
-        env: process.env,
-        homeDirectory: homedir(),
-        hasAuthStore: directory => existsSync(join(directory, "auth.json")),
+        env: this.deps.env,
+        homeDirectory: this.deps.homeDirectory,
+        hasAuthStore: directory => this.hasAuthStore(directory),
       }),
       network: "denied",
     };

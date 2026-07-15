@@ -22724,13 +22724,25 @@ function renderPrompt(spec) {
     "Make only the requested edits. Return a concise final summary of the work performed."
   ].join("\n");
 }
+function resolveCodexStore(deps) {
+  return deps.env.CODEX_HOME ?? join(deps.homeDirectory, ".codex");
+}
 function defaultCodexEnv(deps) {
   if (deps.env.CODEX_HOME !== void 0) return {};
-  const store = join(deps.homeDirectory, ".codex");
+  const store = resolveCodexStore(deps);
   return deps.hasAuthStore(store) ? { CODEX_HOME: store } : {};
 }
 var CodexAdapter = class {
+  constructor(deps = {
+    env: process.env,
+    homeDirectory: homedir()
+  }) {
+    this.deps = deps;
+  }
   producerId = "codex";
+  hasAuthStore(directory) {
+    return (this.deps.hasAuthStore ?? ((store) => existsSync(join(store, "auth.json"))))(directory);
+  }
   async probe(ctx) {
     if (ctx.os === "win32") return unavailableReport(ctx, "unsupported-platform");
     let executable;
@@ -22753,6 +22765,7 @@ var CodexAdapter = class {
       const version2 = result.spawnError === void 0 && result.exitCode === 0 ? parseVersion(result.stdout) : null;
       if (version2 === null) return unavailableReport(ctx, "probe-failed", executable);
       const writeConfinementBackend = selectCodexWriteConfinementBackend(ctx);
+      const authState = this.hasAuthStore(resolveCodexStore(this.deps)) ? "authenticated" : "unauthenticated";
       return {
         producerId: this.producerId,
         available: true,
@@ -22762,7 +22775,7 @@ var CodexAdapter = class {
         environmentType: ctx.environmentType,
         resolvedExecutable: executable,
         version: version2,
-        authState: "unknown",
+        authState,
         executionModes: ["edit"],
         structuredOutput: true,
         writeConfinementBackend,
@@ -22818,9 +22831,9 @@ var CodexAdapter = class {
       stdin: renderPrompt(spec),
       requiredEnv: [...CODEX_REQUIRED_ENV],
       env: defaultCodexEnv({
-        env: process.env,
-        homeDirectory: homedir(),
-        hasAuthStore: (directory) => existsSync(join(directory, "auth.json"))
+        env: this.deps.env,
+        homeDirectory: this.deps.homeDirectory,
+        hasAuthStore: (directory) => this.hasAuthStore(directory)
       }),
       network: "denied"
     };

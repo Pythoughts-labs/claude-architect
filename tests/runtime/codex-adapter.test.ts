@@ -271,6 +271,72 @@ describe("CodexAdapter", () => {
     });
   });
 
+  it("reports authenticated when auth.json exists in the default store", async () => {
+    const root = await mkdtemp(join(tmpdir(), "claude-architect-codex-auth-"));
+    const store = join(root, ".codex");
+    await mkdir(store);
+    await writeFile(join(store, "auth.json"), "fixture contents must not be read");
+
+    try {
+      const report = await new CodexAdapter({
+        env: {},
+        homeDirectory: root,
+      }).probe({
+        ps: versionPlatformServices(executable, []),
+        os: "darwin",
+        arch: "arm64",
+        environmentType: "native",
+      });
+
+      expect(report.authState).toBe("authenticated");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("reports unauthenticated when auth.json is absent from the default store", async () => {
+    const root = await mkdtemp(join(tmpdir(), "claude-architect-codex-auth-"));
+
+    try {
+      const report = await new CodexAdapter({
+        env: {},
+        homeDirectory: root,
+      }).probe({
+        ps: versionPlatformServices(executable, []),
+        os: "darwin",
+        arch: "arm64",
+        environmentType: "native",
+      });
+
+      expect(report.authState).toBe("unauthenticated");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("respects CODEX_HOME when reporting auth state", async () => {
+    const root = await mkdtemp(join(tmpdir(), "claude-architect-codex-auth-"));
+    const store = join(root, "custom-codex-home");
+    await mkdir(store);
+    await writeFile(join(store, "auth.json"), "fixture contents must not be read");
+
+    try {
+      const report = await new CodexAdapter({
+        env: { CODEX_HOME: store },
+        homeDirectory: join(root, "unused-home"),
+      }).probe({
+        ps: versionPlatformServices(executable, []),
+        os: "darwin",
+        arch: "arm64",
+        environmentType: "native",
+      });
+
+      expect(report.authState).toBe("authenticated");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("invokes an npm Codex entrypoint with the runtime Node executable", async () => {
     const root = await mkdtemp(join(tmpdir(), "claude-architect-codex-entrypoint-"));
     const entrypoint = join(root, "codex");
