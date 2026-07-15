@@ -104,7 +104,7 @@ afterEach(async () => {
   if (originalPluginData === undefined) delete process.env.CLAUDE_PLUGIN_DATA;
   else process.env.CLAUDE_PLUGIN_DATA = originalPluginData;
   await Promise.all(temporaryPaths.splice(0).map(entry =>
-    rm(entry, { recursive: true, force: true })));
+    rm(entry, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })));
 });
 
 describe("applyCandidateTree", () => {

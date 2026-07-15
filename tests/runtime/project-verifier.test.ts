@@ -87,7 +87,7 @@ afterEach(async () => {
   clearRegisteredSecrets();
   if (previousPluginData === undefined) delete process.env.CLAUDE_PLUGIN_DATA;
   else process.env.CLAUDE_PLUGIN_DATA = previousPluginData;
-  await Promise.all(temporaryPaths.splice(0).map(path => rm(path, { recursive: true, force: true })));
+  await Promise.all(temporaryPaths.splice(0).map(path => rm(path, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })));
 });
 
 describe("projectVerify", () => {

@@ -67,7 +67,7 @@ async function initRepoAndWorktree(
 afterEach(async () => {
   gitHooks.afterReadTree = undefined;
   gitHooks.failCommand = undefined;
-  await Promise.all(temporaryPaths.splice(0).map(path => rm(path, { recursive: true, force: true })));
+  await Promise.all(temporaryPaths.splice(0).map(path => rm(path, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })));
 });
 
 describe("freezeCandidate", () => {
