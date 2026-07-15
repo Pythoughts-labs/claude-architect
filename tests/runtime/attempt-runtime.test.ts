@@ -147,6 +147,8 @@ let previousPluginData: string | undefined;
 let previousStateDirectory: string | undefined;
 let previousNodeEnvironment: string | undefined;
 let previousDelegated: string | undefined;
+// Windows producers inherit configuration through USERPROFILE, not HOME.
+const homeVariableName = process.platform === "win32" ? "USERPROFILE" : "HOME";
 let previousHome: string | undefined;
 let previousAttemptToken: string | undefined;
 
@@ -227,7 +229,7 @@ beforeEach(async () => {
   previousStateDirectory = process.env.CLAUDE_ARCHITECT_STATE_DIR;
   previousNodeEnvironment = process.env.NODE_ENV;
   previousDelegated = process.env.CLAUDE_ARCHITECT_DELEGATED;
-  previousHome = process.env.HOME;
+  previousHome = process.env[homeVariableName];
   previousAttemptToken = process.env.ATTEMPT_API_TOKEN;
   process.env.CLAUDE_PLUGIN_DATA = await temporaryDirectory("ca-attempt-state-");
   process.env.NODE_ENV = "test";
@@ -247,8 +249,8 @@ afterEach(async () => {
   else process.env.NODE_ENV = previousNodeEnvironment;
   if (previousDelegated === undefined) delete process.env.CLAUDE_ARCHITECT_DELEGATED;
   else process.env.CLAUDE_ARCHITECT_DELEGATED = previousDelegated;
-  if (previousHome === undefined) delete process.env.HOME;
-  else process.env.HOME = previousHome;
+  if (previousHome === undefined) delete process.env[homeVariableName];
+  else process.env[homeVariableName] = previousHome;
   if (previousAttemptToken === undefined) delete process.env.ATTEMPT_API_TOKEN;
   else process.env.ATTEMPT_API_TOKEN = previousAttemptToken;
   await Promise.all(temporaryPaths.splice(0).map(path =>
@@ -634,7 +636,7 @@ describe("runAttempt", () => {
   it("uses a temporary HOME for a controlled configuration profile", async () => {
     const repoRoot = await initRepo();
     const realHome = await temporaryDirectory("ca-real-home-");
-    process.env.HOME = realHome;
+    process.env[homeVariableName] = realHome;
 
     const result = await runAttempt(
       repoRoot,
@@ -654,7 +656,7 @@ describe("runAttempt", () => {
   it("records an inherited configuration profile instead of claiming isolation", async () => {
     const repoRoot = await initRepo();
     const realHome = await temporaryDirectory("ca-inherited-home-");
-    process.env.HOME = realHome;
+    process.env[homeVariableName] = realHome;
 
     const result = await runAttempt(
       repoRoot,
@@ -672,6 +674,6 @@ describe("runAttempt", () => {
       configurationProfile: { isolationState: "inherited-config-only" },
       temporaryHomeApplied: false,
     });
-    expect(manifest.environment).toContainEqual({ name: "HOME", source: "platform" });
+    expect(manifest.environment).toContainEqual({ name: homeVariableName, source: "platform" });
   });
 });
