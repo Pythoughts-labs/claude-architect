@@ -3,12 +3,25 @@
 // not resumed after a crash; startup recovery reclaims stale state. The host must still resolve the
 // first `node` on PATH before this file can run.
 import { spawn, spawnSync } from "node:child_process";
+import { constants as osConstants } from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 const MINIMUM_NODE_MAJOR = 22;
 const VERSION_PROBE_TIMEOUT_MS = 5_000;
 const VERSION_PROBE_MAX_BYTES = 64 * 1024;
+const NON_FORWARDABLE_POSIX_SIGNALS = new Set([
+  "SIGCHLD",
+  "SIGCONT",
+  "SIGINFO",
+  "SIGKILL",
+  "SIGSTOP",
+  "SIGTSTP",
+  "SIGTTIN",
+  "SIGTTOU",
+  "SIGURG",
+  "SIGWINCH",
+]);
 
 function isNodeSupported(version) {
   const match = /^v?(\d+)(?:\.|$)/.exec(String(version).trim());
@@ -66,20 +79,8 @@ async function runServerWith(nodePath, entrypoint) {
     const forwardSignal = signal => child.kill(signal);
     const forwardedSignals = process.platform === "win32"
       ? ["SIGINT", "SIGTERM", "SIGBREAK"]
-      : [
-        "SIGHUP",
-        "SIGINT",
-        "SIGQUIT",
-        "SIGABRT",
-        "SIGALRM",
-        "SIGTERM",
-        "SIGUSR1",
-        "SIGUSR2",
-        "SIGXCPU",
-        "SIGXFSZ",
-        "SIGVTALRM",
-        "SIGPROF",
-      ];
+      : Object.keys(osConstants.signals)
+        .filter(signal => !NON_FORWARDABLE_POSIX_SIGNALS.has(signal));
     const signalHandlers = new Map(forwardedSignals.map(signal => [
       signal,
       () => forwardSignal(signal),

@@ -201,18 +201,23 @@ describe("runtime bootstrap", () => {
     expect(result.stderr).toContain("PATH");
   });
 
-  it.skipIf(process.platform === "win32")("forwards SIGALRM to a re-executed server", async () => {
+  it.skipIf(process.platform === "win32")("forwards SIGIO to a re-executed server", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "ca-bootstrap-signal-"));
     temporaryPaths.push(root);
     const preludePath = await nodeVersionPrelude(root, "20.19.0");
     const bin = path.join(root, "bin");
     const serverPath = path.join(root, "signal-server.mjs");
     const pidFile = path.join(root, "server.pid");
+    const signalFile = path.join(root, "signal.txt");
     await mkdir(bin);
     await symlink(process.execPath, path.join(bin, "node"));
     await writeFile(serverPath, [
       "import { writeFileSync } from 'node:fs';",
       "writeFileSync(process.env.TEST_SERVER_PID_FILE, String(process.pid));",
+      "process.on('SIGIO', () => {",
+      "  writeFileSync(process.env.TEST_SIGNAL_FILE, 'SIGIO');",
+      "  process.exit(47);",
+      "});",
       "setInterval(() => {}, 1000);",
       "",
     ].join("\n"));
@@ -223,17 +228,19 @@ describe("runtime bootstrap", () => {
         PATH: bin,
         CLAUDE_ARCHITECT_SERVER_PATH: serverPath,
         TEST_SERVER_PID_FILE: pidFile,
+        TEST_SIGNAL_FILE: signalFile,
       },
       stdio: ["ignore", "pipe", "pipe"],
     });
     let serverPid = 0;
     try {
       serverPid = Number(await waitForFile(pidFile));
-      child.kill("SIGALRM");
+      child.kill("SIGIO");
       const exit = await waitForExit(child);
       await waitForProcessGone(serverPid);
+      expect(await waitForFile(signalFile)).toBe("SIGIO");
       expect(Number.isSafeInteger(serverPid) && serverPid > 1).toBe(true);
-      expect(exit).toEqual({ code: null, signal: "SIGALRM" });
+      expect(exit).toEqual({ code: 47, signal: null });
       expect(isProcessAlive(serverPid)).toBe(false);
     } finally {
       if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
