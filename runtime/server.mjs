@@ -21932,9 +21932,6 @@ var DELEGATION_SPEC_VERSION = "1";
 var ATTEMPT_RESULT_VERSION = "1";
 var RUNTIME_VERSION = "0.8.0";
 
-// src/mcp/tools.ts
-import { createHash as createHash6 } from "node:crypto";
-
 // src/util/errors.ts
 var RuntimeError = class extends Error {
   constructor(message, detail) {
@@ -22266,6 +22263,553 @@ async function git(cwd, args, indexFile) {
     truncated: { ...exit.truncated }
   };
 }
+
+// src/producers/codex-adapter.ts
+import { open } from "node:fs/promises";
+var CODEX_REQUIRED_ENV = [
+  "CODEX_HOME",
+  "CODEX_API_KEY",
+  "CODEX_ACCESS_TOKEN",
+  "CODEX_CA_CERTIFICATE",
+  "SSL_CERT_FILE"
+];
+var MULTI_AGENT_CONTROL = "features.multi_agent_v2={enabled=false,max_concurrent_threads_per_session=1}";
+var VERSION_TIMEOUT_MS = 1e4;
+var VERSION_OUTPUT_LIMIT = 64 * 1024;
+function isRecord(value) {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+function stringProperty(value, name) {
+  if (!isRecord(value)) return void 0;
+  const property = value[name];
+  return typeof property === "string" ? property : void 0;
+}
+function unavailableReport(ctx, reason, resolvedExecutable = null) {
+  return {
+    producerId: "codex",
+    available: false,
+    reason,
+    os: ctx.os,
+    arch: ctx.arch,
+    environmentType: ctx.environmentType,
+    resolvedExecutable,
+    version: null,
+    authState: "unknown",
+    executionModes: ["edit"],
+    structuredOutput: true,
+    writeConfinementBackend: null,
+    laneEligibility: { edit: false }
+  };
+}
+function parseVersion(stdout) {
+  const match = /(?:^|\s)(\d+\.\d+\.\d+(?:[-+][^\s]+)?)(?:\s|$)/u.exec(stdout.trim());
+  return match?.[1] ?? null;
+}
+async function normalizeCodexExecutable(executable) {
+  if (executable.kind !== "native") return executable;
+  let handle;
+  try {
+    handle = await open(executable.command, "r");
+    const buffer = Buffer.alloc(256);
+    const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);
+    const firstLine = buffer.subarray(0, bytesRead).toString("utf8").split(/\r?\n/u, 1)[0] ?? "";
+    if (!/^#![^\r\n]*\bnode(?:\s|$)/u.test(firstLine)) return executable;
+    return {
+      kind: "node-entrypoint",
+      command: process.execPath,
+      prefixArgs: [executable.command, ...executable.prefixArgs],
+      resolvedFrom: `${executable.resolvedFrom};node:${process.execPath}`
+    };
+  } catch {
+    return executable;
+  } finally {
+    await handle?.close();
+  }
+}
+function quoteTomlString(value) {
+  return JSON.stringify(value);
+}
+function renderList(values) {
+  return values.length === 0 ? "- (none)" : values.map((value) => `- ${value}`).join("\n");
+}
+function renderPrompt(spec) {
+  return [
+    "You are an untrusted implementation Producer operating inside an isolated worktree.",
+    "Do not delegate to other agents or expand the authorized scope.",
+    "",
+    "Objective:",
+    spec.objective,
+    "",
+    "Context:",
+    spec.context,
+    "",
+    "Authorized write allowlist:",
+    renderList(spec.writeAllowlist),
+    "",
+    "Forbidden scope:",
+    renderList(spec.forbiddenScope),
+    "",
+    "Success criteria:",
+    renderList(spec.successCriteria),
+    "",
+    "Make only the requested edits. Return a concise final summary of the work performed."
+  ].join("\n");
+}
+var CodexAdapter = class {
+  producerId = "codex";
+  async probe(ctx) {
+    if (ctx.os === "win32") return unavailableReport(ctx, "unsupported-platform");
+    let executable;
+    try {
+      executable = await normalizeCodexExecutable(
+        await ctx.ps.resolveExecutable({ name: "codex" })
+      );
+    } catch {
+      return unavailableReport(ctx, "missing-executable");
+    }
+    try {
+      const result = await supervise(ctx.ps, {
+        executable,
+        args: ["--version"],
+        cwd: process.cwd(),
+        env: {},
+        timeoutMs: VERSION_TIMEOUT_MS,
+        maxOutputBytes: VERSION_OUTPUT_LIMIT
+      }, {});
+      const version2 = result.spawnError === void 0 && result.exitCode === 0 ? parseVersion(result.stdout) : null;
+      if (version2 === null) return unavailableReport(ctx, "probe-failed", executable);
+      const certified = ctx.os === "darwin" && ctx.arch === "arm64" && ctx.environmentType === "native";
+      const writeConfinementBackend = certified ? "codex-native-sandbox" : null;
+      return {
+        producerId: this.producerId,
+        available: true,
+        reason: null,
+        os: ctx.os,
+        arch: ctx.arch,
+        environmentType: ctx.environmentType,
+        resolvedExecutable: executable,
+        version: version2,
+        authState: "unknown",
+        executionModes: ["edit"],
+        structuredOutput: true,
+        writeConfinementBackend,
+        laneEligibility: { edit: writeConfinementBackend !== null }
+      };
+    } catch {
+      return unavailableReport(ctx, "probe-failed", executable);
+    }
+  }
+  buildInvocation(spec, ctx) {
+    const args = [
+      "exec",
+      "--json",
+      "--ephemeral",
+      "--sandbox",
+      "workspace-write",
+      "--ignore-user-config",
+      "--ignore-rules",
+      "--disable",
+      "multi_agent",
+      "-c",
+      MULTI_AGENT_CONTROL,
+      "-c",
+      'approval_policy="never"',
+      "-c",
+      "sandbox_workspace_write.network_access=false",
+      "-c",
+      "sandbox_workspace_write.exclude_tmpdir_env_var=true",
+      "-c",
+      "sandbox_workspace_write.exclude_slash_tmp=true",
+      "-c",
+      'shell_environment_policy.inherit="none"',
+      "-c",
+      'shell_environment_policy.include_only=["PATH","HOME","TMPDIR","LANG","LC_ALL","CLAUDE_ARCHITECT_DELEGATED"]',
+      "-c",
+      'web_search="disabled"',
+      "--cd",
+      ctx.worktreePath
+    ];
+    if (spec.producerOverrides?.model !== void 0) {
+      args.push("--model", spec.producerOverrides.model);
+    }
+    if (spec.producerOverrides?.reasoningEffort !== void 0) {
+      args.push(
+        "-c",
+        `model_reasoning_effort=${quoteTomlString(spec.producerOverrides.reasoningEffort)}`
+      );
+    }
+    args.push("-");
+    return {
+      executable: ctx.executable,
+      args,
+      stdin: renderPrompt(spec),
+      requiredEnv: [...CODEX_REQUIRED_ENV],
+      network: "denied"
+    };
+  }
+  normalizeEvents(raw) {
+    if (raw.exit.truncated.stdout) {
+      return { events: [], producerSummary: null, ok: false };
+    }
+    const lines = raw.stdout.split(/\r?\n/u).filter((line) => line.trim().length > 0);
+    if (lines.length === 0) return { events: [], producerSummary: null, ok: false };
+    const events = [];
+    let producerSummary = null;
+    let completed = false;
+    let failed = false;
+    try {
+      for (const line of lines) {
+        const parsed = JSON.parse(line);
+        if (!isRecord(parsed) || typeof parsed.type !== "string") {
+          return { events: [], producerSummary: null, ok: false };
+        }
+        if (parsed.type === "turn.completed") {
+          completed = true;
+          continue;
+        }
+        if (parsed.type === "error" || parsed.type === "turn.failed") {
+          failed = true;
+          const text = stringProperty(parsed, "message") ?? stringProperty(parsed.error, "message");
+          events.push({
+            kind: "error",
+            ...text === void 0 ? {} : { text },
+            raw: parsed
+          });
+          continue;
+        }
+        if (parsed.type !== "item.completed") continue;
+        const item = parsed.item;
+        const itemType = stringProperty(item, "type");
+        if (itemType === "agent_message") {
+          const text = stringProperty(item, "text");
+          if (text === void 0) return { events: [], producerSummary: null, ok: false };
+          producerSummary = text;
+          events.push({ kind: "final", text, raw: parsed });
+        } else if (itemType !== void 0) {
+          events.push({ kind: "tool", raw: parsed });
+        }
+      }
+    } catch {
+      return { events: [], producerSummary: null, ok: false };
+    }
+    return {
+      events,
+      producerSummary,
+      ok: completed && !failed && producerSummary !== null
+    };
+  }
+  configurationProfile() {
+    return {
+      isolationState: "controlled-config-supported",
+      credentialSources: [
+        "CODEX_HOME auth store",
+        "CODEX_API_KEY",
+        "CODEX_ACCESS_TOKEN",
+        "operating-system credential store"
+      ],
+      behavioralConfigSources: ["explicit invocation argv"],
+      repositoryInstructionSources: ["worktree AGENTS.md"],
+      environmentDependencies: [...CODEX_REQUIRED_ENV],
+      temporaryHomeStrategy: "use a per-attempt HOME while preserving CODEX_HOME for auth; ignore user config and rules"
+    };
+  }
+};
+
+// src/producers/producer-registry.ts
+var ProducerRegistry = class {
+  adapters;
+  constructor(adapters) {
+    this.adapters = [...adapters];
+  }
+  get(id) {
+    return this.adapters.find((adapter) => adapter.producerId === id);
+  }
+  all() {
+    return [...this.adapters];
+  }
+};
+var registry2 = new ProducerRegistry([new CodexAdapter()]);
+
+// src/producers/capability-probe.ts
+async function probeAll(ctx, producerRegistry = registry2) {
+  return Promise.all(producerRegistry.all().map((adapter) => adapter.probe(ctx)));
+}
+
+// src/producers/producer-adapter.ts
+import { readFileSync } from "node:fs";
+function detectEnvironmentType() {
+  if (process.platform !== "linux") return "native";
+  try {
+    return readFileSync("/proc/version", "utf8").toLowerCase().includes("microsoft") ? "wsl" : "native";
+  } catch {
+    return "native";
+  }
+}
+
+// src/runtime/redaction.ts
+var registeredSecrets = /* @__PURE__ */ new Map();
+var SECRET_MARKER = "[s]";
+var rules = [
+  { marker: "[b]", pattern: /(?<=\bBearer[ \t]+)[A-Za-z0-9._~+/=-]+/gi },
+  { marker: "[k]", pattern: /\bsk-[A-Za-z0-9_-]{8,}\b/g },
+  { marker: "[g]", pattern: /\bgh[pousr]_[A-Za-z0-9]{8,}\b/g },
+  { marker: "[a]", pattern: /\bAKIA[A-Z0-9]{12,}\b/g },
+  { marker: "[l]", pattern: /\bxox[baprs]-[A-Za-z0-9-]{8,}\b/g },
+  {
+    marker: "[j]",
+    pattern: /\beyJ[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b/g
+  },
+  {
+    marker: "[e]",
+    pattern: /(?<=\b(?:(?:[A-Za-z][A-Za-z0-9]*_)*(?:TOKEN|SECRET|PASSWORD|KEY|CREDENTIAL)(?:_[A-Za-z0-9]+)*)=")[^"\r\n]+/gi
+  },
+  {
+    marker: "[e]",
+    pattern: /(?<=\b(?:(?:[A-Za-z][A-Za-z0-9]*_)*(?:TOKEN|SECRET|PASSWORD|KEY|CREDENTIAL)(?:_[A-Za-z0-9]+)*)=')[^'\r\n]+/gi
+  },
+  {
+    marker: "[e]",
+    pattern: /(?<=\b(?:(?:[A-Za-z][A-Za-z0-9]*_)*(?:TOKEN|SECRET|PASSWORD|KEY|CREDENTIAL)(?:_[A-Za-z0-9]+)*)=)[^\s,;"']+/gi
+  }
+];
+function registerSecretValue(value) {
+  if (value.length < 6) return { dispose() {
+  } };
+  registeredSecrets.set(value, (registeredSecrets.get(value) ?? 0) + 1);
+  let active = true;
+  return {
+    dispose() {
+      if (!active) return;
+      active = false;
+      const count = registeredSecrets.get(value);
+      if (count === void 0) return;
+      if (count === 1) registeredSecrets.delete(value);
+      else registeredSecrets.set(value, count - 1);
+    }
+  };
+}
+function containsRegisteredSecret(text) {
+  return [...registeredSecrets.keys()].some((secret) => text.includes(secret));
+}
+function containsRegisteredSecretValue(value) {
+  if (typeof value === "string") return containsRegisteredSecret(value);
+  if (Array.isArray(value)) return value.some(containsRegisteredSecretValue);
+  if (value === null || typeof value !== "object") return false;
+  return Object.values(value).some(containsRegisteredSecretValue);
+}
+function replaceRegisteredSecrets(text) {
+  const secrets = [...registeredSecrets.keys()];
+  if (secrets.length === 0) return text;
+  let cursor = 0;
+  let result = "";
+  while (cursor < text.length) {
+    let nextIndex = -1;
+    let nextSecret = "";
+    for (const secret of secrets) {
+      const index = text.indexOf(secret, cursor);
+      if (index < 0) continue;
+      if (nextIndex < 0 || index < nextIndex || index === nextIndex && secret.length > nextSecret.length) {
+        nextIndex = index;
+        nextSecret = secret;
+      }
+    }
+    if (nextIndex < 0) break;
+    result += text.slice(cursor, nextIndex) + SECRET_MARKER;
+    cursor = nextIndex + nextSecret.length;
+  }
+  return result + text.slice(cursor);
+}
+function redactUnmarked(text) {
+  let result = replaceRegisteredSecrets(text);
+  for (const rule of rules) result = result.replace(rule.pattern, rule.marker);
+  return result;
+}
+function redact(text) {
+  let current = text;
+  while (true) {
+    const next = redactUnmarked(current);
+    if (next === current) return next;
+    current = next;
+  }
+}
+var DANGEROUS_KEYS = /* @__PURE__ */ new Set(["__proto__", "constructor", "prototype"]);
+function redactValue(value, redactKeys) {
+  if (typeof value === "string") return redact(value);
+  if (Array.isArray(value)) return value.map((child) => redactValue(child, redactKeys));
+  if (value === null || typeof value !== "object") return value;
+  const result = {};
+  for (const [key, child] of Object.entries(value).sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0)) {
+    const redacted = redactValue(child, redactKeys);
+    const redactedKeyBase = redactKeys ? redact(key) : key;
+    let redactedKey = redactedKeyBase;
+    let suffix = 2;
+    while (Object.prototype.hasOwnProperty.call(result, redactedKey)) {
+      redactedKey = `${redactedKeyBase}#${suffix}`;
+      suffix += 1;
+    }
+    if (DANGEROUS_KEYS.has(redactedKey)) {
+      Object.defineProperty(result, redactedKey, {
+        value: redacted,
+        writable: true,
+        enumerable: true,
+        configurable: true
+      });
+    } else {
+      result[redactedKey] = redacted;
+    }
+  }
+  return result;
+}
+function redactRecord(obj) {
+  return redactValue(obj, true);
+}
+function redactValues(obj) {
+  return redactValue(obj, false);
+}
+
+// src/mcp/doctor.ts
+function nodeIsSupported(version2) {
+  const major = Number.parseInt(version2.split(".", 1)[0] ?? "", 10);
+  return Number.isInteger(major) && major >= 22;
+}
+function gitVersion(stdout) {
+  return /^git version ([^\s]+)(?:\s|$)/u.exec(stdout.trim())?.[1] ?? null;
+}
+async function doctor(deps = {}) {
+  const ps = deps.ps ?? getPlatformServices();
+  const env = deps.env ?? process.env;
+  const nodeVersion = deps.nodeVersion ?? process.versions.node;
+  const arch = deps.arch ?? process.arch;
+  const environmentType = deps.environmentType ?? detectEnvironmentType();
+  const issues = [];
+  const node = { version: nodeVersion, ok: nodeIsSupported(nodeVersion) };
+  if (!node.ok) issues.push("unsupported-node-version");
+  if (ps.os === "win32") issues.push("unsupported-platform");
+  if (!env.CLAUDE_PLUGIN_DATA) issues.push("missing-claude-plugin-data");
+  if (env.CLAUDE_ARCHITECT_DELEGATED !== void 0) {
+    issues.push("nested-delegation-marker-present");
+  }
+  let git2 = { version: null, ok: false };
+  try {
+    const result = await (deps.git ?? git)(process.cwd(), ["--version"]);
+    const version2 = result.exitCode === 0 && result.truncated?.stdout !== true ? gitVersion(result.stdout) : null;
+    git2 = { version: version2, ok: version2 !== null };
+  } catch {
+  }
+  if (!git2.ok) issues.push("git-unavailable");
+  let producers = [];
+  try {
+    producers = await (deps.probeAll ?? probeAll)({
+      ps,
+      os: ps.os,
+      arch,
+      environmentType
+    });
+    for (const producer of producers) {
+      if (!producer.available && producer.reason !== null) {
+        issues.push(redact(`producer:${producer.producerId}:${producer.reason}`));
+      }
+    }
+  } catch {
+    issues.push("producer-probe-failed");
+  }
+  return {
+    node,
+    git: git2,
+    producers,
+    runtimeVersion: RUNTIME_VERSION,
+    schemaVersion: DELEGATION_SPEC_VERSION,
+    protocolVersion: PROTOCOL_VERSION,
+    issues
+  };
+}
+
+// src/mcp/git-read-tools.ts
+var STATUS_ARGS = [
+  "--no-pager",
+  "status",
+  "--porcelain=v1",
+  "--branch",
+  "--untracked-files=all"
+];
+var DIFF_ARGS = [
+  "--no-pager",
+  "diff",
+  "--no-ext-diff",
+  "--no-textconv",
+  "--no-color",
+  "--full-index",
+  "HEAD",
+  "--"
+];
+var LOG_ARGS = [
+  "--no-pager",
+  "log",
+  "-n",
+  "20",
+  "--no-color",
+  "--format=%H%x09%aI%x09%s",
+  "--"
+];
+var CHANGED_FILES_ARGS = [
+  "--no-pager",
+  "diff",
+  "--no-ext-diff",
+  "--no-textconv",
+  "--no-color",
+  "--name-status",
+  "HEAD",
+  "--"
+];
+var MAX_DIAGNOSTIC_LENGTH = 8192;
+function boundedDiagnostic(value) {
+  const redacted = redact(value.trim());
+  if (redacted.length <= MAX_DIAGNOSTIC_LENGTH) return redacted;
+  return `${redacted.slice(0, MAX_DIAGNOSTIC_LENGTH)}
+[truncated]`;
+}
+async function execute(checkoutPath, args, deps) {
+  try {
+    const canonical = await (deps.ps ?? getPlatformServices()).canonicalizePath(checkoutPath);
+    const result = await (deps.git ?? git)(canonical.canonical, [...args]);
+    if (result.truncated?.stdout === true || result.truncated?.stderr === true) {
+      return {
+        ok: false,
+        error: "git-read-failed",
+        diagnostic: "Git output exceeded the capture limit"
+      };
+    }
+    if (result.exitCode !== 0) {
+      return {
+        ok: false,
+        error: "git-read-failed",
+        diagnostic: boundedDiagnostic(result.stderr || `Git exited with code ${String(result.exitCode)}`)
+      };
+    }
+    return { ok: true, output: redact(result.stdout) };
+  } catch (error2) {
+    return {
+      ok: false,
+      error: "git-read-failed",
+      diagnostic: boundedDiagnostic(error2 instanceof Error ? error2.message : String(error2))
+    };
+  }
+}
+function gitStatus(checkoutPath, deps = {}) {
+  return execute(checkoutPath, STATUS_ARGS, deps);
+}
+function gitDiff(checkoutPath, deps = {}) {
+  return execute(checkoutPath, DIFF_ARGS, deps);
+}
+function gitLog(checkoutPath, deps = {}) {
+  return execute(checkoutPath, LOG_ARGS, deps);
+}
+function gitChangedFiles(checkoutPath, deps = {}) {
+  return execute(checkoutPath, CHANGED_FILES_ARGS, deps);
+}
+
+// src/mcp/tools.ts
+import { createHash as createHash6 } from "node:crypto";
 
 // src/git/repo-preconditions.ts
 import { access, lstat, opendir, realpath } from "node:fs/promises";
@@ -22758,134 +23302,13 @@ import {
   link,
   lstat as lstat2,
   mkdir,
-  open,
+  open as open2,
   readdir,
   realpath as realpath2,
   rename,
   rm
 } from "node:fs/promises";
 import path3 from "node:path";
-
-// src/runtime/redaction.ts
-var registeredSecrets = /* @__PURE__ */ new Map();
-var SECRET_MARKER = "[s]";
-var rules = [
-  { marker: "[b]", pattern: /(?<=\bBearer[ \t]+)[A-Za-z0-9._~+/=-]+/gi },
-  { marker: "[k]", pattern: /\bsk-[A-Za-z0-9_-]{8,}\b/g },
-  { marker: "[g]", pattern: /\bgh[pousr]_[A-Za-z0-9]{8,}\b/g },
-  { marker: "[a]", pattern: /\bAKIA[A-Z0-9]{12,}\b/g },
-  { marker: "[l]", pattern: /\bxox[baprs]-[A-Za-z0-9-]{8,}\b/g },
-  {
-    marker: "[j]",
-    pattern: /\beyJ[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b/g
-  },
-  {
-    marker: "[e]",
-    pattern: /(?<=\b(?:(?:[A-Za-z][A-Za-z0-9]*_)*(?:TOKEN|SECRET|PASSWORD|KEY|CREDENTIAL)(?:_[A-Za-z0-9]+)*)=")[^"\r\n]+/gi
-  },
-  {
-    marker: "[e]",
-    pattern: /(?<=\b(?:(?:[A-Za-z][A-Za-z0-9]*_)*(?:TOKEN|SECRET|PASSWORD|KEY|CREDENTIAL)(?:_[A-Za-z0-9]+)*)=')[^'\r\n]+/gi
-  },
-  {
-    marker: "[e]",
-    pattern: /(?<=\b(?:(?:[A-Za-z][A-Za-z0-9]*_)*(?:TOKEN|SECRET|PASSWORD|KEY|CREDENTIAL)(?:_[A-Za-z0-9]+)*)=)[^\s,;"']+/gi
-  }
-];
-function registerSecretValue(value) {
-  if (value.length < 6) return { dispose() {
-  } };
-  registeredSecrets.set(value, (registeredSecrets.get(value) ?? 0) + 1);
-  let active = true;
-  return {
-    dispose() {
-      if (!active) return;
-      active = false;
-      const count = registeredSecrets.get(value);
-      if (count === void 0) return;
-      if (count === 1) registeredSecrets.delete(value);
-      else registeredSecrets.set(value, count - 1);
-    }
-  };
-}
-function containsRegisteredSecret(text) {
-  return [...registeredSecrets.keys()].some((secret) => text.includes(secret));
-}
-function containsRegisteredSecretValue(value) {
-  if (typeof value === "string") return containsRegisteredSecret(value);
-  if (Array.isArray(value)) return value.some(containsRegisteredSecretValue);
-  if (value === null || typeof value !== "object") return false;
-  return Object.values(value).some(containsRegisteredSecretValue);
-}
-function replaceRegisteredSecrets(text) {
-  const secrets = [...registeredSecrets.keys()];
-  if (secrets.length === 0) return text;
-  let cursor = 0;
-  let result = "";
-  while (cursor < text.length) {
-    let nextIndex = -1;
-    let nextSecret = "";
-    for (const secret of secrets) {
-      const index = text.indexOf(secret, cursor);
-      if (index < 0) continue;
-      if (nextIndex < 0 || index < nextIndex || index === nextIndex && secret.length > nextSecret.length) {
-        nextIndex = index;
-        nextSecret = secret;
-      }
-    }
-    if (nextIndex < 0) break;
-    result += text.slice(cursor, nextIndex) + SECRET_MARKER;
-    cursor = nextIndex + nextSecret.length;
-  }
-  return result + text.slice(cursor);
-}
-function redactUnmarked(text) {
-  let result = replaceRegisteredSecrets(text);
-  for (const rule of rules) result = result.replace(rule.pattern, rule.marker);
-  return result;
-}
-function redact(text) {
-  let current = text;
-  while (true) {
-    const next = redactUnmarked(current);
-    if (next === current) return next;
-    current = next;
-  }
-}
-var DANGEROUS_KEYS = /* @__PURE__ */ new Set(["__proto__", "constructor", "prototype"]);
-function redactValue(value, redactKeys) {
-  if (typeof value === "string") return redact(value);
-  if (Array.isArray(value)) return value.map((child) => redactValue(child, redactKeys));
-  if (value === null || typeof value !== "object") return value;
-  const result = {};
-  for (const [key, child] of Object.entries(value).sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0)) {
-    const redacted = redactValue(child, redactKeys);
-    const redactedKeyBase = redactKeys ? redact(key) : key;
-    let redactedKey = redactedKeyBase;
-    let suffix = 2;
-    while (Object.prototype.hasOwnProperty.call(result, redactedKey)) {
-      redactedKey = `${redactedKeyBase}#${suffix}`;
-      suffix += 1;
-    }
-    if (DANGEROUS_KEYS.has(redactedKey)) {
-      Object.defineProperty(result, redactedKey, {
-        value: redacted,
-        writable: true,
-        enumerable: true,
-        configurable: true
-      });
-    } else {
-      result[redactedKey] = redacted;
-    }
-  }
-  return result;
-}
-function redactRecord(obj) {
-  return redactValue(obj, true);
-}
-function redactValues(obj) {
-  return redactValue(obj, false);
-}
 
 // src/runtime/run-manifest.ts
 import { createHash as createHash2 } from "node:crypto";
@@ -22966,18 +23389,18 @@ function sanitizeRunManifest(manifest) {
   const { manifestHash: _manifestHash, ...body } = manifest;
   return withManifestHash(body);
 }
-function isRecord(value) {
+function isRecord2(value) {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 function verifyRunManifest(value, expectedRunId) {
-  if (!isRecord(value) || typeof value.manifestHash !== "string") {
+  if (!isRecord2(value) || typeof value.manifestHash !== "string") {
     throw new RuntimeError("archived run manifest is malformed");
   }
   const { manifestHash, ...body } = value;
   if (!/^[0-9a-f]{64}$/.test(manifestHash) || sha256(stableJson(body)) !== manifestHash) {
     throw new RuntimeError("archived run manifest integrity check failed");
   }
-  if (body.manifestVersion !== "1" || typeof body.runId !== "string" || typeof body.repoRoot !== "string" || typeof body.baseCommitOid !== "string" || body.candidateManifestHash !== null && typeof body.candidateManifestHash !== "string" || body.runtimeVersion !== RUNTIME_VERSION || body.protocolVersion !== PROTOCOL_VERSION || !isRecord(body.schemaVersions) || body.schemaVersions.delegationSpec !== DELEGATION_SPEC_VERSION || body.schemaVersions.attemptResult !== ATTEMPT_RESULT_VERSION) {
+  if (body.manifestVersion !== "1" || typeof body.runId !== "string" || typeof body.repoRoot !== "string" || typeof body.baseCommitOid !== "string" || body.candidateManifestHash !== null && typeof body.candidateManifestHash !== "string" || body.runtimeVersion !== RUNTIME_VERSION || body.protocolVersion !== PROTOCOL_VERSION || !isRecord2(body.schemaVersions) || body.schemaVersions.delegationSpec !== DELEGATION_SPEC_VERSION || body.schemaVersions.attemptResult !== ATTEMPT_RESULT_VERSION) {
     throw new RuntimeError("archived run manifest contract is invalid");
   }
   if (expectedRunId !== void 0 && body.runId !== expectedRunId) {
@@ -23100,7 +23523,7 @@ async function assertDirectoryIdentity(directory, expected) {
 async function syncDirectory(directory) {
   let handle;
   try {
-    handle = await open(directory, constants2.O_RDONLY | NO_FOLLOW);
+    handle = await open2(directory, constants2.O_RDONLY | NO_FOLLOW);
     await handle.sync();
   } catch (error2) {
     const unsupportedOnWindows = process.platform === "win32" && ["EISDIR", "EINVAL", "ENOTSUP", "EPERM"].includes(errorCode2(error2) ?? "");
@@ -23110,7 +23533,7 @@ async function syncDirectory(directory) {
   }
 }
 async function readRegularFile(filename, parentIdentity) {
-  const handle = await open(filename, constants2.O_RDONLY | NO_FOLLOW);
+  const handle = await open2(filename, constants2.O_RDONLY | NO_FOLLOW);
   try {
     if (parentIdentity !== void 0) {
       await assertDirectoryIdentity(path3.dirname(filename), parentIdentity);
@@ -23355,7 +23778,7 @@ var ArtifactStore = class {
     let temporaryCreated = false;
     try {
       await assertDirectoryIdentity(directory, directoryIdentity);
-      handle = await open(
+      handle = await open2(
         temporaryPath,
         constants2.O_WRONLY | constants2.O_CREAT | constants2.O_EXCL | NO_FOLLOW,
         384
@@ -23405,7 +23828,7 @@ var ArtifactStore = class {
     let temporaryCreated = false;
     try {
       await assertDirectoryIdentity(directory, directoryIdentity);
-      handle = await open(
+      handle = await open2(
         temporaryPath,
         constants2.O_WRONLY | constants2.O_CREAT | constants2.O_EXCL | NO_FOLLOW,
         384
@@ -23686,7 +24109,7 @@ var ArtifactStore = class {
       await this.ensureRunsRoot();
       const runsRootIdentity = await ensurePlainDirectory(this.runsRoot);
       const filename = path3.join(this.runsRoot, CLEANUP_JOURNAL);
-      const handle = await open(
+      const handle = await open2(
         filename,
         constants2.O_WRONLY | constants2.O_CREAT | constants2.O_APPEND | NO_FOLLOW,
         384
@@ -23856,10 +24279,10 @@ import { createHash as createHash4 } from "node:crypto";
 import { lstat as lstat3, mkdtemp, rm as rm2 } from "node:fs/promises";
 import { tmpdir as tmpdir3 } from "node:os";
 import path4 from "node:path";
-var MAX_DIAGNOSTIC_LENGTH = 2e3;
+var MAX_DIAGNOSTIC_LENGTH2 = 2e3;
 var BINARY_PATCH_PAYLOAD_MARKER = "[[BINARY_PATCH_PAYLOAD_OMITTED]]";
 function gitFailure(action, result) {
-  const diagnostic = redact(result.stderr || result.stdout).trim().slice(0, MAX_DIAGNOSTIC_LENGTH);
+  const diagnostic = redact(result.stderr || result.stdout).trim().slice(0, MAX_DIAGNOSTIC_LENGTH2);
   return new RuntimeError(`${action} failed${diagnostic ? `: ${diagnostic}` : ""}`);
 }
 async function checkedGit(cwd, args, indexFile) {
@@ -24112,9 +24535,9 @@ async function freezeCandidate(args) {
 // src/git/worktree-manager.ts
 import { mkdir as mkdir2, rm as rm3 } from "node:fs/promises";
 import path5 from "node:path";
-var MAX_DIAGNOSTIC_LENGTH2 = 2e3;
+var MAX_DIAGNOSTIC_LENGTH3 = 2e3;
 function failure(action, result) {
-  const diagnostic = (result.stderr || result.stdout).trim().slice(0, MAX_DIAGNOSTIC_LENGTH2);
+  const diagnostic = (result.stderr || result.stdout).trim().slice(0, MAX_DIAGNOSTIC_LENGTH3);
   return new RuntimeError(`${action} failed${diagnostic ? `: ${diagnostic}` : ""}`);
 }
 var WorktreeManager = class {
@@ -24176,288 +24599,6 @@ var FAILURE_PRECEDENCE = [
 function classifyFailure(s) {
   for (const reason of FAILURE_PRECEDENCE) if (s[reason]) return reason;
   return null;
-}
-
-// src/producers/codex-adapter.ts
-import { open as open2 } from "node:fs/promises";
-var CODEX_REQUIRED_ENV = [
-  "CODEX_HOME",
-  "CODEX_API_KEY",
-  "CODEX_ACCESS_TOKEN",
-  "CODEX_CA_CERTIFICATE",
-  "SSL_CERT_FILE"
-];
-var MULTI_AGENT_CONTROL = "features.multi_agent_v2={enabled=false,max_concurrent_threads_per_session=1}";
-var VERSION_TIMEOUT_MS = 1e4;
-var VERSION_OUTPUT_LIMIT = 64 * 1024;
-function isRecord2(value) {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-function stringProperty(value, name) {
-  if (!isRecord2(value)) return void 0;
-  const property = value[name];
-  return typeof property === "string" ? property : void 0;
-}
-function unavailableReport(ctx, reason, resolvedExecutable = null) {
-  return {
-    producerId: "codex",
-    available: false,
-    reason,
-    os: ctx.os,
-    arch: ctx.arch,
-    environmentType: ctx.environmentType,
-    resolvedExecutable,
-    version: null,
-    authState: "unknown",
-    executionModes: ["edit"],
-    structuredOutput: true,
-    writeConfinementBackend: null,
-    laneEligibility: { edit: false }
-  };
-}
-function parseVersion(stdout) {
-  const match = /(?:^|\s)(\d+\.\d+\.\d+(?:[-+][^\s]+)?)(?:\s|$)/u.exec(stdout.trim());
-  return match?.[1] ?? null;
-}
-async function normalizeCodexExecutable(executable) {
-  if (executable.kind !== "native") return executable;
-  let handle;
-  try {
-    handle = await open2(executable.command, "r");
-    const buffer = Buffer.alloc(256);
-    const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);
-    const firstLine = buffer.subarray(0, bytesRead).toString("utf8").split(/\r?\n/u, 1)[0] ?? "";
-    if (!/^#![^\r\n]*\bnode(?:\s|$)/u.test(firstLine)) return executable;
-    return {
-      kind: "node-entrypoint",
-      command: process.execPath,
-      prefixArgs: [executable.command, ...executable.prefixArgs],
-      resolvedFrom: `${executable.resolvedFrom};node:${process.execPath}`
-    };
-  } catch {
-    return executable;
-  } finally {
-    await handle?.close();
-  }
-}
-function quoteTomlString(value) {
-  return JSON.stringify(value);
-}
-function renderList(values) {
-  return values.length === 0 ? "- (none)" : values.map((value) => `- ${value}`).join("\n");
-}
-function renderPrompt(spec) {
-  return [
-    "You are an untrusted implementation Producer operating inside an isolated worktree.",
-    "Do not delegate to other agents or expand the authorized scope.",
-    "",
-    "Objective:",
-    spec.objective,
-    "",
-    "Context:",
-    spec.context,
-    "",
-    "Authorized write allowlist:",
-    renderList(spec.writeAllowlist),
-    "",
-    "Forbidden scope:",
-    renderList(spec.forbiddenScope),
-    "",
-    "Success criteria:",
-    renderList(spec.successCriteria),
-    "",
-    "Make only the requested edits. Return a concise final summary of the work performed."
-  ].join("\n");
-}
-var CodexAdapter = class {
-  producerId = "codex";
-  async probe(ctx) {
-    if (ctx.os === "win32") return unavailableReport(ctx, "unsupported-platform");
-    let executable;
-    try {
-      executable = await normalizeCodexExecutable(
-        await ctx.ps.resolveExecutable({ name: "codex" })
-      );
-    } catch {
-      return unavailableReport(ctx, "missing-executable");
-    }
-    try {
-      const result = await supervise(ctx.ps, {
-        executable,
-        args: ["--version"],
-        cwd: process.cwd(),
-        env: {},
-        timeoutMs: VERSION_TIMEOUT_MS,
-        maxOutputBytes: VERSION_OUTPUT_LIMIT
-      }, {});
-      const version2 = result.spawnError === void 0 && result.exitCode === 0 ? parseVersion(result.stdout) : null;
-      if (version2 === null) return unavailableReport(ctx, "probe-failed", executable);
-      const certified = ctx.os === "darwin" && ctx.arch === "arm64" && ctx.environmentType === "native";
-      const writeConfinementBackend = certified ? "codex-native-sandbox" : null;
-      return {
-        producerId: this.producerId,
-        available: true,
-        reason: null,
-        os: ctx.os,
-        arch: ctx.arch,
-        environmentType: ctx.environmentType,
-        resolvedExecutable: executable,
-        version: version2,
-        authState: "unknown",
-        executionModes: ["edit"],
-        structuredOutput: true,
-        writeConfinementBackend,
-        laneEligibility: { edit: writeConfinementBackend !== null }
-      };
-    } catch {
-      return unavailableReport(ctx, "probe-failed", executable);
-    }
-  }
-  buildInvocation(spec, ctx) {
-    const args = [
-      "exec",
-      "--json",
-      "--ephemeral",
-      "--sandbox",
-      "workspace-write",
-      "--ignore-user-config",
-      "--ignore-rules",
-      "--disable",
-      "multi_agent",
-      "-c",
-      MULTI_AGENT_CONTROL,
-      "-c",
-      'approval_policy="never"',
-      "-c",
-      "sandbox_workspace_write.network_access=false",
-      "-c",
-      "sandbox_workspace_write.exclude_tmpdir_env_var=true",
-      "-c",
-      "sandbox_workspace_write.exclude_slash_tmp=true",
-      "-c",
-      'shell_environment_policy.inherit="none"',
-      "-c",
-      'shell_environment_policy.include_only=["PATH","HOME","TMPDIR","LANG","LC_ALL","CLAUDE_ARCHITECT_DELEGATED"]',
-      "-c",
-      'web_search="disabled"',
-      "--cd",
-      ctx.worktreePath
-    ];
-    if (spec.producerOverrides?.model !== void 0) {
-      args.push("--model", spec.producerOverrides.model);
-    }
-    if (spec.producerOverrides?.reasoningEffort !== void 0) {
-      args.push(
-        "-c",
-        `model_reasoning_effort=${quoteTomlString(spec.producerOverrides.reasoningEffort)}`
-      );
-    }
-    args.push("-");
-    return {
-      executable: ctx.executable,
-      args,
-      stdin: renderPrompt(spec),
-      requiredEnv: [...CODEX_REQUIRED_ENV],
-      network: "denied"
-    };
-  }
-  normalizeEvents(raw) {
-    if (raw.exit.truncated.stdout) {
-      return { events: [], producerSummary: null, ok: false };
-    }
-    const lines = raw.stdout.split(/\r?\n/u).filter((line) => line.trim().length > 0);
-    if (lines.length === 0) return { events: [], producerSummary: null, ok: false };
-    const events = [];
-    let producerSummary = null;
-    let completed = false;
-    let failed = false;
-    try {
-      for (const line of lines) {
-        const parsed = JSON.parse(line);
-        if (!isRecord2(parsed) || typeof parsed.type !== "string") {
-          return { events: [], producerSummary: null, ok: false };
-        }
-        if (parsed.type === "turn.completed") {
-          completed = true;
-          continue;
-        }
-        if (parsed.type === "error" || parsed.type === "turn.failed") {
-          failed = true;
-          const text = stringProperty(parsed, "message") ?? stringProperty(parsed.error, "message");
-          events.push({
-            kind: "error",
-            ...text === void 0 ? {} : { text },
-            raw: parsed
-          });
-          continue;
-        }
-        if (parsed.type !== "item.completed") continue;
-        const item = parsed.item;
-        const itemType = stringProperty(item, "type");
-        if (itemType === "agent_message") {
-          const text = stringProperty(item, "text");
-          if (text === void 0) return { events: [], producerSummary: null, ok: false };
-          producerSummary = text;
-          events.push({ kind: "final", text, raw: parsed });
-        } else if (itemType !== void 0) {
-          events.push({ kind: "tool", raw: parsed });
-        }
-      }
-    } catch {
-      return { events: [], producerSummary: null, ok: false };
-    }
-    return {
-      events,
-      producerSummary,
-      ok: completed && !failed && producerSummary !== null
-    };
-  }
-  configurationProfile() {
-    return {
-      isolationState: "controlled-config-supported",
-      credentialSources: [
-        "CODEX_HOME auth store",
-        "CODEX_API_KEY",
-        "CODEX_ACCESS_TOKEN",
-        "operating-system credential store"
-      ],
-      behavioralConfigSources: ["explicit invocation argv"],
-      repositoryInstructionSources: ["worktree AGENTS.md"],
-      environmentDependencies: [...CODEX_REQUIRED_ENV],
-      temporaryHomeStrategy: "use a per-attempt HOME while preserving CODEX_HOME for auth; ignore user config and rules"
-    };
-  }
-};
-
-// src/producers/producer-registry.ts
-var ProducerRegistry = class {
-  adapters;
-  constructor(adapters) {
-    this.adapters = [...adapters];
-  }
-  get(id) {
-    return this.adapters.find((adapter) => adapter.producerId === id);
-  }
-  all() {
-    return [...this.adapters];
-  }
-};
-var registry2 = new ProducerRegistry([new CodexAdapter()]);
-
-// src/producers/capability-probe.ts
-async function probeAll(ctx, producerRegistry = registry2) {
-  return Promise.all(producerRegistry.all().map((adapter) => adapter.probe(ctx)));
-}
-
-// src/producers/producer-adapter.ts
-import { readFileSync } from "node:fs";
-function detectEnvironmentType() {
-  if (process.platform !== "linux") return "native";
-  try {
-    return readFileSync("/proc/version", "utf8").toLowerCase().includes("microsoft") ? "wsl" : "native";
-  } catch {
-    return "native";
-  }
 }
 
 // src/producers/routing-policy.ts
@@ -25094,7 +25235,7 @@ import { randomUUID as randomUUID3 } from "node:crypto";
 import { realpath as realpath4 } from "node:fs/promises";
 import path7 from "node:path";
 var MAX_COMMAND_OUTPUT_BYTES = 1e6;
-var MAX_DIAGNOSTIC_LENGTH3 = 2e3;
+var MAX_DIAGNOSTIC_LENGTH4 = 2e3;
 var POSIX_ESSENTIAL_ENV2 = [
   "HOME",
   "PATH",
@@ -25108,7 +25249,7 @@ var POSIX_ESSENTIAL_ENV2 = [
   "XDG_RUNTIME_DIR"
 ];
 function gitFailure2(action, result) {
-  const diagnostic = redact(result.stderr || result.stdout).trim().slice(0, MAX_DIAGNOSTIC_LENGTH3);
+  const diagnostic = redact(result.stderr || result.stdout).trim().slice(0, MAX_DIAGNOSTIC_LENGTH4);
   return new RuntimeError(`${action} failed${diagnostic ? `: ${diagnostic}` : ""}`);
 }
 async function checkedGit2(cwd, args) {
@@ -25361,9 +25502,9 @@ async function projectVerify(args) {
 
 // src/verify/structural-verifier.ts
 import { createHash as createHash5 } from "node:crypto";
-var MAX_DIAGNOSTIC_LENGTH4 = 2e3;
+var MAX_DIAGNOSTIC_LENGTH5 = 2e3;
 function gitFailure3(action, result) {
-  const diagnostic = redact(result.stderr || result.stdout).trim().slice(0, MAX_DIAGNOSTIC_LENGTH4);
+  const diagnostic = redact(result.stderr || result.stdout).trim().slice(0, MAX_DIAGNOSTIC_LENGTH5);
   return new RuntimeError(`${action} failed${diagnostic ? `: ${diagnostic}` : ""}`);
 }
 async function checkedGit3(cwd, args) {
@@ -25896,7 +26037,21 @@ var integrationOutput = external_exports.object({
   detail: external_exports.string().optional(),
   ...errorOutputFields
 });
-var doctorOutput = external_exports.object({ issues: external_exports.array(external_exports.string()) });
+var doctorOutput = external_exports.object({
+  node: external_exports.object({ version: external_exports.string(), ok: external_exports.boolean() }),
+  git: external_exports.object({ version: external_exports.string().nullable(), ok: external_exports.boolean() }),
+  producers: external_exports.array(external_exports.record(external_exports.string(), external_exports.unknown())),
+  runtimeVersion: external_exports.string(),
+  schemaVersion: external_exports.string(),
+  protocolVersion: external_exports.string(),
+  issues: external_exports.array(external_exports.string())
+});
+var gitReadOutput = external_exports.object({
+  ok: external_exports.boolean(),
+  output: external_exports.string().optional(),
+  error: external_exports.literal("git-read-failed").optional(),
+  diagnostic: external_exports.string().optional()
+});
 function toolOutput(value) {
   const structuredContent = value;
   return {
@@ -25984,7 +26139,41 @@ async function start(dependencies = {}) {
       inputSchema: {},
       outputSchema: doctorOutput
     },
-    async () => toolOutput({ issues: ["doctor-not-implemented"] })
+    async () => toolOutput(await doctor(dependencies))
+  );
+  const registerGitReadTool = (name, title, description, handler) => server.registerTool(
+    name,
+    {
+      title,
+      description,
+      inputSchema: { checkoutPath: external_exports.string() },
+      outputSchema: gitReadOutput
+    },
+    async ({ checkoutPath }) => toolOutput(await handler(checkoutPath, dependencies))
+  );
+  registerGitReadTool(
+    "gitStatus",
+    "Read repository status",
+    "Return redacted porcelain status without modifying the repository.",
+    gitStatus
+  );
+  registerGitReadTool(
+    "gitDiff",
+    "Read repository diff",
+    "Return the redacted HEAD-to-worktree diff without external diff drivers.",
+    gitDiff
+  );
+  registerGitReadTool(
+    "gitLog",
+    "Read recent repository history",
+    "Return a redacted bounded recent commit log.",
+    gitLog
+  );
+  registerGitReadTool(
+    "gitChangedFiles",
+    "Read changed repository paths",
+    "Return redacted HEAD-to-worktree name-status records.",
+    gitChangedFiles
   );
   await server.connect(new StdioServerTransport());
   console.error("claude-architect MCP server ready");

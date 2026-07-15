@@ -113,11 +113,19 @@ describe("MCP server handshake", () => {
           spec: { specVersion: "1" },
         },
       });
+      const diagnosed = await request(4, "tools/call", {
+        name: "doctor",
+        arguments: {},
+      });
 
       expect(names).toEqual([
         "decideCandidate",
         "delegate",
         "doctor",
+        "gitChangedFiles",
+        "gitDiff",
+        "gitLog",
+        "gitStatus",
         "integrateCandidate",
         "reviewCandidate",
       ]);
@@ -127,6 +135,12 @@ describe("MCP server handshake", () => {
         type: "text",
         text: JSON.stringify(called.structuredContent),
       }]);
+      expect(diagnosed.structuredContent).toMatchObject({
+        runtimeVersion: expect.any(String),
+        protocolVersion: PROTOCOL_VERSION,
+        producers: expect.any(Array),
+        issues: expect.any(Array),
+      });
       expect(stdout.trim().split(/\r?\n/).every(line => {
         try {
           JSON.parse(line);

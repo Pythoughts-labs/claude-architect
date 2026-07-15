@@ -1,0 +1,95 @@
+import { execFile } from "node:child_process";
+import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import { afterEach, describe, expect, it } from "vitest";
+import {
+  gitChangedFiles,
+  gitDiff,
+  gitLog,
+  gitStatus,
+  type GitReadDependencies,
+} from "../../src/mcp/git-read-tools.js";
+
+const temporaryPaths: string[] = [];
+
+function execGit(cwd: string, args: string[]): Promise<void> {
+  return new Promise((resolve, reject) => {
+    execFile("git", args, { cwd }, error => error ? reject(error) : resolve());
+  });
+}
+
+afterEach(async () => {
+  await Promise.all(temporaryPaths.splice(0).map(entry =>
+    rm(entry, { recursive: true, force: true })));
+});
+
+describe("read-only Git tools", () => {
+  it("returns redacted status, diff, log, and changed-file observations", async () => {
+    const secret = "sk-12345678advisor";
+    const root = await mkdtemp(path.join(tmpdir(), "ca-git-read-"));
+    temporaryPaths.push(root);
+    const repo = path.join(root, "repo");
+    await mkdir(repo);
+    await execGit(repo, ["init", "-q"]);
+    await execGit(repo, ["config", "user.name", "Test"]);
+    await execGit(repo, ["config", "user.email", "test@example.com"]);
+    await writeFile(path.join(repo, "tracked.txt"), "initial\n", "utf8");
+    await execGit(repo, ["add", "tracked.txt"]);
+    await execGit(repo, ["commit", "-qm", `initial ${secret}`]);
+    await writeFile(path.join(repo, "tracked.txt"), `token=${secret}\n`, "utf8");
+    await writeFile(path.join(repo, `${secret}.txt`), "new\n", "utf8");
+    await execGit(repo, ["add", "tracked.txt", `${secret}.txt`]);
+
+    const outputs = await Promise.all([
+      gitStatus(repo),
+      gitDiff(repo),
+      gitLog(repo),
+      gitChangedFiles(repo),
+    ]);
+
+    for (const output of outputs) {
+      expect(output.ok).toBe(true);
+      expect("output" in output ? output.output : "").toContain("[k]");
+      expect(JSON.stringify(output)).not.toContain(secret);
+    }
+  });
+
+  it("uses only fixed argv and fails closed when output is truncated", async () => {
+    const calls: string[][] = [];
+    const deps: GitReadDependencies = {
+      ps: {
+        os: "darwin",
+        canonicalizePath: async input => ({ input, canonical: "/canonical/repo", gitCommonDir: null }),
+      } as GitReadDependencies["ps"],
+      git: async (cwd, args) => {
+        expect(cwd).toBe("/canonical/repo");
+        calls.push(args);
+        return args[1] === "diff" && args[2] === "--no-ext-diff" && args.includes("--full-index")
+          ? {
+            stdout: "partial",
+            stderr: "",
+            exitCode: 0,
+            truncated: { stdout: true, stderr: false },
+          }
+          : { stdout: "ok", stderr: "", exitCode: 0 };
+      },
+    };
+
+    await expect(gitStatus("/repo", deps)).resolves.toEqual({ ok: true, output: "ok" });
+    await expect(gitDiff("/repo", deps)).resolves.toEqual({
+      ok: false,
+      error: "git-read-failed",
+      diagnostic: "Git output exceeded the capture limit",
+    });
+    await expect(gitLog("/repo", deps)).resolves.toEqual({ ok: true, output: "ok" });
+    await expect(gitChangedFiles("/repo", deps)).resolves.toEqual({ ok: true, output: "ok" });
+
+    expect(calls).toEqual([
+      ["--no-pager", "status", "--porcelain=v1", "--branch", "--untracked-files=all"],
+      ["--no-pager", "diff", "--no-ext-diff", "--no-textconv", "--no-color", "--full-index", "HEAD", "--"],
+      ["--no-pager", "log", "-n", "20", "--no-color", "--format=%H%x09%aI%x09%s", "--"],
+      ["--no-pager", "diff", "--no-ext-diff", "--no-textconv", "--no-color", "--name-status", "HEAD", "--"],
+    ]);
+  });
+});

@@ -2,6 +2,14 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import { PROTOCOL_VERSION, RUNTIME_VERSION } from "../protocol/versions.js";
+import { doctor, type DoctorDependencies } from "./doctor.js";
+import {
+  gitChangedFiles,
+  gitDiff,
+  gitLog,
+  gitStatus,
+  type GitReadDependencies,
+} from "./git-read-tools.js";
 import {
   handleDecideCandidate,
   handleDelegate,
@@ -43,7 +51,23 @@ const integrationOutput = z.object({
   detail: z.string().optional(),
   ...errorOutputFields,
 });
-const doctorOutput = z.object({ issues: z.array(z.string()) });
+const doctorOutput = z.object({
+  node: z.object({ version: z.string(), ok: z.boolean() }),
+  git: z.object({ version: z.string().nullable(), ok: z.boolean() }),
+  producers: z.array(z.record(z.string(), z.unknown())),
+  runtimeVersion: z.string(),
+  schemaVersion: z.string(),
+  protocolVersion: z.string(),
+  issues: z.array(z.string()),
+});
+const gitReadOutput = z.object({
+  ok: z.boolean(),
+  output: z.string().optional(),
+  error: z.literal("git-read-failed").optional(),
+  diagnostic: z.string().optional(),
+});
+
+export type ServerDependencies = ToolDependencies & DoctorDependencies & GitReadDependencies;
 
 function toolOutput(value: object) {
   const structuredContent = value as Record<string, unknown>;
@@ -53,7 +77,7 @@ function toolOutput(value: object) {
   };
 }
 
-export async function start(dependencies: ToolDependencies = {}): Promise<void> {
+export async function start(dependencies: ServerDependencies = {}): Promise<void> {
   if (process.env.CLAUDE_ARCHITECT_DELEGATED !== undefined) {
     console.error("Claude Architect MCP startup denied: CLAUDE_ARCHITECT_DELEGATED is present");
     process.exitCode = 1;
@@ -134,7 +158,46 @@ export async function start(dependencies: ToolDependencies = {}): Promise<void> 
       inputSchema: {},
       outputSchema: doctorOutput,
     },
-    async () => toolOutput({ issues: ["doctor-not-implemented"] }),
+    async () => toolOutput(await doctor(dependencies)),
+  );
+  const registerGitReadTool = (
+    name: "gitStatus" | "gitDiff" | "gitLog" | "gitChangedFiles",
+    title: string,
+    description: string,
+    handler: (checkoutPath: string, deps: GitReadDependencies) => Promise<object>,
+  ) => server.registerTool(
+    name,
+    {
+      title,
+      description,
+      inputSchema: { checkoutPath: z.string() },
+      outputSchema: gitReadOutput,
+    },
+    async ({ checkoutPath }) => toolOutput(await handler(checkoutPath, dependencies)),
+  );
+  registerGitReadTool(
+    "gitStatus",
+    "Read repository status",
+    "Return redacted porcelain status without modifying the repository.",
+    gitStatus,
+  );
+  registerGitReadTool(
+    "gitDiff",
+    "Read repository diff",
+    "Return the redacted HEAD-to-worktree diff without external diff drivers.",
+    gitDiff,
+  );
+  registerGitReadTool(
+    "gitLog",
+    "Read recent repository history",
+    "Return a redacted bounded recent commit log.",
+    gitLog,
+  );
+  registerGitReadTool(
+    "gitChangedFiles",
+    "Read changed repository paths",
+    "Return redacted HEAD-to-worktree name-status records.",
+    gitChangedFiles,
   );
 
   await server.connect(new StdioServerTransport());
