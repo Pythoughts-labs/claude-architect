@@ -5,6 +5,7 @@ export interface GitResult {
   stdout: string;
   stderr: string;
   exitCode: number | null;
+  truncated?: { stdout: boolean; stderr: boolean };
 }
 
 export async function git(cwd: string, args: string[], indexFile?: string): Promise<GitResult> {
@@ -31,5 +32,10 @@ export async function git(cwd: string, args: string[], indexFile?: string): Prom
     timeoutMs: 60_000,
     maxOutputBytes: 8_000_000,
   }, {});
-  return { stdout: exit.stdout, stderr: exit.stderr, exitCode: exit.exitCode };
+  return {
+    stdout: exit.stdout,
+    stderr: exit.stderr,
+    exitCode: exit.exitCode,
+    truncated: { ...exit.truncated },
+  };
 }

@@ -49,6 +49,13 @@ export interface PruneResult {
   retained: Array<{ runId: string; reason: string }>;
 }
 
+export type RunDecisionValue = "accepted" | "rejected" | "revision-requested";
+
+export interface RunDecisionRecord {
+  decision: RunDecisionValue;
+  recordedAt: string;
+}
+
 interface RunEntry {
   runId: string;
   directory: string;
@@ -523,6 +530,38 @@ export class ArtifactStore {
     await this.writeArchiveFile(relativePath, serialized);
   }
 
+  private async replaceJson(relativePath: string, value: unknown): Promise<void> {
+    const directory = await this.ensureRunDirectory(false);
+    if (directory === null) throw new RuntimeError("run archive does not exist");
+    const directoryIdentity = await ensurePlainDirectory(directory);
+    const destination = path.join(directory, relativePath);
+    const temporaryPath = path.join(directory, `.${relativePath}.${randomUUID()}.tmp`);
+    const serialized = `${serializeJson(value, 2)}\n`;
+    let handle;
+    let temporaryCreated = false;
+    try {
+      await assertDirectoryIdentity(directory, directoryIdentity);
+      handle = await open(
+        temporaryPath,
+        constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | NO_FOLLOW,
+        0o600,
+      );
+      temporaryCreated = true;
+      await handle.writeFile(serialized, { encoding: "utf8" });
+      await handle.sync();
+      await handle.close();
+      handle = undefined;
+      await assertDirectoryIdentity(directory, directoryIdentity);
+      await rename(temporaryPath, destination);
+      temporaryCreated = false;
+      await syncDirectory(directory);
+      await assertDirectoryIdentity(directory, directoryIdentity);
+    } finally {
+      await handle?.close();
+      if (temporaryCreated) await rm(temporaryPath, { force: true });
+    }
+  }
+
   async writeLog(name: string, text: string): Promise<string> {
     validateComponent(name, "log name");
     const ref = path.posix.join("logs", `${name}.log`);
@@ -580,7 +619,7 @@ export class ArtifactStore {
     }
   }
 
-  private async readManifest(runId: string): Promise<RunManifest | null> {
+  async readManifest(runId: string): Promise<RunManifest | null> {
     const runDirectory = path.join(this.runsRoot, runId);
     const validated = await this.ensureExistingRunDirectory(runDirectory);
     if (validated === null) return null;
@@ -592,6 +631,37 @@ export class ArtifactStore {
         )),
         runId,
       );
+    } catch (error) {
+      if (isMissing(error)) return null;
+      throw error;
+    }
+  }
+
+  async writeDecision(record: RunDecisionRecord): Promise<void> {
+    if (!(["accepted", "rejected", "revision-requested"] as const).includes(record.decision)
+      || !Number.isFinite(Date.parse(record.recordedAt))) {
+      throw new RuntimeError("run decision is invalid");
+    }
+    await this.replaceJson("decision.json", record);
+  }
+
+  async readDecision(runId: string): Promise<RunDecisionRecord | null> {
+    validateComponent(runId, "run id");
+    const runDirectory = path.join(this.runsRoot, runId);
+    const validated = await this.ensureExistingRunDirectory(runDirectory);
+    if (validated === null) return null;
+    try {
+      const value = JSON.parse(await readRegularFile(
+        path.join(validated.path, "decision.json"),
+        validated.identity,
+      )) as Partial<RunDecisionRecord>;
+      if (!(["accepted", "rejected", "revision-requested"] as const)
+        .includes(value.decision as RunDecisionValue)
+        || typeof value.recordedAt !== "string"
+        || !Number.isFinite(Date.parse(value.recordedAt))) {
+        throw new RuntimeError("archived run decision is malformed");
+      }
+      return value as RunDecisionRecord;
     } catch (error) {
       if (isMissing(error)) return null;
       throw error;

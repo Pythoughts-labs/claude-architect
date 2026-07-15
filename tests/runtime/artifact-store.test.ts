@@ -171,6 +171,28 @@ describe("ArtifactStore", () => {
     });
   });
 
+  it("persists and replaces the latest candidate decision", async () => {
+    const runId = "run-decision";
+    const store = new ArtifactStore(runId);
+    await store.writeResult(sampleResult(runId));
+
+    await store.writeDecision({
+      decision: "revision-requested",
+      recordedAt: "2026-07-14T12:00:00.000Z",
+    });
+    await store.writeDecision({
+      decision: "accepted",
+      recordedAt: "2026-07-14T12:01:00.000Z",
+    });
+
+    await expect(store.readDecision(runId)).resolves.toEqual({
+      decision: "accepted",
+      recordedAt: "2026-07-14T12:01:00.000Z",
+    });
+    const stored = JSON.parse(await readFile(join(store.runDirectory, "decision.json"), "utf8"));
+    expect(stored).toMatchObject({ decision: "accepted" });
+  });
+
   it("does not accept a forged result after a validated run directory is swapped", async () => {
     const runId = "run-read-swap";
     const store = new ArtifactStore(runId);
