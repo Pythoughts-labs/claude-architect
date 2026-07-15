@@ -46,9 +46,11 @@ import { NestedDelegationError, RuntimeError } from "../util/errors.js";
 import { ArtifactStore } from "./artifact-store.js";
 import {
   buildEnvironment,
+  registerSensitiveEnvironment,
   type BuiltEnvironment,
   type EnvProvenance,
 } from "./environment-policy.js";
+import { redact, redactValues } from "./redaction.js";
 import {
   buildRunManifest,
   type PackagedVerifierInput,
@@ -316,57 +318,75 @@ function withRunStartPidRecording(
 }
 
 async function archiveTerminal(context: TerminalContext): Promise<AttemptResult> {
-  const failure = classifyFailure(context.signals);
-  const logsRef = await context.store.writeLog("producer", context.producerLog);
-  const result: AttemptResult = {
-    resultVersion: "1",
-    runId: context.runId,
-    status: statusForFailure(failure),
-    failure,
-    summary: summaryForFailure(failure),
-    producerSummary: context.producerSummary,
-    candidate: context.candidate,
-    requestedVerification: context.spec.verification.map(command => ({ ...command })),
-    executedVerification: context.commandOutcomes.map(outcome => ({ ...outcome })),
-    unresolvedIssues: [...context.unresolvedIssues],
-    evidence: { ...context.evidence },
-    logsRef,
-    producerId: context.report?.producerId ?? null,
-    producerVersion: context.report?.version ?? null,
-    producerModel: context.spec.producerOverrides?.model ?? null,
-    durationMs: Math.max(0, context.now() - context.startedAtMs),
-    sessionId: null,
-  };
-  const manifest = buildRunManifest({
-    runId: context.runId,
-    repoRoot: context.repoRoot,
-    baseCommitOid: context.baseCommitOid,
-    candidateManifestHash: context.candidate?.manifestHash ?? null,
-    producer: {
-      id: context.report?.producerId ?? null,
-      version: context.report?.version ?? null,
-      model: context.spec.producerOverrides?.model ?? null,
-    },
-    effectivePolicy: context.profile === null
-      ? { routingFailure: failure }
-      : {
-        configurationProfile: context.profile,
-        temporaryHomeApplied: context.temporaryHomeApplied,
+  const verificationSecretRegistrations: Array<{ dispose(): void }> = [];
+  try {
+    for (const command of context.spec.verification) {
+      verificationSecretRegistrations.push(registerSensitiveEnvironment(command.environment ?? {}));
+    }
+
+    const failure = classifyFailure(context.signals);
+    const logsRef = await context.store.writeLog("producer", context.producerLog);
+    const result: AttemptResult = {
+      resultVersion: "1",
+      runId: context.runId,
+      status: statusForFailure(failure),
+      failure,
+      summary: summaryForFailure(failure),
+      producerSummary: context.producerSummary === null ? null : redact(context.producerSummary),
+      candidate: context.candidate === null
+        ? null
+        : {
+          ...context.candidate,
+          changedPaths: context.candidate.changedPaths.map(change => ({ ...change })),
+          patch: redact(context.candidate.patch),
+        },
+      requestedVerification: redactValues(context.spec.verification),
+      executedVerification: redactValues(context.commandOutcomes),
+      unresolvedIssues: context.unresolvedIssues.map(redact),
+      evidence: redactValues(context.evidence),
+      logsRef,
+      producerId: context.report?.producerId ?? null,
+      producerVersion: context.report?.version ?? null,
+      producerModel: context.spec.producerOverrides?.model ?? null,
+      durationMs: Math.max(0, context.now() - context.startedAtMs),
+      sessionId: null,
+    };
+    const manifest = buildRunManifest({
+      runId: context.runId,
+      repoRoot: context.repoRoot,
+      baseCommitOid: context.baseCommitOid,
+      candidateManifestHash: context.candidate?.manifestHash ?? null,
+      producer: {
+        id: context.report?.producerId ?? null,
+        version: context.report?.version ?? null,
+        model: context.spec.producerOverrides?.model ?? null,
       },
-    repositoryInstructions: context.repositoryInstructions,
-    prompt: context.invocation?.stdin ?? `${context.spec.objective}\n${context.spec.context}`,
-    executionPolicy: {
-      timeoutMs: context.spec.timeoutMs,
-      network: context.invocation?.network ?? "not-started",
-      writeAllowlist: context.spec.writeAllowlist,
-      forbiddenScope: context.spec.forbiddenScope,
-    },
-    environment: context.environment,
-    packagedVerifier: context.packagedVerifier,
-  });
-  await context.store.writeManifest(manifest);
-  await context.store.writeResult(result);
-  return result;
+      effectivePolicy: {
+        ...(context.profile === null
+          ? { routingFailure: failure }
+          : {
+            configurationProfile: context.profile,
+            temporaryHomeApplied: context.temporaryHomeApplied,
+          }),
+        verificationPolicy: context.evidence.verificationPolicy ?? [],
+      },
+      repositoryInstructions: context.repositoryInstructions,
+      prompt: context.invocation?.stdin ?? `${context.spec.objective}\n${context.spec.context}`,
+      executionPolicy: {
+        timeoutMs: context.spec.timeoutMs,
+        network: context.invocation?.network ?? "not-started",
+        writeAllowlist: context.spec.writeAllowlist,
+        forbiddenScope: context.spec.forbiddenScope,
+      },
+      environment: context.environment,
+      packagedVerifier: context.packagedVerifier,
+    });
+    await context.store.writeManifest(manifest);
+    await context.store.writeResult(result);
+    return result;
+  } finally {
+    for (const registration of verificationSecretRegistrations) registration.dispose();
+  }
 }
 
 async function cleanupAttemptResources(args: {

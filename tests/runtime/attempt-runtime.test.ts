@@ -24,6 +24,7 @@ import {
 import {
   clearRegisteredSecrets,
   containsRegisteredSecret,
+  redact,
 } from "../../src/runtime/redaction.js";
 import { NestedDelegationError } from "../../src/util/errors.js";
 
@@ -277,6 +278,65 @@ describe("runAttempt", () => {
     expect(runStart.startedAt).toEqual(expect.any(String));
     expect(containsRegisteredSecret("attempt-secret-value")).toBe(false);
     await expectAttemptResourcesCleaned(runId);
+  });
+
+  it("persists honest verification policy evidence in the run manifest", async () => {
+    const repoRoot = await initRepo();
+    const verificationPolicy = [{
+      id: "check",
+      confinement: "none",
+      networkPolicy: "unenforced",
+      requestedNetwork: "denied",
+      skipped: false,
+    }];
+    const verifier: AcceptanceVerifierLike = {
+      async verify() {
+        return {
+          ok: true,
+          failures: [],
+          evidence: { verificationPolicy },
+          commandOutcomes: [],
+        };
+      },
+    };
+
+    await runAttempt(
+      repoRoot,
+      validSpec(),
+      dependencies(new FakeAdapter(), "run-verification-policy", { verifier }),
+    );
+
+    expect(await archivedJson("run-verification-policy", "manifest.json")).toMatchObject({
+      effectivePolicy: { verificationPolicy },
+    });
+  });
+
+  it("scrubs verification-command environment secrets from returned and archived results", async () => {
+    const repoRoot = await initRepo();
+    const secret = "verification-command-enterprise-secret";
+    const verificationSpec = validSpec();
+    verificationSpec.verification = [{
+      id: "secret-check",
+      executable: process.execPath,
+      args: ["-e", "process.exit(0)"],
+      cwd: ".",
+      environment: { VERIFY_API_TOKEN: secret },
+      timeoutMs: 5_000,
+      network: "denied",
+      expectedExitCodes: [0],
+    }];
+
+    const result = await runAttempt(
+      repoRoot,
+      verificationSpec,
+      dependencies(new FakeAdapter({ content: secret }), "run-verification-secret"),
+    );
+    const archived = await archivedJson("run-verification-secret", "result.json");
+
+    expect(JSON.stringify(result)).not.toContain(secret);
+    expect(JSON.stringify(archived)).not.toContain(secret);
+    expect(result.requestedVerification[0]?.environment).toEqual({ VERIFY_API_TOKEN: "[s]" });
+    expect(redact(secret)).toBe(secret);
   });
 
   it("throws before touching the repository when delegation is already nested", async () => {
