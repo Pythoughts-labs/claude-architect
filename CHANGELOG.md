@@ -6,6 +6,12 @@ All notable changes to Claude Architect are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.9.2] - 2026-07-15
+
+### Added
+
+- Verification commands may opt into `allowedMutations: "ignored-paths"`, permitting Git-ignored byproducts such as `node_modules` from a dependency install. Tracked, untracked, submodule, and HEAD mutations still fail verification, and the default remains strict (`none`). Verification runs in a clean materialization, so real projects need an install step before typechecks or tests can run.
+
 ## [0.9.1] - 2026-07-15
 
 ### Fixed
@@ -89,7 +95,8 @@ Initial public release.
 - Native OpenCode assets under `.opencode/` and `opencode.json`, so the same lanes and skill work outside Claude Code.
 - SVG banner and shields badges for the README.
 
-[Unreleased]: https://github.com/Pythoughts-labs/claude-architect/compare/v0.9.1...HEAD
+[Unreleased]: https://github.com/Pythoughts-labs/claude-architect/compare/v0.9.2...HEAD
+[0.9.2]: https://github.com/Pythoughts-labs/claude-architect/compare/v0.9.1...v0.9.2
 [0.9.1]: https://github.com/Pythoughts-labs/claude-architect/compare/v0.9.0...v0.9.1
 [0.9.0]: https://github.com/Pythoughts-labs/claude-architect/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/Pythoughts-labs/claude-architect/compare/v0.7.0...v0.8.0

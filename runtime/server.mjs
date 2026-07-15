@@ -23456,6 +23456,12 @@ var delegation_spec_v1_default = {
                 }
               }
             }
+          },
+          allowedMutations: {
+            enum: [
+              "none",
+              "ignored-paths"
+            ]
           }
         }
       }
@@ -26002,7 +26008,8 @@ async function projectVerify(args) {
         ]),
         checkedGit3(materialized.path, ["rev-parse", "--verify", "HEAD"])
       ]);
-      if (status.length > 0 || currentHead.trim() !== args.artifact.candidateCommitOid) {
+      const disallowedRecords = command.allowedMutations === "ignored-paths" ? status.split("\0").filter((record2) => record2.length > 0 && !record2.startsWith("! ")) : status.length > 0 ? [status] : [];
+      if (disallowedRecords.length > 0 || currentHead.trim() !== args.artifact.candidateCommitOid) {
         mutated = true;
         failures.push("verification-mutated");
         break;

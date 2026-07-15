@@ -7,6 +7,8 @@ export interface VerificationCommand {
   timeoutMs: number;                // bounded by RUNTIME_MAX_TIMEOUT_MS — schema enforces maximum
   network: "denied" | "allowed";
   expectedExitCodes: number[];
+  /** "ignored-paths" permits Git-ignored byproducts (e.g. dependency installs); default "none". */
+  allowedMutations?: "none" | "ignored-paths";
   platform?: { os?: Array<"darwin" | "linux" | "win32">; arch?: string[] };
 }
 

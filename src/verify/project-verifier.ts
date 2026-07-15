@@ -335,7 +335,10 @@ export async function projectVerify(args: ProjectVerifyArgs): Promise<ProjectVer
         ]),
         checkedGit(materialized.path, ["rev-parse", "--verify", "HEAD"]),
       ]);
-      if (status.length > 0 || currentHead.trim() !== args.artifact.candidateCommitOid) {
+      const disallowedRecords = command.allowedMutations === "ignored-paths"
+        ? status.split("\0").filter(record => record.length > 0 && !record.startsWith("! "))
+        : status.length > 0 ? [status] : [];
+      if (disallowedRecords.length > 0 || currentHead.trim() !== args.artifact.candidateCommitOid) {
         mutated = true;
         failures.push("verification-mutated");
         break;

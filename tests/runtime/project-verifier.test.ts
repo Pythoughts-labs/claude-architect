@@ -192,6 +192,46 @@ describe("projectVerify", () => {
     expect(result.failures).toContain("verification-mutated");
   });
 
+  it("permits ignored-path writes when the command opts into ignored-paths mutations", async () => {
+    const fixture = await frozenFixture();
+
+    const result = await projectVerify({
+      repoRoot: fixture.repoRoot,
+      artifact: fixture.artifact,
+      commands: [command({
+        id: "dependency-install",
+        allowedMutations: "ignored-paths",
+        args: [
+          "-e",
+          "require('node:fs').mkdirSync('ignored-output', { recursive: true }); require('node:fs').writeFileSync('ignored-output/result.txt', 'changed')",
+        ],
+      })],
+    });
+
+    expect(result.mutated).toBe(false);
+    expect(result.failures).toEqual([]);
+  });
+
+  it("still detects tracked and untracked mutations when ignored-paths are permitted", async () => {
+    const fixture = await frozenFixture();
+
+    const result = await projectVerify({
+      repoRoot: fixture.repoRoot,
+      artifact: fixture.artifact,
+      commands: [command({
+        id: "untracked-mutation",
+        allowedMutations: "ignored-paths",
+        args: [
+          "-e",
+          "require('node:fs').writeFileSync('stray-untracked.txt', 'changed')",
+        ],
+      })],
+    });
+
+    expect(result.mutated).toBe(true);
+    expect(result.failures).toContain("verification-mutated");
+  });
+
   it("detects a clean status after the verification command changes HEAD", async () => {
     const fixture = await frozenFixture();
 
