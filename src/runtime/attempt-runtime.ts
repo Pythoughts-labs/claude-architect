@@ -425,28 +425,8 @@ export async function runAttempt(
     writeAllowlist: spec.writeAllowlist,
   });
   if (!preconditions.ok) {
-    return archiveTerminal({
-      store,
-      spec,
-      runId,
-      startedAtMs,
-      now,
-      repoRoot: canonical.canonical,
-      baseCommitOid: "",
-      signals: { unavailable: true },
-      report: null,
-      profile: null,
-      invocation: null,
-      environment: [],
-      temporaryHomeApplied: false,
-      producerSummary: null,
-      candidate: null,
-      commandOutcomes: [],
-      unresolvedIssues: [preconditions.reason],
-      evidence: { precondition: preconditions.reason },
-      producerLog: producerLog(null),
-      repositoryInstructions,
-      packagedVerifier,
+    throw new RuntimeError("repository precondition failed", {
+      reason: preconditions.reason,
     });
   }
 

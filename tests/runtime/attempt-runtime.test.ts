@@ -292,6 +292,26 @@ describe("runAttempt", () => {
       .rejects.toMatchObject({ code: "ENOENT" });
   });
 
+  it("does not misclassify a repository precondition rejection as producer unavailability", async () => {
+    const repoRoot = await initRepo();
+    await writeFile(join(repoRoot, "a.txt"), "dirty\n");
+
+    await expect(runAttempt(
+      repoRoot,
+      validSpec(),
+      dependencies(new FakeAdapter(), "run-dirty-precondition"),
+    )).rejects.toMatchObject({
+      message: "repository precondition failed",
+      detail: { reason: "dirty-checkout" },
+    });
+
+    await expect(access(join(
+      process.env.CLAUDE_PLUGIN_DATA!,
+      "runs",
+      "run-dirty-precondition",
+    ))).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
   it("archives unavailable when no producer is eligible", async () => {
     const repoRoot = await initRepo();
     const runId = "run-unavailable";
