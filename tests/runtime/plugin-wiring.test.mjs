@@ -71,9 +71,9 @@ describe("P0-A plugin wiring", () => {
     const marketplace = JSON.parse(read(".claude-plugin/marketplace.json"));
     const readme = read("README.md");
     const changelog = read("CHANGELOG.md");
-    assert.equal(plugin.version, "0.11.1");
-    assert.equal(marketplace.plugins[0].version, "0.11.1");
-    assert.match(readme, /badge\/version-0\.11\.1-/u);
+    assert.equal(plugin.version, "0.12.0");
+    assert.equal(marketplace.plugins[0].version, "0.12.0");
+    assert.match(readme, /badge\/version-0\.12\.0-/u);
     assert.doesNotMatch(
       readme,
       /`\/delegate`/u,
@@ -81,11 +81,11 @@ describe("P0-A plugin wiring", () => {
     );
     assert.match(changelog, /^## \[0\.8\.0\] - 2026-07-14$/mu);
     assert.match(readme, /macOS arm64[^\n]*certified/iu);
-    assert.match(readme, /Linux[^\n]*unsupported/iu);
+    assert.match(readme, /Linux[^\n]*tested/iu);
     assert.match(readme, /Windows[^\n]*unsupported/iu);
     assert.match(readme, /codex-native-sandbox/u);
     assert.match(marketplace.plugins[0].description, /macOS arm64 certified/iu);
-    assert.match(marketplace.plugins[0].description, /Linux and native Windows pending P0-B/iu);
+    assert.match(marketplace.plugins[0].description, /Linux tested; native Windows pending/iu);
     assert.match(readme, /Installed marketplace copies[^\n]*update[^\n]*reload/iu);
     assert.match(readme, /--disable multi_agent/u);
     assert.match(readme, /features\.multi_agent_v2=\{enabled=false,max_concurrent_threads_per_session=1\}/u);

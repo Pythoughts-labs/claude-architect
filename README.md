@@ -14,7 +14,7 @@
 <p align="center">
   <img alt="Claude Code" src="https://img.shields.io/badge/Claude_Code-plugin-d97757?style=flat-square&labelColor=0b0e14">
   <img alt="OpenCode" src="https://img.shields.io/badge/OpenCode-native-58a6ff?style=flat-square&labelColor=0b0e14">
-  <img alt="version" src="https://img.shields.io/badge/version-0.11.1-9aa4b2?style=flat-square&labelColor=0b0e14">
+  <img alt="version" src="https://img.shields.io/badge/version-0.12.0-9aa4b2?style=flat-square&labelColor=0b0e14">
   <img alt="license" src="https://img.shields.io/badge/license-MIT-3fb950?style=flat-square&labelColor=0b0e14">
 </p>
 
@@ -92,10 +92,12 @@ Installed marketplace copies must update and reload Claude Code before the P0-A 
 | Sandbox backend | Host | Environment | State |
 |---|---|---|---|
 | `codex-native-sandbox` | macOS arm64 | native | **certified** |
-| `codex-native-sandbox` | Linux | native | **unsupported** |
+| `codex-native-sandbox` | Linux | native | **tested** |
 | `codex-native-sandbox` | Windows | native | **unsupported** |
 
-The runtime itself—worktrees, byte-exact candidate materialization, independent verification, and process-tree control via the committed Job Object helper—is exercised by a 3-OS CI matrix (macOS 14, Ubuntu, Windows), while edit-Lane write confinement remains certified only on macOS arm64.
+Linux **tested** evidence comes from the opt-in confinement gate on a real Linux host; the Codex Linux sandbox (bubblewrap) requires unprivileged user namespaces and fails closed where they are unavailable (for example, in default-seccomp containers).
+
+The runtime itself—worktrees, byte-exact candidate materialization, independent verification, and process-tree control via the committed Job Object helper—is exercised by a 3-OS CI matrix (macOS 14, Ubuntu, Windows), while edit-Lane write confinement is certified on macOS arm64 and tested on Linux.
 
 Verification commands are recorded honestly as `confinement: "none"` and `networkPolicy: "unenforced"` in P0-A. Those checks are Host-authorized evidence; they are not described as sandboxed. Platform/Producer combinations without proven write confinement remain ineligible for the edit Lane.
 
@@ -191,7 +193,7 @@ The spec it produces always names the objective, the exact files, the interfaces
 
 ## Requirements
 
-- **Codex lane:** install and authenticate the [OpenAI Codex CLI](https://github.com/openai/codex). The certified MCP edit Lane currently requires macOS arm64 and a successful native confinement probe; other environments remain diagnostics-only and must not fall back around a failed confinement or edit-eligibility gate.
+- **Codex lane:** install and authenticate the [OpenAI Codex CLI](https://github.com/openai/codex). The MCP edit Lane requires a certified or tested native confinement backend (currently macOS arm64 or Linux) and a successful native confinement probe; unsupported environments remain diagnostics-only and must not fall back around a failed confinement or edit-eligibility gate.
 - **OpenCode lane:** install the [OpenCode CLI](https://opencode.ai) and authenticate a provider with `opencode auth login`. The lane runs `opencode run --agent build --auto`; optional model and variant overrides otherwise defer to OpenCode configuration.
 - **Pi lane:** install the [Pi coding agent](https://pi.dev) and start a local model server. Optional model and thinking overrides otherwise defer to Pi configuration.
 - **Pythinker lane:** install the [Pythinker CLI](https://pythoughts-labs.github.io/pythinker-code/), authenticate a provider, and optionally pass a model or `--thinking-effort off|minimal|low|medium|high|xhigh|max` override. Absent overrides defer to Pythinker configuration. This lane runs unattended in `--yolo` mode.

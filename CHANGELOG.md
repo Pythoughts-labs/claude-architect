@@ -6,6 +6,17 @@ All notable changes to Claude Architect are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.12.0] - 2026-07-15
+
+### Added
+
+- Recorded real-Linux evidence from the opt-in confinement gate on arm64, kernel 7.0.11-orbstack, a `node:22` container, and codex-cli 0.144.4: the inside-worktree write succeeded with exact content and the outside-home write was blocked.
+- Confirmed that the Codex Linux sandbox uses bubblewrap and requires unprivileged user namespaces. Where they are blocked, such as by Docker's default seccomp profile, Codex refuses to execute commands and provides no unsandboxed fallback.
+
+### Changed
+
+- Promoted the Linux native `codex-native-sandbox` backend to `tested`, enabling the Codex edit Lane on Linux.
+
 ## [0.11.1] - 2026-07-15
 
 ### Added
@@ -140,7 +151,8 @@ Initial public release.
 - Native OpenCode assets under `.opencode/` and `opencode.json`, so the same lanes and skill work outside Claude Code.
 - SVG banner and shields badges for the README.
 
-[Unreleased]: https://github.com/Pythoughts-labs/claude-architect/compare/v0.11.1...HEAD
+[Unreleased]: https://github.com/Pythoughts-labs/claude-architect/compare/v0.12.0...HEAD
+[0.12.0]: https://github.com/Pythoughts-labs/claude-architect/compare/v0.11.1...v0.12.0
 [0.11.1]: https://github.com/Pythoughts-labs/claude-architect/compare/v0.11.0...v0.11.1
 [0.11.0]: https://github.com/Pythoughts-labs/claude-architect/compare/v0.10.0...v0.11.0
 [0.10.0]: https://github.com/Pythoughts-labs/claude-architect/compare/v0.9.3...v0.10.0

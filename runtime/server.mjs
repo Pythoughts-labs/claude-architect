@@ -21930,7 +21930,7 @@ var StdioServerTransport = class {
 var PROTOCOL_VERSION = "1.0.0";
 var DELEGATION_SPEC_VERSION = "1";
 var ATTEMPT_RESULT_VERSION = "1";
-var RUNTIME_VERSION = "0.11.1";
+var RUNTIME_VERSION = "0.12.0";
 
 // src/platform/posix-platform-services.ts
 import { spawn, execFile } from "node:child_process";
@@ -22605,7 +22605,7 @@ var SANDBOX_BACKENDS = [{
   kind: "producer-native",
   platforms: [
     { os: "darwin", arch: "arm64", environmentType: "native", state: "certified" },
-    { os: "linux", environmentType: "native", state: "unsupported" },
+    { os: "linux", environmentType: "native", state: "tested" },
     { os: "win32", environmentType: "native", state: "unsupported" }
   ]
 }];

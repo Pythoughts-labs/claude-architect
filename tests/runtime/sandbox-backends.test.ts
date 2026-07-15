@@ -32,8 +32,15 @@ describe("selectSandboxBackend", () => {
     });
   });
 
-  it("rejects the unsupported Linux backend", () => {
+  it("selects the tested native Codex sandbox on Linux", () => {
     expect(selectSandboxBackend(report({ os: "linux", arch: "x64" }))).toEqual({
+      backend: SANDBOX_BACKENDS[0],
+      state: "tested",
+    });
+  });
+
+  it("rejects the unsupported Windows backend", () => {
+    expect(selectSandboxBackend(report({ os: "win32", arch: "x64" }))).toEqual({
       backend: null,
       reason: "no-write-confinement-backend",
     });

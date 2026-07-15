@@ -11,14 +11,13 @@ export interface SandboxBackend {
   }>;
 }
 
-// States may only be promoted by a real green CI/integration run (Task 9);
-// Linux and Windows start unsupported.
+// States may only be promoted by a real green CI/integration run (Task 9).
 export const SANDBOX_BACKENDS: SandboxBackend[] = [{
   id: "codex-native-sandbox",
   kind: "producer-native",
   platforms: [
     { os: "darwin", arch: "arm64", environmentType: "native", state: "certified" },
-    { os: "linux", environmentType: "native", state: "unsupported" },
+    { os: "linux", environmentType: "native", state: "tested" },
     { os: "win32", environmentType: "native", state: "unsupported" },
   ],
 }];
