@@ -63,9 +63,32 @@ async function runServerWith(nodePath, entrypoint) {
       stdio: "inherit",
       windowsHide: true,
     });
-    child.once("error", reject);
+    const forwarded = new Set();
+    const forwardSignal = signal => {
+      forwarded.add(signal);
+      child.kill(signal);
+    };
+    const signalHandlers = new Map([
+      ["SIGHUP", () => forwardSignal("SIGHUP")],
+      ["SIGINT", () => forwardSignal("SIGINT")],
+      ["SIGTERM", () => forwardSignal("SIGTERM")],
+    ]);
+    for (const [signal, handler] of signalHandlers) process.on(signal, handler);
+    const cleanup = () => {
+      for (const [signal, handler] of signalHandlers) process.off(signal, handler);
+    };
+    child.once("error", error => {
+      cleanup();
+      reject(error);
+    });
     child.once("exit", (code, signal) => {
+      cleanup();
       if (signal !== null) {
+        if (forwarded.has(signal)) {
+          process.exitCode = 1;
+          resolve();
+          return;
+        }
         reject(new Error(`server exited from signal ${signal}`));
         return;
       }
