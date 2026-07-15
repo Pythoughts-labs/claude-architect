@@ -267,7 +267,8 @@ export class WindowsPlatformServices implements PlatformServices {
   async acquireCheckoutLock(checkout: string): Promise<CheckoutLock> {
     const { canonical, gitCommonDir: commonDir } = await this.canonicalizePath(checkout);
     const key = createHash("sha256").update(commonDir ?? canonical).digest("hex");
-    return acquireWxFileLock(key, `checkout is locked: ${checkout}`);
+    const ownerToken = await this.getProcessStartToken(nodeProcess.pid);
+    return acquireWxFileLock(key, `checkout is locked: ${checkout}`, ownerToken);
   }
 
   async createSecureTempDirectory(): Promise<string> {

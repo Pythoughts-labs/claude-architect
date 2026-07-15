@@ -28,6 +28,7 @@ function delay(ms: number): Promise<void> {
 export async function acquireWxFileLock(
   key: string,
   timeoutMessage?: string,
+  ownerToken: string | null = null,
 ): Promise<CheckoutLock> {
   const lockDirectory = path.join(resolveStateDir(), "locks");
   const lockPath = path.join(lockDirectory, `${key}.lock`);
@@ -36,7 +37,9 @@ export async function acquireWxFileLock(
   for (;;) {
     try {
       const handle = await fs.open(lockPath, "wx");
-      try { await handle.writeFile(String(nodeProcess.pid)); }
+      try {
+        await handle.writeFile(JSON.stringify({ pid: nodeProcess.pid, processToken: ownerToken }));
+      }
       finally { await handle.close(); }
       return { key, release: async () => { await fs.rm(lockPath, { force: true }); } };
     } catch (error) {
@@ -163,7 +166,8 @@ export class PosixPlatformServices implements PlatformServices {
   async acquireCheckoutLock(checkout: string): Promise<CheckoutLock> {
     const { canonical, gitCommonDir: commonDir } = await this.canonicalizePath(checkout);
     const key = createHash("sha256").update(commonDir ?? canonical).digest("hex");
-    return acquireWxFileLock(key, `checkout is locked: ${checkout}`);
+    const ownerToken = await this.getProcessStartToken(nodeProcess.pid);
+    return acquireWxFileLock(key, `checkout is locked: ${checkout}`, ownerToken);
   }
 
   async createSecureTempDirectory(): Promise<string> {

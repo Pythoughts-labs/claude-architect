@@ -22016,7 +22016,7 @@ function errorCode(error2) {
 function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
-async function acquireWxFileLock(key, timeoutMessage) {
+async function acquireWxFileLock(key, timeoutMessage, ownerToken = null) {
   const lockDirectory = path.join(resolveStateDir(), "locks");
   const lockPath = path.join(lockDirectory, `${key}.lock`);
   await fs.mkdir(lockDirectory, { recursive: true });
@@ -22025,7 +22025,7 @@ async function acquireWxFileLock(key, timeoutMessage) {
     try {
       const handle = await fs.open(lockPath, "wx");
       try {
-        await handle.writeFile(String(nodeProcess2.pid));
+        await handle.writeFile(JSON.stringify({ pid: nodeProcess2.pid, processToken: ownerToken }));
       } finally {
         await handle.close();
       }
@@ -22171,7 +22171,8 @@ var PosixPlatformServices = class {
   async acquireCheckoutLock(checkout) {
     const { canonical, gitCommonDir: commonDir } = await this.canonicalizePath(checkout);
     const key = createHash("sha256").update(commonDir ?? canonical).digest("hex");
-    return acquireWxFileLock(key, `checkout is locked: ${checkout}`);
+    const ownerToken = await this.getProcessStartToken(nodeProcess2.pid);
+    return acquireWxFileLock(key, `checkout is locked: ${checkout}`, ownerToken);
   }
   async createSecureTempDirectory() {
     return fs.mkdtemp(path.join(tmpdir2(), "claude-architect-"));
@@ -22456,7 +22457,8 @@ var WindowsPlatformServices = class {
   async acquireCheckoutLock(checkout) {
     const { canonical, gitCommonDir: commonDir } = await this.canonicalizePath(checkout);
     const key = createHash2("sha256").update(commonDir ?? canonical).digest("hex");
-    return acquireWxFileLock(key, `checkout is locked: ${checkout}`);
+    const ownerToken = await this.getProcessStartToken(nodeProcess3.pid);
+    return acquireWxFileLock(key, `checkout is locked: ${checkout}`, ownerToken);
   }
   async createSecureTempDirectory() {
     return fs2.mkdtemp(path2.join(tmpdir3(), "claude-architect-"));
@@ -27164,9 +27166,20 @@ async function replayInterruptedPrunes(runsRoot) {
     });
   }
 }
-async function recoverRun(record2, root, ps) {
-  if (record2.pid !== null) {
-    await ps.terminateProcessTreeByPid(record2.pid, record2.processToken);
+async function recoverRun(record2, root, ps, isProcessAlive, requestCooperativeTermination, delayMs, graceMs) {
+  let escalation;
+  if (record2.pid !== null && isProcessAlive(record2.pid)) {
+    const liveToken = record2.processToken === null ? null : await ps.getProcessStartToken(record2.pid);
+    if (record2.processToken === null || liveToken === record2.processToken) {
+      await requestCooperativeTermination(record2.pid);
+      await delayMs(graceMs);
+      if (isProcessAlive(record2.pid)) {
+        await ps.terminateProcessTreeByPid(record2.pid, record2.processToken);
+        escalation = "forced";
+      } else {
+        escalation = "cooperative";
+      }
+    }
   }
   const commonDir = await validateGitCommonDir(record2.canonicalCommonDir);
   const store = new ArtifactStore(record2.runId);
@@ -27193,7 +27206,8 @@ async function recoverRun(record2, root, ps) {
     unresolvedIssues: ["attempt-interrupted-before-terminal-result"],
     evidence: {
       recovery: "startup-stale-run",
-      originalStartedAt: record2.startedAt
+      originalStartedAt: record2.startedAt,
+      ...escalation === void 0 ? {} : { escalation }
     },
     logsRef,
     producerId: null,
@@ -27202,6 +27216,36 @@ async function recoverRun(record2, root, ps) {
     durationMs: Math.max(0, Date.now() - Date.parse(record2.startedAt)),
     sessionId: null
   });
+}
+function defaultRequestCooperativeTermination(pid) {
+  try {
+    nodeProcess4.kill(pid, "SIGTERM");
+  } catch {
+  }
+}
+function defaultDelayMs(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+function parseLockOwner(contents) {
+  const trimmed = contents.trim();
+  if (/^[0-9]+$/.test(trimmed)) {
+    const pid = Number(trimmed);
+    return Number.isSafeInteger(pid) && pid > 1 ? { pid, processToken: null } : null;
+  }
+  let value;
+  try {
+    value = JSON.parse(trimmed);
+  } catch {
+    return null;
+  }
+  if (typeof value !== "object" || value === null) return null;
+  const owner = value;
+  if (typeof owner.pid !== "number" || !Number.isSafeInteger(owner.pid) || owner.pid <= 1 || owner.processToken !== null && typeof owner.processToken !== "string") return null;
+  return { pid: owner.pid, processToken: owner.processToken };
+}
+async function lockOwnerIsLive(owner, isProcessAlive, getProcessStartToken) {
+  if (owner === null || !isProcessAlive(owner.pid)) return false;
+  return owner.processToken === null || await getProcessStartToken(owner.pid) === owner.processToken;
 }
 function defaultIsProcessAlive(pid) {
   if (!Number.isSafeInteger(pid) || pid <= 1) return false;
@@ -27214,7 +27258,7 @@ function defaultIsProcessAlive(pid) {
     throw error2;
   }
 }
-async function reclaimLocks(locksRoot, isProcessAlive) {
+async function reclaimLocks(locksRoot, isProcessAlive, getProcessStartToken) {
   let entries;
   try {
     const rootIdentity = await plainDirectoryIdentity(locksRoot);
@@ -27233,10 +27277,7 @@ async function reclaimLocks(locksRoot, isProcessAlive) {
     }
     const contents = await readBoundedRegularFile(lockPath);
     if (contents === null) continue;
-    const parsed = Number(contents.trim());
-    const ownerPid = Number.isSafeInteger(parsed) && parsed > 1 ? parsed : null;
-    const ownerIsAlive = ownerPid !== null && isProcessAlive(ownerPid);
-    if (ownerIsAlive) continue;
+    if (await lockOwnerIsLive(parseLockOwner(contents), isProcessAlive, getProcessStartToken)) continue;
     const identity = await lstat5(lockPath);
     if (!identity.isFile() || identity.isSymbolicLink()) {
       throw new RuntimeError("checkout lock identity changed during recovery");
@@ -27244,11 +27285,10 @@ async function reclaimLocks(locksRoot, isProcessAlive) {
     await rm4(lockPath, { force: false });
   }
 }
-async function lockIsOwnedByLiveProcess(locksRoot, lockKey, isProcessAlive) {
+async function lockIsOwnedByLiveProcess(locksRoot, lockKey, isProcessAlive, getProcessStartToken) {
   const contents = await readBoundedRegularFile(path10.join(locksRoot, `${lockKey}.lock`));
   if (contents === null) return false;
-  const ownerPid = Number(contents.trim());
-  return Number.isSafeInteger(ownerPid) && ownerPid > 1 && isProcessAlive(ownerPid);
+  return lockOwnerIsLive(parseLockOwner(contents), isProcessAlive, getProcessStartToken);
 }
 async function recoverStaleRuns(dependencies = {}) {
   const root = await stateRoot();
@@ -27258,6 +27298,9 @@ async function recoverStaleRuns(dependencies = {}) {
   if (runsIdentity !== null) await replayInterruptedPrunes(runsRoot);
   const ps = dependencies.platformServices ?? getPlatformServices();
   const isProcessAlive = dependencies.isProcessAlive ?? defaultIsProcessAlive;
+  const requestCooperativeTermination = dependencies.requestCooperativeTermination ?? defaultRequestCooperativeTermination;
+  const delayMs = dependencies.delayMs ?? defaultDelayMs;
+  const graceMs = dependencies.graceMs ?? 3e3;
   const locksRoot = path10.join(root, "locks");
   const stale = [];
   if (runsIdentity !== null) {
@@ -27273,18 +27316,32 @@ async function recoverStaleRuns(dependencies = {}) {
         validateTerminalResult(result, entry.name);
         continue;
       }
-      if (await lockIsOwnedByLiveProcess(locksRoot, record2.lockKey, isProcessAlive)) continue;
+      if (await lockIsOwnedByLiveProcess(
+        locksRoot,
+        record2.lockKey,
+        isProcessAlive,
+        (pid) => ps.getProcessStartToken(pid)
+      )) continue;
       stale.push(record2);
     }
   }
   const recovered = [];
   for (const record2 of stale) {
-    await recoverRun(record2, root, ps);
+    await recoverRun(
+      record2,
+      root,
+      ps,
+      isProcessAlive,
+      requestCooperativeTermination,
+      delayMs,
+      graceMs
+    );
     recovered.push(record2.runId);
   }
   await reclaimLocks(
     locksRoot,
-    isProcessAlive
+    isProcessAlive,
+    (pid) => ps.getProcessStartToken(pid)
   );
   return { recovered };
 }

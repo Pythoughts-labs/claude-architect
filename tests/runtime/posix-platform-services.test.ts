@@ -87,6 +87,11 @@ describe("PosixPlatformServices", () => {
 
   it("blocks a second checkout lock until the first is released", async () => {
     const lockA = await ps.acquireCheckoutLock(repoPath);
+    const lockPath = path.join(resolveStateDir(), "locks", `${lockA.key}.lock`);
+    await expect(fs.readFile(lockPath, "utf8").then(contents => JSON.parse(contents))).resolves.toEqual({
+      pid: process.pid,
+      processToken: await ps.getProcessStartToken(process.pid),
+    });
     let resolved = false;
     const pendingLockB = ps.acquireCheckoutLock(repoPath).then(lock => { resolved = true; return lock; });
     await delay(100);

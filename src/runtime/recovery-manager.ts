@@ -57,8 +57,16 @@ interface DirectoryIdentity {
 }
 
 export interface RecoveryDependencies {
-  platformServices?: Pick<PlatformServices, "os" | "terminateProcessTreeByPid">;
+  platformServices?: Pick<PlatformServices, "os" | "getProcessStartToken" | "terminateProcessTreeByPid">;
   isProcessAlive?: (pid: number) => boolean;
+  requestCooperativeTermination?: (pid: number) => void | Promise<void>;
+  delayMs?: (ms: number) => Promise<void>;
+  graceMs?: number;
+}
+
+interface LockOwner {
+  pid: number;
+  processToken: string | null;
 }
 
 function errorCode(error: unknown): string | undefined {
@@ -476,10 +484,27 @@ async function replayInterruptedPrunes(runsRoot: string): Promise<void> {
 async function recoverRun(
   record: RunStartRecord,
   root: string,
-  ps: Pick<PlatformServices, "os" | "terminateProcessTreeByPid">,
+  ps: Pick<PlatformServices, "os" | "getProcessStartToken" | "terminateProcessTreeByPid">,
+  isProcessAlive: (pid: number) => boolean,
+  requestCooperativeTermination: (pid: number) => void | Promise<void>,
+  delayMs: (ms: number) => Promise<void>,
+  graceMs: number,
 ): Promise<void> {
-  if (record.pid !== null) {
-    await ps.terminateProcessTreeByPid(record.pid, record.processToken);
+  let escalation: "cooperative" | "forced" | undefined;
+  if (record.pid !== null && isProcessAlive(record.pid)) {
+    const liveToken = record.processToken === null
+      ? null
+      : await ps.getProcessStartToken(record.pid);
+    if (record.processToken === null || liveToken === record.processToken) {
+      await requestCooperativeTermination(record.pid);
+      await delayMs(graceMs);
+      if (isProcessAlive(record.pid)) {
+        await ps.terminateProcessTreeByPid(record.pid, record.processToken);
+        escalation = "forced";
+      } else {
+        escalation = "cooperative";
+      }
+    }
   }
   const commonDir = await validateGitCommonDir(record.canonicalCommonDir);
   const store = new ArtifactStore(record.runId);
@@ -507,6 +532,7 @@ async function recoverRun(
     evidence: {
       recovery: "startup-stale-run",
       originalStartedAt: record.startedAt,
+      ...(escalation === undefined ? {} : { escalation }),
     },
     logsRef,
     producerId: null,
@@ -515,6 +541,41 @@ async function recoverRun(
     durationMs: Math.max(0, Date.now() - Date.parse(record.startedAt)),
     sessionId: null,
   });
+}
+
+function defaultRequestCooperativeTermination(pid: number): void {
+  try { nodeProcess.kill(pid, "SIGTERM"); }
+  catch { /* process already exited */ }
+}
+
+function defaultDelayMs(ms: number): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+function parseLockOwner(contents: string): LockOwner | null {
+  const trimmed = contents.trim();
+  if (/^[0-9]+$/.test(trimmed)) {
+    const pid = Number(trimmed);
+    return Number.isSafeInteger(pid) && pid > 1 ? { pid, processToken: null } : null;
+  }
+  let value: unknown;
+  try { value = JSON.parse(trimmed); }
+  catch { return null; }
+  if (typeof value !== "object" || value === null) return null;
+  const owner = value as { pid?: unknown; processToken?: unknown };
+  if (typeof owner.pid !== "number" || !Number.isSafeInteger(owner.pid) || owner.pid <= 1
+    || (owner.processToken !== null && typeof owner.processToken !== "string")) return null;
+  return { pid: owner.pid, processToken: owner.processToken };
+}
+
+async function lockOwnerIsLive(
+  owner: LockOwner | null,
+  isProcessAlive: (pid: number) => boolean,
+  getProcessStartToken: (pid: number) => Promise<string | null>,
+): Promise<boolean> {
+  if (owner === null || !isProcessAlive(owner.pid)) return false;
+  return owner.processToken === null
+    || await getProcessStartToken(owner.pid) === owner.processToken;
 }
 
 function defaultIsProcessAlive(pid: number): boolean {
@@ -532,6 +593,7 @@ function defaultIsProcessAlive(pid: number): boolean {
 async function reclaimLocks(
   locksRoot: string,
   isProcessAlive: (pid: number) => boolean,
+  getProcessStartToken: (pid: number) => Promise<string | null>,
 ): Promise<void> {
   let entries;
   try {
@@ -551,10 +613,7 @@ async function reclaimLocks(
     }
     const contents = await readBoundedRegularFile(lockPath);
     if (contents === null) continue;
-    const parsed = Number(contents.trim());
-    const ownerPid = Number.isSafeInteger(parsed) && parsed > 1 ? parsed : null;
-    const ownerIsAlive = ownerPid !== null && isProcessAlive(ownerPid);
-    if (ownerIsAlive) continue;
+    if (await lockOwnerIsLive(parseLockOwner(contents), isProcessAlive, getProcessStartToken)) continue;
     const identity = await lstat(lockPath);
     if (!identity.isFile() || identity.isSymbolicLink()) {
       throw new RuntimeError("checkout lock identity changed during recovery");
@@ -567,11 +626,11 @@ async function lockIsOwnedByLiveProcess(
   locksRoot: string,
   lockKey: string,
   isProcessAlive: (pid: number) => boolean,
+  getProcessStartToken: (pid: number) => Promise<string | null>,
 ): Promise<boolean> {
   const contents = await readBoundedRegularFile(path.join(locksRoot, `${lockKey}.lock`));
   if (contents === null) return false;
-  const ownerPid = Number(contents.trim());
-  return Number.isSafeInteger(ownerPid) && ownerPid > 1 && isProcessAlive(ownerPid);
+  return lockOwnerIsLive(parseLockOwner(contents), isProcessAlive, getProcessStartToken);
 }
 
 export async function recoverStaleRuns(
@@ -585,6 +644,10 @@ export async function recoverStaleRuns(
 
   const ps = dependencies.platformServices ?? getPlatformServices();
   const isProcessAlive = dependencies.isProcessAlive ?? defaultIsProcessAlive;
+  const requestCooperativeTermination = dependencies.requestCooperativeTermination
+    ?? defaultRequestCooperativeTermination;
+  const delayMs = dependencies.delayMs ?? defaultDelayMs;
+  const graceMs = dependencies.graceMs ?? 3000;
   const locksRoot = path.join(root, "locks");
   const stale: RunStartRecord[] = [];
   if (runsIdentity !== null) {
@@ -600,19 +663,33 @@ export async function recoverStaleRuns(
         validateTerminalResult(result, entry.name);
         continue;
       }
-      if (await lockIsOwnedByLiveProcess(locksRoot, record.lockKey, isProcessAlive)) continue;
+      if (await lockIsOwnedByLiveProcess(
+        locksRoot,
+        record.lockKey,
+        isProcessAlive,
+        pid => ps.getProcessStartToken(pid),
+      )) continue;
       stale.push(record);
     }
   }
 
   const recovered: string[] = [];
   for (const record of stale) {
-    await recoverRun(record, root, ps);
+    await recoverRun(
+      record,
+      root,
+      ps,
+      isProcessAlive,
+      requestCooperativeTermination,
+      delayMs,
+      graceMs,
+    );
     recovered.push(record.runId);
   }
   await reclaimLocks(
     locksRoot,
     isProcessAlive,
+    pid => ps.getProcessStartToken(pid),
   );
   return { recovered };
 }

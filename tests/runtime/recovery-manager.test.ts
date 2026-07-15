@@ -33,6 +33,7 @@ vi.mock("@modelcontextprotocol/sdk/server/stdio.js", () => ({
 const temporaryPaths: string[] = [];
 let previousPluginData: string | undefined;
 let previousDelegated: string | undefined;
+let previousPluginRoot: string | undefined;
 
 async function temporaryDirectory(prefix: string): Promise<string> {
   const directory = await mkdtemp(path.join(tmpdir(), prefix));
@@ -63,9 +64,30 @@ async function expectMissing(filename: string): Promise<void> {
   await expect(access(filename)).rejects.toMatchObject({ code: "ENOENT" });
 }
 
+async function createUnfinishedRun(
+  runId: string,
+  commonDir: string,
+  pid: number | null,
+  processToken: string | null = null,
+): Promise<ArtifactStore> {
+  const store = new ArtifactStore(runId);
+  await mkdir(store.runDirectory, { recursive: true });
+  const lockKey = createHash("sha256").update(commonDir).digest("hex");
+  await writeFile(path.join(store.runDirectory, "run-start.json"), `${JSON.stringify({
+    runId,
+    lockKey,
+    canonicalCommonDir: commonDir,
+    pid,
+    processToken,
+    startedAt: "2026-07-14T12:00:00.000Z",
+  })}\n`);
+  return store;
+}
+
 beforeEach(async () => {
   previousPluginData = process.env.CLAUDE_PLUGIN_DATA;
   previousDelegated = process.env.CLAUDE_ARCHITECT_DELEGATED;
+  previousPluginRoot = process.env.CLAUDE_PLUGIN_ROOT;
   process.env.CLAUDE_PLUGIN_DATA = await temporaryDirectory("ca-recovery-state-");
   delete process.env.CLAUDE_ARCHITECT_DELEGATED;
   serverEvents.length = 0;
@@ -76,6 +98,8 @@ afterEach(async () => {
   else process.env.CLAUDE_PLUGIN_DATA = previousPluginData;
   if (previousDelegated === undefined) delete process.env.CLAUDE_ARCHITECT_DELEGATED;
   else process.env.CLAUDE_ARCHITECT_DELEGATED = previousDelegated;
+  if (previousPluginRoot === undefined) delete process.env.CLAUDE_PLUGIN_ROOT;
+  else process.env.CLAUDE_PLUGIN_ROOT = previousPluginRoot;
   await Promise.all(temporaryPaths.splice(0).map(entry =>
     rm(entry, { recursive: true, force: true })));
 });
@@ -105,13 +129,14 @@ describe("recoverStaleRuns", () => {
     const result = await recoverStaleRuns({
       platformServices: {
         os: "darwin",
+        async getProcessStartToken() { return null; },
         async terminateProcessTreeByPid(pid) { terminated.push(pid); },
       },
       isProcessAlive: () => false,
     });
 
     expect(result).toEqual({ recovered: [runId] });
-    expect(terminated).toEqual([4242]);
+    expect(terminated).toEqual([]);
     await expectMissing(worktree.path);
     await expectMissing(lockPath);
     expect((await git(repo.directory, ["rev-parse", "--verify", "--quiet", anchorRef])).exitCode)
@@ -128,11 +153,12 @@ describe("recoverStaleRuns", () => {
     await expect(recoverStaleRuns({
       platformServices: {
         os: "darwin",
+        async getProcessStartToken() { return null; },
         async terminateProcessTreeByPid(pid) { terminated.push(pid); },
       },
       isProcessAlive: () => false,
     })).resolves.toEqual({ recovered: [] });
-    expect(terminated).toEqual([4242]);
+    expect(terminated).toEqual([]);
   });
 
   it("does not kill a stale run when its recorded process token differs", async () => {
@@ -156,6 +182,7 @@ describe("recoverStaleRuns", () => {
     const result = await recoverStaleRuns({
       platformServices: {
         os: "darwin",
+        async getProcessStartToken() { return liveToken; },
         async terminateProcessTreeByPid(pid, expectedToken) {
           calls.push({ pid, expectedToken });
           if (expectedToken === undefined || expectedToken === liveToken) {
@@ -163,11 +190,11 @@ describe("recoverStaleRuns", () => {
           }
         },
       },
-      isProcessAlive: () => false,
+      isProcessAlive: () => true,
     });
 
     expect(result).toEqual({ recovered: [runId] });
-    expect(calls).toEqual([{ pid: 4242, expectedToken: "darwin:recorded-start" }]);
+    expect(calls).toEqual([]);
     await expectMissing(worktree.path);
     await expect(store.readResult(runId)).resolves.toMatchObject({
       runId,
@@ -185,6 +212,7 @@ describe("recoverStaleRuns", () => {
     await expect(recoverStaleRuns({
       platformServices: {
         os: "darwin",
+        async getProcessStartToken() { return null; },
         async terminateProcessTreeByPid() {},
       },
       isProcessAlive: () => true,
@@ -217,6 +245,7 @@ describe("recoverStaleRuns", () => {
     await expect(recoverStaleRuns({
       platformServices: {
         os: "darwin",
+        async getProcessStartToken() { return null; },
         async terminateProcessTreeByPid(pid) { terminated.push(pid); },
       },
       isProcessAlive: pid => pid === 7777,
@@ -251,6 +280,7 @@ describe("recoverStaleRuns", () => {
     await expect(recoverStaleRuns({
       platformServices: {
         os: "darwin",
+        async getProcessStartToken() { return null; },
         async terminateProcessTreeByPid() {},
       },
     })).rejects.toThrow(/attempt result.*invalid|terminal attempt result is malformed/);
@@ -274,6 +304,7 @@ describe("recoverStaleRuns", () => {
     await expect(recoverStaleRuns({
       platformServices: {
         os: "darwin",
+        async getProcessStartToken() { return null; },
         async terminateProcessTreeByPid() {},
       },
     })).rejects.toThrow("run-start recovery record is malformed");
@@ -297,10 +328,118 @@ describe("recoverStaleRuns", () => {
     await expect(recoverStaleRuns({
       platformServices: {
         os: "darwin",
+        async getProcessStartToken() { return null; },
         async terminateProcessTreeByPid(pid) { terminated.push(pid); },
       },
     })).rejects.toMatchObject({ code: "ENOENT" });
-    expect(terminated).toEqual([5252]);
+    expect(terminated).toEqual([]);
+  });
+
+  it("escalates a live matching orphan cooperatively and then forcibly", async () => {
+    const repo = await initRepo();
+    const runId = "run-live-orphan-forced";
+    const store = await createUnfinishedRun(runId, repo.commonDir, 4242, "darwin:start");
+    const events: string[] = [];
+
+    await expect(recoverStaleRuns({
+      platformServices: {
+        os: "darwin",
+        async getProcessStartToken() { return "darwin:start"; },
+        async terminateProcessTreeByPid() { events.push("forced"); },
+      },
+      isProcessAlive: () => true,
+      requestCooperativeTermination() { events.push("cooperative"); },
+      async delayMs(ms) { events.push(`delay:${ms}`); },
+    })).resolves.toEqual({ recovered: [runId] });
+
+    expect(events).toEqual(["cooperative", "delay:3000", "forced"]);
+    await expect(store.readResult(runId)).resolves.toMatchObject({
+      evidence: { recovery: "startup-stale-run", escalation: "forced" },
+    });
+  });
+
+  it("records cooperative recovery when an orphan exits during the grace period", async () => {
+    const repo = await initRepo();
+    const runId = "run-live-orphan-cooperative";
+    const store = await createUnfinishedRun(runId, repo.commonDir, 4343, "darwin:start");
+    const events: string[] = [];
+    let alive = true;
+
+    await expect(recoverStaleRuns({
+      platformServices: {
+        os: "darwin",
+        async getProcessStartToken() { return "darwin:start"; },
+        async terminateProcessTreeByPid() { events.push("forced"); },
+      },
+      isProcessAlive: () => alive,
+      requestCooperativeTermination() { events.push("cooperative"); },
+      async delayMs() { events.push("delay"); alive = false; },
+    })).resolves.toEqual({ recovered: [runId] });
+
+    expect(events).toEqual(["cooperative", "delay"]);
+    await expect(store.readResult(runId)).resolves.toMatchObject({
+      evidence: { recovery: "startup-stale-run", escalation: "cooperative" },
+    });
+  });
+
+  it("reclaims token-mismatched live locks and preserves matching live locks", async () => {
+    const locksRoot = path.join(process.env.CLAUDE_PLUGIN_DATA!, "locks");
+    const mismatchedPath = path.join(locksRoot, `${"b".repeat(64)}.lock`);
+    const matchingPath = path.join(locksRoot, `${"c".repeat(64)}.lock`);
+    await mkdir(locksRoot, { recursive: true });
+    await writeFile(mismatchedPath, JSON.stringify({ pid: 7001, processToken: "old" }));
+    await writeFile(matchingPath, JSON.stringify({ pid: 7002, processToken: "live" }));
+
+    await recoverStaleRuns({
+      platformServices: {
+        os: "darwin",
+        async getProcessStartToken(pid) { return pid === 7001 ? "new" : "live"; },
+        async terminateProcessTreeByPid() {},
+      },
+      isProcessAlive: () => true,
+    });
+
+    await expectMissing(mismatchedPath);
+    await expect(readFile(matchingPath, "utf8")).resolves.toContain("\"processToken\":\"live\"");
+  });
+
+  it("accepts legacy bare-pid locks and reclaims only dead owners", async () => {
+    const locksRoot = path.join(process.env.CLAUDE_PLUGIN_DATA!, "locks");
+    const deadPath = path.join(locksRoot, `${"d".repeat(64)}.lock`);
+    const livePath = path.join(locksRoot, `${"e".repeat(64)}.lock`);
+    await mkdir(locksRoot, { recursive: true });
+    await writeFile(deadPath, "8001");
+    await writeFile(livePath, "8002");
+
+    await recoverStaleRuns({
+      platformServices: {
+        os: "darwin",
+        async getProcessStartToken() { return "irrelevant"; },
+        async terminateProcessTreeByPid() {},
+      },
+      isProcessAlive: pid => pid === 8002,
+    });
+
+    await expectMissing(deadPath);
+    await expect(readFile(livePath, "utf8")).resolves.toBe("8002");
+  });
+
+  it("recovers state left under a stale plugin root", async () => {
+    const repo = await initRepo();
+    const runId = "run-stale-plugin-root";
+    process.env.CLAUDE_PLUGIN_ROOT = path.join(await temporaryDirectory("old-plugin-root-"), "removed");
+    const store = await createUnfinishedRun(runId, repo.commonDir, null);
+
+    await expect(recoverStaleRuns({
+      platformServices: {
+        os: "darwin",
+        async getProcessStartToken() { return null; },
+        async terminateProcessTreeByPid() {},
+      },
+      isProcessAlive: () => false,
+    })).resolves.toEqual({ recovered: [runId] });
+
+    await expect(store.readResult(runId)).resolves.toMatchObject({ status: "cancelled" });
   });
 
   it("finishes an interrupted prune after the archive was quarantined", async () => {
@@ -333,6 +472,7 @@ describe("recoverStaleRuns", () => {
     await recoverStaleRuns({
       platformServices: {
         os: "darwin",
+        async getProcessStartToken() { return null; },
         async terminateProcessTreeByPid() {},
       },
       isProcessAlive: () => false,
@@ -375,6 +515,7 @@ describe("recoverStaleRuns", () => {
     await recoverStaleRuns({
       platformServices: {
         os: "darwin",
+        async getProcessStartToken() { return null; },
         async terminateProcessTreeByPid() {},
       },
       isProcessAlive: () => false,
