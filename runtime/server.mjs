@@ -25316,6 +25316,12 @@ function buildEnvironment(args) {
 // src/runtime/attempt-runtime.ts
 var MAX_PRODUCER_OUTPUT_BYTES = 1e6;
 var NO_FOLLOW2 = constants3.O_NOFOLLOW ?? 0;
+function reportPhase(deps, phase) {
+  try {
+    deps.onPhase?.(phase);
+  } catch {
+  }
+}
 function hasEnvironmentMarker(environment) {
   return environment.CLAUDE_ARCHITECT_DELEGATED !== void 0;
 }
@@ -25602,6 +25608,7 @@ async function runAttempt(checkoutPath, spec, deps) {
       reason: preconditions.reason
     });
   }
+  reportPhase(deps, "probing producers");
   const reports = await probeAll({
     ps,
     os: ps.os,
@@ -25697,6 +25704,7 @@ async function runAttempt(checkoutPath, spec, deps) {
       ...tempHome === null ? {} : { tempHome }
     });
     const recordingServices = withRunStartPidRecording(ps, runStartTarget, runStart);
+    reportPhase(deps, "producer running");
     const exit = deps.abortSignal?.aborted === true ? preCancelledExit() : await supervise(recordingServices, {
       executable: invocation.executable,
       args: invocation.args,
@@ -25722,6 +25730,7 @@ async function runAttempt(checkoutPath, spec, deps) {
       if (exit.exitCode !== 0) signals["producer-failure"] = true;
     }
     if (!hasFailureSignal(signals)) {
+      reportPhase(deps, "freezing candidate");
       const frozen = await freezeCandidate({
         repoRoot: canonical.canonical,
         worktreePath: worktree.path,
@@ -25739,6 +25748,7 @@ async function runAttempt(checkoutPath, spec, deps) {
         candidate = frozen.artifact;
         evidence = { ...frozen.evidence };
         try {
+          reportPhase(deps, "verifying candidate");
           const verification = await deps.verifier.verify({
             repoRoot: canonical.canonical,
             worktreePath: worktree.path,
@@ -25763,6 +25773,7 @@ async function runAttempt(checkoutPath, spec, deps) {
       signals["verification-failure"] = true;
       unresolvedIssues.push("missing-candidate");
     }
+    reportPhase(deps, "archiving result");
     return await archiveTerminal({
       store,
       spec,
@@ -26212,6 +26223,21 @@ async function withRepoLock(key, fn) {
     if (mutex.pending === 0 && mutexes.get(key) === mutex) mutexes.delete(key);
   }
 }
+var IGNORED_PATHS_LIMIT = 50;
+function boundIgnoredPathEvidence(value) {
+  const evidence = value.evidence;
+  if (typeof evidence !== "object" || evidence === null) return value;
+  const paths = evidence.ignoredPaths;
+  if (!Array.isArray(paths) || paths.length <= IGNORED_PATHS_LIMIT) return value;
+  return {
+    ...value,
+    evidence: {
+      ...evidence,
+      ignoredPaths: paths.slice(0, IGNORED_PATHS_LIMIT),
+      ignoredPathsOmitted: paths.length - IGNORED_PATHS_LIMIT
+    }
+  };
+}
 
 // src/mcp/tools.ts
 function services2(deps) {
@@ -26315,14 +26341,15 @@ async function handleDelegate(checkoutPath, input, deps = {}) {
       const attemptDependencies = {
         ...configured,
         ps,
-        verifier: configured.verifier ?? new AcceptanceVerifier()
+        verifier: configured.verifier ?? new AcceptanceVerifier(),
+        ...deps.onProgress === void 0 ? {} : { onPhase: deps.onProgress }
       };
       const result = await (deps.runAttempt ?? runAttempt)(
         canonical.canonical,
         validation.spec,
         attemptDependencies
       );
-      return { ok: true, result };
+      return { ok: true, result: boundIgnoredPathEvidence(result) };
     });
   } catch (error2) {
     if (error2 instanceof NestedDelegationError) {
@@ -26364,7 +26391,7 @@ async function handleReviewCandidate(runId, deps = {}) {
       if (patch.exitCode !== 0 || patch.truncated?.stdout === true) {
         throw runtimeError("failed to regenerate candidate patch", "candidate-review-failed");
       }
-      return {
+      return boundIgnoredPathEvidence({
         patch: patch.stdout,
         changedPaths: candidate.changedPaths.map((change) => ({ ...change })),
         evidence: structuredClone(run.result.evidence),
@@ -26372,7 +26399,7 @@ async function handleReviewCandidate(runId, deps = {}) {
           ...outcome,
           args: [...outcome.args]
         }))
-      };
+      });
     });
   } catch (error2) {
     return errorResult(error2);
@@ -26980,14 +27007,40 @@ async function start(dependencies = {}) {
       },
       outputSchema: delegateOutput
     },
-    async ({ checkoutPath, spec, protocolVersion }) => toolOutput(await handleDelegate(
-      checkoutPath,
-      spec,
-      {
-        ...dependencies,
-        skillProtocolVersion: protocolVersion ?? dependencies.skillProtocolVersion ?? PROTOCOL_VERSION
+    async ({ checkoutPath, spec, protocolVersion }, extra) => {
+      const progressToken = extra._meta?.progressToken;
+      const startedAt = Date.now();
+      let step = 0;
+      let lastPhase = "starting attempt";
+      const emit2 = (message) => {
+        if (progressToken === void 0) return;
+        step += 1;
+        const elapsed = Math.round((Date.now() - startedAt) / 1e3);
+        void extra.sendNotification({
+          method: "notifications/progress",
+          params: { progressToken, progress: step, message: `${message} (${elapsed}s)` }
+        }).catch(() => {
+        });
+      };
+      const onProgress = progressToken === void 0 ? void 0 : (message) => {
+        lastPhase = message;
+        emit2(message);
+      };
+      const heartbeat = onProgress === void 0 ? void 0 : setInterval(() => emit2(lastPhase), 15e3);
+      try {
+        return toolOutput(await handleDelegate(
+          checkoutPath,
+          spec,
+          {
+            ...dependencies,
+            skillProtocolVersion: protocolVersion ?? dependencies.skillProtocolVersion ?? PROTOCOL_VERSION,
+            ...onProgress === void 0 ? {} : { onProgress }
+          }
+        ));
+      } finally {
+        if (heartbeat !== void 0) clearInterval(heartbeat);
       }
-    ))
+    }
   );
   server.registerTool(
     "reviewCandidate",

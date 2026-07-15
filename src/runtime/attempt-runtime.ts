@@ -91,6 +91,8 @@ export interface AttemptRuntimeDependencies {
   abortSignal?: AbortSignal;
   repositoryInstructions?: RepositoryInstructionInput[];
   packagedVerifier?: PackagedVerifierInput;
+  /** Host progress reporting only; never awaited and never affects the attempt. */
+  onPhase?: (phase: string) => void;
 }
 
 interface RunStartRecord {
@@ -130,6 +132,10 @@ interface TerminalContext {
   producerLog: string;
   repositoryInstructions: RepositoryInstructionInput[];
   packagedVerifier: PackagedVerifierInput;
+}
+
+function reportPhase(deps: AttemptRuntimeDependencies, phase: string): void {
+  try { deps.onPhase?.(phase); } catch { /* progress reporting must never affect the attempt */ }
 }
 
 function hasEnvironmentMarker(environment: Record<string, string | undefined>): boolean {
@@ -454,6 +460,7 @@ export async function runAttempt(
     });
   }
 
+  reportPhase(deps, "probing producers");
   const reports = await probeAll({
     ps,
     os: ps.os,
@@ -553,6 +560,7 @@ export async function runAttempt(
       ...(tempHome === null ? {} : { tempHome }),
     });
     const recordingServices = withRunStartPidRecording(ps, runStartTarget, runStart);
+    reportPhase(deps, "producer running");
     const exit = deps.abortSignal?.aborted === true
       ? preCancelledExit()
       : await supervise(recordingServices, {
@@ -583,6 +591,7 @@ export async function runAttempt(
     }
 
     if (!hasFailureSignal(signals)) {
+      reportPhase(deps, "freezing candidate");
       const frozen = await freezeCandidate({
         repoRoot: canonical.canonical,
         worktreePath: worktree.path,
@@ -600,6 +609,7 @@ export async function runAttempt(
         candidate = frozen.artifact;
         evidence = { ...frozen.evidence };
         try {
+          reportPhase(deps, "verifying candidate");
           const verification = await deps.verifier.verify({
             repoRoot: canonical.canonical,
             worktreePath: worktree.path,
@@ -626,6 +636,7 @@ export async function runAttempt(
       unresolvedIssues.push("missing-candidate");
     }
 
+    reportPhase(deps, "archiving result");
     return await archiveTerminal({
       store,
       spec,

@@ -102,14 +102,41 @@ export async function start(dependencies: ServerDependencies = {}): Promise<void
       },
       outputSchema: delegateOutput,
     },
-    async ({ checkoutPath, spec, protocolVersion }) => toolOutput(await handleDelegate(
-      checkoutPath,
-      spec,
-      {
-        ...dependencies,
-        skillProtocolVersion: protocolVersion ?? dependencies.skillProtocolVersion ?? PROTOCOL_VERSION,
-      },
-    )),
+    async ({ checkoutPath, spec, protocolVersion }, extra) => {
+      const progressToken = extra._meta?.progressToken;
+      const startedAt = Date.now();
+      let step = 0;
+      let lastPhase = "starting attempt";
+      const emit = (message: string) => {
+        if (progressToken === undefined) return;
+        step += 1;
+        const elapsed = Math.round((Date.now() - startedAt) / 1000);
+        void extra.sendNotification({
+          method: "notifications/progress",
+          params: { progressToken, progress: step, message: `${message} (${elapsed}s)` },
+        }).catch(() => { /* progress is best-effort */ });
+      };
+      const onProgress = progressToken === undefined ? undefined : (message: string) => {
+        lastPhase = message;
+        emit(message);
+      };
+      const heartbeat = onProgress === undefined
+        ? undefined
+        : setInterval(() => emit(lastPhase), 15_000);
+      try {
+        return toolOutput(await handleDelegate(
+          checkoutPath,
+          spec,
+          {
+            ...dependencies,
+            skillProtocolVersion: protocolVersion ?? dependencies.skillProtocolVersion ?? PROTOCOL_VERSION,
+            ...(onProgress === undefined ? {} : { onProgress }),
+          },
+        ));
+      } finally {
+        if (heartbeat !== undefined) clearInterval(heartbeat);
+      }
+    },
   );
   server.registerTool(
     "reviewCandidate",

@@ -6,6 +6,16 @@ All notable changes to Claude Architect are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.9.3] - 2026-07-15
+
+### Added
+
+- `delegate` now streams MCP progress notifications while an attempt runs — probing, producer running, freezing, verifying, archiving — with elapsed seconds and a 15-second heartbeat, so the Host spinner shows live phase information instead of a silent multi-minute call.
+
+### Fixed
+
+- Delegate and review tool results bound `evidence.ignoredPaths` to 50 entries plus an `ignoredPathsOmitted` count. A repository with installed dependencies previously returned ~230 KB of ignored-path names in every result, overflowing the Host's tool-output limit; archived artifacts still record the complete list.
+
 ## [0.9.2] - 2026-07-15
 
 ### Added
@@ -95,7 +105,8 @@ Initial public release.
 - Native OpenCode assets under `.opencode/` and `opencode.json`, so the same lanes and skill work outside Claude Code.
 - SVG banner and shields badges for the README.
 
-[Unreleased]: https://github.com/Pythoughts-labs/claude-architect/compare/v0.9.2...HEAD
+[Unreleased]: https://github.com/Pythoughts-labs/claude-architect/compare/v0.9.3...HEAD
+[0.9.3]: https://github.com/Pythoughts-labs/claude-architect/compare/v0.9.2...v0.9.3
 [0.9.2]: https://github.com/Pythoughts-labs/claude-architect/compare/v0.9.1...v0.9.2
 [0.9.1]: https://github.com/Pythoughts-labs/claude-architect/compare/v0.9.0...v0.9.1
 [0.9.0]: https://github.com/Pythoughts-labs/claude-architect/compare/v0.8.0...v0.9.0

@@ -24,7 +24,7 @@ import type { RunManifest } from "../runtime/run-manifest.js";
 import { redact } from "../runtime/redaction.js";
 import { NestedDelegationError, RuntimeError } from "../util/errors.js";
 import { AcceptanceVerifier } from "../verify/acceptance-verifier.js";
-import { withRepoLock } from "./serialize.js";
+import { boundIgnoredPathEvidence, withRepoLock } from "./serialize.js";
 
 export type RunDecision = RunDecisionRecord;
 
@@ -44,6 +44,8 @@ export interface ToolDependencies {
   attemptDependencies?: AttemptRuntimeDependencies;
   skillProtocolVersion?: string;
   now?: () => Date;
+  /** Host progress reporting for long-running delegate calls. */
+  onProgress?: (message: string) => void;
 }
 
 export interface ToolErrorResult {
@@ -198,13 +200,14 @@ export async function handleDelegate(
         ...configured,
         ps,
         verifier: configured.verifier ?? new AcceptanceVerifier(),
+        ...(deps.onProgress === undefined ? {} : { onPhase: deps.onProgress }),
       };
       const result = await (deps.runAttempt ?? executeAttempt)(
         canonical.canonical,
         validation.spec,
         attemptDependencies,
       );
-      return { ok: true, result };
+      return { ok: true, result: boundIgnoredPathEvidence(result) };
     });
   } catch (error) {
     if (error instanceof NestedDelegationError) {
@@ -261,7 +264,7 @@ export async function handleReviewCandidate(
       if (patch.exitCode !== 0 || patch.truncated?.stdout === true) {
         throw runtimeError("failed to regenerate candidate patch", "candidate-review-failed");
       }
-      return {
+      return boundIgnoredPathEvidence({
         patch: patch.stdout,
         changedPaths: candidate.changedPaths.map(change => ({ ...change })),
         evidence: structuredClone(run.result.evidence),
@@ -269,7 +272,7 @@ export async function handleReviewCandidate(
           ...outcome,
           args: [...outcome.args],
         })),
-      };
+      });
     });
   } catch (error) {
     return errorResult(error);

@@ -200,6 +200,37 @@ describe("MCP tool handlers", () => {
     expect(attempted).toBe(false);
   });
 
+  it("bounds repository-sized ignored-path evidence on the returned result", async () => {
+    const deps = dependencies();
+    const bigResult = {
+      ...result,
+      evidence: { ...result.evidence, ignoredPaths: Array.from({ length: 500 }, (_, i) => `node_modules/pkg-${i}`) },
+    };
+    deps.runAttempt = async () => bigResult;
+
+    const output = await handleDelegate("/repo", validSpec, deps);
+
+    expect(output.ok).toBe(true);
+    const evidence = (output as { result: { evidence: Record<string, unknown> } }).result.evidence;
+    expect((evidence.ignoredPaths as string[]).length).toBe(50);
+    expect(evidence.ignoredPathsOmitted).toBe(450);
+    expect(bigResult.evidence.ignoredPaths.length).toBe(500); // archived copy untouched
+  });
+
+  it("forwards host progress reporting into the attempt dependencies", async () => {
+    const phases: string[] = [];
+    const deps = dependencies();
+    deps.onProgress = message => phases.push(message);
+    deps.runAttempt = async (_checkout, _spec, attemptDeps) => {
+      attemptDeps.onPhase?.("probing producers");
+      return result;
+    };
+
+    await handleDelegate("/repo", validSpec, deps);
+
+    expect(phases).toEqual(["probing producers"]);
+  });
+
   it("returns an actionable protocol mismatch without touching a producer", async () => {
     let attempted = false;
     const deps = dependencies();
