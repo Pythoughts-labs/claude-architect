@@ -51,8 +51,16 @@ export async function doctor(deps: DoctorDependencies = {}): Promise<DoctorResul
   const environmentType = deps.environmentType ?? detectEnvironmentType();
   const issues: string[] = [];
 
-  const node = { version: nodeVersion, ok: nodeIsSupported(nodeVersion) };
-  if (!node.ok) issues.push("unsupported-node-version");
+  const supportedNodeVersion = nodeIsSupported(nodeVersion);
+  let initialNodeAvailable = false;
+  try {
+    await ps.resolveExecutable({ name: "node" });
+    initialNodeAvailable = true;
+  } catch {
+    issues.push("initial-node-unavailable");
+  }
+  const node = { version: nodeVersion, ok: supportedNodeVersion && initialNodeAvailable };
+  if (!supportedNodeVersion) issues.push("unsupported-node-version");
   if (ps.os === "win32") issues.push("unsupported-platform");
   if (!env.CLAUDE_PLUGIN_DATA) issues.push("missing-claude-plugin-data");
   if (env.CLAUDE_ARCHITECT_DELEGATED !== undefined) {

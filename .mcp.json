@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "runtime": {
+      "command": "node",
+      "args": ["${CLAUDE_PLUGIN_ROOT}/runtime/bootstrap.mjs"]
+    }
+  }
+}

@@ -12,8 +12,8 @@
       "name": "claude-architect",
       "displayName": "Claude Architect",
       "source": "./",
-      "version": "0.7.0",
-      "description": "CLI coding-agent orchestration for Claude through Codex, OpenCode, Pi, and Pythinker Code, with architect-led review and native OpenCode assets.",
+      "version": "0.8.0",
+      "description": "Verified P0-A MCP delegation with macOS arm64 certified; Linux and native Windows pending P0-B. Codex edit eligibility requires its proven native sandbox.",
       "author": {
         "name": "elkaix",
         "url": "https://github.com/elkaix"
@@ -32,7 +32,10 @@
         "codex",
         "pi",
         "pythinker",
-        "advisor"
+        "advisor",
+        "macos-arm64-certified",
+        "linux-pending-p0-b",
+        "windows-pending-p0-b"
       ]
     }
   ]

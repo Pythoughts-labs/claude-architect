@@ -14,13 +14,13 @@
 <p align="center">
   <img alt="Claude Code" src="https://img.shields.io/badge/Claude_Code-plugin-d97757?style=flat-square&labelColor=0b0e14">
   <img alt="OpenCode" src="https://img.shields.io/badge/OpenCode-native-58a6ff?style=flat-square&labelColor=0b0e14">
-  <img alt="version" src="https://img.shields.io/badge/version-0.7.0-9aa4b2?style=flat-square&labelColor=0b0e14">
+  <img alt="version" src="https://img.shields.io/badge/version-0.8.0-9aa4b2?style=flat-square&labelColor=0b0e14">
   <img alt="license" src="https://img.shields.io/badge/license-MIT-3fb950?style=flat-square&labelColor=0b0e14">
 </p>
 
 # Claude Architect
 
-CLI coding-agent orchestration for Claude through Codex, OpenCode, Pi, and Pythinker Code. Install the plugin, run `/delegate`, and let Claude handle the handoff: it writes the implementation spec, sends the work to the selected CLI, then reviews the result before accepting it. Your strongest model stays focused on decisions instead of spending tokens on mechanical edits.
+Verified coding-agent delegation for Claude through a trusted MCP runtime. Install the plugin, run `/claude-architect:delegate`, and let Claude author the spec, supervise an untrusted Producer, review the independently verified Candidate Artifact, and integrate only the accepted bytes. Your strongest model stays focused on decisions instead of spending tokens on mechanical edits.
 
 ## Quick start
 
@@ -38,7 +38,7 @@ Restart Claude Code so it loads the plugin.
 Open Claude Code in your project and run:
 
 ```text
-/delegate Use Codex to add rate limiting to our public API, run the tests, and review the diff before accepting it.
+/claude-architect:delegate Use Codex to add rate limiting to our public API, run the tests, and review the diff before accepting it.
 ```
 
 Name Codex, OpenCode, Pi, or Pythinker in the request to choose a lane immediately. If you leave the lane out, Claude Architect asks which one to use.
@@ -77,13 +77,26 @@ claude plugin install claude-architect@claude-architect
 claude plugin list --json
 ```
 
-Restart Claude Code, open a project, and run `/delegate`. Update commands, OpenCode installation, and lane requirements are documented below.
+Restart Claude Code, open a project, and run `/claude-architect:delegate`. Update commands, OpenCode installation, and lane requirements are documented below.
 
 ### Runtime bootstrap and recovery
 
 The Claude Code MCP runtime requires Node.js 22 or newer. The host must be able to resolve an initial `node` executable on `PATH` before the plugin bootstrap can run; if that executable is older, the bootstrap searches `PATH` for a supported Node.js and re-executes the server with it. Install Node.js 22+ and reload the plugin when no supported runtime is available.
 
 Claude Code owns MCP startup timeout and restart behavior. If the server does not complete the MCP `initialize` handshake within the host timeout, Claude Code surfaces that startup failure. A crashed delegation attempt is not resumed automatically in P0; recovery reclaims stale locks and worktrees on the next server start, and a new delegation must be submitted.
+
+Installed marketplace copies must update and reload Claude Code before the P0-A runtime and Codex single-agent controls take effect. The Codex adapter enforces `--disable multi_agent` together with `features.multi_agent_v2={enabled=false,max_concurrent_threads_per_session=1}`; an already loaded marketplace copy continues using its previous adapter until update and reload.
+
+### P0-A support matrix
+
+| Host | P0-A state | Implementation eligibility |
+|---|---|---|
+| macOS arm64 | **Certified P0-A** | Codex edit Lane only when its live capability report names `codex-native-sandbox`; otherwise diagnostics-only. |
+| macOS x64 | **Pending P0-B** | Diagnostics-only; no certified write-confinement backend yet. |
+| Linux x64/arm64, including WSL reported as Linux | **Pending P0-B** | Diagnostics-only; certification and a proven write-confinement backend remain pending. |
+| Native Windows x64/arm64 | **Pending P0-B** | The runtime loads for structured diagnostics, but Producer execution and native confinement remain pending. |
+
+Verification commands are recorded honestly as `confinement: "none"` and `networkPolicy: "unenforced"` in P0-A. Those checks are Host-authorized evidence; they are not described as sandboxed. Platform/Producer combinations without proven write confinement remain ineligible for the edit Lane.
 
 ## Why it saves money
 
@@ -110,7 +123,7 @@ Every delegation carries the same five-part spec: the objective, the exact files
 | Provider pool | `opencode-implementer` | Any authenticated OpenCode provider (Zen/Go, MiniMax coding plan, OpenAI) | The right model sits behind an OpenCode credential the other lanes cannot reach |
 | Local, $0 | `pi-implementer` | Open-weight model on local hardware via Pi | Routine work you want to keep local at zero marginal token cost |
 | Autonomous | `pythinker-implementer` | Your own Pythinker agent, headless `--yolo` | A trusted spec should run to completion with no human in the loop |
-| Judgment | `claude-advisor` | Claude's strongest tier, read only | Architecture, migrations, API shape, a broad refactor, or a problem that has resisted two attempts |
+| Judgment | `claude-architect:advisor` | Claude's strongest tier, read only | Architecture, migrations, API shape, a broad refactor, or a problem that has resisted two attempts |
 
 There is no implicit lane default. If `/delegate` does not name Codex, OpenCode, Pi, Pythinker, or an implementer, the architect asks which CLI to use before preparing or launching the delegation. Reach for OpenCode when the model you want only lives in its provider pool, Pi when local execution and zero token cost matter, and Pythinker when full unattended execution is the point. Each lane is a harness around a producer. Codex pins its own model; Pi, OpenCode, and Pythinker accept optional model and thinking or variant overrides, and otherwise defer to the selected CLI's configured defaults. Every CLI lane runs a preflight and returns a structured `unavailable` report rather than quietly implementing the work itself. A lane that promises Codex and silently becomes a Claude lane is worse than a loud failure, because you chose that lane for a reason.
 
@@ -133,6 +146,8 @@ Update later with:
 claude plugin marketplace update claude-architect
 claude plugin update claude-architect@claude-architect
 ```
+
+Restart or reload Claude Code after updating so the new skill, MCP runtime, and Producer controls replace the installed cached copy.
 
 The plugin loads the agent definitions in `agents/` and the `delegate` skill in `skills/`.
 
@@ -163,32 +178,34 @@ Quit and restart OpenCode after installing or updating because it loads skills a
 Ask the architect to delegate:
 
 ```text
-/delegate Add rate limiting to our public API and review the diff before
+/claude-architect:delegate Add rate limiting to our public API and review the diff before
 accepting it.
 ```
 
 Because that request does not name a lane, the architect asks you to choose Codex, OpenCode, Pi, or Pythinker before it continues. The question identifies each lane's producer and reasoning control: Codex runs GPT-5.6 Sol at `low` by default (`medium`, `high`, `xhigh`, and `max` are overrides), OpenCode exposes an optional model-specific variant, Pi exposes optional `--model` and `--thinking`, and Pythinker exposes optional `--model` and `--thinking-effort`. Without an override, Pi, OpenCode, and Pythinker use their CLI-configured defaults. Use a custom answer to name an override, or name a lane and reasoning level in the request to skip the question.
 
+The `0.8.0` MCP path is certified for Codex on macOS arm64 when the confinement gate passes. OpenCode, Pi, and Pythinker continue through the documented legacy implementer fallback while their runtime adapters remain pending; Claude still reviews those diffs independently.
+
 The spec it produces always names the objective, the exact files, the interfaces, the constraints, and the verification command. Independent read-only tasks or edits to separate files can run in parallel. Writing agents must not race in the same working tree, so isolate concurrent runs in separate worktrees.
 
 ## Requirements
 
-- **Codex lane:** install and authenticate the [OpenAI Codex CLI](https://github.com/openai/codex). The lane calls `gpt-5.6-sol` at low reasoning by default.
+- **Codex lane:** install and authenticate the [OpenAI Codex CLI](https://github.com/openai/codex). The certified MCP edit Lane currently requires macOS arm64 and a successful native confinement probe; other environments remain diagnostics-only or use the legacy fallback.
 - **OpenCode lane:** install the [OpenCode CLI](https://opencode.ai) and authenticate a provider with `opencode auth login`. The lane runs `opencode run --agent build --auto`; optional model and variant overrides otherwise defer to OpenCode configuration.
 - **Pi lane:** install the [Pi coding agent](https://pi.dev) and start a local model server. Optional model and thinking overrides otherwise defer to Pi configuration.
 - **Pythinker lane:** install the [Pythinker CLI](https://pythoughts-labs.github.io/pythinker-code/), authenticate a provider, and optionally pass a model or `--thinking-effort off|minimal|low|medium|high|xhigh|max` override. Absent overrides defer to Pythinker configuration. This lane runs unattended in `--yolo` mode.
-- **Advisor:** Claude Code users need access to the model set in `agents/claude-advisor.md` (Fable 5). OpenCode users can set a preferred advisor model in their copied agent file; without one it inherits the session model.
+- **Advisor:** Claude Code users need access to Opus for the strictly non-mutating `claude-architect:advisor`. OpenCode retains the legacy `claude-advisor.md` agent and may configure its preferred model.
 
 ## When to call the advisor
 
-Consult `claude-advisor` before an architecture decision, a data migration, a public API change, or a broad refactor. Call it after two failed attempts at the same problem, and once more before accepting a multi-step deliverable. Pass it the decision, the constraints, and the options you already considered. It reads the code, returns a verdict with the one risk that decides it, and never touches a file.
+Consult `claude-architect:advisor` before an architecture decision, a data migration, a public API change, or a broad refactor. Call it after two failed attempts at the same problem, and once more before accepting a multi-step deliverable. Pass it the decision, the constraints, and the options you already considered. It can read repository files and the redacted Git status/diff/log/changed-file tools, returns a verdict with the one risk that decides it, and has no Bash, Write, or Edit access.
 
 ## Repository layout
 
-- `agents/` holds the Claude Code subagents: the four lanes and the advisor.
-- `skills/delegate/` is the shared routing and acceptance doctrine.
+- `agents/` holds the legacy implementation lanes plus the strictly non-mutating MCP advisor.
+- `skills/delegate/` carries the versioned MCP lifecycle, repair loop, review, decision, and integration doctrine.
 - `.opencode/agents/`, `opencode.json`, and `scripts/install-opencode.sh` carry the OpenCode agents, skill wiring, and packaged runtime.
-- `.claude-plugin/` has the plugin and marketplace manifests.
+- `.mcp.json` starts the packaged runtime through `runtime/bootstrap.mjs`; `.claude-plugin/` has the plugin and marketplace manifests.
 - `assets/` holds the banner.
 
 ## License

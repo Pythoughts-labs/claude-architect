@@ -9,7 +9,22 @@ import {
 import { doctor } from "../../src/mcp/doctor.js";
 
 function platform(os: "darwin" | "win32"): PlatformServices {
-  return { os } as PlatformServices;
+  return {
+    os,
+    resolveExecutable: async () => ({
+      kind: "native",
+      command: "/usr/local/bin/node",
+      prefixArgs: [],
+      resolvedFrom: "test",
+    }),
+    async spawnSupervised() { throw new Error("unexpected spawn"); },
+    async requestCooperativeCancellation() { throw new Error("unexpected cancellation"); },
+    async terminateProcessTree() { throw new Error("unexpected termination"); },
+    async terminateProcessTreeByPid() { throw new Error("unexpected termination"); },
+    async acquireCheckoutLock() { throw new Error("unexpected lock"); },
+    async createSecureTempDirectory() { throw new Error("unexpected temp directory"); },
+    async canonicalizePath() { throw new Error("unexpected canonicalization"); },
+  };
 }
 
 function codexReport(os: "darwin" | "win32"): CapabilityReport {
@@ -84,5 +99,23 @@ describe("doctor", () => {
       "git-unavailable",
     ]));
     expect(JSON.stringify(result)).not.toContain("sk-doctorsecret");
+  });
+
+  it("reports when the host cannot resolve the initial Node executable", async () => {
+    const ps = platform("darwin");
+    ps.resolveExecutable = async () => {
+      throw new Error("missing node");
+    };
+
+    const result = await doctor({
+      ps,
+      env: { CLAUDE_PLUGIN_DATA: "/plugin-data" },
+      nodeVersion: "22.17.0",
+      git: async () => ({ stdout: "git version 2.49.0\n", stderr: "", exitCode: 0 }),
+      probeAll: async () => [],
+    });
+
+    expect(result.node).toEqual({ version: "22.17.0", ok: false });
+    expect(result.issues).toContain("initial-node-unavailable");
   });
 });
