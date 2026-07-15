@@ -11,3 +11,5 @@ demo/
 # live-dogfood notes (not part of deliverable)
 scratchpad.md
 .superpowers/
+tasks/
+/CONTEXT.md
