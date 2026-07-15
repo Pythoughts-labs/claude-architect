@@ -8,7 +8,6 @@ import {
   readdir,
   realpath,
   rm,
-  stat,
 } from "node:fs/promises";
 import path from "node:path";
 import { git } from "../git/git-exec.js";
@@ -45,10 +44,10 @@ type PruneReason = "max-age" | "max-bytes";
 type AnchorCleanup = "not-applicable" | "deleted" | "already-absent";
 
 interface CleanupRecord {
-  event: "prune-cleanup";
+  event: "prune-cleanup-intent" | "prune-cleanup-complete";
   runId: string;
   reason: PruneReason;
-  anchorCleanup: AnchorCleanup;
+  anchorCleanup: AnchorCleanup | "pending";
   archiveBytes: number;
   recordedAt: string;
 }
@@ -63,7 +62,7 @@ function isSafeComponent(value: string): boolean {
 }
 
 function validateComponent(value: string, kind: "run id" | "log name"): void {
-  if (!isSafeComponent(value)) {
+  if (!isSafeComponent(value) || (kind === "run id" && value !== value.toLowerCase())) {
     throw new RuntimeError(`invalid ${kind}: ${JSON.stringify(value)}`);
   }
 }
@@ -140,10 +139,21 @@ async function readRegularFile(filename: string): Promise<string> {
 
 async function directoryBytes(directory: string): Promise<number> {
   let total = 0;
-  for (const entry of await readdir(directory, { withFileTypes: true })) {
+  let entries;
+  try {
+    entries = await readdir(directory, { withFileTypes: true });
+  } catch (error) {
+    if (isMissing(error)) return 0;
+    throw error;
+  }
+  for (const entry of entries) {
     const entryPath = path.join(directory, entry.name);
-    if (entry.isDirectory()) total += await directoryBytes(entryPath);
-    else if (entry.isFile()) total += (await stat(entryPath)).size;
+    try {
+      if (entry.isDirectory()) total += await directoryBytes(entryPath);
+      else if (entry.isFile()) total += (await lstat(entryPath)).size;
+    } catch (error) {
+      if (!isMissing(error)) throw error;
+    }
   }
   return total;
 }
@@ -221,15 +231,17 @@ export class ArtifactStore {
 
   private async writeArchiveFile(relativePath: string, text: string): Promise<void> {
     const directory = await this.ensureArchiveDirectory(relativePath);
-    const destination = path.join(this.runDirectory, relativePath);
+    const destination = path.join(directory, path.basename(relativePath));
     const temporaryPath = path.join(directory, `.${path.basename(destination)}.${randomUUID()}.tmp`);
     let handle;
+    let temporaryCreated = false;
     try {
       handle = await open(
         temporaryPath,
         constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | NO_FOLLOW,
         0o600,
       );
+      temporaryCreated = true;
       await handle.writeFile(text, { encoding: "utf8" });
       await handle.sync();
       await handle.close();
@@ -237,25 +249,25 @@ export class ArtifactStore {
 
       try {
         await link(temporaryPath, destination);
-        await rm(temporaryPath, { force: true });
-        await syncDirectory(directory);
       } catch (error) {
         if (!isAlreadyPresent(error)) throw error;
         const existing = await readRegularFile(destination);
         if (existing !== text) {
           throw new RuntimeError(`archive entry already exists with different content: ${relativePath}`);
         }
-        await syncDirectory(directory);
       }
     } finally {
       await handle?.close();
-      await rm(temporaryPath, { force: true });
+      if (temporaryCreated) {
+        await rm(temporaryPath, { force: true });
+        await syncDirectory(directory);
+      }
     }
   }
 
   private async writeJson(relativePath: string, value: unknown): Promise<void> {
     const sanitized = redactRecord(value);
-    const serialized = redact(`${JSON.stringify(sanitized, null, 2)}\n`);
+    const serialized = `${JSON.stringify(sanitized, null, 2)}\n`;
     await this.writeArchiveFile(relativePath, serialized);
   }
 
@@ -333,15 +345,21 @@ export class ArtifactStore {
   private async entries(): Promise<RunEntry[]> {
     const entries = await Promise.all((await this.list()).map(async runId => {
       const directory = path.join(this.runsRoot, runId);
-      const metadata = await stat(directory);
-      return {
-        runId,
-        directory,
-        modifiedAtMs: metadata.mtimeMs,
-        bytes: await directoryBytes(directory),
-      };
+      try {
+        const metadata = await lstat(directory);
+        if (metadata.isSymbolicLink() || !metadata.isDirectory()) return null;
+        return {
+          runId,
+          directory,
+          modifiedAtMs: metadata.mtimeMs,
+          bytes: await directoryBytes(directory),
+        };
+      } catch (error) {
+        if (isMissing(error)) return null;
+        throw error;
+      }
     }));
-    return entries.sort(compareEntries);
+    return entries.filter((entry): entry is RunEntry => entry !== null).sort(compareEntries);
   }
 
   private async deleteCandidateAnchor(
@@ -393,7 +411,7 @@ export class ArtifactStore {
       try {
         const metadata = await handle.stat();
         if (!metadata.isFile()) throw new RuntimeError("cleanup journal is not a regular file");
-        const line = redact(`${JSON.stringify(redactRecord(record))}\n`);
+        const line = `${JSON.stringify(redactRecord(record))}\n`;
         await handle.writeFile(line, { encoding: "utf8" });
         await handle.sync();
       } finally {
@@ -422,9 +440,17 @@ export class ArtifactStore {
           retained.push({ runId: entry.runId, reason: "incomplete-run" });
           return;
         }
+        await this.appendCleanupRecord({
+          event: "prune-cleanup-intent",
+          runId: entry.runId,
+          reason,
+          anchorCleanup: "pending",
+          archiveBytes: entry.bytes,
+          recordedAt: new Date().toISOString(),
+        });
         const anchorCleanup = await this.deleteCandidateAnchor(entry.runId, result);
         await this.appendCleanupRecord({
-          event: "prune-cleanup",
+          event: "prune-cleanup-complete",
           runId: entry.runId,
           reason,
           anchorCleanup,

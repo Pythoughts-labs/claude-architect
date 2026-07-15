@@ -127,6 +127,20 @@ describe("ArtifactStore", () => {
     });
   });
 
+  it("keeps archived JSON valid when a registered secret contains JSON syntax", async () => {
+    const registration = registerSecretValue('"runId"');
+    const store = new ArtifactStore("run-json-syntax");
+
+    await store.writeResult(sampleResult("run-json-syntax"));
+
+    const stored = await readFile(join(store.runDirectory, "result.json"), "utf8");
+    expect(() => JSON.parse(stored)).not.toThrow();
+    await expect(store.readResult("run-json-syntax")).resolves.toMatchObject({
+      runId: "run-json-syntax",
+    });
+    registration.dispose();
+  });
+
   it("writes redacted logs and returns a relative archive ref", async () => {
     const registration = registerSecretValue("enterprise-secret-value");
     const store = new ArtifactStore("run-log");
@@ -163,6 +177,7 @@ describe("ArtifactStore", () => {
   it("rejects path traversal in run and log names", async () => {
     expect(() => new ArtifactStore("../outside")).toThrow(/invalid run id/);
     expect(() => new ArtifactStore("CON")).toThrow(/invalid run id/);
+    expect(() => new ArtifactStore("Run-A")).toThrow(/invalid run id/);
     const store = new ArtifactStore("run-safe");
 
     await expect(store.writeLog("../outside", "text")).rejects.toThrow(/invalid log name/);
@@ -303,6 +318,86 @@ describe("ArtifactStore", () => {
 
     await expect(git(repoRoot, ["show-ref", "--verify", anchorRef])).rejects.toBeDefined();
     await expect(stat(runDirectory)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("records cleanup intent before deleting a candidate anchor", async () => {
+    const repoRoot = await mkdtemp(join(tmpdir(), "claude-architect-intent-repo-"));
+    temporaryPaths.push(repoRoot);
+    await git(repoRoot, ["init", "-q"]);
+    await git(repoRoot, ["commit", "--allow-empty", "-q", "-m", "base"]);
+    const commitOid = await git(repoRoot, ["rev-parse", "HEAD"]);
+    const anchorRef = "refs/claude-architect/candidates/run-intent";
+    await git(repoRoot, ["update-ref", anchorRef, commitOid]);
+
+    const store = new ArtifactStore("run-intent");
+    const result = sampleResult("run-intent");
+    result.candidate = {
+      baseCommitOid: commitOid,
+      candidateTreeOid: await git(repoRoot, ["rev-parse", "HEAD^{tree}"]),
+      candidateCommitOid: commitOid,
+      anchorRef,
+      manifestHash: createHash("sha256").update("[]").digest("hex"),
+      changedPaths: [],
+      patch: "",
+    };
+    await store.writeResult(result);
+    await store.writeManifest(buildRunManifest(manifestArgs("run-intent", repoRoot)));
+    const runDirectory = join(process.env.CLAUDE_PLUGIN_DATA!, "runs", "run-intent");
+    const oldTime = new Date(Date.now() - 60_000);
+    await utimes(runDirectory, oldTime, oldTime);
+
+    await store.prune({ maxAgeMs: 1_000, maxBytes: Number.MAX_SAFE_INTEGER });
+
+    const records = (await readFile(join(
+      process.env.CLAUDE_PLUGIN_DATA!,
+      "runs",
+      "cleanup.ndjson",
+    ), "utf8")).trim().split("\n").map(line => JSON.parse(line) as {
+      event: string;
+      runId: string;
+      anchorCleanup: string;
+    });
+    expect(records.slice(-2)).toMatchObject([
+      { event: "prune-cleanup-intent", runId: "run-intent", anchorCleanup: "pending" },
+      { event: "prune-cleanup-complete", runId: "run-intent", anchorCleanup: "deleted" },
+    ]);
+  });
+
+  it("retains a candidate anchor when cleanup intent cannot be recorded", async () => {
+    const repoRoot = await mkdtemp(join(tmpdir(), "claude-architect-intent-failure-repo-"));
+    temporaryPaths.push(repoRoot);
+    await git(repoRoot, ["init", "-q"]);
+    await git(repoRoot, ["commit", "--allow-empty", "-q", "-m", "base"]);
+    const commitOid = await git(repoRoot, ["rev-parse", "HEAD"]);
+    const anchorRef = "refs/claude-architect/candidates/run-intent-failure";
+    await git(repoRoot, ["update-ref", anchorRef, commitOid]);
+
+    const store = new ArtifactStore("run-intent-failure");
+    const result = sampleResult("run-intent-failure");
+    result.candidate = {
+      baseCommitOid: commitOid,
+      candidateTreeOid: await git(repoRoot, ["rev-parse", "HEAD^{tree}"]),
+      candidateCommitOid: commitOid,
+      anchorRef,
+      manifestHash: createHash("sha256").update("[]").digest("hex"),
+      changedPaths: [],
+      patch: "",
+    };
+    await store.writeResult(result);
+    await store.writeManifest(buildRunManifest(manifestArgs("run-intent-failure", repoRoot)));
+    const runDirectory = join(process.env.CLAUDE_PLUGIN_DATA!, "runs", "run-intent-failure");
+    const oldTime = new Date(Date.now() - 60_000);
+    await utimes(runDirectory, oldTime, oldTime);
+    await mkdir(join(process.env.CLAUDE_PLUGIN_DATA!, "runs", "cleanup.ndjson"));
+
+    const pruned = await store.prune({
+      maxAgeMs: 1_000,
+      maxBytes: Number.MAX_SAFE_INTEGER,
+    });
+
+    expect(pruned.removed).not.toContain("run-intent-failure");
+    expect(await git(repoRoot, ["rev-parse", anchorRef])).toBe(commitOid);
+    await expect(stat(runDirectory)).resolves.toBeDefined();
   });
 
   it("deletes a symbolic candidate anchor without dereferencing it", async () => {
@@ -458,6 +553,37 @@ describe("buildRunManifest", () => {
       { name: "CODEX_TOKEN", source: "adapter" },
       { name: "PATH", source: "platform" },
     ]);
+    registration.dispose();
+  });
+
+  it("keeps the persisted manifest hash consistent after value redaction", async () => {
+    const registration = registerSecretValue("platform");
+    const store = new ArtifactStore("run-manifest-hash");
+    await store.writeManifest(buildRunManifest(manifestArgs(
+      "run-manifest-hash",
+      "/canonical/repo",
+    )));
+
+    const persisted = JSON.parse(await readFile(
+      join(store.runDirectory, "manifest.json"),
+      "utf8",
+    )) as Record<string, unknown>;
+    const manifestHash = persisted.manifestHash;
+    delete persisted.manifestHash;
+    const canonicalize = (value: unknown): unknown => {
+      if (Array.isArray(value)) return value.map(canonicalize);
+      if (value === null || typeof value !== "object") return value;
+      return Object.fromEntries(Object.entries(value as Record<string, unknown>)
+        .filter(([, child]) => child !== undefined)
+        .sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0)
+        .map(([key, child]) => [key, canonicalize(child)]));
+    };
+    const recomputed = createHash("sha256")
+      .update(JSON.stringify(canonicalize(persisted)))
+      .digest("hex");
+
+    expect(manifestHash).toBe(recomputed);
+    expect(JSON.stringify(persisted)).not.toContain("platform");
     registration.dispose();
   });
 });

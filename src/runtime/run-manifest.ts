@@ -40,7 +40,7 @@ export interface RunManifest {
   repositoryInstructions: RepositoryInstructionRecord[];
   promptHash: string;
   executionPolicy: Record<string, unknown>;
-  environment: EnvProvenance;
+  environment: Array<{ name: string; source: string }>;
   runtimeVersion: typeof RUNTIME_VERSION;
   protocolVersion: typeof PROTOCOL_VERSION;
   schemaVersions: {
@@ -112,7 +112,7 @@ export function buildRunManifest(args: BuildRunManifestArgs): RunManifest {
     promptHash: sha256(args.prompt),
     executionPolicy: redactRecord(args.executionPolicy),
     environment: args.environment
-      .map(entry => ({ name: redact(entry.name), source: entry.source }))
+      .map(entry => ({ name: redact(entry.name), source: redact(entry.source) }))
       .sort((left, right) => {
         const nameOrder = compareText(left.name, right.name);
         return nameOrder === 0 ? compareText(left.source, right.source) : nameOrder;
