@@ -166,6 +166,26 @@ describe("CodexAdapter", () => {
     });
   });
 
+  it("rejects a truncated structured-output stream", async () => {
+    const stdout = await readFile(new URL("fixtures/codex-success.json", import.meta.url), "utf8");
+
+    expect(new CodexAdapter().normalizeEvents({
+      stdout,
+      stderr: "",
+      exit: exit({ truncated: { stdout: true, stderr: false } }),
+    })).toEqual({ events: [], producerSummary: null, ok: false });
+  });
+
+  it("keeps normalizable nonzero output valid for producer-failure classification", async () => {
+    const stdout = await readFile(new URL("fixtures/codex-success.json", import.meta.url), "utf8");
+
+    expect(new CodexAdapter().normalizeEvents({
+      stdout,
+      stderr: "producer failed after reporting",
+      exit: exit({ exitCode: 1 }),
+    }).ok).toBe(true);
+  });
+
   it("builds an argv-only invocation with the delegation prompt on stdin", () => {
     const spec = sampleSpec();
     const invocation = new CodexAdapter().buildInvocation(spec, invocationContext());

@@ -225,6 +225,9 @@ export class CodexAdapter implements ProducerAdapter {
     stderr: string;
     exit: Parameters<ProducerAdapter["normalizeEvents"]>[0]["exit"];
   }): ReturnType<ProducerAdapter["normalizeEvents"]> {
+    if (raw.exit.truncated.stdout) {
+      return { events: [], producerSummary: null, ok: false };
+    }
     const lines = raw.stdout.split(/\r?\n/u).filter(line => line.trim().length > 0);
     if (lines.length === 0) return { events: [], producerSummary: null, ok: false };
 
