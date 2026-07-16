@@ -68,7 +68,9 @@ describe("seatbelt profile", () => {
         tempHome: null,
         allowNetwork: false,
       });
-      expect(profile.split(`(subpath "${missingPath}")`)).toHaveLength(2);
+      // Mirror sbPath's escaping: win32 tmpdir paths contain backslashes.
+      const escaped = missingPath.replace(/\\/gu, "\\\\").replace(/"/gu, '\\"');
+      expect(profile.split(`(subpath "${escaped}")`)).toHaveLength(2);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
