@@ -6,6 +6,22 @@ All notable changes to Claude Architect are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.13.0] - 2026-07-16
+
+### Added
+
+- `delegatePipeline` MCP tool: a deterministic delegate → review → fix → verify loop that runs the full lifecycle in one call, with a fail-closed gate evaluation, clean-room verify, and an evidence bundle per round.
+- Fresh-context review pipeline: fresh-session role runner with fail-closed confinement, role prompt templates and role-spec builder, structured-output schemas with a single repair retry, and a deterministic finding consolidator.
+- Optional `review` block on the delegation spec (including `maxRounds`) to configure the pipeline from the protocol side.
+- Native producer adapters for OpenCode (plain-text contract), Pi (inherited-config profile, multi-provider), and Pythinker — all registered in the producer registry with per-producer certification smokes.
+- macOS Seatbelt os-kind write-confinement backend, per-producer Seatbelt writable paths with Pythinker MCP isolation, and a read-only Seatbelt policy for review roles.
+- End-to-end pipeline lifecycle test running against a temporary git repository, plus an opt-in Seatbelt certification gate.
+
+### Changed
+
+- The delegate skill now routes non-trivial delegations through `delegatePipeline` instead of the manual lifecycle tools.
+- Lane docs: progress streams via the FINAL file (caller-supplied progress log), and the Pi lane is documented as multi-provider rather than local-only.
+
 ## [0.12.1] - 2026-07-15
 
 ### Added
@@ -157,7 +173,8 @@ Initial public release.
 - Native OpenCode assets under `.opencode/` and `opencode.json`, so the same lanes and skill work outside Claude Code.
 - SVG banner and shields badges for the README.
 
-[Unreleased]: https://github.com/Pythoughts-labs/claude-architect/compare/v0.12.1...HEAD
+[Unreleased]: https://github.com/Pythoughts-labs/claude-architect/compare/v0.13.0...HEAD
+[0.13.0]: https://github.com/Pythoughts-labs/claude-architect/compare/v0.12.1...v0.13.0
 [0.12.1]: https://github.com/Pythoughts-labs/claude-architect/compare/v0.12.0...v0.12.1
 [0.12.0]: https://github.com/Pythoughts-labs/claude-architect/compare/v0.11.1...v0.12.0
 [0.11.1]: https://github.com/Pythoughts-labs/claude-architect/compare/v0.11.0...v0.11.1
