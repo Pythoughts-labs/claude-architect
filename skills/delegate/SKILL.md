@@ -43,6 +43,13 @@ Construct a candidate spec with every required field:
 7. `verification`: Host-authorized commands with executable, argv, relative cwd, timeout, network policy, expected exit codes, and optional platform filters.
 8. `executionMode: "edit"`, a bounded `timeoutMs`, ordered `producerPreferences`, optional supported overrides, and `expectedOutput: "candidate-patch"`.
 
+**Acceptance criteria:**
+
+- Every success criterion must be objectively checkable.
+- At least one verification command must mechanically cover each criterion.
+- Criteria that cannot be commanded, such as "code is clean", belong in the `review` block, not `successCriteria`.
+- Prefer explicit test file paths in verification args; directory args can resolve differently between the Producer sandbox and clean-room verification.
+
 Resolve ambiguity before calling the runtime. Do not give the Producer credentials, hidden instructions, acceptance authority, or permission to expand scope.
 
 ## Trusted MCP lifecycle

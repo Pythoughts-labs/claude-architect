@@ -24303,7 +24303,8 @@ var delegation_spec_v1_default = {
       const: "1"
     },
     objective: {
-      type: "string"
+      type: "string",
+      minLength: 1
     },
     context: {
       type: "string"
@@ -24324,8 +24325,10 @@ var delegation_spec_v1_default = {
     successCriteria: {
       type: "array",
       items: {
-        type: "string"
-      }
+        type: "string",
+        minLength: 1
+      },
+      minItems: 1
     },
     verification: {
       type: "array",
@@ -24407,7 +24410,8 @@ var delegation_spec_v1_default = {
             ]
           }
         }
-      }
+      },
+      minItems: 1
     },
     executionMode: {
       const: "edit"

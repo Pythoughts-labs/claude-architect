@@ -7,7 +7,17 @@ import { resolveReviewConfig } from "../../src/protocol/delegation-spec.js";
 function makeValidSpec() {
   return {
     specVersion: "1", objective: "add fn", context: "ctx", writeAllowlist: ["src/**"], forbiddenScope: [],
-    successCriteria: ["compiles"], verification: [], executionMode: "edit",
+    successCriteria: ["compiles"],
+    verification: [{
+      id: "check",
+      executable: "node",
+      args: ["-e", "process.exit(0)"],
+      cwd: ".",
+      timeoutMs: 60000,
+      network: "denied",
+      expectedExitCodes: [0],
+    }],
+    executionMode: "edit",
     timeoutMs: 60000, producerPreferences: ["codex"], expectedOutput: "candidate-patch",
   };
 }

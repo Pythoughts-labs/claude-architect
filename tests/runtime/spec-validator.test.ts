@@ -3,7 +3,17 @@ import { validateSpec } from "../../src/protocol/spec-validator.js";
 
 const base = {
   specVersion: "1", objective: "add fn", context: "ctx", writeAllowlist: ["src/**"], forbiddenScope: [],
-  successCriteria: ["compiles"], verification: [], executionMode: "edit",
+  successCriteria: ["compiles"],
+  verification: [{
+    id: "check",
+    executable: "node",
+    args: ["-e", "process.exit(0)"],
+    cwd: ".",
+    timeoutMs: 60000,
+    network: "denied",
+    expectedExitCodes: [0],
+  }],
+  executionMode: "edit",
   timeoutMs: 60000, producerPreferences: ["codex"], expectedOutput: "candidate-patch",
 };
 describe("validateSpec", () => {
@@ -56,5 +66,17 @@ describe("validateSpec", () => {
     const error = result.errors.find(e => e.path.includes("network"));
     expect(error?.message).toContain("allowed values: ");
     expect(error?.message).toContain("denied");
+  });
+  it("rejects empty successCriteria", () => {
+    const result = validateSpec({ ...base, successCriteria: [] });
+    expect(result.ok).toBe(false);
+  });
+  it("rejects empty verification", () => {
+    const result = validateSpec({ ...base, verification: [] });
+    expect(result.ok).toBe(false);
+  });
+  it("rejects an empty objective", () => {
+    const result = validateSpec({ ...base, objective: "" });
+    expect(result.ok).toBe(false);
   });
 });
