@@ -123,16 +123,16 @@ OPENCODE_VARIANT="${VARIANT:-}" \
 bash "$RUNTIME" "$SPEC" "$FINAL"
 ```
 
-**Progress streaming.** When the caller's prompt supplies a `PROGRESS_LOG: <path>` line, stream the run's live output there so the architect can tail it while you work — create the parent directory, then wrap the invocation:
+**Progress streaming.** The adapter redirects all of opencode's live output into the `$FINAL` file, so the caller can watch progress by tailing it. When the caller's prompt supplies a `PROGRESS_LOG: <path>` line, use that path as the FINAL file instead of a mktemp (create the parent directory first):
 
 ```bash
 mkdir -p "$(dirname "$PROGRESS_LOG")"
-set -o pipefail
+FINAL="$PROGRESS_LOG"
 OPENCODE_MODEL="${PROVIDER_MODEL:-}" OPENCODE_VARIANT="${VARIANT:-}" \
-  bash "$RUNTIME" "$SPEC" "$FINAL" 2>&1 | tee -a "$PROGRESS_LOG"
+  bash "$RUNTIME" "$SPEC" "$FINAL"
 ```
 
-`set -o pipefail` keeps the adapter's real exit code observable through the pipe. Without a `PROGRESS_LOG` in the prompt, invoke plainly as above.
+Do not `tee` the wrapper's own stdout — it stays empty until the adapter exits. Without a `PROGRESS_LOG` in the prompt, use a mktemp FINAL as above.
 
 Adapter discipline (non-negotiable):
 
