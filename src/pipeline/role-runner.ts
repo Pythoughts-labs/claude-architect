@@ -17,6 +17,7 @@ import { detectEnvironmentType } from "../producers/producer-adapter.js";
 import type { ProducerRegistry } from "../producers/producer-registry.js";
 import { route } from "../producers/routing-policy.js";
 import { buildEnvironment } from "../runtime/environment-policy.js";
+import { redact } from "../runtime/redaction.js";
 import {
   buildRoleSpec,
   type PipelineRole,
@@ -38,6 +39,7 @@ export interface RoleRunArgs {
 export interface RoleRunResult {
   ok: boolean;
   rawOutput: string;
+  archiveSafeRawOutput?: string;
   failure: FailureClassification | null;
   producerId: string | null;
 }
@@ -206,11 +208,14 @@ export async function runRole(args: RoleRunArgs): Promise<RoleRunResult> {
       }
 
       const failure = classifyFailure(signals);
+      const archiveSafeRawOutput = rawOutput === ""
+        ? {}
+        : { archiveSafeRawOutput: redact(rawOutput) };
       if (failure === null) {
-        return { ok: true, rawOutput, failure: null, producerId };
+        return { ok: true, rawOutput, ...archiveSafeRawOutput, failure: null, producerId };
       }
       if (exit.cancelled || attempt === 2) {
-        return { ok: false, rawOutput, failure, producerId };
+        return { ok: false, rawOutput, ...archiveSafeRawOutput, failure, producerId };
       }
     } catch (error) {
       primaryError = error;

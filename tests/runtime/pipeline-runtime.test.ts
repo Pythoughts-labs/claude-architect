@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import {
   mkdir,
   mkdtemp,
+  readFile,
   realpath,
   rm,
   writeFile,
@@ -295,6 +296,19 @@ describe("runPipeline", () => {
     expect(result.status).toBe("decision-ready");
     expect(result.rounds).toHaveLength(1);
     expect(result.rounds[0]?.fix).toBeNull();
+    expect(result.rounds[0]?.roleLogRefs).toEqual([
+      "logs/role-reviewer-correctness-round1.log",
+      "logs/role-reviewer-systems-round1.log",
+    ]);
+    const store = new ArtifactStore("pipeline-clean");
+    await expect(readFile(
+      path.join(store.runDirectory, "logs", "role-reviewer-correctness-round1.log"),
+      "utf8",
+    )).resolves.toBe(fenced(approve));
+    await expect(readFile(
+      path.join(store.runDirectory, "logs", "role-reviewer-systems-round1.log"),
+      "utf8",
+    )).resolves.toBe(fenced(approve));
   });
 
   it("fixes a blocker and returns decision-ready after a clean re-review", async () => {
@@ -324,6 +338,7 @@ describe("runPipeline", () => {
 
     expect(result.status).toBe("decision-ready");
     expect(result.rounds).toHaveLength(2);
+    expect(result.rounds[0]?.roleLogRefs).toContain("logs/role-fixer-round1.log");
   });
 
   it("requires human decision when blockers remain at the round cap", async () => {
@@ -369,7 +384,19 @@ describe("runPipeline", () => {
     );
 
     expect(result.status).toBe("failed");
+    expect(result.gate.reasons).toEqual([
+      "review phase did not produce valid structured output (see logs/role-reviewer-correctness-round1.log)",
+    ]);
     expect(calls).toBe(2);
+    const store = new ArtifactStore("pipeline-invalid");
+    await expect(readFile(
+      path.join(store.runDirectory, "logs", "role-reviewer-correctness-round1.log"),
+      "utf8",
+    )).resolves.toBe("not json");
+    await expect(readFile(
+      path.join(store.runDirectory, "logs", "role-reviewer-correctness-round1-repair.log"),
+      "utf8",
+    )).resolves.toBe("not json either");
   });
 
   it("requires human decision when the candidate adds a skipped test", async () => {

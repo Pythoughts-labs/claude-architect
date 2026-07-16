@@ -27703,11 +27703,12 @@ async function runRole(args) {
         if (exit.exitCode !== 0) signals["producer-failure"] = true;
       }
       const failure2 = classifyFailure(signals);
+      const archiveSafeRawOutput = rawOutput === "" ? {} : { archiveSafeRawOutput: redact(rawOutput) };
       if (failure2 === null) {
-        return { ok: true, rawOutput, failure: null, producerId };
+        return { ok: true, rawOutput, ...archiveSafeRawOutput, failure: null, producerId };
       }
       if (exit.cancelled || attempt === 2) {
-        return { ok: false, rawOutput, failure: failure2, producerId };
+        return { ok: false, rawOutput, ...archiveSafeRawOutput, failure: failure2, producerId };
       }
     } catch (error2) {
       primaryError = error2;
@@ -27779,6 +27780,13 @@ function roleArgs(args) {
     ...args.deps.env === void 0 ? {} : { env: args.deps.env },
     ...args.deps.abortSignal === void 0 ? {} : { abortSignal: args.deps.abortSignal }
   };
+}
+async function runArchivedRole(runner, args, store, logName2) {
+  const result = await runner(args);
+  const output = result.rawOutput === "" ? `role produced no stdout; failure: ${result.failure ?? "none"}
+` : result.archiveSafeRawOutput ?? result.rawOutput;
+  const logRef2 = await store.writeLog(logName2, output);
+  return { result, logRef: logRef2 };
 }
 function failedResult(attempt, rounds, finalCandidateCommit, reason) {
   return {
@@ -27906,28 +27914,50 @@ function detectWeakenedTests(diff) {
 }
 async function runReviews(args) {
   const runner = args.deps.roleRunner ?? runRole;
-  const parsed = await Promise.all(args.reviewers.map(async (reviewer) => {
+  const outcomes = await Promise.all(args.reviewers.map(async (reviewer) => {
+    const role = `reviewer-${reviewer}`;
     const callArgs = roleArgs({
-      role: `reviewer-${reviewer}`,
+      role,
       spec: args.spec,
       pkg: args.pkg,
       worktreePath: args.worktreePath,
       deps: args.deps,
       runId: args.runId
     });
-    const initial = await runner(callArgs);
-    if (!initial.ok) return null;
+    const logName2 = `role-${role}-round${args.round}`;
+    const initial = await runArchivedRole(runner, callArgs, args.store, logName2);
+    const roleLogRefs2 = [initial.logRef];
+    if (!initial.result.ok) {
+      return { review: null, initialLogRef: initial.logRef, roleLogRefs: roleLogRefs2 };
+    }
     const outcome = await parseStructuredReport(
-      initial.rawOutput,
+      initial.result.rawOutput,
       schemas.reviewReport,
       async (validationErrors) => {
-        const repair = await runner(callArgs);
-        return repair.ok ? repair.rawOutput : "";
+        const repair = await runArchivedRole(
+          runner,
+          callArgs,
+          args.store,
+          `${logName2}-repair`
+        );
+        roleLogRefs2.push(repair.logRef);
+        return repair.result.ok ? repair.result.rawOutput : "";
       }
     );
-    return outcome.ok ? { reviewer, report: outcome.value } : null;
+    return {
+      review: outcome.ok ? { reviewer, report: outcome.value } : null,
+      initialLogRef: initial.logRef,
+      roleLogRefs: roleLogRefs2
+    };
   }));
-  return parsed.every((review) => review !== null) ? parsed : null;
+  const roleLogRefs = outcomes.flatMap((outcome) => outcome.roleLogRefs);
+  const reviews = outcomes.map((outcome) => outcome.review);
+  if (reviews.every((review) => review !== null)) {
+    return { ok: true, reviews, roleLogRefs };
+  }
+  const failed = outcomes.find((outcome) => outcome.review === null);
+  if (failed === void 0) throw new Error("unreachable invalid review state");
+  return { ok: false, failedRoleLogRef: failed.initialLogRef, roleLogRefs };
 }
 async function runFix(args) {
   const runner = args.deps.roleRunner ?? runRole;
@@ -27939,17 +27969,27 @@ async function runFix(args) {
     deps: args.deps,
     runId: args.runId
   });
-  const initial = await runner(callArgs);
-  if (!initial.ok) return null;
+  const logName2 = `role-fixer-round${args.round}`;
+  const initial = await runArchivedRole(runner, callArgs, args.store, logName2);
+  const roleLogRefs = [initial.logRef];
+  if (!initial.result.ok) {
+    return { ok: false, failedRoleLogRef: initial.logRef, roleLogRefs };
+  }
   const outcome = await parseStructuredReport(
-    initial.rawOutput,
+    initial.result.rawOutput,
     schemas.fixReport,
     async (validationErrors) => {
-      const repair = await runner(callArgs);
-      return repair.ok ? repair.rawOutput : "";
+      const repair = await runArchivedRole(
+        runner,
+        callArgs,
+        args.store,
+        `${logName2}-repair`
+      );
+      roleLogRefs.push(repair.logRef);
+      return repair.result.ok ? repair.result.rawOutput : "";
     }
   );
-  return outcome.ok ? outcome.value : null;
+  return outcome.ok ? { ok: true, fix: outcome.value, roleLogRefs } : { ok: false, failedRoleLogRef: initial.logRef, roleLogRefs };
 }
 async function verifyCandidate(args) {
   const ps = args.deps.ps ?? getPlatformServices();
@@ -28073,28 +28113,30 @@ async function runPipeline(checkoutPath, spec, deps) {
         candidateDiff: diffText,
         testEvidence: testEvidence(attempt)
       };
-      const parsedReviews = await runReviews({
+      const reviewRun = await runReviews({
         reviewers,
         spec,
         pkg,
         worktreePath: candidateWorktree.path,
         deps,
-        runId: attempt.runId
+        runId: attempt.runId,
+        round,
+        store
       });
-      if (parsedReviews === null) {
+      if (!reviewRun.ok) {
         return failedResult(
           attempt,
           rounds,
           currentCandidateCommit,
-          "review phase did not produce valid structured output"
+          `review phase did not produce valid structured output (see ${reviewRun.failedRoleLogRef})`
         );
       }
-      const reviews = parsedReviews.map((review) => ({
+      const reviews = reviewRun.reviews.map((review) => ({
         reviewer: review.reviewer,
         report: review.report
       }));
       const consolidated = consolidate(reviews);
-      await Promise.all(parsedReviews.map((review) => store.writePipelineArtifact(
+      await Promise.all(reviewRun.reviews.map((review) => store.writePipelineArtifact(
         `round-${round}-review-${review.reviewer}`,
         review.report
       )));
@@ -28102,26 +28144,29 @@ async function runPipeline(checkoutPath, spec, deps) {
       const blocking = consolidated.findings.some(
         (finding) => finding.severity === "blocker" || finding.severity === "major"
       );
-      const approved = parsedReviews.every((review) => review.report.verdict === "approve");
+      const approved = reviewRun.reviews.every((review) => review.report.verdict === "approve");
       if (!blocking && approved) {
-        rounds.push({ round, reviews, consolidated, fix: null });
+        rounds.push({ round, reviews, consolidated, fix: null, roleLogRefs: reviewRun.roleLogRefs });
         break;
       }
-      const fix = await runFix({
+      const fixRun = await runFix({
         spec,
         pkg: { ...pkg, findings: consolidated.findings },
         worktreePath: candidateWorktree.path,
         deps,
-        runId: attempt.runId
+        runId: attempt.runId,
+        round,
+        store
       });
-      if (fix === null) {
+      if (!fixRun.ok) {
         return failedResult(
           attempt,
           rounds,
           currentCandidateCommit,
-          "fix phase did not produce valid structured output"
+          `fix phase did not produce valid structured output (see ${fixRun.failedRoleLogRef})`
         );
       }
+      const { fix } = fixRun;
       await store.writePipelineArtifact(`round-${round}-fix`, fix);
       const commit = await git(candidateWorktree.path, [
         "cat-file",
@@ -28137,7 +28182,13 @@ async function runPipeline(checkoutPath, spec, deps) {
         );
       }
       currentCandidateCommit = fix.candidateCommit;
-      rounds.push({ round, reviews, consolidated, fix });
+      rounds.push({
+        round,
+        reviews,
+        consolidated,
+        fix,
+        roleLogRefs: [...reviewRun.roleLogRefs, ...fixRun.roleLogRefs]
+      });
     }
   } catch (error2) {
     primaryError = error2;

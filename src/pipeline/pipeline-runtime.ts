@@ -38,6 +38,7 @@ export interface PipelineRound {
   reviews: { reviewer: string; report: ReviewReport }[];
   consolidated: ConsolidationResult;
   fix: FixReport | null;
+  roleLogRefs: string[];
 }
 
 export interface PipelineResult {
@@ -64,6 +65,14 @@ interface ParsedReview {
   reviewer: ReviewerKind;
   report: ReviewReport;
 }
+
+type ReviewRunResult =
+  | { ok: true; reviews: ParsedReview[]; roleLogRefs: string[] }
+  | { ok: false; failedRoleLogRef: string; roleLogRefs: string[] };
+
+type FixRunResult =
+  | { ok: true; fix: FixReport; roleLogRefs: string[] }
+  | { ok: false; failedRoleLogRef: string; roleLogRefs: string[] };
 
 const schemas = loadSchemas();
 const IGNORED_STRUCTURAL_FAILURES = new Set<StructuralFailure>([
@@ -102,6 +111,20 @@ function roleArgs(args: {
     ...(args.deps.env === undefined ? {} : { env: args.deps.env }),
     ...(args.deps.abortSignal === undefined ? {} : { abortSignal: args.deps.abortSignal }),
   };
+}
+
+async function runArchivedRole(
+  runner: (args: RoleRunArgs) => Promise<RoleRunResult>,
+  args: RoleRunArgs,
+  store: ArtifactStore,
+  logName: string,
+): Promise<{ result: RoleRunResult; logRef: string }> {
+  const result = await runner(args);
+  const output = result.rawOutput === ""
+    ? `role produced no stdout; failure: ${result.failure ?? "none"}\n`
+    : result.archiveSafeRawOutput ?? result.rawOutput;
+  const logRef = await store.writeLog(logName, output);
+  return { result, logRef };
 }
 
 function failedResult(
@@ -260,31 +283,55 @@ async function runReviews(args: {
   worktreePath: string;
   deps: PipelineDependencies;
   runId: string;
-}): Promise<ParsedReview[] | null> {
+  round: number;
+  store: ArtifactStore;
+}): Promise<ReviewRunResult> {
   const runner = args.deps.roleRunner ?? defaultRunRole;
-  const parsed = await Promise.all(args.reviewers.map(async reviewer => {
+  const outcomes = await Promise.all(args.reviewers.map(async reviewer => {
+    const role = `reviewer-${reviewer}` as const;
     const callArgs = roleArgs({
-      role: `reviewer-${reviewer}`,
+      role,
       spec: args.spec,
       pkg: args.pkg,
       worktreePath: args.worktreePath,
       deps: args.deps,
       runId: args.runId,
     });
-    const initial = await runner(callArgs);
-    if (!initial.ok) return null;
+    const logName = `role-${role}-round${args.round}`;
+    const initial = await runArchivedRole(runner, callArgs, args.store, logName);
+    const roleLogRefs = [initial.logRef];
+    if (!initial.result.ok) {
+      return { review: null, initialLogRef: initial.logRef, roleLogRefs };
+    }
     const outcome = await parseStructuredReport<ReviewReport>(
-      initial.rawOutput,
+      initial.result.rawOutput,
       schemas.reviewReport,
       async validationErrors => {
         void validationErrors;
-        const repair = await runner(callArgs);
-        return repair.ok ? repair.rawOutput : "";
+        const repair = await runArchivedRole(
+          runner,
+          callArgs,
+          args.store,
+          `${logName}-repair`,
+        );
+        roleLogRefs.push(repair.logRef);
+        return repair.result.ok ? repair.result.rawOutput : "";
       },
     );
-    return outcome.ok ? { reviewer, report: outcome.value } : null;
+    return {
+      review: outcome.ok ? { reviewer, report: outcome.value } : null,
+      initialLogRef: initial.logRef,
+      roleLogRefs,
+    };
   }));
-  return parsed.every((review): review is ParsedReview => review !== null) ? parsed : null;
+  const roleLogRefs = outcomes.flatMap(outcome => outcome.roleLogRefs);
+  const reviews = outcomes.map(outcome => outcome.review);
+  if (reviews.every((review): review is ParsedReview => review !== null)) {
+    return { ok: true, reviews, roleLogRefs };
+  }
+  const failed = outcomes.find(outcome => outcome.review === null);
+  if (failed === undefined) throw new Error("unreachable invalid review state");
+  return { ok: false, failedRoleLogRef: failed.initialLogRef, roleLogRefs };
 }
 
 async function runFix(args: {
@@ -293,7 +340,9 @@ async function runFix(args: {
   worktreePath: string;
   deps: PipelineDependencies;
   runId: string;
-}): Promise<FixReport | null> {
+  round: number;
+  store: ArtifactStore;
+}): Promise<FixRunResult> {
   const runner = args.deps.roleRunner ?? defaultRunRole;
   const callArgs = roleArgs({
     role: "fixer",
@@ -303,18 +352,30 @@ async function runFix(args: {
     deps: args.deps,
     runId: args.runId,
   });
-  const initial = await runner(callArgs);
-  if (!initial.ok) return null;
+  const logName = `role-fixer-round${args.round}`;
+  const initial = await runArchivedRole(runner, callArgs, args.store, logName);
+  const roleLogRefs = [initial.logRef];
+  if (!initial.result.ok) {
+    return { ok: false, failedRoleLogRef: initial.logRef, roleLogRefs };
+  }
   const outcome = await parseStructuredReport<FixReport>(
-    initial.rawOutput,
+    initial.result.rawOutput,
     schemas.fixReport,
     async validationErrors => {
       void validationErrors;
-      const repair = await runner(callArgs);
-      return repair.ok ? repair.rawOutput : "";
+      const repair = await runArchivedRole(
+        runner,
+        callArgs,
+        args.store,
+        `${logName}-repair`,
+      );
+      roleLogRefs.push(repair.logRef);
+      return repair.result.ok ? repair.result.rawOutput : "";
     },
   );
-  return outcome.ok ? outcome.value : null;
+  return outcome.ok
+    ? { ok: true, fix: outcome.value, roleLogRefs }
+    : { ok: false, failedRoleLogRef: initial.logRef, roleLogRefs };
 }
 
 async function verifyCandidate(args: {
@@ -457,29 +518,31 @@ export async function runPipeline(
         candidateDiff: diffText,
         testEvidence: testEvidence(attempt),
       };
-      const parsedReviews = await runReviews({
+      const reviewRun = await runReviews({
         reviewers,
         spec,
         pkg,
         worktreePath: candidateWorktree.path,
         deps,
         runId: attempt.runId,
+        round,
+        store,
       });
-      if (parsedReviews === null) {
+      if (!reviewRun.ok) {
         return failedResult(
           attempt,
           rounds,
           currentCandidateCommit,
-          "review phase did not produce valid structured output",
+          `review phase did not produce valid structured output (see ${reviewRun.failedRoleLogRef})`,
         );
       }
 
-      const reviews = parsedReviews.map(review => ({
+      const reviews = reviewRun.reviews.map(review => ({
         reviewer: review.reviewer,
         report: review.report,
       }));
       const consolidated = consolidate(reviews);
-      await Promise.all(parsedReviews.map(review => store.writePipelineArtifact(
+      await Promise.all(reviewRun.reviews.map(review => store.writePipelineArtifact(
         `round-${round}-review-${review.reviewer}`,
         review.report,
       )));
@@ -488,27 +551,30 @@ export async function runPipeline(
       const blocking = consolidated.findings.some(
         finding => finding.severity === "blocker" || finding.severity === "major",
       );
-      const approved = parsedReviews.every(review => review.report.verdict === "approve");
+      const approved = reviewRun.reviews.every(review => review.report.verdict === "approve");
       if (!blocking && approved) {
-        rounds.push({ round, reviews, consolidated, fix: null });
+        rounds.push({ round, reviews, consolidated, fix: null, roleLogRefs: reviewRun.roleLogRefs });
         break;
       }
 
-      const fix = await runFix({
+      const fixRun = await runFix({
         spec,
         pkg: { ...pkg, findings: consolidated.findings },
         worktreePath: candidateWorktree.path,
         deps,
         runId: attempt.runId,
+        round,
+        store,
       });
-      if (fix === null) {
+      if (!fixRun.ok) {
         return failedResult(
           attempt,
           rounds,
           currentCandidateCommit,
-          "fix phase did not produce valid structured output",
+          `fix phase did not produce valid structured output (see ${fixRun.failedRoleLogRef})`,
         );
       }
+      const { fix } = fixRun;
       await store.writePipelineArtifact(`round-${round}-fix`, fix);
       const commit = await git(candidateWorktree.path, [
         "cat-file",
@@ -524,7 +590,13 @@ export async function runPipeline(
         );
       }
       currentCandidateCommit = fix.candidateCommit;
-      rounds.push({ round, reviews, consolidated, fix });
+      rounds.push({
+        round,
+        reviews,
+        consolidated,
+        fix,
+        roleLogRefs: [...reviewRun.roleLogRefs, ...fixRun.roleLogRefs],
+      });
     }
   } catch (error) {
     primaryError = error;
