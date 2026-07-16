@@ -14,7 +14,7 @@
 <p align="center">
   <img alt="Claude Code" src="https://img.shields.io/badge/Claude_Code-plugin-d97757?style=flat-square&labelColor=0b0e14">
   <img alt="OpenCode" src="https://img.shields.io/badge/OpenCode-native-58a6ff?style=flat-square&labelColor=0b0e14">
-  <img alt="version" src="https://img.shields.io/badge/version-0.14.0-9aa4b2?style=flat-square&labelColor=0b0e14">
+  <img alt="version" src="https://img.shields.io/badge/version-0.15.0-9aa4b2?style=flat-square&labelColor=0b0e14">
   <img alt="license" src="https://img.shields.io/badge/license-MIT-3fb950?style=flat-square&labelColor=0b0e14">
 </p>
 
@@ -94,6 +94,7 @@ Installed marketplace copies must update and reload Claude Code before the P0-A 
 | `codex-native-sandbox` | macOS arm64 | native | **certified** |
 | `codex-native-sandbox` | Linux | native | **tested** |
 | `codex-native-sandbox` | Windows | native | **unsupported** |
+| `macos-seatbelt` (OpenCode/Pi/Pythinker edit + all read-only review roles) | macOS arm64 | native | **certified** |
 
 Linux **tested** evidence comes from the opt-in confinement gate on a real Linux host; the Codex Linux sandbox (bubblewrap) requires unprivileged user namespaces and fails closed where they are unavailable (for example, in default-seccomp containers).
 

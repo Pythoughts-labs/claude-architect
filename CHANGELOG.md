@@ -6,6 +6,29 @@ All notable changes to Claude Architect are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.15.0] - 2026-07-16
+
+### Fixed
+
+- **The review pipeline could never execute.** Dogfooding `delegatePipeline` end-to-end against real Codex exposed four stacked defects that each blocked the review/fix/verify roles from running at all; every one had escaped the suite because all pipeline tests used a fake adapter:
+  - Read-only roles gated on the *selected producer's* write-confinement backend being OS-kind, but Codex always reports its own producer-native sandbox, so every review failed with `sandbox-violation`.
+  - `macos-seatbelt` was still marked `unsupported`; certified darwin/arm64 via the opt-in confinement gate (worktree write permitted, outside write blocked).
+  - The read-only Seatbelt profile denied all network, so reviewer/verifier model sessions could not reach the provider API.
+  - Wrapping Codex in an outer read-only Seatbelt profile crashed its own sandbox init (`Operation not permitted`); producers with a native sandbox now confine read-only roles themselves via `--sandbox read-only`, and only backend-less producers get the host Seatbelt wrap.
+- The Windows CI leg (red since 0.13.0): the Seatbelt profile builder joined paths with platform-dependent `node:path`, emitting backslash subpaths on Windows; switched to `node:path/posix`.
+
+### Added
+
+- Producer watchdog (`runtime/watchdog.mjs`): producers are spawned through a wrapper that polls the MCP server PID and terminates the producer's process group when the server dies, closing the orphaned-producer window.
+- Pipeline role outputs are archived per round (`logs/role-<role>-round<N>.log`, redacted) whether or not structured-output parsing succeeds, and parse-failure gate reasons name the exact log reference.
+- Reviewer prompts require a per-success-criterion verdict (`met | not-met | cannot-verify`) with cited diff-line evidence and explicit disclosure of anything unverifiable.
+- Delegation specs now require a non-empty objective, at least one success criterion, and at least one verification command; the delegate skill documents the acceptance-criteria rules.
+- Enabling the OpenCode, Pi, and Pythinker edit lanes on certified darwin/arm64 under Seatbelt confinement.
+
+### Changed
+
+- Pre-push gate (`.githooks/pre-push`): every push runs typecheck and the full suite; main/tag pushes also run the release validator and refuse a tag push while origin/main CI is red. CI workflow moved to least-privilege permissions and current action versions.
+
 ## [0.14.0] - 2026-07-16
 
 ### Added
