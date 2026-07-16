@@ -136,6 +136,22 @@ describe("seatbelt profile", () => {
     expect(wrapped.stdin).toBe('{"mcpServers":{}}\n');
   });
 
+  it("keeps joined subpaths POSIX even when HOME contains win32-style separators", () => {
+    const wrapped = wrapInvocationWithSeatbelt({
+      ...invocation,
+      args: ["--work-dir", "/tmp/wt", "--prompt", "test"],
+      env: { HOME: "C:\\Users\\test" },
+    }, {
+      worktreePath: "/tmp/wt",
+      tempHome: null,
+      allowNetwork: false,
+    });
+    const profile = wrapped.args[1] ?? "";
+
+    expect(profile).toContain('(subpath "C:\\\\Users\\\\test/.pythinker")');
+    expect(profile).not.toContain('(subpath "C:\\\\Users\\\\test")');
+  });
+
   it("escapes quotes and rejects control characters in paths", () => {
     expect(() => buildSeatbeltProfile({
       worktreePath: "/tmp/a\nb",

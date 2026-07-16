@@ -25075,7 +25075,7 @@ async function freezeCandidate(args) {
 // src/platform/sandbox/seatbelt.ts
 import { realpathSync } from "node:fs";
 import { homedir as homedir5 } from "node:os";
-import { join as join5 } from "node:path";
+import { join as join5 } from "node:path/posix";
 function buildReadOnlySeatbeltPolicy(args) {
   return {
     worktreePath: "",

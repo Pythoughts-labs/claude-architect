@@ -1,6 +1,6 @@
 import { realpathSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { join } from "node:path/posix";
 import type { ProducerInvocation } from "../../producers/producer-adapter.js";
 
 export interface SeatbeltPolicy {
