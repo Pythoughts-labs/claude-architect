@@ -299,17 +299,26 @@ describe("runRole", () => {
     // Regression: real Codex reports codex-native-sandbox (producer-native).
     // Wrapping it in an outer Seatbelt profile EPERM-crashes its own sandbox
     // init, so the role must run the producer directly with readOnly=true.
-    const adapter = new FakeAdapter({
-      cannedStdout: REVIEW_OUTPUT,
-      writeConfinementBackend: "codex-native-sandbox",
-    });
+    // Add a host-arch-independent producer-native row so the assertion holds on
+    // any CI runner (the probe report's arch is the real process.arch).
+    const codex = SANDBOX_BACKENDS.find(backend => backend.id === "codex-native-sandbox");
+    if (codex === undefined) throw new Error("codex-native-sandbox backend is missing");
+    codex.platforms.push({ os: "darwin", environmentType: "native", state: "tested" });
+    try {
+      const adapter = new FakeAdapter({
+        cannedStdout: REVIEW_OUTPUT,
+        writeConfinementBackend: "codex-native-sandbox",
+      });
 
-    const result = await runRole(argsWith(adapter, "reviewer-correctness"));
+      const result = await runRole(argsWith(adapter, "reviewer-correctness"));
 
-    expect(result.ok).toBe(true);
-    expect(result.failure).toBeNull();
-    expect(adapter.spawnedCommands).not.toContain("/usr/bin/sandbox-exec");
-    expect(adapter.readOnlyRequests).toEqual([true]);
+      expect(result.ok).toBe(true);
+      expect(result.failure).toBeNull();
+      expect(adapter.spawnedCommands).not.toContain("/usr/bin/sandbox-exec");
+      expect(adapter.readOnlyRequests).toEqual([true]);
+    } finally {
+      codex.platforms.pop();
+    }
   });
 
   it("retries exactly once on process failure, then reports failure", async () => {

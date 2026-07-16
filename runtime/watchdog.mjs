@@ -14,13 +14,19 @@ if (separator !== "--" || command === undefined) {
 }
 
 const supervisorPid = Number(supervisorArg);
-const child = spawn(command, args, { detached: true, stdio: "inherit" });
+// POSIX: detach so the child leads its own process group and a negative-PID
+// signal reaches the whole tree. Windows has no POSIX process groups or
+// signals, so spawn attached and terminate the child directly (Windows
+// process-tree teardown is handled separately by the Job Object helper).
+const isWindows = process.platform === "win32";
+const child = spawn(command, args, { detached: !isWindows, stdio: "inherit" });
 let supervisorGone = false;
 let terminationTimer = null;
 
 function killChildGroup(signal) {
   try {
-    process.kill(-child.pid, signal);
+    if (isWindows) process.kill(child.pid, signal);
+    else process.kill(-child.pid, signal);
   } catch {
     // The child process group has already exited.
   }
