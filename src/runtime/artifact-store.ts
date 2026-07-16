@@ -659,6 +659,36 @@ export class ArtifactStore {
     return ref;
   }
 
+  async writePipelineArtifact(name: string, value: unknown): Promise<void> {
+    validateComponent(name, "log name");
+    await this.writeJson(path.posix.join("pipeline", `${name}.json`), value);
+  }
+
+  async readPipelineArtifact<T>(runId: string, name: string): Promise<T | null> {
+    validateComponent(runId, "run id");
+    validateComponent(name, "log name");
+    const runDirectory = path.join(this.runsRoot, runId);
+    const validatedRun = await this.ensureExistingRunDirectory(runDirectory);
+    if (validatedRun === null) return null;
+    const validated = await this.ensureExistingRunDirectory(path.join(runDirectory, "pipeline"));
+    if (validated === null) return null;
+    if (!isWithin(validatedRun.path, validated.path)) {
+      throw new RuntimeError("pipeline archive directory escapes run directory");
+    }
+    await assertDirectoryIdentity(validatedRun.path, validatedRun.identity);
+    try {
+      const value = JSON.parse(await readRegularFile(
+        path.join(validated.path, `${name}.json`),
+        validated.identity,
+      )) as T;
+      await assertDirectoryIdentity(validatedRun.path, validatedRun.identity);
+      return value;
+    } catch (error) {
+      if (isMissing(error)) return null;
+      throw error;
+    }
+  }
+
   async writeResult(result: AttemptResult): Promise<void> {
     if (result.runId !== this.runId) {
       throw new RuntimeError("attempt result run id does not match artifact store");
