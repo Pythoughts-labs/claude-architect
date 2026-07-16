@@ -15,3 +15,7 @@ Claude Architect also includes a strictly non-mutating Claude advisor, cross-pla
 - Keep `.claude-plugin/plugin.json`, `.claude-plugin/marketplace.json`, the README version badge, and `CHANGELOG.md` on the same version.
 - Run `bash scripts/validate-release.sh` before every release push.
 - Do not commit a release tag or push it when validation fails.
+
+## Push gates
+
+A pre-push hook lives in `.githooks/pre-push` (enable once per clone with `git config core.hooksPath .githooks`). Every push runs `npx tsc --noEmit` and the full vitest suite; pushes to `main` or any tag additionally run `bash scripts/validate-release.sh` and check the latest origin/main CI conclusion via `gh`. A tag push is refused while main CI is red; a main push only warns, since it may be the fix. Bypassing the hook requires a stated reason. Local gates cannot reproduce the Windows/Linux CI legs, so treat a red cross-platform run as a stop-the-line signal: fix or revert before any further release-facing push.
