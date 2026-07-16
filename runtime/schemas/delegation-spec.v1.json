@@ -152,6 +152,31 @@
     },
     "expectedOutput": {
       "const": "candidate-patch"
+    },
+    "review": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "reviewers",
+        "maxRounds"
+      ],
+      "properties": {
+        "reviewers": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "enum": [
+              "correctness",
+              "systems"
+            ]
+          }
+        },
+        "maxRounds": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 2
+        }
+      }
     }
   }
 }
