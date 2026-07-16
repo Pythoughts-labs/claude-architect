@@ -219,6 +219,11 @@ describe("buildReadOnlySeatbeltPolicy", () => {
     expect(profile).not.toContain("worktrees");
   });
 
+  it("allows network so role model sessions can reach the provider API", () => {
+    const profile = buildSeatbeltProfile(buildReadOnlySeatbeltPolicy({ tempHome: null }));
+    expect(profile).not.toContain("(deny network*)");
+  });
+
   it("works with no temp home at all", () => {
     const profile = buildSeatbeltProfile(buildReadOnlySeatbeltPolicy({ tempHome: null }));
     expect(profile).toContain("(deny file-write*)");

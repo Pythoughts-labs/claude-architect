@@ -25089,7 +25089,11 @@ function buildReadOnlySeatbeltPolicy(args) {
   return {
     worktreePath: "",
     tempHome: args.tempHome,
-    allowNetwork: false
+    // Read-only roles ARE model sessions: they must reach the provider API.
+    // The confinement goal here is write-protection, not offline isolation —
+    // matching the edit lane, where Codex's native sandbox permits its own
+    // API traffic while denying out-of-worktree writes.
+    allowNetwork: true
   };
 }
 function sbPath(path11) {
