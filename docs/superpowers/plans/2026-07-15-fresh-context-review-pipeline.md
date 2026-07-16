@@ -13,7 +13,7 @@ Spec: `docs/superpowers/specs/2026-07-15-fresh-context-review-pipeline-design.md
 ## Global Constraints
 
 - Spec invariants: fresh context per role; role separation (implementer never approves own code; reviewers/verifier read-only; fixer never final-verifies; runtime never authors code or waives findings); artifact-only handoff (reviewer packages never include implementer transcript/reasoning); fail closed (missing/invalid evidence = gate not satisfied; round caps route to human decision, never auto-accept).
-- Defaults copied verbatim from spec: `reviewers: [correctness, systems]`, `max_rounds: 2`. `review` block is optional — existing `delegate` calls untouched.
+- Defaults copied verbatim from spec: `reviewers: [correctness, systems]`, `maxRounds: 2`. `review` block is optional — existing `delegate` calls untouched.
 - Disposition values, verbatim: `fixed | already_satisfied | rejected_with_evidence | blocked | requires_human_decision`.
 - Severity values, verbatim: `blocker | major | minor | nit`. Nits never block.
 - Structured outputs: validated at the runtime boundary, one schema-repair retry, then phase failure.
@@ -1700,7 +1700,7 @@ edits).
    ```yaml
    review:
      reviewers: [correctness, systems]   # default
-     max_rounds: 2                        # default
+     maxRounds: 2                        # default
    ```
 
 2. Call `mcp__plugin_claude-architect_runtime__delegatePipeline` with

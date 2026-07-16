@@ -94,7 +94,7 @@ untouched:
 ```yaml
 review:
   reviewers: [correctness, systems]   # default
-  max_rounds: 2                        # default
+  maxRounds: 2                        # default
 ```
 
 ## Failure handling
