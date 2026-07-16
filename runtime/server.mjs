@@ -28096,10 +28096,14 @@ var schemas2 = loadSchemas();
 function validateSpec(input) {
   const ok = schemas2.delegationSpec(input);
   if (ok) return { ok: true, spec: input };
-  const errors = (schemas2.delegationSpec.errors ?? []).map((e) => ({
-    path: e.instancePath || e.schemaPath,
-    message: e.message ?? "invalid"
-  }));
+  const errors = (schemas2.delegationSpec.errors ?? []).map((e) => {
+    let message = e.message ?? "invalid";
+    const allowed = e.params?.allowedValues;
+    if (Array.isArray(allowed)) {
+      message = `${message} (allowed values: ${allowed.map(String).join(", ")})`;
+    }
+    return { path: e.instancePath || e.schemaPath, message };
+  });
   return { ok: false, errors };
 }
 

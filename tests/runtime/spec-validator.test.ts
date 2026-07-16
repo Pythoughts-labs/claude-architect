@@ -37,4 +37,24 @@ describe("validateSpec", () => {
   });
   it("rejects non-edit executionMode", () =>
     expect(validateSpec({ ...base, executionMode: "review" }).ok).toBe(false));
+  it("lists allowed values for enum validation errors", () => {
+    const result = validateSpec({
+      ...base,
+      verification: [{
+        id: "check",
+        executable: "npm",
+        args: ["test"],
+        cwd: ".",
+        timeoutMs: 60000,
+        network: "deny",
+        expectedExitCodes: [0],
+      }],
+    });
+
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    const error = result.errors.find(e => e.path.includes("network"));
+    expect(error?.message).toContain("allowed values: ");
+    expect(error?.message).toContain("denied");
+  });
 });

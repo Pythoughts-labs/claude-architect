@@ -7,8 +7,13 @@ export type ValidateResult =
 export function validateSpec(input: unknown): ValidateResult {
   const ok = schemas.delegationSpec(input);
   if (ok) return { ok: true, spec: input as DelegationSpec };
-  const errors = (schemas.delegationSpec.errors ?? []).map(e => ({
-    path: e.instancePath || e.schemaPath, message: e.message ?? "invalid",
-  }));
+  const errors = (schemas.delegationSpec.errors ?? []).map(e => {
+    let message = e.message ?? "invalid";
+    const allowed = (e.params as Record<string, unknown> | undefined)?.allowedValues;
+    if (Array.isArray(allowed)) {
+      message = `${message} (allowed values: ${allowed.map(String).join(", ")})`;
+    }
+    return { path: e.instancePath || e.schemaPath, message };
+  });
   return { ok: false, errors };
 }
