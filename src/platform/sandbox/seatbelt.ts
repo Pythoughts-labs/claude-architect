@@ -9,6 +9,20 @@ export interface SeatbeltPolicy {
   allowNetwork: boolean;
 }
 
+/**
+ * Builds a policy for read-only roles such as reviewers and clean-room verifiers.
+ * The producer may write only to its temp home; the worktree and repo remain read-only.
+ */
+export function buildReadOnlySeatbeltPolicy(
+  args: { tempHome: string | null },
+): SeatbeltPolicy {
+  return {
+    worktreePath: "",
+    tempHome: args.tempHome,
+    allowNetwork: false,
+  };
+}
+
 function sbPath(path: string): string {
   for (const character of path) {
     const codePoint = character.codePointAt(0);

@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import type { ProducerInvocation } from "../../src/producers/producer-adapter.js";
 import {
+  buildReadOnlySeatbeltPolicy,
   buildSeatbeltProfile,
   wrapInvocationWithSeatbelt,
 } from "../../src/platform/sandbox/seatbelt.js";
@@ -188,5 +189,20 @@ describe("seatbelt profile", () => {
       "--dir",
       "/tmp/wt",
     ]);
+  });
+});
+
+describe("buildReadOnlySeatbeltPolicy", () => {
+  it("grants no write access to the worktree", () => {
+    const policy = buildReadOnlySeatbeltPolicy({ tempHome: "/tmp/role-home" });
+    const profile = buildSeatbeltProfile(policy);
+    expect(profile).toContain("(deny file-write*)");
+    expect(profile).toContain('(subpath "/tmp/role-home")');
+    expect(profile).not.toContain("worktrees");
+  });
+
+  it("works with no temp home at all", () => {
+    const profile = buildSeatbeltProfile(buildReadOnlySeatbeltPolicy({ tempHome: null }));
+    expect(profile).toContain("(deny file-write*)");
   });
 });
