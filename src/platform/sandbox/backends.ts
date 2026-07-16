@@ -20,6 +20,12 @@ export const SANDBOX_BACKENDS: SandboxBackend[] = [{
     { os: "linux", environmentType: "native", state: "tested" },
     { os: "win32", environmentType: "native", state: "unsupported" },
   ],
+}, {
+  id: "macos-seatbelt",
+  kind: "os",
+  platforms: [
+    { os: "darwin", environmentType: "native", state: "unsupported" }, // promoted in Task 6 with gate evidence
+  ],
 }];
 
 export function selectSandboxBackend(report: CapabilityReport):

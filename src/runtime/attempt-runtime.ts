@@ -20,6 +20,7 @@ import type {
 } from "../platform/platform-services.js";
 import { supervise } from "../platform/process-supervisor.js";
 import { selectSandboxBackend } from "../platform/sandbox/backends.js";
+import { wrapInvocationWithSeatbelt } from "../platform/sandbox/seatbelt.js";
 import { getPlatformServices } from "../platform/select-platform.js";
 import type {
   AttemptResult,
@@ -556,13 +557,14 @@ export async function runAttempt(
     );
     const profile = adapter.configurationProfile();
     if (shouldUseTemporaryHome(profile)) tempHome = await ps.createSecureTempDirectory();
-    const invocation = adapter.buildInvocation(spec, {
+    let invocation = adapter.buildInvocation(spec, {
       worktreePath: worktree.path,
       runId,
       ...(tempHome === null ? {} : { tempHome }),
       capabilityReport: report,
       executable: report.resolvedExecutable,
     });
+    let confinement: string | null = null;
     if (spec.executionMode === "edit") {
       const selection = selectSandboxBackend(report);
       if (selection.backend === null) {
@@ -588,6 +590,14 @@ export async function runAttempt(
           producerLog: producerLog(null),
           repositoryInstructions,
           packagedVerifier,
+        });
+      }
+      confinement = selection.backend.id;
+      if (selection.backend.kind === "os" && selection.backend.id === "macos-seatbelt") {
+        invocation = wrapInvocationWithSeatbelt(invocation, {
+          worktreePath: worktree.path,
+          tempHome,
+          allowNetwork: invocation.network === "allowed",
         });
       }
     }
@@ -616,7 +626,7 @@ export async function runAttempt(
     let candidate: CandidateArtifact | null = null;
     let commandOutcomes: CommandOutcome[] = [];
     let unresolvedIssues: string[] = [];
-    let evidence: Record<string, unknown> = {};
+    let evidence: Record<string, unknown> = confinement === null ? {} : { confinement };
     if (exit.spawnError !== undefined) signals["spawn-failure"] = true;
     if (exit.cancelled) signals.cancelled = true;
     if (exit.timedOut) signals.timeout = true;
@@ -643,12 +653,13 @@ export async function runAttempt(
         else signals["sandbox-violation"] = true;
         unresolvedIssues = [frozen.reason];
         evidence = {
+          ...evidence,
           freezeReject: frozen.reason,
           ...(frozen.paths === undefined ? {} : { freezeRejectPaths: frozen.paths }),
         };
       } else {
         candidate = frozen.artifact;
-        evidence = { ...frozen.evidence };
+        evidence = { ...evidence, ...frozen.evidence };
         try {
           reportPhase(deps, "verifying candidate");
           const verification = await deps.verifier.verify({

@@ -22608,6 +22608,13 @@ var SANDBOX_BACKENDS = [{
     { os: "linux", environmentType: "native", state: "tested" },
     { os: "win32", environmentType: "native", state: "unsupported" }
   ]
+}, {
+  id: "macos-seatbelt",
+  kind: "os",
+  platforms: [
+    { os: "darwin", environmentType: "native", state: "unsupported" }
+    // promoted in Task 6 with gate evidence
+  ]
 }];
 function selectSandboxBackend(report) {
   if (report.writeConfinementBackend === null) {
@@ -25503,6 +25510,53 @@ var WorktreeManager = class {
   }
 };
 
+// src/platform/sandbox/seatbelt.ts
+function sbPath(path11) {
+  for (const character of path11) {
+    const codePoint = character.codePointAt(0);
+    if (codePoint !== void 0 && (codePoint < 32 || codePoint === 127)) {
+      throw new Error(`seatbelt: control character in path: ${JSON.stringify(path11)}`);
+    }
+  }
+  return `"${path11.replace(/\\/gu, "\\\\").replace(/"/gu, '\\"')}"`;
+}
+function buildSeatbeltProfile(policy) {
+  const writable = [
+    policy.worktreePath,
+    policy.tempHome,
+    process.env.TMPDIR ?? "/private/tmp",
+    "/private/tmp",
+    "/dev"
+  ].filter((path11) => typeof path11 === "string" && path11.length > 0);
+  const lines = [
+    "(version 1)",
+    "(allow default)",
+    "(deny file-write*)",
+    ...writable.map((path11) => `(allow file-write* (subpath ${sbPath(path11)}))`),
+    '(allow file-write* (literal "/dev/null") (literal "/dev/tty"))'
+  ];
+  if (!policy.allowNetwork) lines.push("(deny network*)");
+  return lines.join("\n");
+}
+function wrapInvocationWithSeatbelt(invocation, policy) {
+  const profile = buildSeatbeltProfile(policy);
+  const inner = [
+    invocation.executable.command,
+    ...invocation.executable.prefixArgs,
+    ...invocation.args
+  ];
+  return {
+    ...invocation,
+    executable: {
+      kind: "native",
+      command: "/usr/bin/sandbox-exec",
+      prefixArgs: [],
+      resolvedFrom: `seatbelt:${invocation.executable.resolvedFrom}`
+    },
+    args: ["-p", profile, ...inner]
+  };
+}
+
 // src/protocol/attempt-result.ts
 var FAILURE_PRECEDENCE = [
   "invalid-specification",
@@ -26090,13 +26144,14 @@ async function runAttempt(checkoutPath, spec, deps) {
     );
     const profile = adapter.configurationProfile();
     if (shouldUseTemporaryHome(profile)) tempHome = await ps.createSecureTempDirectory();
-    const invocation = adapter.buildInvocation(spec, {
+    let invocation = adapter.buildInvocation(spec, {
       worktreePath: worktree.path,
       runId,
       ...tempHome === null ? {} : { tempHome },
       capabilityReport: report,
       executable: report.resolvedExecutable
     });
+    let confinement = null;
     if (spec.executionMode === "edit") {
       const selection = selectSandboxBackend(report);
       if (selection.backend === null) {
@@ -26124,6 +26179,14 @@ async function runAttempt(checkoutPath, spec, deps) {
           packagedVerifier
         });
       }
+      confinement = selection.backend.id;
+      if (selection.backend.kind === "os" && selection.backend.id === "macos-seatbelt") {
+        invocation = wrapInvocationWithSeatbelt(invocation, {
+          worktreePath: worktree.path,
+          tempHome,
+          allowNetwork: invocation.network === "allowed"
+        });
+      }
     }
     builtEnvironment = buildEnvironment({
       os: ps.os,
@@ -26147,7 +26210,7 @@ async function runAttempt(checkoutPath, spec, deps) {
     let candidate = null;
     let commandOutcomes = [];
     let unresolvedIssues = [];
-    let evidence = {};
+    let evidence = confinement === null ? {} : { confinement };
     if (exit.spawnError !== void 0) signals["spawn-failure"] = true;
     if (exit.cancelled) signals.cancelled = true;
     if (exit.timedOut) signals.timeout = true;
@@ -26172,12 +26235,13 @@ async function runAttempt(checkoutPath, spec, deps) {
         else signals["sandbox-violation"] = true;
         unresolvedIssues = [frozen.reason];
         evidence = {
+          ...evidence,
           freezeReject: frozen.reason,
           ...frozen.paths === void 0 ? {} : { freezeRejectPaths: frozen.paths }
         };
       } else {
         candidate = frozen.artifact;
-        evidence = { ...frozen.evidence };
+        evidence = { ...evidence, ...frozen.evidence };
         try {
           reportPhase(deps, "verifying candidate");
           const verification = await deps.verifier.verify({

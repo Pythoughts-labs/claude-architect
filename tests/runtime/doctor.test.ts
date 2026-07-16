@@ -73,6 +73,10 @@ describe("doctor", () => {
         id: "codex-native-sandbox",
         kind: "producer-native",
         state: "certified",
+      }, {
+        id: "macos-seatbelt",
+        kind: "os",
+        state: "unsupported",
       }],
       runtimeVersion: RUNTIME_VERSION,
       schemaVersion: DELEGATION_SPEC_VERSION,
@@ -120,6 +124,10 @@ describe("doctor", () => {
     expect(result.sandboxBackends).toEqual([{
       id: "codex-native-sandbox",
       kind: "producer-native",
+      state: "unsupported",
+    }, {
+      id: "macos-seatbelt",
+      kind: "os",
       state: "unsupported",
     }]);
   });
