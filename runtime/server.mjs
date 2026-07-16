@@ -22619,8 +22619,11 @@ var SANDBOX_BACKENDS = [{
   id: "macos-seatbelt",
   kind: "os",
   platforms: [
+    // Certified 2026-07-16 on darwin/arm64 via the opt-in RUN_SEATBELT_CONFINEMENT_GATE
+    // test (worktree write permitted, outside write blocked). Other darwin arches
+    // remain unsupported until they produce the same gate evidence.
+    { os: "darwin", arch: "arm64", environmentType: "native", state: "certified" },
     { os: "darwin", environmentType: "native", state: "unsupported" }
-    // promoted in Task 6 with gate evidence
   ]
 }];
 function selectSandboxBackend(report) {
@@ -27645,8 +27648,13 @@ async function runRole(args) {
   }
   const readOnly = READ_ONLY_ROLES.has(args.role);
   if (readOnly) {
-    const selection = selectSandboxBackend(report);
-    if (selection.backend === null || selection.backend.kind !== "os") {
+    const osBackend = selectOsWriteConfinementBackend({
+      ps: args.ps,
+      os: args.ps.os,
+      arch: process.arch,
+      environmentType: detectEnvironmentType()
+    });
+    if (osBackend === null) {
       return {
         ok: false,
         rawOutput: "",

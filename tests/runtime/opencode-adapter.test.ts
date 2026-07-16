@@ -213,8 +213,8 @@ describe("OpenCodeAdapter", () => {
       reason: null,
       version: "1.2.3",
       structuredOutput: false,
-      writeConfinementBackend: null,
-      laneEligibility: { edit: false },
+      writeConfinementBackend: "macos-seatbelt",
+      laneEligibility: { edit: true },
     });
   });
 
@@ -616,9 +616,20 @@ describe("OpenCodeAdapter", () => {
 });
 
 describe("selectOsWriteConfinementBackend", () => {
-  it("returns null for the current unsupported macOS seatbelt registry row", () => {
+  it("returns the certified seatbelt backend on darwin/arm64", () => {
     expect(selectOsWriteConfinementBackend(probeContext(
       unavailablePlatformServices(),
-    ))).toBeNull();
+    ))).toBe("macos-seatbelt");
+  });
+
+  it("returns null for an uncertified host row", () => {
+    expect(selectOsWriteConfinementBackend({
+      ...probeContext(unavailablePlatformServices()),
+      arch: "x64",
+    })).toBeNull();
+    expect(selectOsWriteConfinementBackend({
+      ...probeContext(unavailablePlatformServices()),
+      os: "linux",
+    })).toBeNull();
   });
 });

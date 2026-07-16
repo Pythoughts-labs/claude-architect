@@ -148,7 +148,7 @@ class FakeAdapter implements ProducerAdapter {
 
 const temporaryPaths: string[] = [];
 let previousNodeEnvironment: string | undefined;
-let previousSeatbeltState: "certified" | "tested" | "unsupported" | undefined;
+let previousSeatbeltStates: Array<"certified" | "tested" | "unsupported"> | undefined;
 let worktreePath = "";
 
 async function temporaryDirectory(prefix: string): Promise<string> {
@@ -243,11 +243,11 @@ beforeEach(async () => {
   worktreePath = await temporaryDirectory("ca-role-worktree-");
 
   const seatbelt = SANDBOX_BACKENDS.find(backend => backend.id === "macos-seatbelt");
-  const darwin = seatbelt?.platforms.find(platform =>
-    platform.os === "darwin" && platform.environmentType === "native");
-  if (darwin === undefined) throw new Error("macOS Seatbelt test backend is missing");
-  previousSeatbeltState = darwin.state;
-  darwin.state = "tested";
+  if (seatbelt === undefined) throw new Error("macOS Seatbelt test backend is missing");
+  // runRole checks the HOST arch (process.arch), so every darwin entry must be
+  // promoted for these tests to behave identically on arm64 and x64 CI hosts.
+  previousSeatbeltStates = seatbelt.platforms.map(platform => platform.state);
+  for (const platform of seatbelt.platforms) platform.state = "tested";
 });
 
 afterEach(async () => {
@@ -255,12 +255,13 @@ afterEach(async () => {
   else process.env.NODE_ENV = previousNodeEnvironment;
 
   const seatbelt = SANDBOX_BACKENDS.find(backend => backend.id === "macos-seatbelt");
-  const darwin = seatbelt?.platforms.find(platform =>
-    platform.os === "darwin" && platform.environmentType === "native");
-  if (darwin !== undefined && previousSeatbeltState !== undefined) {
-    darwin.state = previousSeatbeltState;
+  if (seatbelt !== undefined && previousSeatbeltStates !== undefined) {
+    seatbelt.platforms.forEach((platform, index) => {
+      const saved = previousSeatbeltStates?.[index];
+      if (saved !== undefined) platform.state = saved;
+    });
   }
-  previousSeatbeltState = undefined;
+  previousSeatbeltStates = undefined;
 
   await Promise.all(temporaryPaths.splice(0).map(path =>
     rm(path, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })));
@@ -279,7 +280,9 @@ describe("runRole", () => {
     expect(adapter.spawnedCommands).toEqual(["/usr/bin/sandbox-exec"]);
   });
 
-  it("fails closed when a read-only role has no OS sandbox backend", async () => {
+  it("fails closed when the HOST has no OS sandbox backend", async () => {
+    const seatbelt = SANDBOX_BACKENDS.find(backend => backend.id === "macos-seatbelt");
+    for (const platform of seatbelt?.platforms ?? []) platform.state = "unsupported";
     const adapter = new FakeAdapter({ writeConfinementBackend: null });
 
     const result = await runRole(argsWith(adapter, "reviewer-systems"));
@@ -288,6 +291,21 @@ describe("runRole", () => {
     expect(result.failure).toBe("sandbox-violation");
     expect(adapter.invocationCount).toBe(0);
     expect(adapter.spawnCount).toBe(0);
+  });
+
+  it("runs a read-only role for a producer that reports only its own native backend", async () => {
+    // Regression: real Codex reports codex-native-sandbox (producer-native).
+    // Read-only confinement is the HOST's seatbelt wrap, so the role must run.
+    const adapter = new FakeAdapter({
+      cannedStdout: REVIEW_OUTPUT,
+      writeConfinementBackend: "codex-native-sandbox",
+    });
+
+    const result = await runRole(argsWith(adapter, "reviewer-correctness"));
+
+    expect(result.ok).toBe(true);
+    expect(result.failure).toBeNull();
+    expect(adapter.spawnedCommands).toEqual(["/usr/bin/sandbox-exec"]);
   });
 
   it("retries exactly once on process failure, then reports failure", async () => {

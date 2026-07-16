@@ -217,8 +217,8 @@ describe("PiAdapter", () => {
       reason: null,
       version: "0.80.7",
       structuredOutput: false,
-      writeConfinementBackend: null,
-      laneEligibility: { edit: false },
+      writeConfinementBackend: "macos-seatbelt",
+      laneEligibility: { edit: true },
     });
     expect(report.laneEligibility.edit).toBe(report.writeConfinementBackend !== null);
   });

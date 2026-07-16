@@ -76,7 +76,7 @@ describe("doctor", () => {
       }, {
         id: "macos-seatbelt",
         kind: "os",
-        state: "unsupported",
+        state: "certified",
       }],
       runtimeVersion: RUNTIME_VERSION,
       schemaVersion: DELEGATION_SPEC_VERSION,
