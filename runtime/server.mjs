@@ -22913,6 +22913,483 @@ var CodexAdapter = class {
   }
 };
 
+// src/producers/opencode-adapter.ts
+import { existsSync as existsSync2 } from "node:fs";
+import { homedir as homedir2 } from "node:os";
+import { join as join2 } from "node:path";
+
+// src/producers/plain-text.ts
+import { open as open2 } from "node:fs/promises";
+var PLAIN_TEXT_LIMIT = 8e3;
+function renderList2(values) {
+  return values.length === 0 ? "- (none)" : values.map((value) => `- ${value}`).join("\n");
+}
+function renderProducerPrompt(spec) {
+  return [
+    "You are an untrusted implementation Producer operating inside an isolated worktree.",
+    "Do not delegate to other agents or expand the authorized scope.",
+    "",
+    "Objective:",
+    spec.objective,
+    "",
+    "Context:",
+    spec.context,
+    "",
+    "Authorized write allowlist:",
+    renderList2(spec.writeAllowlist),
+    "",
+    "Forbidden scope:",
+    renderList2(spec.forbiddenScope),
+    "",
+    "Success criteria:",
+    renderList2(spec.successCriteria),
+    "",
+    "Make only the requested edits. Return a concise final summary of the work performed."
+  ].join("\n");
+}
+function normalizePlainText(raw) {
+  if (raw.exit.truncated.stdout) {
+    return {
+      events: [{ kind: "error", text: "stdout-truncated" }],
+      producerSummary: null,
+      ok: false
+    };
+  }
+  if (raw.exit.exitCode !== 0) {
+    return {
+      events: [{ kind: "error", text: raw.stderr.slice(-PLAIN_TEXT_LIMIT) }],
+      producerSummary: null,
+      ok: false
+    };
+  }
+  const trimmed = raw.stdout.trim();
+  const summary = trimmed.length > PLAIN_TEXT_LIMIT ? trimmed.slice(-PLAIN_TEXT_LIMIT) : trimmed;
+  if (summary.length === 0) return { events: [], producerSummary: null, ok: false };
+  return {
+    events: [{ kind: "final", text: summary }],
+    producerSummary: summary,
+    ok: true
+  };
+}
+async function normalizeNodeShim(executable) {
+  if (executable.kind !== "native") return executable;
+  let handle;
+  try {
+    handle = await open2(executable.command, "r");
+    const buffer = Buffer.alloc(256);
+    const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);
+    const firstLine = buffer.subarray(0, bytesRead).toString("utf8").split(/\r?\n/u, 1)[0] ?? "";
+    if (!/^#![^\r\n]*\bnode(?:\s|$)/u.test(firstLine)) return executable;
+    return {
+      kind: "node-entrypoint",
+      command: process.execPath,
+      prefixArgs: [executable.command, ...executable.prefixArgs],
+      resolvedFrom: `${executable.resolvedFrom};node:${process.execPath}`
+    };
+  } catch {
+    return executable;
+  } finally {
+    await handle?.close();
+  }
+}
+function selectOsWriteConfinementBackend(ctx) {
+  const backend = SANDBOX_BACKENDS.find((candidate) => candidate.id === "macos-seatbelt" && candidate.platforms.some((platform) => platform.os === ctx.os && platform.environmentType === ctx.environmentType && (platform.arch === void 0 || platform.arch === ctx.arch) && (platform.state === "certified" || platform.state === "tested")));
+  return backend?.id ?? null;
+}
+
+// src/producers/opencode-adapter.ts
+var OPENCODE_REQUIRED_ENV = ["OPENCODE_CONFIG_DIR", "XDG_DATA_HOME"];
+var VERSION_TIMEOUT_MS2 = 1e4;
+var VERSION_OUTPUT_LIMIT2 = 64 * 1024;
+function unavailableReport2(ctx, reason, resolvedExecutable = null) {
+  return {
+    producerId: "opencode",
+    available: false,
+    reason,
+    os: ctx.os,
+    arch: ctx.arch,
+    environmentType: ctx.environmentType,
+    resolvedExecutable,
+    version: null,
+    authState: "unknown",
+    executionModes: ["edit"],
+    structuredOutput: false,
+    writeConfinementBackend: null,
+    laneEligibility: { edit: false }
+  };
+}
+function parseVersion2(stdout) {
+  const match = /(?:^|\s)(\d+\.\d+\.\d+(?:[-+][^\s]+)?)(?:\s|$)/u.exec(stdout.trim());
+  return match?.[1] ?? null;
+}
+function defaultOpenCodeEnv(deps) {
+  if (deps.env.XDG_DATA_HOME !== void 0) return {};
+  const dataHome = join2(deps.homeDirectory, ".local", "share");
+  return deps.hasAuthStore(join2(dataHome, "opencode")) ? { XDG_DATA_HOME: dataHome } : {};
+}
+var OpenCodeAdapter = class {
+  constructor(deps = {
+    env: process.env,
+    homeDirectory: homedir2()
+  }) {
+    this.deps = deps;
+  }
+  producerId = "opencode";
+  structuredOutput = false;
+  executionModes = ["edit"];
+  hasAuthStore(directory) {
+    return (this.deps.hasAuthStore ?? ((store) => existsSync2(join2(store, "auth.json"))))(directory);
+  }
+  async probe(ctx) {
+    if (ctx.os === "win32") return unavailableReport2(ctx, "unsupported-platform");
+    let executable;
+    try {
+      executable = await normalizeNodeShim(
+        await ctx.ps.resolveExecutable({ name: "opencode" })
+      );
+    } catch {
+      return unavailableReport2(ctx, "missing-executable");
+    }
+    try {
+      const result = await supervise(ctx.ps, {
+        executable,
+        args: ["--version"],
+        cwd: process.cwd(),
+        env: {},
+        timeoutMs: VERSION_TIMEOUT_MS2,
+        maxOutputBytes: VERSION_OUTPUT_LIMIT2
+      }, {});
+      const version2 = result.spawnError === void 0 && result.exitCode === 0 ? parseVersion2(result.stdout) : null;
+      if (version2 === null) return unavailableReport2(ctx, "probe-failed", executable);
+      const writeConfinementBackend = selectOsWriteConfinementBackend(ctx);
+      const authStore = join2(this.deps.homeDirectory, ".local", "share", "opencode");
+      const authState = this.hasAuthStore(authStore) ? "authenticated" : "unauthenticated";
+      return {
+        producerId: this.producerId,
+        available: true,
+        reason: null,
+        os: ctx.os,
+        arch: ctx.arch,
+        environmentType: ctx.environmentType,
+        resolvedExecutable: executable,
+        version: version2,
+        authState,
+        executionModes: [...this.executionModes],
+        structuredOutput: this.structuredOutput,
+        writeConfinementBackend,
+        laneEligibility: { edit: writeConfinementBackend !== null }
+      };
+    } catch {
+      return unavailableReport2(ctx, "probe-failed", executable);
+    }
+  }
+  buildInvocation(spec, ctx) {
+    const args = [
+      "run",
+      "--dir",
+      ctx.worktreePath,
+      "--agent",
+      "build",
+      "--auto",
+      "--log-level",
+      "ERROR"
+    ];
+    if (spec.producerOverrides?.model !== void 0) {
+      args.push("--model", spec.producerOverrides.model);
+    }
+    return {
+      executable: ctx.executable,
+      args,
+      stdin: renderProducerPrompt(spec),
+      requiredEnv: [...OPENCODE_REQUIRED_ENV],
+      env: defaultOpenCodeEnv({
+        env: this.deps.env,
+        homeDirectory: this.deps.homeDirectory,
+        hasAuthStore: (directory) => this.hasAuthStore(directory)
+      }),
+      network: "denied"
+    };
+  }
+  normalizeEvents(raw) {
+    return normalizePlainText(raw);
+  }
+  configurationProfile() {
+    return {
+      isolationState: "controlled-config-with-copied-credentials",
+      credentialSources: ["~/.local/share/opencode/auth.json"],
+      behavioralConfigSources: ["explicit invocation argv"],
+      repositoryInstructionSources: ["worktree AGENTS.md"],
+      environmentDependencies: [...OPENCODE_REQUIRED_ENV],
+      temporaryHomeStrategy: "temp HOME with XDG_DATA_HOME passthrough for the auth store"
+    };
+  }
+};
+
+// src/producers/pi-adapter.ts
+import { existsSync as existsSync3 } from "node:fs";
+import { homedir as homedir3 } from "node:os";
+import { join as join3 } from "node:path";
+var PI_REQUIRED_ENV = ["PI_API_KEY"];
+var VERSION_TIMEOUT_MS3 = 1e4;
+var VERSION_OUTPUT_LIMIT3 = 64 * 1024;
+function unavailableReport3(ctx, reason, resolvedExecutable = null) {
+  return {
+    producerId: "pi",
+    available: false,
+    reason,
+    os: ctx.os,
+    arch: ctx.arch,
+    environmentType: ctx.environmentType,
+    resolvedExecutable,
+    version: null,
+    authState: "unknown",
+    executionModes: ["edit"],
+    structuredOutput: false,
+    writeConfinementBackend: null,
+    laneEligibility: { edit: false }
+  };
+}
+function parseVersion3(stdout) {
+  const match = /(?:^|\s)(\d+\.\d+\.\d+(?:[-+][^\s]+)?)(?:\s|$)/u.exec(stdout.trim());
+  return match?.[1] ?? null;
+}
+function defaultPiEnv(deps) {
+  if (deps.env.HOME !== void 0) return {};
+  return deps.hasConfigDir(join3(deps.homeDirectory, ".pi")) ? { HOME: deps.homeDirectory } : {};
+}
+var PiAdapter = class {
+  constructor(deps = {
+    env: process.env,
+    homeDirectory: homedir3()
+  }) {
+    this.deps = deps;
+  }
+  producerId = "pi";
+  structuredOutput = false;
+  executionModes = ["edit"];
+  hasAuthStore(directory) {
+    return (this.deps.hasAuthStore ?? ((store) => existsSync3(join3(store, "auth.json"))))(directory);
+  }
+  hasConfigDir(directory) {
+    return existsSync3(directory);
+  }
+  async probe(ctx) {
+    if (ctx.os === "win32") return unavailableReport3(ctx, "unsupported-platform");
+    let executable;
+    try {
+      executable = await normalizeNodeShim(
+        await ctx.ps.resolveExecutable({ name: "pi" })
+      );
+    } catch {
+      return unavailableReport3(ctx, "missing-executable");
+    }
+    try {
+      const result = await supervise(ctx.ps, {
+        executable,
+        args: ["--version"],
+        cwd: process.cwd(),
+        env: {},
+        timeoutMs: VERSION_TIMEOUT_MS3,
+        maxOutputBytes: VERSION_OUTPUT_LIMIT3
+      }, {});
+      const version2 = result.spawnError === void 0 && result.exitCode === 0 ? parseVersion3(result.stdout) : null;
+      if (version2 === null) return unavailableReport3(ctx, "probe-failed", executable);
+      const writeConfinementBackend = selectOsWriteConfinementBackend(ctx);
+      const authStore = join3(this.deps.homeDirectory, ".pi", "agent");
+      const authState = this.hasAuthStore(authStore) ? "authenticated" : "unauthenticated";
+      return {
+        producerId: this.producerId,
+        available: true,
+        reason: null,
+        os: ctx.os,
+        arch: ctx.arch,
+        environmentType: ctx.environmentType,
+        resolvedExecutable: executable,
+        version: version2,
+        authState,
+        executionModes: [...this.executionModes],
+        structuredOutput: this.structuredOutput,
+        writeConfinementBackend,
+        laneEligibility: { edit: writeConfinementBackend !== null }
+      };
+    } catch {
+      return unavailableReport3(ctx, "probe-failed", executable);
+    }
+  }
+  buildInvocation(spec, ctx) {
+    const args = [
+      "-p",
+      "--no-session",
+      "--no-skills",
+      "--tools",
+      "read,bash,edit,write,grep,find,ls"
+    ];
+    if (spec.producerOverrides?.model !== void 0) {
+      args.push("--model", spec.producerOverrides.model);
+    }
+    if (spec.producerOverrides?.reasoningEffort !== void 0) {
+      args.push("--thinking", spec.producerOverrides.reasoningEffort);
+    }
+    return {
+      executable: ctx.executable,
+      args,
+      stdin: renderProducerPrompt(spec),
+      requiredEnv: [...PI_REQUIRED_ENV],
+      env: defaultPiEnv({
+        env: this.deps.env,
+        homeDirectory: this.deps.homeDirectory,
+        hasConfigDir: (directory) => this.hasConfigDir(directory)
+      }),
+      network: "denied"
+    };
+  }
+  normalizeEvents(raw) {
+    return normalizePlainText(raw);
+  }
+  configurationProfile() {
+    return {
+      isolationState: "inherited-config-only",
+      credentialSources: ["~/.pi/agent/auth.json"],
+      behavioralConfigSources: ["~/.pi/agent/settings.json", "~/.pi/agent/models.json"],
+      repositoryInstructionSources: ["worktree AGENTS.md"],
+      environmentDependencies: [...PI_REQUIRED_ENV],
+      temporaryHomeStrategy: "real HOME inherited by declared policy; reduced reproducibility recorded in the Run Manifest"
+    };
+  }
+};
+
+// src/producers/pythinker-adapter.ts
+import { existsSync as existsSync4 } from "node:fs";
+import { homedir as homedir4 } from "node:os";
+import { join as join4 } from "node:path";
+var VERSION_TIMEOUT_MS4 = 1e4;
+var VERSION_OUTPUT_LIMIT4 = 64 * 1024;
+function unavailableReport4(ctx, reason, resolvedExecutable = null) {
+  return {
+    producerId: "pythinker",
+    available: false,
+    reason,
+    os: ctx.os,
+    arch: ctx.arch,
+    environmentType: ctx.environmentType,
+    resolvedExecutable,
+    version: null,
+    authState: "unknown",
+    executionModes: ["edit"],
+    structuredOutput: false,
+    writeConfinementBackend: null,
+    laneEligibility: { edit: false }
+  };
+}
+function parseVersion4(stdout) {
+  const match = /(?:^|\s)(\d+\.\d+\.\d+(?:[-+][^\s]+)?)(?:\s|$)/u.exec(stdout.trim());
+  return match?.[1] ?? /\d+\.\d+\.\d+(?:[-+][^\s]+)?/u.exec(stdout)?.[0] ?? null;
+}
+function defaultPythinkerEnv(deps) {
+  if (deps.env.HOME !== void 0) return {};
+  return deps.hasConfigDir(join4(deps.homeDirectory, ".pythinker")) ? { HOME: deps.homeDirectory } : {};
+}
+var PythinkerAdapter = class {
+  constructor(deps = {
+    env: process.env,
+    homeDirectory: homedir4()
+  }) {
+    this.deps = deps;
+  }
+  producerId = "pythinker";
+  structuredOutput = false;
+  executionModes = ["edit"];
+  hasAuthStore(directory) {
+    return (this.deps.hasAuthStore ?? ((store) => existsSync4(join4(store, "auth.json"))))(directory);
+  }
+  hasConfigDir(directory) {
+    return existsSync4(directory);
+  }
+  async probe(ctx) {
+    if (ctx.os === "win32") return unavailableReport4(ctx, "unsupported-platform");
+    let executable;
+    try {
+      executable = await normalizeNodeShim(
+        await ctx.ps.resolveExecutable({ name: "pythinker" })
+      );
+    } catch {
+      return unavailableReport4(ctx, "missing-executable");
+    }
+    try {
+      const result = await supervise(ctx.ps, {
+        executable,
+        args: ["--version"],
+        cwd: process.cwd(),
+        env: {},
+        timeoutMs: VERSION_TIMEOUT_MS4,
+        maxOutputBytes: VERSION_OUTPUT_LIMIT4
+      }, {});
+      const version2 = result.spawnError === void 0 && result.exitCode === 0 ? parseVersion4(result.stdout) : null;
+      if (version2 === null) return unavailableReport4(ctx, "probe-failed", executable);
+      const writeConfinementBackend = selectOsWriteConfinementBackend(ctx);
+      const authStore = join4(this.deps.homeDirectory, ".pythinker");
+      const authState = this.hasAuthStore(authStore) ? "authenticated" : "unauthenticated";
+      return {
+        producerId: this.producerId,
+        available: true,
+        reason: null,
+        os: ctx.os,
+        arch: ctx.arch,
+        environmentType: ctx.environmentType,
+        resolvedExecutable: executable,
+        version: version2,
+        authState,
+        executionModes: [...this.executionModes],
+        structuredOutput: this.structuredOutput,
+        writeConfinementBackend,
+        laneEligibility: { edit: writeConfinementBackend !== null }
+      };
+    } catch {
+      return unavailableReport4(ctx, "probe-failed", executable);
+    }
+  }
+  buildInvocation(spec, ctx) {
+    const args = [
+      "--quiet",
+      "--yolo",
+      "--work-dir",
+      ctx.worktreePath,
+      "--prompt",
+      renderProducerPrompt(spec)
+    ];
+    if (spec.producerOverrides?.model !== void 0) {
+      args.push("--model", spec.producerOverrides.model);
+    }
+    if (spec.producerOverrides?.reasoningEffort !== void 0) {
+      args.push("--thinking-effort", spec.producerOverrides.reasoningEffort);
+    }
+    return {
+      executable: ctx.executable,
+      args,
+      requiredEnv: [],
+      env: defaultPythinkerEnv({
+        env: this.deps.env,
+        homeDirectory: this.deps.homeDirectory,
+        hasConfigDir: (directory) => this.hasConfigDir(directory)
+      }),
+      network: "denied"
+    };
+  }
+  normalizeEvents(raw) {
+    return normalizePlainText(raw);
+  }
+  configurationProfile() {
+    return {
+      isolationState: "inherited-config-only",
+      credentialSources: ["~/.pythinker/auth.json"],
+      behavioralConfigSources: ["~/.pythinker/config.toml"],
+      repositoryInstructionSources: ["worktree AGENTS.md"],
+      environmentDependencies: [],
+      temporaryHomeStrategy: "real HOME inherited by declared policy; reduced reproducibility recorded in the Run Manifest"
+    };
+  }
+};
+
 // src/producers/producer-registry.ts
 var ProducerRegistry = class {
   adapters;
@@ -22926,7 +23403,7 @@ var ProducerRegistry = class {
     return [...this.adapters];
   }
 };
-var registry2 = new ProducerRegistry([new CodexAdapter()]);
+var registry2 = new ProducerRegistry([new CodexAdapter(), new OpenCodeAdapter(), new PiAdapter(), new PythinkerAdapter()]);
 
 // src/producers/capability-probe.ts
 async function probeAll(ctx, producerRegistry = registry2) {
@@ -24136,7 +24613,7 @@ import {
   link,
   lstat as lstat2,
   mkdir,
-  open as open2,
+  open as open3,
   opendir as opendir2,
   readdir,
   realpath as realpath2,
@@ -24360,7 +24837,7 @@ async function assertDirectoryIdentity(directory, expected) {
 async function syncDirectory(directory) {
   let handle;
   try {
-    handle = await open2(directory, constants2.O_RDONLY | NO_FOLLOW);
+    handle = await open3(directory, constants2.O_RDONLY | NO_FOLLOW);
     await handle.sync();
   } catch (error2) {
     const unsupportedOnWindows = process.platform === "win32" && ["EISDIR", "EINVAL", "ENOTSUP", "EPERM"].includes(errorCode2(error2) ?? "");
@@ -24370,7 +24847,7 @@ async function syncDirectory(directory) {
   }
 }
 async function readRegularFile(filename, parentIdentity) {
-  const handle = await open2(filename, constants2.O_RDONLY | NO_FOLLOW);
+  const handle = await open3(filename, constants2.O_RDONLY | NO_FOLLOW);
   try {
     if (parentIdentity !== void 0) {
       await assertDirectoryIdentity(path4.dirname(filename), parentIdentity);
@@ -24677,7 +25154,7 @@ var ArtifactStore = class {
     let temporaryCreated = false;
     try {
       await assertDirectoryIdentity(directory, directoryIdentity);
-      handle = await open2(
+      handle = await open3(
         temporaryPath,
         constants2.O_WRONLY | constants2.O_CREAT | constants2.O_EXCL | NO_FOLLOW,
         384
@@ -24730,7 +25207,7 @@ var ArtifactStore = class {
     let temporaryCreated = false;
     try {
       await assertDirectoryIdentity(directory, directoryIdentity);
-      handle = await open2(
+      handle = await open3(
         temporaryPath,
         constants2.O_WRONLY | constants2.O_CREAT | constants2.O_EXCL | NO_FOLLOW,
         384
@@ -25020,7 +25497,7 @@ var ArtifactStore = class {
       await this.ensureRunsRoot();
       const runsRootIdentity = await ensurePlainDirectory(this.runsRoot);
       const filename = path4.join(this.runsRoot, CLEANUP_JOURNAL);
-      const handle = await open2(
+      const handle = await open3(
         filename,
         constants2.O_WRONLY | constants2.O_CREAT | constants2.O_APPEND | NO_FOLLOW,
         384
@@ -25178,7 +25655,7 @@ import { randomUUID as randomUUID2 } from "node:crypto";
 import { constants as constants3 } from "node:fs";
 import {
   lstat as lstat4,
-  open as open3,
+  open as open4,
   realpath as realpath3,
   rename as rename2,
   rm as rm3
@@ -25847,7 +26324,7 @@ function assertDirectoryIdentity2(target) {
 async function syncDirectory2(directory) {
   let handle;
   try {
-    handle = await open3(directory, constants3.O_RDONLY | NO_FOLLOW2);
+    handle = await open4(directory, constants3.O_RDONLY | NO_FOLLOW2);
     await handle.sync();
   } catch (error2) {
     const unsupportedOnWindows = process.platform === "win32" && ["EISDIR", "EINVAL", "ENOTSUP", "EPERM"].includes(errorCode3(error2) ?? "");
@@ -25862,7 +26339,7 @@ async function writeRunStart(target, record2, create) {
   const serialized = `${JSON.stringify(record2, null, 2)}
 `;
   if (create) {
-    const handle2 = await open3(
+    const handle2 = await open4(
       destination,
       constants3.O_WRONLY | constants3.O_CREAT | constants3.O_EXCL | NO_FOLLOW2,
       384
@@ -25884,7 +26361,7 @@ async function writeRunStart(target, record2, create) {
   let created = false;
   let handle;
   try {
-    handle = await open3(
+    handle = await open4(
       temporaryPath,
       constants3.O_WRONLY | constants3.O_CREAT | constants3.O_EXCL | NO_FOLLOW2,
       384
@@ -26954,7 +27431,7 @@ import { createHash as createHash8 } from "node:crypto";
 import { constants as constants4 } from "node:fs";
 import {
   lstat as lstat5,
-  open as open4,
+  open as open5,
   readdir as readdir2,
   realpath as realpath5,
   rm as rm4
@@ -27004,7 +27481,7 @@ async function stateRoot() {
 async function readBoundedRegularFile(filename) {
   let handle;
   try {
-    handle = await open4(filename, constants4.O_RDONLY | NO_FOLLOW3);
+    handle = await open5(filename, constants4.O_RDONLY | NO_FOLLOW3);
     const metadata = await handle.stat();
     if (!metadata.isFile() || metadata.size > MAX_STATE_FILE_BYTES) {
       throw new RuntimeError("recovery state entry is not a bounded regular file");
@@ -27020,7 +27497,7 @@ async function readBoundedRegularFile(filename) {
 async function readCleanupJournal(filename) {
   let handle;
   try {
-    handle = await open4(filename, constants4.O_RDWR | NO_FOLLOW3);
+    handle = await open5(filename, constants4.O_RDWR | NO_FOLLOW3);
     const metadata = await handle.stat();
     if (!metadata.isFile() || metadata.size > MAX_STATE_FILE_BYTES) {
       throw new RuntimeError("cleanup journal is not a bounded regular file");
@@ -27194,7 +27671,7 @@ async function appendCleanupRecord(runsRoot, record2) {
   const identity = await plainDirectoryIdentity(runsRoot);
   if (identity === null) throw new RuntimeError("cleanup journal root disappeared");
   const filename = path10.join(runsRoot, "cleanup.ndjson");
-  const handle = await open4(
+  const handle = await open5(
     filename,
     constants4.O_WRONLY | constants4.O_CREAT | constants4.O_APPEND | NO_FOLLOW3,
     384

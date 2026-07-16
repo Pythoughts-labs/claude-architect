@@ -1,5 +1,8 @@
 import { CodexAdapter } from "./codex-adapter.js";
+import { OpenCodeAdapter } from "./opencode-adapter.js";
+import { PiAdapter } from "./pi-adapter.js";
 import type { ProducerAdapter } from "./producer-adapter.js";
+import { PythinkerAdapter } from "./pythinker-adapter.js";
 
 export class ProducerRegistry {
   private readonly adapters: ProducerAdapter[];
@@ -17,4 +20,4 @@ export class ProducerRegistry {
   }
 }
 
-export const registry = new ProducerRegistry([new CodexAdapter()]);
+export const registry = new ProducerRegistry([new CodexAdapter(), new OpenCodeAdapter(), new PiAdapter(), new PythinkerAdapter()]);

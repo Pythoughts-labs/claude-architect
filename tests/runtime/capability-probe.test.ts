@@ -67,6 +67,12 @@ describe("ProducerRegistry", () => {
     expect(testRegistry.get("pi")).toBeUndefined();
     expect(testRegistry.all()).toEqual([adapter]);
     expect(registry.get("codex")).toBeInstanceOf(CodexAdapter);
+    expect(registry.all().map(adapter => adapter.producerId)).toEqual([
+      "codex",
+      "opencode",
+      "pi",
+      "pythinker",
+    ]);
   });
 });
 
