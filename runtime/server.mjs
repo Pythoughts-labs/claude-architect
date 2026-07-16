@@ -24802,6 +24802,7 @@ function checkVersionCompat(skillProtocolVersion) {
 import { randomUUID as randomUUID2 } from "node:crypto";
 import { constants as constants3 } from "node:fs";
 import {
+  access as access2,
   lstat as lstat4,
   open as open4,
   realpath as realpath3,
@@ -24809,6 +24810,7 @@ import {
   rm as rm3
 } from "node:fs/promises";
 import path8 from "node:path";
+import { fileURLToPath as fileURLToPath2 } from "node:url";
 
 // src/git/candidate-tree.ts
 import { createHash as createHash4 } from "node:crypto";
@@ -26535,6 +26537,22 @@ function shouldUseTemporaryHome(profile) {
 function errorCode3(error2) {
   return error2.code;
 }
+async function resolveWatchdogPath() {
+  const candidates = [
+    new URL("../../runtime/watchdog.mjs", import.meta.url),
+    new URL("./watchdog.mjs", import.meta.url)
+  ];
+  let lastError;
+  for (const candidate of candidates) {
+    try {
+      await access2(candidate);
+      return fileURLToPath2(candidate);
+    } catch (error2) {
+      lastError = error2;
+    }
+  }
+  throw lastError;
+}
 function assertDirectoryIdentity2(target) {
   return Promise.all([
     lstat4(target.publicDirectory),
@@ -26901,10 +26919,24 @@ async function runAttempt(checkoutPath, spec, deps) {
       ...tempHome === null ? {} : { tempHome }
     });
     const recordingServices = withRunStartPidRecording(ps, runStartTarget, runStart);
+    const watchdogExecutable = {
+      kind: "native",
+      command: process.execPath,
+      prefixArgs: [],
+      resolvedFrom: "runtime-watchdog"
+    };
+    const watchdogArgs = [
+      await resolveWatchdogPath(),
+      String(process.pid),
+      "--",
+      invocation.executable.command,
+      ...invocation.executable.prefixArgs,
+      ...invocation.args
+    ];
     reportPhase(deps, "producer running");
     const exit = deps.abortSignal?.aborted === true ? preCancelledExit() : await supervise(recordingServices, {
-      executable: invocation.executable,
-      args: invocation.args,
+      executable: watchdogExecutable,
+      args: watchdogArgs,
       cwd: worktree.path,
       env: builtEnvironment.env,
       timeoutMs: spec.timeoutMs,

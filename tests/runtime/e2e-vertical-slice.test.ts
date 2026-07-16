@@ -328,6 +328,10 @@ describe("P0-A end-to-end vertical slice", () => {
           adapter = new FakeAdapter({ eligible: false, reason: "authentication-required" });
           break;
         case "spawn-failure":
+          // The producer is now spawned via the watchdog wrapper (node watchdog.mjs ... -- <cmd>),
+          // so the outer OS spawn always succeeds (node exists); a missing wrapped-producer command
+          // now surfaces as a nonzero watchdog exit, classified as producer-failure. See the
+          // dedicated unit test in tests/runtime/attempt-runtime.test.ts for this exact mapping.
           adapter = new FakeAdapter({ spawnFailure: true });
           break;
         case "cancelled": {
@@ -360,9 +364,10 @@ describe("P0-A end-to-end vertical slice", () => {
         spec,
         dependencies(adapter, `e2e-${classification}`, { verifier, abortSignal }),
       );
+      const expectedFailure = classification === "spawn-failure" ? "producer-failure" : classification;
       expect(output).toMatchObject({
         ok: true,
-        result: { failure: classification },
+        result: { failure: expectedFailure },
       });
       observed.push(classification);
     }

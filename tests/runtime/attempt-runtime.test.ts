@@ -490,7 +490,7 @@ describe("runAttempt", () => {
     await expectAttemptResourcesCleaned(runId);
   });
 
-  it("maps a child spawn error to spawn-failure", async () => {
+  it("maps a producer executable that does not exist to producer-failure (watchdog spawns cleanly)", async () => {
     const repoRoot = await initRepo();
     const runId = "run-spawn-failure";
 
@@ -500,10 +500,14 @@ describe("runAttempt", () => {
       dependencies(new FakeAdapter({ spawnFailure: true }), runId),
     );
 
+    // The producer is spawned via the watchdog wrapper (node watchdog.mjs ... -- <producer>), so
+    // the outer OS spawn always succeeds (node exists) even when the wrapped producer command does
+    // not; the watchdog itself reports a nonzero exit, which classifies as producer-failure rather
+    // than spawn-failure.
     expect(result.status).toBe("failed");
-    expect(result.failure).toBe("spawn-failure");
+    expect(result.failure).toBe("producer-failure");
     expect(result.candidate).toBeNull();
-    expect(await archivedJson(runId, "run-start.json")).toMatchObject({ pid: null });
+    expect(await archivedJson(runId, "run-start.json")).toMatchObject({ pid: expect.any(Number) });
     await expectAttemptResourcesCleaned(runId);
   });
 

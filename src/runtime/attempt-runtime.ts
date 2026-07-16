@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { constants } from "node:fs";
 import {
+  access,
   lstat,
   open,
   realpath,
@@ -8,12 +9,14 @@ import {
   rm,
 } from "node:fs/promises";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { freezeCandidate } from "../git/candidate-tree.js";
 import { checkPreconditions } from "../git/repo-preconditions.js";
 import { WorktreeManager } from "../git/worktree-manager.js";
 import type {
   CheckoutLock,
   PlatformServices,
+  ResolvedExecutable,
   SpawnRequest,
   SupervisedExit,
   SupervisedProcess,
@@ -203,6 +206,25 @@ function shouldUseTemporaryHome(profile: ProducerConfigurationProfile): boolean 
 
 function errorCode(error: unknown): string | undefined {
   return (error as NodeJS.ErrnoException).code;
+}
+
+async function resolveWatchdogPath(): Promise<string> {
+  // Source layout: src/runtime/ → ../../runtime/.
+  // Bundled layout: runtime/server.mjs → ./.
+  const candidates = [
+    new URL("../../runtime/watchdog.mjs", import.meta.url),
+    new URL("./watchdog.mjs", import.meta.url),
+  ];
+  let lastError: unknown;
+  for (const candidate of candidates) {
+    try {
+      await access(candidate);
+      return fileURLToPath(candidate);
+    } catch (error) {
+      lastError = error;
+    }
+  }
+  throw lastError;
 }
 
 function assertDirectoryIdentity(target: RunStartTarget): Promise<void> {
@@ -616,12 +638,26 @@ export async function runAttempt(
       ...(tempHome === null ? {} : { tempHome }),
     });
     const recordingServices = withRunStartPidRecording(ps, runStartTarget, runStart);
+    const watchdogExecutable: ResolvedExecutable = {
+      kind: "native",
+      command: process.execPath,
+      prefixArgs: [],
+      resolvedFrom: "runtime-watchdog",
+    };
+    const watchdogArgs = [
+      await resolveWatchdogPath(),
+      String(process.pid),
+      "--",
+      invocation.executable.command,
+      ...invocation.executable.prefixArgs,
+      ...invocation.args,
+    ];
     reportPhase(deps, "producer running");
     const exit = deps.abortSignal?.aborted === true
       ? preCancelledExit()
       : await supervise(recordingServices, {
-        executable: invocation.executable,
-        args: invocation.args,
+        executable: watchdogExecutable,
+        args: watchdogArgs,
         cwd: worktree.path,
         env: builtEnvironment.env,
         timeoutMs: spec.timeoutMs,
