@@ -57,6 +57,40 @@ Resolve ambiguity before calling the runtime. Do not give the Producer credentia
 
 Never accept a Producer self-report as evidence, bypass `reviewCandidate`, call integration before an accepted decision, or substitute a different artifact hash.
 
+## Choosing delegate vs delegatePipeline
+
+Use `delegatePipeline` by default for non-trivial tasks — anything with
+meaningful correctness or systems risk (multiple files, state, concurrency,
+security surface, or behavior existing code depends on). Use plain `delegate`
+only for trivial tasks (typo-level fixes, single obvious one-liners, doc-only
+edits).
+
+## Pipeline lifecycle
+
+1. Build the Delegation Spec exactly as for `delegate`. Optionally add:
+
+   ```yaml
+   review:
+     reviewers: [correctness, systems]   # default
+     maxRounds: 2                         # default
+   ```
+
+2. Call `mcp__plugin_claude-architect_runtime__delegatePipeline` with
+   `checkoutPath`, `spec`, `protocolVersion: "1.0.0"`.
+3. Read the returned evidence bundle: attempt result, per-round review
+   reports and consolidated findings, fix dispositions, verification report,
+   and gate reasons.
+   - `status: "decision-ready"` — review the evidence yourself, then call
+     `decideCandidate` and, if accepted, `integrateCandidate` (candidate
+     `manifestHash` as `expectedArtifactHash`).
+   - `status: "human-decision-required"` — present the gate reasons,
+     unresolved findings, and dispositions to the human verbatim. Never
+     accept on their behalf.
+   - `status: "failed"` — report the failure classification; retry or
+     re-scope per the normal delegate failure guidance.
+4. The pipeline never merges and never waives findings; you and the human
+   remain the only decision-makers.
+
 ## Legacy migration fallback
 
 The pre-0.8 prose lane definitions remain packaged during migration: `codex-implementer`, `opencode-implementer`, `pi-implementer`, and `pythinker-implementer`. OpenCode, Pi, and Pythinker may use their selected legacy lane while their MCP adapters are not yet certified. Keep the objective, files, interfaces, constraints, and verification unchanged, isolate writes in the lane's worktree, and independently inspect its diff and verification output. Never silently substitute Claude implementation for a named Producer.
