@@ -13,6 +13,7 @@ import {
 import {
   handleDecideCandidate,
   handleDelegate,
+  handleDelegatePipeline,
   handleIntegrateCandidate,
   handleReviewCandidate,
   type ToolDependencies,
@@ -27,6 +28,21 @@ const errorOutputFields = {
 const delegateOutput = z.object({
   ok: z.boolean(),
   result: z.record(z.string(), z.unknown()).optional(),
+  validationErrors: z.array(z.object({ path: z.string(), message: z.string() })).optional(),
+  diagnostic: z.string().optional(),
+  error: z.string().optional(),
+});
+const delegatePipelineOutput = z.object({
+  ok: z.boolean(),
+  result: z.object({
+    runId: z.string(),
+    status: z.enum(["decision-ready", "human-decision-required", "failed"]),
+    attempt: z.record(z.string(), z.unknown()),
+    rounds: z.array(z.record(z.string(), z.unknown())),
+    verification: z.record(z.string(), z.unknown()).nullable(),
+    gate: z.record(z.string(), z.unknown()),
+    finalCandidateCommit: z.string(),
+  }).optional(),
   validationErrors: z.array(z.object({ path: z.string(), message: z.string() })).optional(),
   diagnostic: z.string().optional(),
   error: z.string().optional(),
@@ -125,6 +141,54 @@ export async function start(dependencies: ServerDependencies = {}): Promise<void
         : setInterval(() => emit(lastPhase), 15_000);
       try {
         return toolOutput(await handleDelegate(
+          checkoutPath,
+          spec,
+          {
+            ...dependencies,
+            skillProtocolVersion: protocolVersion ?? dependencies.skillProtocolVersion ?? PROTOCOL_VERSION,
+            ...(onProgress === undefined ? {} : { onProgress }),
+          },
+        ));
+      } finally {
+        if (heartbeat !== undefined) clearInterval(heartbeat);
+      }
+    },
+  );
+  server.registerTool(
+    "delegatePipeline",
+    {
+      title: "Run the fresh-context review pipeline",
+      description: "Validate a Delegation Spec and run the full implement/review/fix pipeline.",
+      inputSchema: {
+        checkoutPath: z.string(),
+        spec: z.unknown(),
+        protocolVersion: z.string().optional(),
+      },
+      outputSchema: delegatePipelineOutput,
+    },
+    async ({ checkoutPath, spec, protocolVersion }, extra) => {
+      const progressToken = extra._meta?.progressToken;
+      const startedAt = Date.now();
+      let step = 0;
+      let lastPhase = "starting attempt";
+      const emit = (message: string) => {
+        if (progressToken === undefined) return;
+        step += 1;
+        const elapsed = Math.round((Date.now() - startedAt) / 1000);
+        void extra.sendNotification({
+          method: "notifications/progress",
+          params: { progressToken, progress: step, message: `${message} (${elapsed}s)` },
+        }).catch(() => { /* progress is best-effort */ });
+      };
+      const onProgress = progressToken === undefined ? undefined : (message: string) => {
+        lastPhase = message;
+        emit(message);
+      };
+      const heartbeat = onProgress === undefined
+        ? undefined
+        : setInterval(() => emit(lastPhase), 15_000);
+      try {
+        return toolOutput(await handleDelegatePipeline(
           checkoutPath,
           spec,
           {

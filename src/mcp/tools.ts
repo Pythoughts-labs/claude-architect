@@ -3,6 +3,12 @@ import { git as runGit } from "../git/git-exec.js";
 import { applyCandidateTree as applyTree } from "../integrate/controlled-integrator.js";
 import type { PlatformServices } from "../platform/platform-services.js";
 import { getPlatformServices } from "../platform/select-platform.js";
+import {
+  runPipeline as executePipeline,
+  type PipelineDependencies,
+  type PipelineResult,
+} from "../pipeline/pipeline-runtime.js";
+import { registry } from "../producers/producer-registry.js";
 import type { AttemptResult, CandidateArtifact } from "../protocol/attempt-result.js";
 import type { DelegationSpec } from "../protocol/delegation-spec.js";
 import { checkVersionCompat } from "../protocol/schema-loader.js";
@@ -40,6 +46,7 @@ export interface ToolDependencies {
   storeFactory?: (runId: string) => ToolArtifactStore;
   git?: typeof runGit;
   runAttempt?: typeof executeAttempt;
+  runPipeline?: typeof executePipeline;
   applyCandidateTree?: typeof applyTree;
   attemptDependencies?: AttemptRuntimeDependencies;
   skillProtocolVersion?: string;
@@ -208,6 +215,79 @@ export async function handleDelegate(
         attemptDependencies,
       );
       return { ok: true, result: boundIgnoredPathEvidence(result) };
+    });
+  } catch (error) {
+    if (error instanceof NestedDelegationError) {
+      return { ok: false, error: "nested-delegation-denied" };
+    }
+    return errorResult(error);
+  }
+}
+
+export async function handleDelegatePipeline(
+  checkoutPath: string,
+  input: unknown,
+  deps: ToolDependencies = {},
+): Promise<
+  | { ok: true; result: PipelineResult }
+  | {
+    ok: false;
+    error: "invalid-specification";
+    validationErrors: Array<{ path: string; message: string }>;
+  }
+  | { ok: false; diagnostic: string }
+  | { ok: false; error: "nested-delegation-denied" }
+  | ToolErrorResult
+> {
+  const protocol = checkVersionCompat(deps.skillProtocolVersion ?? PROTOCOL_VERSION);
+  if (!protocol.ok) return { ok: false, diagnostic: protocol.diagnostic! };
+  // Schemaless MCP clients (spec is z.unknown → empty JSON schema) may serialize the
+  // nested spec object as a JSON string; accept that encoding before validation.
+  if (typeof input === "string") {
+    try {
+      input = JSON.parse(input) as unknown;
+    } catch {
+      return {
+        ok: false,
+        error: "invalid-specification",
+        validationErrors: [{ path: "#", message: "string spec is not valid JSON" }],
+      };
+    }
+  }
+  const schema = schemaCompatibility(input);
+  if (!schema.ok) return schema;
+  const validation = validateSpec(input);
+  if (!validation.ok) {
+    return {
+      ok: false,
+      error: "invalid-specification",
+      validationErrors: validation.errors,
+    };
+  }
+
+  try {
+    const ps = services(deps);
+    const canonical = await ps.canonicalizePath(checkoutPath);
+    const key = canonical.gitCommonDir ?? canonical.canonical;
+    return await withRepoLock(key, async () => {
+      const configured = deps.attemptDependencies ?? { verifier: new AcceptanceVerifier() };
+      const attemptDependencies: AttemptRuntimeDependencies = {
+        ...configured,
+        ps,
+        verifier: configured.verifier ?? new AcceptanceVerifier(),
+        ...(deps.onProgress === undefined ? {} : { onPhase: deps.onProgress }),
+      };
+      const pipelineDependencies: PipelineDependencies = {
+        ...attemptDependencies,
+        registry,
+        ...(deps.runAttempt === undefined ? {} : { runAttempt: deps.runAttempt }),
+      };
+      const pipelineResult = await (deps.runPipeline ?? executePipeline)(
+        canonical.canonical,
+        validation.spec,
+        pipelineDependencies,
+      );
+      return { ok: true, result: pipelineResult };
     });
   } catch (error) {
     if (error instanceof NestedDelegationError) {

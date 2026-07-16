@@ -4,12 +4,14 @@ import type { GitResult } from "../../src/git/git-exec.js";
 import {
   handleDecideCandidate,
   handleDelegate,
+  handleDelegatePipeline,
   handleIntegrateCandidate,
   handleReviewCandidate,
   type RunDecision,
   type ToolArtifactStore,
   type ToolDependencies,
 } from "../../src/mcp/tools.js";
+import type { PipelineResult } from "../../src/pipeline/pipeline-runtime.js";
 import type { PlatformServices } from "../../src/platform/platform-services.js";
 import type { AttemptResult, CandidateArtifact } from "../../src/protocol/attempt-result.js";
 import type { DelegationSpec } from "../../src/protocol/delegation-spec.js";
@@ -60,6 +62,20 @@ const result: AttemptResult = {
   producerModel: null,
   durationMs: 1,
   sessionId: null,
+};
+
+const pipelineResult: PipelineResult = {
+  runId: "run-tools",
+  status: "decision-ready",
+  attempt: result,
+  rounds: [],
+  verification: null,
+  gate: {
+    decisionReady: true,
+    requiresHumanDecision: false,
+    reasons: [],
+  },
+  finalCandidateCommit: candidate.candidateCommitOid,
 };
 
 const manifest = {
@@ -154,6 +170,52 @@ function dependencies(store = new FakeStore()): ToolDependencies {
     }),
   };
 }
+
+describe("handleDelegatePipeline", () => {
+  it("validates spec and returns pipeline result with runPipeline called once", async () => {
+    const calls: string[] = [];
+    const deps = dependencies();
+    const injectedRunAttempt = deps.runAttempt;
+    deps.runPipeline = async (checkoutPath, spec, pipelineDeps) => {
+      calls.push(checkoutPath);
+      expect(spec).toEqual(validSpec);
+      expect(pipelineDeps.ps).toBe(deps.ps);
+      expect(pipelineDeps.verifier).toBeDefined();
+      expect(pipelineDeps.registry).toBeDefined();
+      expect(pipelineDeps.runAttempt).toBe(injectedRunAttempt);
+      return pipelineResult;
+    };
+
+    const output = await handleDelegatePipeline("/repo", validSpec, deps);
+
+    expect(output).toEqual({ ok: true, result: pipelineResult });
+    expect(calls).toEqual(["/canonical/repo"]);
+  });
+
+  it("invalid spec returns error without invoking pipeline", async () => {
+    let calls = 0;
+    const deps = dependencies();
+    deps.runPipeline = async () => {
+      calls += 1;
+      return pipelineResult;
+    };
+
+    const output = await handleDelegatePipeline("/repo", { specVersion: "1" }, deps);
+
+    expect(output).toMatchObject({ ok: false, error: "invalid-specification" });
+    expect("validationErrors" in output && output.validationErrors.length).toBeGreaterThan(0);
+    expect(calls).toBe(0);
+  });
+
+  it("accepts spec as JSON string", async () => {
+    const deps = dependencies();
+    deps.runPipeline = async () => pipelineResult;
+
+    const output = await handleDelegatePipeline("/repo", JSON.stringify(validSpec), deps);
+
+    expect(output).toEqual({ ok: true, result: pipelineResult });
+  });
+});
 
 describe("MCP tool handlers", () => {
   it("returns repairable validation errors without touching a producer", async () => {
