@@ -116,9 +116,12 @@ fi
 ```
 <!-- END CLAUDE_ARCHITECT_RUNTIME_RESOLVER -->
 
-3. Invoke pythinker headless and unattended through the tested adapter:
+3. Invoke pythinker headless and unattended through the tested adapter.
+
+**Timeout.** When the caller's prompt supplies a `TIMEOUT_SECONDS: <n>` line, export it; otherwise default to 1800 for anything that runs builds or test suites (the adapter's own default is 900 and has killed completed runs before their FINAL message flushed):
 
 ```bash
+PYTHINKER_TIMEOUT_SECONDS="${TIMEOUT_SECONDS:-1800}" \
 PYTHINKER_MODEL="${MODEL:-}" \
 PYTHINKER_THINKING_EFFORT="${THINKING_EFFORT:-}" \
 bash "$RUNTIME" "$SPEC" "$FINAL"
@@ -129,6 +132,7 @@ bash "$RUNTIME" "$SPEC" "$FINAL"
 ```bash
 mkdir -p "$(dirname "$PROGRESS_LOG")"
 FINAL="$PROGRESS_LOG"
+PYTHINKER_TIMEOUT_SECONDS="${TIMEOUT_SECONDS:-1800}" \
 PYTHINKER_MODEL="${MODEL:-}" PYTHINKER_THINKING_EFFORT="${THINKING_EFFORT:-}" \
   bash "$RUNTIME" "$SPEC" "$FINAL"
 ```
@@ -173,3 +177,5 @@ GAPS: [spec ambiguities, unfinished items, model-default fallback note, or "none
 - Report the resolved model when Pythinker exposes it. If it remains unknown, report `MODEL: unresolved` rather than guessing.
 - If pythinker's changes are wrong, report that plainly with the failing output — do not patch them yourself. Fix decisions belong to the caller.
 - If the task turns out to be architectural — the spec itself is wrong — stop and report; that decision belongs upstream (consult `claude-advisor`).
+- Never wait in the background or end your turn while pythinker is still running: invoke the adapter in the foreground and block on it. If you must poll a progress file, poll in a foreground loop.
+- On `STATUS: timeout`, the on-disk `git status`/diff is the primary evidence — the FINAL message flushes only at session end and may be empty even when the work completed. Inspect the tree before declaring the run lost.
