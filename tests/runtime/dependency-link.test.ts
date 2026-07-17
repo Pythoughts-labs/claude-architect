@@ -1,4 +1,4 @@
-import { access, mkdir, mkdtemp, readlink, rm, writeFile } from "node:fs/promises";
+import { access, lstat, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -23,19 +23,25 @@ afterEach(async () => {
 });
 
 describe("linkPrimaryDependencies", () => {
-  it("links node_modules when package locks match", async () => {
-    const paths = await fixture();
-    await writeFile(path.join(paths.primary, "package-lock.json"), "{}\n");
-    await writeFile(path.join(paths.worktree, "package-lock.json"), "{}\n");
+  it.skipIf(process.platform !== "darwin" && process.platform !== "linux")(
+    "clones node_modules privately when package locks match",
+    async () => {
+      const paths = await fixture();
+      await writeFile(path.join(paths.primary, "package-lock.json"), "{}\n");
+      await writeFile(path.join(paths.worktree, "package-lock.json"), "{}\n");
 
-    await expect(linkPrimaryDependencies(paths.primary, paths.worktree)).resolves.toBe("inherited");
-    expect(await readlink(path.join(paths.worktree, "node_modules"))).toBe(
-      path.join(paths.primary, "node_modules"),
-    );
+      await expect(linkPrimaryDependencies(paths.primary, paths.worktree)).resolves.toBe("inherited");
+      const worktreeModules = path.join(paths.worktree, "node_modules");
+      expect((await lstat(worktreeModules)).isDirectory()).toBe(true);
+      expect((await lstat(worktreeModules)).isSymbolicLink()).toBe(false);
 
-    await rm(paths.worktree, { recursive: true, force: true });
-    await expect(access(path.join(paths.primary, "node_modules", "sentinel"))).resolves.toBeUndefined();
-  });
+      await writeFile(path.join(worktreeModules, "private-write"), "worktree only\n");
+      await expect(access(path.join(paths.primary, "node_modules", "private-write")))
+        .rejects.toMatchObject({ code: "ENOENT" });
+      await expect(access(path.join(paths.primary, "node_modules", "sentinel")))
+        .resolves.toBeUndefined();
+    },
+  );
 
   it("skips the link when package locks differ", async () => {
     const paths = await fixture();
@@ -71,13 +77,50 @@ describe("linkPrimaryDependencies", () => {
     );
   });
 
-  it("links node_modules when all recognized lockfiles match", async () => {
-    const paths = await fixture();
-    for (const lockfile of ["package-lock.json", "bun.lockb", "pnpm-lock.yaml", "yarn.lock"]) {
-      await writeFile(path.join(paths.primary, lockfile), `${lockfile}\n`);
-      await writeFile(path.join(paths.worktree, lockfile), `${lockfile}\n`);
-    }
+  it.skipIf(process.platform !== "darwin" && process.platform !== "linux")(
+    "clones node_modules when all recognized lockfiles match",
+    async () => {
+      const paths = await fixture();
+      for (const lockfile of ["package-lock.json", "bun.lockb", "pnpm-lock.yaml", "yarn.lock"]) {
+        await writeFile(path.join(paths.primary, lockfile), `${lockfile}\n`);
+        await writeFile(path.join(paths.worktree, lockfile), `${lockfile}\n`);
+      }
 
-    await expect(linkPrimaryDependencies(paths.primary, paths.worktree)).resolves.toBe("inherited");
+      await expect(linkPrimaryDependencies(paths.primary, paths.worktree)).resolves.toBe("inherited");
+    },
+  );
+
+  it("fails closed and removes partial output when copy-on-write cloning fails", async () => {
+    const paths = await fixture();
+    await writeFile(path.join(paths.primary, "package-lock.json"), "{}\n");
+    await writeFile(path.join(paths.worktree, "package-lock.json"), "{}\n");
+
+    await expect(linkPrimaryDependencies(paths.primary, paths.worktree, {
+      platform: "linux",
+      execFile: async (_file, args) => {
+        await mkdir(args[args.length - 1]!);
+        throw new Error("forced cp failure");
+      },
+    })).resolves.toBe("skipped-cow-unsupported");
+    await expect(access(path.join(paths.worktree, "node_modules")))
+      .rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("fails closed without invoking cp on unsupported platforms", async () => {
+    const paths = await fixture();
+    await writeFile(path.join(paths.primary, "package-lock.json"), "{}\n");
+    await writeFile(path.join(paths.worktree, "package-lock.json"), "{}\n");
+    let invoked = false;
+
+    await expect(linkPrimaryDependencies(paths.primary, paths.worktree, {
+      platform: "win32",
+      execFile: async () => {
+        invoked = true;
+        throw new Error("must not run");
+      },
+    })).resolves.toBe("skipped-cow-unsupported");
+    expect(invoked).toBe(false);
+    await expect(access(path.join(paths.worktree, "node_modules")))
+      .rejects.toMatchObject({ code: "ENOENT" });
   });
 });

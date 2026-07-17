@@ -1,9 +1,23 @@
-import { access, readFile, symlink } from "node:fs/promises";
+import { execFile } from "node:child_process";
+import { access, readFile, rm } from "node:fs/promises";
 import path from "node:path";
+import { promisify } from "node:util";
 
-export type DependencyLink = "inherited" | "skipped-lockfile-mismatch" | "none";
+export type DependencyLink =
+  | "inherited"
+  | "skipped-lockfile-mismatch"
+  | "skipped-cow-unsupported"
+  | "none";
+
+const execFileAsync = promisify(execFile);
+
+export interface DependencyLinkDependencies {
+  execFile?: typeof execFileAsync;
+  platform?: NodeJS.Platform;
+}
 
 const LOCKFILES = ["package-lock.json", "bun.lockb", "pnpm-lock.yaml", "yarn.lock"] as const;
+const COPY_TIMEOUT_MS = 120_000;
 
 async function exists(candidate: string): Promise<boolean> {
   try {
@@ -17,6 +31,7 @@ async function exists(candidate: string): Promise<boolean> {
 export async function linkPrimaryDependencies(
   primaryRepo: string,
   worktreePath: string,
+  dependencies: DependencyLinkDependencies = {},
 ): Promise<DependencyLink> {
   const primaryModules = path.join(primaryRepo, "node_modules");
   if (!await exists(primaryModules)) return "none";
@@ -44,6 +59,20 @@ export async function linkPrimaryDependencies(
     return "skipped-lockfile-mismatch";
   }
 
-  await symlink(primaryModules, path.join(worktreePath, "node_modules"), "junction");
-  return "inherited";
+  const targetModules = path.join(worktreePath, "node_modules");
+  const platform = dependencies.platform ?? process.platform;
+  const copyArgs = platform === "darwin"
+    ? ["-Rc", primaryModules, targetModules]
+    : platform === "linux"
+      ? ["-a", "--reflink=always", primaryModules, targetModules]
+      : null;
+  if (copyArgs === null) return "skipped-cow-unsupported";
+
+  try {
+    await (dependencies.execFile ?? execFileAsync)("cp", copyArgs, { timeout: COPY_TIMEOUT_MS });
+    return "inherited";
+  } catch {
+    await rm(targetModules, { recursive: true, force: true });
+    return "skipped-cow-unsupported";
+  }
 }

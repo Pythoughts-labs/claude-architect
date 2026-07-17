@@ -25027,7 +25027,7 @@ import {
   open as open4,
   realpath as realpath4,
   rename as rename2,
-  rm as rm3
+  rm as rm4
 } from "node:fs/promises";
 import path10 from "node:path";
 import { fileURLToPath as fileURLToPath2 } from "node:url";
@@ -25654,9 +25654,13 @@ function buildEnvironment(args) {
 }
 
 // src/verify/dependency-link.ts
-import { access as access2, readFile, symlink } from "node:fs/promises";
+import { execFile as execFile3 } from "node:child_process";
+import { access as access2, readFile, rm as rm2 } from "node:fs/promises";
 import path7 from "node:path";
+import { promisify } from "node:util";
+var execFileAsync = promisify(execFile3);
 var LOCKFILES = ["package-lock.json", "bun.lockb", "pnpm-lock.yaml", "yarn.lock"];
+var COPY_TIMEOUT_MS = 12e4;
 async function exists2(candidate) {
   try {
     await access2(candidate);
@@ -25665,7 +25669,7 @@ async function exists2(candidate) {
     return false;
   }
 }
-async function linkPrimaryDependencies(primaryRepo, worktreePath) {
+async function linkPrimaryDependencies(primaryRepo, worktreePath, dependencies = {}) {
   const primaryModules = path7.join(primaryRepo, "node_modules");
   if (!await exists2(primaryModules)) return "none";
   const [primaryLockfiles, worktreeLockfiles] = await Promise.all([
@@ -25689,8 +25693,17 @@ async function linkPrimaryDependencies(primaryRepo, worktreePath) {
   } catch {
     return "skipped-lockfile-mismatch";
   }
-  await symlink(primaryModules, path7.join(worktreePath, "node_modules"), "junction");
-  return "inherited";
+  const targetModules = path7.join(worktreePath, "node_modules");
+  const platform = dependencies.platform ?? process.platform;
+  const copyArgs = platform === "darwin" ? ["-Rc", primaryModules, targetModules] : platform === "linux" ? ["-a", "--reflink=always", primaryModules, targetModules] : null;
+  if (copyArgs === null) return "skipped-cow-unsupported";
+  try {
+    await (dependencies.execFile ?? execFileAsync)("cp", copyArgs, { timeout: COPY_TIMEOUT_MS });
+    return "inherited";
+  } catch {
+    await rm2(targetModules, { recursive: true, force: true });
+    return "skipped-cow-unsupported";
+  }
 }
 
 // src/verify/project-verifier.ts
@@ -26076,7 +26089,7 @@ import {
   readdir,
   realpath as realpath3,
   rename,
-  rm as rm2
+  rm as rm3
 } from "node:fs/promises";
 import path9 from "node:path";
 
@@ -26677,7 +26690,7 @@ var ArtifactStore = class {
       await handle?.close();
       if (temporaryCreated) {
         await assertDirectoryIdentity(directory, directoryIdentity);
-        await rm2(temporaryPath, { force: true });
+        await rm3(temporaryPath, { force: true });
         await syncDirectory(directory);
         await assertDirectoryIdentity(directory, directoryIdentity);
       }
@@ -26720,7 +26733,7 @@ var ArtifactStore = class {
       await assertDirectoryIdentity(directory, directoryIdentity);
     } finally {
       await handle?.close();
-      if (temporaryCreated) await rm2(temporaryPath, { force: true });
+      if (temporaryCreated) await rm3(temporaryPath, { force: true });
     }
   }
   async writeLog(name, text) {
@@ -27111,7 +27124,7 @@ var ArtifactStore = class {
         await assertDirectoryIdentity(this.runsRoot, runsRootIdentity);
         await assertDirectoryIdentity(quarantinePath, entry.identity);
         archiveRemovalCommitted = true;
-        await rm2(quarantinePath, { recursive: true, force: false });
+        await rm3(quarantinePath, { recursive: true, force: false });
         await syncDirectory(this.runsRoot);
         await transaction.commit();
         await this.appendCleanupRecord({
@@ -27445,7 +27458,7 @@ async function writeRunStart(target, record2, create) {
     await assertDirectoryIdentity2(target);
   } finally {
     await handle?.close();
-    if (created) await rm3(temporaryPath, { force: true });
+    if (created) await rm4(temporaryPath, { force: true });
   }
 }
 async function initializeRunStart(store, record2) {
@@ -27573,7 +27586,7 @@ async function cleanupAttemptResources(args) {
   }
   if (args.tempHome !== null) {
     try {
-      await rm3(args.tempHome, { recursive: true, force: true });
+      await rm4(args.tempHome, { recursive: true, force: true });
     } catch (error2) {
       failures.push(error2);
     }
@@ -28160,7 +28173,7 @@ function evaluateGates(input) {
 }
 
 // src/pipeline/role-runner.ts
-import { rm as rm4 } from "node:fs/promises";
+import { rm as rm5 } from "node:fs/promises";
 
 // src/pipeline/role-prompts.ts
 import { readFileSync as readFileSync2 } from "node:fs";
@@ -28442,7 +28455,7 @@ async function cleanupProcessAttempt(tempHome, builtEnvironment) {
   }
   if (tempHome !== null) {
     try {
-      await rm4(tempHome, { recursive: true, force: true });
+      await rm5(tempHome, { recursive: true, force: true });
     } catch (error2) {
       failures.push(error2);
     }
@@ -29668,7 +29681,7 @@ import {
   open as open5,
   readdir as readdir2,
   realpath as realpath6,
-  rm as rm5
+  rm as rm6
 } from "node:fs/promises";
 import path14 from "node:path";
 import nodeProcess4 from "node:process";
@@ -29767,7 +29780,7 @@ async function removePlainDirectory(directory, expected) {
   if (!isPlainDirectory(metadata) || !sameIdentity(metadata, expected)) {
     throw new RuntimeError("recovery directory identity changed before removal");
   }
-  await rm5(directory, { recursive: true, force: false });
+  await rm6(directory, { recursive: true, force: false });
 }
 function parseRunStart(text, expectedRunId) {
   let value;
@@ -30135,7 +30148,7 @@ async function reclaimLocks(locksRoot, isProcessAlive, getProcessStartToken) {
     if (!identity.isFile() || identity.isSymbolicLink()) {
       throw new RuntimeError("checkout lock identity changed during recovery");
     }
-    await rm5(lockPath, { force: false });
+    await rm6(lockPath, { force: false });
   }
 }
 async function lockIsOwnedByLiveProcess(locksRoot, lockKey, isProcessAlive, getProcessStartToken) {
