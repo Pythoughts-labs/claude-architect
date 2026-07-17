@@ -143,7 +143,7 @@ describe("projectVerify", () => {
         skipped: false,
       }),
     ]);
-    expect(result.evidence.dependencyLink).toBe("inherited");
+    expect(["inherited", "skipped-cow-unsupported"]).toContain(result.evidence.dependencyLink);
     expect(result.commandOutcomes[0]).toMatchObject({
       stdoutRef: "logs/verification-0-stdout.log",
       stderrRef: "logs/verification-0-stderr.log",

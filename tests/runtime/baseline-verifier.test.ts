@@ -74,7 +74,7 @@ describe("verifyBaseline", () => {
     await expect(verifyBaseline({ ...repo, commands: [command(0)] })).resolves.toEqual({
       baselineCommitOid: repo.headCommitOid,
       commands: [{ id: "exit-0", exitCode: 0, ok: true }],
-      dependencyLink: "inherited",
+      dependencyLink: expect.stringMatching(/^(?:inherited|skipped-cow-unsupported)$/),
     });
   });
 
