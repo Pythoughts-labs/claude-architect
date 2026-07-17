@@ -6,6 +6,65 @@ All notable changes to Claude Architect are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.16.0] - 2026-07-16
+
+Hardening release from a full-day dogfooding session that surfaced eleven
+delegation-lane and runtime defects; every fix in this release was itself
+implemented through `delegatePipeline`.
+
+### Added
+
+- Pre-dispatch verification baseline: the runtime now runs every spec
+  verification command against clean HEAD in a disposable worktree before
+  probing producers; unexpected failures stop the attempt with the new
+  `environment-defect` classification (distinct from `verification-failure`),
+  and `expectBaselineFailure: true` opts intentional bug-reproducer specs out.
+  Read-only specs skip the baseline with explicit evidence.
+- Clean-room dependency inheritance: verification and baseline worktrees
+  symlink `node_modules` from the primary checkout when the lockfile is
+  byte-identical, recorded as `dependencyLink` evidence — dependency-requiring
+  verification commands (`npx tsc`, `vitest`) no longer fail falsely.
+- Fixer commit capability: fix-round producers receive the linked worktree's
+  private gitdir and shared object database as sandbox writable roots, so a
+  `git commit` inside the sandbox succeeds instead of every fix round ending
+  `blocked` on a denied `index.lock` (refs and config stay read-only).
+- Action-first edit prompts: `CODEX_EDIT_ACTION_PREAMBLE` is prepended to all
+  non-read-only codex prompts, forbidding rule/skill-file ingestion and
+  plan-only zero-edit exits; the delegate skill requires distilled constraints
+  in `context`.
+- Edit timeout floor: `RUNTIME_MIN_EDIT_TIMEOUT_MS` (10 minutes) — edit-mode
+  specs below it are rejected, not clamped; the isolated codex runner defaults
+  `CODEX_TIMEOUT_SECONDS` to 600.
+- Codex lane failure classification: reports carry `FAILURE CLASSIFICATION`
+  (`sandbox-attributable | real | mixed | unresolved | not-applicable`) with a
+  per-gate basis; a failing gate may be reported real only when the wrapper's
+  outside-sandbox rerun also fails.
+- Delegate skill gains **Verification preflight** and **Coordinator duties**
+  sections (two lanes reporting the same blocker means the architect pauses
+  lanes and repairs the environment centrally).
+
+### Fixed
+
+- Implementer lanes could end their turn "waiting" on a background monitor,
+  completing with zero work product: all four lanes now mandate one foreground
+  blocking Bash call (600000ms), exactly two valid turn endings, and
+  PID-rejoin loops with 10-minute stall detection (kill, then one fresh
+  relaunch or a concrete blocker report).
+- Parallel legacy lanes shared one checkout, and one lane's `git stash` cycle
+  destroyed another lane's uncommitted work: worktree isolation is now
+  unconditional, tree-wide git-state mutations are forbidden on shared
+  checkouts (propagated verbatim into producer prompts), pre-existence checks
+  use a disposable worktree, and overlapping `writeAllowlist`s serialize with
+  central integration.
+- Verification ordering: lint/format gates must precede the final type-check,
+  formatters run in non-mutating check mode, and the type-check covers all
+  touched typed files including new tests.
+- Producers never create commits (sandbox `.git/index.lock` denials are
+  expected confinement, classified sandbox-attributable); the 600000ms
+  lifetime must be the Bash tool's explicit `timeout` parameter; per-run
+  private `mktemp -d` spec directories eliminate cross-lane temp collisions.
+- The lane-contract test pins all of the above across both hosts.
+
 ## [0.15.0] - 2026-07-16
 
 ### Fixed
@@ -210,7 +269,10 @@ Initial public release.
 - Native OpenCode assets under `.opencode/` and `opencode.json`, so the same lanes and skill work outside Claude Code.
 - SVG banner and shields badges for the README.
 
-[Unreleased]: https://github.com/Pythoughts-labs/claude-architect/compare/v0.13.0...HEAD
+[Unreleased]: https://github.com/Pythoughts-labs/claude-architect/compare/v0.16.0...HEAD
+[0.16.0]: https://github.com/Pythoughts-labs/claude-architect/compare/v0.15.0...v0.16.0
+[0.15.0]: https://github.com/Pythoughts-labs/claude-architect/compare/v0.14.0...v0.15.0
+[0.14.0]: https://github.com/Pythoughts-labs/claude-architect/compare/v0.13.0...v0.14.0
 [0.13.0]: https://github.com/Pythoughts-labs/claude-architect/compare/v0.12.1...v0.13.0
 [0.12.1]: https://github.com/Pythoughts-labs/claude-architect/compare/v0.12.0...v0.12.1
 [0.12.0]: https://github.com/Pythoughts-labs/claude-architect/compare/v0.11.1...v0.12.0

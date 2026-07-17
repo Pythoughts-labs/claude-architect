@@ -3226,8 +3226,8 @@ var require_utils = __commonJS({
       }
       return ind;
     }
-    function removeDotSegments(path11) {
-      let input = path11;
+    function removeDotSegments(path13) {
+      let input = path13;
       const output = [];
       let nextSlash = -1;
       let len = 0;
@@ -3479,8 +3479,8 @@ var require_schemes = __commonJS({
         wsComponent.secure = void 0;
       }
       if (wsComponent.resourceName) {
-        const [path11, query] = wsComponent.resourceName.split("?");
-        wsComponent.path = path11 && path11 !== "/" ? path11 : void 0;
+        const [path13, query] = wsComponent.resourceName.split("?");
+        wsComponent.path = path13 && path13 !== "/" ? path13 : void 0;
         wsComponent.query = query;
         wsComponent.resourceName = void 0;
       }
@@ -8191,8 +8191,8 @@ function getErrorMap() {
 
 // node_modules/zod/v3/helpers/parseUtil.js
 var makeIssue = (params) => {
-  const { data, path: path11, errorMaps, issueData } = params;
-  const fullPath = [...path11, ...issueData.path || []];
+  const { data, path: path13, errorMaps, issueData } = params;
+  const fullPath = [...path13, ...issueData.path || []];
   const fullIssue = {
     ...issueData,
     path: fullPath
@@ -8308,11 +8308,11 @@ var errorUtil;
 
 // node_modules/zod/v3/types.js
 var ParseInputLazyPath = class {
-  constructor(parent, value, path11, key) {
+  constructor(parent, value, path13, key) {
     this._cachedPath = [];
     this.parent = parent;
     this.data = value;
-    this._path = path11;
+    this._path = path13;
     this._key = key;
   }
   get path() {
@@ -11950,10 +11950,10 @@ function assignProp(target, prop, value) {
     configurable: true
   });
 }
-function getElementAtPath(obj, path11) {
-  if (!path11)
+function getElementAtPath(obj, path13) {
+  if (!path13)
     return obj;
-  return path11.reduce((acc, key) => acc?.[key], obj);
+  return path13.reduce((acc, key) => acc?.[key], obj);
 }
 function promiseAllObject(promisesObj) {
   const keys = Object.keys(promisesObj);
@@ -12273,11 +12273,11 @@ function aborted(x, startIndex = 0) {
   }
   return false;
 }
-function prefixIssues(path11, issues) {
+function prefixIssues(path13, issues) {
   return issues.map((iss) => {
     var _a;
     (_a = iss).path ?? (_a.path = []);
-    iss.path.unshift(path11);
+    iss.path.unshift(path13);
     return iss;
   });
 }
@@ -21930,7 +21930,7 @@ var StdioServerTransport = class {
 var PROTOCOL_VERSION = "1.0.0";
 var DELEGATION_SPEC_VERSION = "1";
 var ATTEMPT_RESULT_VERSION = "1";
-var RUNTIME_VERSION = "0.15.0";
+var RUNTIME_VERSION = "0.16.0";
 
 // src/platform/posix-platform-services.ts
 import { spawn, execFile } from "node:child_process";
@@ -22531,6 +22531,7 @@ function resolveReviewConfig(spec) {
   return spec.review ?? DEFAULT_REVIEW_CONFIG;
 }
 var RUNTIME_MAX_TIMEOUT_MS = 18e5;
+var RUNTIME_MIN_EDIT_TIMEOUT_MS = 6e5;
 
 // src/platform/process-supervisor.ts
 async function supervise(ps, req, opts) {
@@ -22718,8 +22719,15 @@ function quoteTomlString(value) {
 function renderList(values) {
   return values.length === 0 ? "- (none)" : values.map((value) => `- ${value}`).join("\n");
 }
-function renderPrompt(spec) {
-  return [
+var CODEX_EDIT_ACTION_PREAMBLE = [
+  "This is an action-first edit run.",
+  "Constraints are fully pre-digested in this spec.",
+  "Do not read AGENTS.md, CLAUDE.md, SKILL.md, lessons files, or any agent-rule/skill documents.",
+  "Begin by opening the implementation files authorized in the spec.",
+  "A plan-only final message with zero edits is a failed run."
+].join("\n");
+function renderPrompt(spec, readOnly) {
+  const prompt = [
     "You are an untrusted implementation Producer operating inside an isolated worktree.",
     "Do not delegate to other agents or expand the authorized scope.",
     "",
@@ -22738,8 +22746,13 @@ function renderPrompt(spec) {
     "Success criteria:",
     renderList(spec.successCriteria),
     "",
+    "If you run linting, formatting, or type checking, complete all linting and formatting first, then run a final type-check covering every typed file you changed, including new or modified tests.",
+    "",
     "Make only the requested edits. Return a concise final summary of the work performed."
   ].join("\n");
+  return readOnly ? prompt : `${CODEX_EDIT_ACTION_PREAMBLE}
+
+${prompt}`;
 }
 function resolveCodexStore(deps) {
   return deps.env.CODEX_HOME ?? join(deps.homeDirectory, ".codex");
@@ -22825,6 +22838,10 @@ var CodexAdapter = class {
       "sandbox_workspace_write.exclude_tmpdir_env_var=true",
       "-c",
       "sandbox_workspace_write.exclude_slash_tmp=true",
+      ...ctx.extraWritableRoots === void 0 || ctx.extraWritableRoots.length === 0 ? [] : [
+        "-c",
+        `sandbox_workspace_write.writable_roots=${JSON.stringify(ctx.extraWritableRoots)}`
+      ],
       "-c",
       'shell_environment_policy.inherit="none"',
       "-c",
@@ -22847,7 +22864,7 @@ var CodexAdapter = class {
     return {
       executable: ctx.executable,
       args,
-      stdin: renderPrompt(spec),
+      stdin: renderPrompt(spec, ctx.readOnly === true),
       requiredEnv: [...CODEX_REQUIRED_ENV],
       env: defaultCodexEnv({
         env: this.deps.env,
@@ -24015,9 +24032,9 @@ async function recomputeManifest(args) {
   const rawDiff = parseRawDiff(rawOutput);
   const rawByPath = new Map(rawDiff.map((entry) => [entry.path, entry]));
   const treeByPath = parseTree(treeOutput);
-  const changedPaths = sortChangedPaths(parseNameStatus(nameStatusOutput).map(({ path: path11, status }) => {
-    const rawEntry = rawByPath.get(path11);
-    const treeEntry = treeByPath.get(path11);
+  const changedPaths = sortChangedPaths(parseNameStatus(nameStatusOutput).map(({ path: path13, status }) => {
+    const rawEntry = rawByPath.get(path13);
+    const treeEntry = treeByPath.get(path13);
     if (treeEntry === void 0 && status !== "D") {
       throw new RuntimeError("candidate tree is missing a changed path");
     }
@@ -24025,7 +24042,7 @@ async function recomputeManifest(args) {
       throw new RuntimeError("git diff-tree outputs disagree");
     }
     return {
-      path: path11,
+      path: path13,
       changeType: changeType(status),
       mode: treeEntry?.mode ?? rawEntry.oldMode,
       contentHash: treeEntry?.oid ?? null
@@ -24418,6 +24435,9 @@ var delegation_spec_v1_default = {
       },
       minItems: 1
     },
+    expectBaselineFailure: {
+      type: "boolean"
+    },
     executionMode: {
       const: "edit"
     },
@@ -24516,6 +24536,7 @@ var attempt_result_v1_default = {
         "sandbox-violation",
         "invalid-output",
         "producer-failure",
+        "environment-defect",
         "verification-failure"
       ]
     },
@@ -24579,7 +24600,8 @@ var attempt_result_v1_default = {
             "timeout",
             "sandbox-violation",
             "invalid-output",
-            "producer-failure"
+            "producer-failure",
+            "environment-defect"
           ]
         },
         candidate: { type: "null" }
@@ -24804,17 +24826,17 @@ function checkVersionCompat(skillProtocolVersion) {
 }
 
 // src/runtime/attempt-runtime.ts
-import { randomUUID as randomUUID2 } from "node:crypto";
+import { randomUUID as randomUUID4 } from "node:crypto";
 import { constants as constants3 } from "node:fs";
 import {
-  access as access2,
+  access as access3,
   lstat as lstat4,
   open as open4,
-  realpath as realpath3,
+  realpath as realpath4,
   rename as rename2,
   rm as rm3
 } from "node:fs/promises";
-import path8 from "node:path";
+import path10 from "node:path";
 import { fileURLToPath as fileURLToPath2 } from "node:url";
 
 // src/git/candidate-tree.ts
@@ -25098,14 +25120,14 @@ function buildReadOnlySeatbeltPolicy(args) {
     allowNetwork: true
   };
 }
-function sbPath(path11) {
-  for (const character of path11) {
+function sbPath(path13) {
+  for (const character of path13) {
     const codePoint = character.codePointAt(0);
     if (codePoint !== void 0 && (codePoint < 32 || codePoint === 127)) {
-      throw new Error(`seatbelt: control character in path: ${JSON.stringify(path11)}`);
+      throw new Error(`seatbelt: control character in path: ${JSON.stringify(path13)}`);
     }
   }
-  return `"${path11.replace(/\\/gu, "\\\\").replace(/"/gu, '\\"')}"`;
+  return `"${path13.replace(/\\/gu, "\\\\").replace(/"/gu, '\\"')}"`;
 }
 function openCodeWritablePaths(invocation, policy) {
   if (policy.tempHome !== null || !invocation.requiredEnv.includes("OPENCODE_CONFIG_DIR")) return [];
@@ -25143,18 +25165,18 @@ function buildProfile(policy, additionalWritable) {
     "/private/tmp",
     "/dev",
     ...additionalWritable
-  ].filter((path11) => typeof path11 === "string" && path11.length > 0).flatMap((path11) => {
+  ].filter((path13) => typeof path13 === "string" && path13.length > 0).flatMap((path13) => {
     try {
-      return [path11, realpathSync(path11)];
+      return [path13, realpathSync(path13)];
     } catch {
-      return [path11];
+      return [path13];
     }
   }))];
   const lines = [
     "(version 1)",
     "(allow default)",
     "(deny file-write*)",
-    ...writable.map((path11) => `(allow file-write* (subpath ${sbPath(path11)}))`),
+    ...writable.map((path13) => `(allow file-write* (subpath ${sbPath(path13)}))`),
     '(allow file-write* (literal "/dev/null") (literal "/dev/tty"))'
   ];
   if (!policy.allowNetwork) lines.push("(deny network*)");
@@ -25187,6 +25209,8 @@ function wrapInvocationWithSeatbelt(invocation, policy) {
 // src/protocol/attempt-result.ts
 var FAILURE_PRECEDENCE = [
   "invalid-specification",
+  "environment-defect",
+  // clean baseline verification failed
   "unavailable",
   // pre-launch unavailability
   "authentication-required",
@@ -25231,8 +25255,542 @@ function route(preferences, reports) {
   return { producerId: null, reason: "no-eligible-producer", considered };
 }
 
+// src/verify/baseline-verifier.ts
+import { randomUUID as randomUUID2 } from "node:crypto";
+
+// src/verify/project-verifier.ts
+import { randomUUID } from "node:crypto";
+import { realpath as realpath2 } from "node:fs/promises";
+import path8 from "node:path";
+
+// src/runtime/environment-policy.ts
+import path6 from "node:path";
+var POSIX_ESSENTIAL_ENV = [
+  "HOME",
+  "PATH",
+  "TMPDIR",
+  "LANG",
+  "LC_ALL",
+  "XDG_CONFIG_HOME",
+  "XDG_CACHE_HOME",
+  "XDG_DATA_HOME",
+  "XDG_STATE_HOME",
+  "XDG_RUNTIME_DIR"
+];
+var WIN32_ESSENTIAL_ENV = [
+  "SystemRoot",
+  "ComSpec",
+  "TEMP",
+  "TMP",
+  "USERPROFILE",
+  "APPDATA",
+  "LOCALAPPDATA",
+  "Path"
+];
+var SENSITIVE_ENV_NAME = /^(?:[A-Za-z][A-Za-z0-9]*_)*(?:TOKEN|SECRET|PASSWORD|KEY|CREDENTIAL)(?:_[A-Za-z0-9]+)*$/i;
+var COMMON_SENSITIVE_ENV_NAMES = /* @__PURE__ */ new Set([
+  "GOOGLE_APPLICATION_CREDENTIALS",
+  "MYSQL_PWD",
+  "PGPASSWORD",
+  "REDISCLI_AUTH"
+]);
+function normalizeEnvironmentName(name) {
+  return name.replace(/([A-Z]+)([A-Z][a-z])/g, "$1_$2").replace(/([a-z0-9])([A-Z])/g, "$1_$2").toUpperCase();
+}
+function isSensitiveEnvironmentName(name) {
+  const normalized = normalizeEnvironmentName(name);
+  return SENSITIVE_ENV_NAME.test(normalized) || COMMON_SENSITIVE_ENV_NAMES.has(normalized);
+}
+function validateEnvironmentName(name) {
+  if (name.length === 0 || name.includes("=") || name.includes("\0")) {
+    throw new RuntimeError(`invalid environment variable name: ${JSON.stringify(name)}`);
+  }
+}
+function validateEnvironmentValue(name, value) {
+  if (value.includes("\0")) {
+    throw new RuntimeError(`invalid environment variable value for ${JSON.stringify(name)}`);
+  }
+}
+function combineSecretRegistrations(registrations) {
+  let active = true;
+  return {
+    dispose() {
+      if (!active) return;
+      active = false;
+      for (const registration of registrations) registration.dispose();
+    }
+  };
+}
+function registerSensitiveValues(environment, validateEntries) {
+  const registrations = [];
+  try {
+    for (const [name, value] of Object.entries(environment)) {
+      if (value === void 0) continue;
+      if (validateEntries) {
+        validateEnvironmentName(name);
+        validateEnvironmentValue(name, value);
+      }
+      if (isSensitiveEnvironmentName(name)) {
+        registrations.push(registerSecretValue(value));
+      }
+    }
+    return combineSecretRegistrations(registrations);
+  } catch (error2) {
+    combineSecretRegistrations(registrations).dispose();
+    throw error2;
+  }
+}
+function registerSensitiveEnvironment(environment) {
+  return registerSensitiveValues(environment, true);
+}
+function setEnvironmentValue(environment, provenance, name, value, source) {
+  validateEnvironmentName(name);
+  validateEnvironmentValue(name, value);
+  Object.defineProperty(environment, name, {
+    value,
+    writable: true,
+    enumerable: true,
+    configurable: true
+  });
+  provenance.set(name, source);
+}
+function compareNames(left, right) {
+  return left < right ? -1 : left > right ? 1 : 0;
+}
+function buildEnvironment(args) {
+  const env = {};
+  const provenance = /* @__PURE__ */ new Map();
+  const hostSecretRegistration = registerSensitiveValues(process.env, false);
+  try {
+    const platformEnvironment = args.os === "win32" ? normalizeWindowsEnv(process.env) : process.env;
+    const platformNames = args.os === "win32" ? WIN32_ESSENTIAL_ENV : POSIX_ESSENTIAL_ENV;
+    for (const name of platformNames) {
+      if (args.tempHome !== void 0 && name.startsWith("XDG_")) continue;
+      const value = platformEnvironment[name];
+      if (value !== void 0) {
+        setEnvironmentValue(env, provenance, name, value, "platform");
+      }
+    }
+    if (args.tempHome !== void 0) {
+      if (args.os === "win32") {
+        setEnvironmentValue(env, provenance, "USERPROFILE", args.tempHome, "platform");
+        setEnvironmentValue(
+          env,
+          provenance,
+          "APPDATA",
+          path6.win32.join(args.tempHome, "AppData", "Roaming"),
+          "platform"
+        );
+        setEnvironmentValue(
+          env,
+          provenance,
+          "LOCALAPPDATA",
+          path6.win32.join(args.tempHome, "AppData", "Local"),
+          "platform"
+        );
+      } else {
+        setEnvironmentValue(env, provenance, "HOME", args.tempHome, "platform");
+      }
+    }
+    for (const name of args.adapterAllowlist) {
+      validateEnvironmentName(name);
+      if (args.os !== "win32" && args.tempHome !== void 0 && name.startsWith("XDG_")) continue;
+      if (!Object.prototype.hasOwnProperty.call(process.env, name)) continue;
+      const value = process.env[name];
+      if (value !== void 0) {
+        setEnvironmentValue(env, provenance, name, value, "adapter");
+      }
+    }
+    for (const [name, value] of Object.entries(args.adapterValues ?? {})) {
+      validateEnvironmentName(name);
+      if (args.os !== "win32" && args.tempHome !== void 0 && name.startsWith("XDG_")) continue;
+      if (Object.prototype.hasOwnProperty.call(env, name)) continue;
+      setEnvironmentValue(env, provenance, name, value, "adapter");
+    }
+    for (const [name, value] of Object.entries(args.specAdditions ?? {})) {
+      setEnvironmentValue(env, provenance, name, value, "spec");
+    }
+    setEnvironmentValue(
+      env,
+      provenance,
+      "CLAUDE_ARCHITECT_DELEGATED",
+      "1",
+      "platform"
+    );
+    const environmentSecretRegistration = registerSensitiveEnvironment(env);
+    return {
+      env,
+      provenance: [...provenance.entries()].map(([name, source]) => ({ name, source })).sort((left, right) => compareNames(left.name, right.name)),
+      secretRegistration: combineSecretRegistrations([
+        hostSecretRegistration,
+        environmentSecretRegistration
+      ])
+    };
+  } catch (error2) {
+    hostSecretRegistration.dispose();
+    throw error2;
+  }
+}
+
+// src/verify/dependency-link.ts
+import { access as access2, readFile, symlink } from "node:fs/promises";
+import path7 from "node:path";
+var LOCKFILES = ["package-lock.json", "bun.lockb", "pnpm-lock.yaml", "yarn.lock"];
+async function exists2(candidate) {
+  try {
+    await access2(candidate);
+    return true;
+  } catch {
+    return false;
+  }
+}
+async function linkPrimaryDependencies(primaryRepo, worktreePath) {
+  const primaryModules = path7.join(primaryRepo, "node_modules");
+  if (!await exists2(primaryModules)) return "none";
+  let selected;
+  for (const lockfile of LOCKFILES) {
+    if (await exists2(path7.join(primaryRepo, lockfile))) {
+      selected = lockfile;
+      break;
+    }
+  }
+  if (selected === void 0) return "none";
+  try {
+    const [primaryLock, worktreeLock] = await Promise.all([
+      readFile(path7.join(primaryRepo, selected)),
+      readFile(path7.join(worktreePath, selected))
+    ]);
+    if (!primaryLock.equals(worktreeLock)) return "skipped-lockfile-mismatch";
+  } catch {
+    return "skipped-lockfile-mismatch";
+  }
+  await symlink(primaryModules, path7.join(worktreePath, "node_modules"), "junction");
+  return "inherited";
+}
+
+// src/verify/project-verifier.ts
+var MAX_COMMAND_OUTPUT_BYTES = 1e6;
+var MAX_DIAGNOSTIC_LENGTH5 = 2e3;
+var POSIX_ESSENTIAL_ENV2 = [
+  "HOME",
+  "PATH",
+  "TMPDIR",
+  "LANG",
+  "LC_ALL",
+  "XDG_CONFIG_HOME",
+  "XDG_CACHE_HOME",
+  "XDG_DATA_HOME",
+  "XDG_STATE_HOME",
+  "XDG_RUNTIME_DIR"
+];
+function gitFailure3(action, result) {
+  const diagnostic = redact(result.stderr || result.stdout).trim().slice(0, MAX_DIAGNOSTIC_LENGTH5);
+  return new RuntimeError(`${action} failed${diagnostic ? `: ${diagnostic}` : ""}`);
+}
+async function checkedGit3(cwd, args) {
+  const result = await git(cwd, args);
+  if (result.exitCode !== 0) throw gitFailure3(`git ${args[0] ?? "command"}`, result);
+  return result.stdout;
+}
+function defineEnvironmentValue(environment, name, value) {
+  Object.defineProperty(environment, name, {
+    value,
+    writable: true,
+    enumerable: true,
+    configurable: true
+  });
+}
+function commandEnvironment(command, os) {
+  const environment = /* @__PURE__ */ Object.create(null);
+  const platformEnvironment = os === "win32" ? normalizeWindowsEnv(process.env) : process.env;
+  const platformNames = os === "win32" ? WIN32_ESSENTIAL_ENV : POSIX_ESSENTIAL_ENV2;
+  for (const name of platformNames) {
+    const value = platformEnvironment[name];
+    if (value !== void 0) defineEnvironmentValue(environment, name, value);
+  }
+  for (const [name, value] of Object.entries(command.environment ?? {})) {
+    defineEnvironmentValue(environment, name, value);
+  }
+  defineEnvironmentValue(environment, "CLAUDE_ARCHITECT_DELEGATED", "1");
+  return environment;
+}
+function isWithinScope(root, candidate, os) {
+  if (os === "win32") return canonicalizeForScope(candidate, root);
+  const relative = path8.posix.relative(root, candidate);
+  return relative === "" || !path8.posix.isAbsolute(relative) && relative !== ".." && !relative.startsWith("../");
+}
+async function resolveCommandCwd(worktreePath, commandCwd, os) {
+  if (path8.isAbsolute(commandCwd)) return null;
+  const lexical = path8.resolve(worktreePath, commandCwd);
+  if (!isWithinScope(worktreePath, lexical, os)) return null;
+  try {
+    const [canonicalRoot, canonicalCwd] = await Promise.all([
+      realpath2(worktreePath),
+      realpath2(lexical)
+    ]);
+    return isWithinScope(canonicalRoot, canonicalCwd, os) ? canonicalCwd : null;
+  } catch {
+    return null;
+  }
+}
+function appliesToPlatform(command, os, arch) {
+  if (command.platform?.os !== void 0 && !command.platform.os.includes(os)) {
+    return { applies: false, reason: "platform-os" };
+  }
+  if (command.platform?.arch !== void 0 && !command.platform.arch.includes(arch)) {
+    return { applies: false, reason: "platform-arch" };
+  }
+  return { applies: true };
+}
+function logName(index, stream) {
+  return `verification-${index}-${stream}`;
+}
+function logRef(name) {
+  return `logs/${name}.log`;
+}
+function errorMessage(error2) {
+  return error2 instanceof Error ? error2.message : String(error2);
+}
+function boundText(text) {
+  const bytes = Buffer.from(text);
+  if (bytes.length <= MAX_COMMAND_OUTPUT_BYTES) return { text, truncated: false };
+  let end = MAX_COMMAND_OUTPUT_BYTES;
+  while (end > 0 && (bytes[end] & 192) === 128) end -= 1;
+  return { text: bytes.subarray(0, end).toString("utf8"), truncated: true };
+}
+async function executeCommand(args) {
+  const { command, index, cwd, ps, now } = args;
+  const registration = registerSensitiveEnvironment(command.environment ?? {});
+  const stdoutName = logName(index, "stdout");
+  const stderrName = logName(index, "stderr");
+  const startedAt = now();
+  let executable = null;
+  let exit = null;
+  let failureText = "";
+  try {
+    const environment = commandEnvironment(command, ps.os);
+    executable = await ps.resolveExecutable({
+      name: command.executable,
+      ...path8.isAbsolute(command.executable) ? { explicitPath: command.executable } : {},
+      searchPath: environment.PATH ?? environment.Path ?? ""
+    });
+    exit = await supervise(ps, {
+      executable,
+      args: command.args,
+      cwd,
+      env: environment,
+      timeoutMs: command.timeoutMs,
+      maxOutputBytes: MAX_COMMAND_OUTPUT_BYTES
+    }, {});
+  } catch (error2) {
+    failureText = errorMessage(error2);
+  }
+  try {
+    const actualArgs = [...executable?.prefixArgs ?? [], ...command.args].map(redact);
+    const stdout = boundText(redact(exit?.stdout ?? ""));
+    const stderr = boundText(redact(exit === null ? failureText : [exit.stderr, exit.spawnError === void 0 ? "" : errorMessage(exit.spawnError)].filter(Boolean).join("\n")));
+    const exitCode = exit?.exitCode ?? null;
+    const failed = exitCode === null || exit?.timedOut === true || exit?.cancelled === true || exit?.spawnError !== void 0 || !command.expectedExitCodes.includes(exitCode);
+    return {
+      outcome: {
+        id: redact(command.id),
+        executable: redact(executable?.command ?? command.executable),
+        args: actualArgs,
+        exitCode,
+        timedOut: exit?.timedOut ?? false,
+        durationMs: Math.max(0, now() - startedAt),
+        stdoutRef: logRef(stdoutName),
+        stderrRef: logRef(stderrName)
+      },
+      evidence: {
+        id: redact(command.id),
+        confinement: "none",
+        networkPolicy: "unenforced",
+        requestedNetwork: command.network,
+        skipped: false,
+        resolvedFrom: executable === null ? null : redact(executable.resolvedFrom),
+        truncated: {
+          stdout: (exit?.truncated.stdout ?? false) || stdout.truncated,
+          stderr: (exit?.truncated.stderr ?? false) || stderr.truncated
+        },
+        spawnError: exit?.spawnError !== void 0
+      },
+      outputLogs: [
+        { name: stdoutName, text: stdout.text },
+        { name: stderrName, text: stderr.text }
+      ],
+      failed
+    };
+  } finally {
+    registration.dispose();
+  }
+}
+function skippedEvidence(command, reason) {
+  const registration = registerSensitiveEnvironment(command.environment ?? {});
+  try {
+    return {
+      id: redact(command.id),
+      confinement: "none",
+      networkPolicy: "unenforced",
+      requestedNetwork: command.network,
+      skipped: true,
+      skipReason: reason
+    };
+  } finally {
+    registration.dispose();
+  }
+}
+async function projectVerify(args) {
+  const ps = args.ps ?? getPlatformServices();
+  const arch = args.arch ?? process.arch;
+  const now = args.now ?? Date.now;
+  const verificationId = args.verificationId?.() ?? randomUUID();
+  const manager = new WorktreeManager(args.repoRoot, `verify-${verificationId}`, ps);
+  const materialized = await manager.create(args.artifact.candidateCommitOid);
+  let primaryError;
+  try {
+    const dependencyLink = await linkPrimaryDependencies(args.repoRoot, materialized.path);
+    const materializedTree = (await checkedGit3(
+      materialized.path,
+      ["rev-parse", "HEAD^{tree}"]
+    )).trim();
+    if (materializedTree !== args.artifact.candidateTreeOid) {
+      return {
+        commandOutcomes: [],
+        mutated: false,
+        failures: ["candidate-materialization-mismatch"],
+        evidence: { commands: [], dependencyLink },
+        outputLogs: []
+      };
+    }
+    const commandOutcomes = [];
+    const failures = [];
+    const commandEvidence = [];
+    const outputLogs = [];
+    let mutated = false;
+    for (let index = 0; index < args.commands.length; index += 1) {
+      const command = args.commands[index];
+      const applicability = appliesToPlatform(command, ps.os, arch);
+      if (!applicability.applies) {
+        commandEvidence.push(skippedEvidence(command, applicability.reason));
+        continue;
+      }
+      const cwd = await resolveCommandCwd(materialized.path, command.cwd, ps.os);
+      if (cwd === null) {
+        const registration = registerSensitiveEnvironment(command.environment ?? {});
+        try {
+          failures.push(`invalid-command-cwd:${redact(command.id)}`);
+          commandEvidence.push({
+            id: redact(command.id),
+            confinement: "none",
+            networkPolicy: "unenforced",
+            requestedNetwork: command.network,
+            skipped: false
+          });
+        } finally {
+          registration.dispose();
+        }
+        continue;
+      }
+      const executed = await executeCommand({ command, index, cwd, ps, now });
+      commandOutcomes.push(executed.outcome);
+      commandEvidence.push(executed.evidence);
+      outputLogs.push(...executed.outputLogs);
+      if (executed.failed) failures.push(`command-failed:${executed.outcome.id}`);
+      const [status, currentHead] = await Promise.all([
+        checkedGit3(materialized.path, [
+          "status",
+          "--porcelain=v2",
+          "-z",
+          "--untracked-files=all",
+          "--ignored=matching",
+          "--ignore-submodules=none"
+        ]),
+        checkedGit3(materialized.path, ["rev-parse", "--verify", "HEAD"])
+      ]);
+      const records = status.split("\0").filter((record2) => record2.length > 0 && !(dependencyLink === "inherited" && /^[?!] node_modules$/.test(record2)));
+      const disallowedRecords = command.allowedMutations === "ignored-paths" ? records.filter((record2) => !record2.startsWith("! ")) : records;
+      if (disallowedRecords.length > 0 || currentHead.trim() !== args.artifact.candidateCommitOid) {
+        mutated = true;
+        failures.push("verification-mutated");
+        break;
+      }
+    }
+    return {
+      commandOutcomes,
+      mutated,
+      failures,
+      evidence: { commands: commandEvidence, dependencyLink },
+      outputLogs
+    };
+  } catch (error2) {
+    primaryError = error2;
+    throw error2;
+  } finally {
+    try {
+      await materialized.cleanup();
+    } catch (cleanupError) {
+      if (primaryError === void 0) throw cleanupError;
+      throw new AggregateError(
+        [primaryError, cleanupError],
+        "project verification failed and its worktree could not be cleaned up"
+      );
+    }
+  }
+}
+
+// src/verify/baseline-verifier.ts
+async function verifyBaseline(args) {
+  const ps = args.ps ?? getPlatformServices();
+  const arch = args.arch ?? process.arch;
+  const now = args.now ?? Date.now;
+  const manager = new WorktreeManager(
+    args.repoRoot,
+    `baseline-${args.verificationId?.() ?? randomUUID2()}`,
+    ps
+  );
+  const materialized = await manager.create(args.headCommitOid);
+  let primaryError;
+  try {
+    const dependencyLink = await linkPrimaryDependencies(args.repoRoot, materialized.path);
+    const commands = [];
+    for (let index = 0; index < args.commands.length; index += 1) {
+      const command = args.commands[index];
+      if (!appliesToPlatform(command, ps.os, arch).applies) {
+        commands.push({ id: command.id, exitCode: null, ok: true });
+        continue;
+      }
+      const cwd = await resolveCommandCwd(materialized.path, command.cwd, ps.os);
+      if (cwd === null) {
+        commands.push({ id: command.id, exitCode: null, ok: false });
+        continue;
+      }
+      const executed = await executeCommand({ command, index, cwd, ps, now });
+      commands.push({
+        id: executed.outcome.id,
+        exitCode: executed.outcome.exitCode,
+        ok: !executed.failed
+      });
+    }
+    return { baselineCommitOid: args.headCommitOid, commands, dependencyLink };
+  } catch (error2) {
+    primaryError = error2;
+    throw error2;
+  } finally {
+    try {
+      await materialized.cleanup();
+    } catch (cleanupError) {
+      if (primaryError === void 0) throw cleanupError;
+      throw new AggregateError(
+        [primaryError, cleanupError],
+        "baseline verification failed and its worktree could not be cleaned up"
+      );
+    }
+  }
+}
+
 // src/runtime/artifact-store.ts
-import { createHash as createHash6, randomUUID } from "node:crypto";
+import { createHash as createHash6, randomUUID as randomUUID3 } from "node:crypto";
 import { constants as constants2 } from "node:fs";
 import {
   link,
@@ -25241,11 +25799,11 @@ import {
   open as open3,
   opendir as opendir2,
   readdir,
-  realpath as realpath2,
+  realpath as realpath3,
   rename,
   rm as rm2
 } from "node:fs/promises";
-import path6 from "node:path";
+import path9 from "node:path";
 
 // src/runtime/run-manifest.ts
 import { createHash as createHash5 } from "node:crypto";
@@ -25424,8 +25982,8 @@ function compareEntries(left, right) {
   return left.runId < right.runId ? -1 : left.runId > right.runId ? 1 : 0;
 }
 function isWithin(root, candidate) {
-  const relative = path6.relative(root, candidate);
-  return relative === "" || !path6.isAbsolute(relative) && relative !== ".." && !relative.startsWith(`..${path6.sep}`);
+  const relative = path9.relative(root, candidate);
+  return relative === "" || !path9.isAbsolute(relative) && relative !== ".." && !relative.startsWith(`..${path9.sep}`);
 }
 async function ensurePlainDirectory(directory) {
   let created = false;
@@ -25439,7 +25997,7 @@ async function ensurePlainDirectory(directory) {
   if (metadata.isSymbolicLink() || !metadata.isDirectory()) {
     throw new RuntimeError(`archive directory must not be a symbolic link: ${redact(directory)}`);
   }
-  if (created) await syncDirectory(path6.dirname(directory));
+  if (created) await syncDirectory(path9.dirname(directory));
   return { dev: metadata.dev, ino: metadata.ino };
 }
 async function ensurePlainDirectoryTree(directory) {
@@ -25447,7 +26005,7 @@ async function ensurePlainDirectoryTree(directory) {
     return await ensurePlainDirectory(directory);
   } catch (error2) {
     if (!isMissing(error2)) throw error2;
-    const parent = path6.dirname(directory);
+    const parent = path9.dirname(directory);
     if (parent === directory) throw error2;
     await ensurePlainDirectoryTree(parent);
     return ensurePlainDirectory(directory);
@@ -25475,7 +26033,7 @@ async function readRegularFile(filename, parentIdentity) {
   const handle = await open3(filename, constants2.O_RDONLY | NO_FOLLOW);
   try {
     if (parentIdentity !== void 0) {
-      await assertDirectoryIdentity(path6.dirname(filename), parentIdentity);
+      await assertDirectoryIdentity(path9.dirname(filename), parentIdentity);
     }
     const metadata = await handle.stat();
     if (!metadata.isFile()) {
@@ -25502,7 +26060,7 @@ async function readRegularFile(filename, parentIdentity) {
       throw new RuntimeError(`archive entry changed while being read: ${redact(filename)}`);
     }
     if (parentIdentity !== void 0) {
-      await assertDirectoryIdentity(path6.dirname(filename), parentIdentity);
+      await assertDirectoryIdentity(path9.dirname(filename), parentIdentity);
     }
     return contents.subarray(0, offset).toString("utf8");
   } finally {
@@ -25530,7 +26088,7 @@ async function directoryBytes(directory, expectedIdentity) {
     await assertDirectoryIdentity(directory, identity);
     for await (const entry of entries) {
       await assertDirectoryIdentity(directory, identity);
-      const entryPath = path6.join(directory, entry.name);
+      const entryPath = path9.join(directory, entry.name);
       try {
         const entryMetadata = await lstat3(entryPath);
         if (entryMetadata.isSymbolicLink()) {
@@ -25615,7 +26173,7 @@ function preserveNullableIdentity2(value, label) {
 function preserveCandidatePath(value) {
   const candidatePath = preserveIdentity2(value, "candidate path");
   const segments = candidatePath.split("/");
-  if (candidatePath === "" || candidatePath.includes("\\") || candidatePath.includes("\0") || path6.posix.isAbsolute(candidatePath) || path6.win32.isAbsolute(candidatePath) || /^[A-Za-z]:/.test(candidatePath) || segments.some((segment) => segment === "" || segment === "." || segment === "..")) {
+  if (candidatePath === "" || candidatePath.includes("\\") || candidatePath.includes("\0") || path9.posix.isAbsolute(candidatePath) || path9.win32.isAbsolute(candidatePath) || /^[A-Za-z]:/.test(candidatePath) || segments.some((segment) => segment === "" || segment === "." || segment === "..")) {
     throw new RuntimeError("candidate path must be a normalized relative Git path");
   }
   return candidatePath;
@@ -25718,13 +26276,13 @@ var ArtifactStore = class {
   constructor(runId) {
     validateComponent(runId, "run id");
     this.runId = runId;
-    this.runsRoot = path6.join(resolveStateDir(), "runs");
-    this.runDirectory = path6.join(this.runsRoot, runId);
+    this.runsRoot = path9.join(resolveStateDir(), "runs");
+    this.runDirectory = path9.join(this.runsRoot, runId);
   }
   async ensureRunsRoot() {
-    await ensurePlainDirectoryTree(path6.dirname(this.runsRoot));
+    await ensurePlainDirectoryTree(path9.dirname(this.runsRoot));
     await ensurePlainDirectory(this.runsRoot);
-    return realpath2(this.runsRoot);
+    return realpath3(this.runsRoot);
   }
   async ensureRunDirectory(create) {
     const canonicalRunsRoot = await this.ensureRunsRoot();
@@ -25741,28 +26299,28 @@ var ArtifactStore = class {
         throw error2;
       }
     }
-    const canonicalRunDirectory = await realpath2(this.runDirectory);
+    const canonicalRunDirectory = await realpath3(this.runDirectory);
     if (!isWithin(canonicalRunsRoot, canonicalRunDirectory)) {
       throw new RuntimeError("archive directory escapes plugin data");
     }
     return canonicalRunDirectory;
   }
   async ensureArchiveDirectory(relativePath) {
-    if (path6.isAbsolute(relativePath)) throw new RuntimeError("archive path must be relative");
-    const normalized = path6.normalize(relativePath);
-    if (normalized === ".." || normalized.startsWith(`..${path6.sep}`)) {
+    if (path9.isAbsolute(relativePath)) throw new RuntimeError("archive path must be relative");
+    const normalized = path9.normalize(relativePath);
+    if (normalized === ".." || normalized.startsWith(`..${path9.sep}`)) {
       throw new RuntimeError("archive path escapes run directory");
     }
     const canonicalRunDirectory = await this.ensureRunDirectory(true);
     if (canonicalRunDirectory === null) throw new RuntimeError("failed to create archive directory");
-    const relativeDirectory = path6.dirname(normalized);
+    const relativeDirectory = path9.dirname(normalized);
     if (relativeDirectory === ".") return canonicalRunDirectory;
     let current = canonicalRunDirectory;
-    for (const component of relativeDirectory.split(path6.sep)) {
+    for (const component of relativeDirectory.split(path9.sep)) {
       validateComponent(component, "log name");
-      current = path6.join(current, component);
+      current = path9.join(current, component);
       await ensurePlainDirectory(current);
-      const canonicalCurrent = await realpath2(current);
+      const canonicalCurrent = await realpath3(current);
       if (!isWithin(canonicalRunDirectory, canonicalCurrent)) {
         throw new RuntimeError("archive directory escapes run directory");
       }
@@ -25773,8 +26331,8 @@ var ArtifactStore = class {
   async writeArchiveFile(relativePath, text) {
     const directory = await this.ensureArchiveDirectory(relativePath);
     const directoryIdentity = await ensurePlainDirectory(directory);
-    const destination = path6.join(directory, path6.basename(relativePath));
-    const temporaryPath = path6.join(directory, `.${path6.basename(destination)}.${randomUUID()}.tmp`);
+    const destination = path9.join(directory, path9.basename(relativePath));
+    const temporaryPath = path9.join(directory, `.${path9.basename(destination)}.${randomUUID3()}.tmp`);
     let handle;
     let temporaryCreated = false;
     try {
@@ -25818,14 +26376,14 @@ var ArtifactStore = class {
     await this.writeArchiveFile(relativePath, serialized);
   }
   async replaceJson(relativePath, value) {
-    if (path6.isAbsolute(relativePath) || path6.dirname(relativePath) !== "." || path6.basename(relativePath) !== relativePath || !isSafeComponent(relativePath)) {
+    if (path9.isAbsolute(relativePath) || path9.dirname(relativePath) !== "." || path9.basename(relativePath) !== relativePath || !isSafeComponent(relativePath)) {
       throw new RuntimeError("replacement archive path must be a safe relative leaf");
     }
     const directory = await this.ensureRunDirectory(false);
     if (directory === null) throw new RuntimeError("run archive does not exist");
     const directoryIdentity = await ensurePlainDirectory(directory);
-    const destination = path6.join(directory, relativePath);
-    const temporaryPath = path6.join(directory, `.${relativePath}.${randomUUID()}.tmp`);
+    const destination = path9.join(directory, relativePath);
+    const temporaryPath = path9.join(directory, `.${relativePath}.${randomUUID3()}.tmp`);
     const serialized = `${serializeJson(value, 2)}
 `;
     let handle;
@@ -25854,21 +26412,21 @@ var ArtifactStore = class {
   }
   async writeLog(name, text) {
     validateComponent(name, "log name");
-    const ref = path6.posix.join("logs", `${name}.log`);
+    const ref = path9.posix.join("logs", `${name}.log`);
     await this.writeArchiveFile(ref, redact(text));
     return ref;
   }
   async writePipelineArtifact(name, value) {
     validateComponent(name, "log name");
-    await this.writeJson(path6.posix.join("pipeline", `${name}.json`), value);
+    await this.writeJson(path9.posix.join("pipeline", `${name}.json`), value);
   }
   async readPipelineArtifact(runId, name) {
     validateComponent(runId, "run id");
     validateComponent(name, "log name");
-    const runDirectory = path6.join(this.runsRoot, runId);
+    const runDirectory = path9.join(this.runsRoot, runId);
     const validatedRun = await this.ensureExistingRunDirectory(runDirectory);
     if (validatedRun === null) return null;
-    const validated = await this.ensureExistingRunDirectory(path6.join(runDirectory, "pipeline"));
+    const validated = await this.ensureExistingRunDirectory(path9.join(runDirectory, "pipeline"));
     if (validated === null) return null;
     if (!isWithin(validatedRun.path, validated.path)) {
       throw new RuntimeError("pipeline archive directory escapes run directory");
@@ -25876,7 +26434,7 @@ var ArtifactStore = class {
     await assertDirectoryIdentity(validatedRun.path, validatedRun.identity);
     try {
       const value = JSON.parse(await readRegularFile(
-        path6.join(validated.path, `${name}.json`),
+        path9.join(validated.path, `${name}.json`),
         validated.identity
       ));
       await assertDirectoryIdentity(validatedRun.path, validatedRun.identity);
@@ -25902,13 +26460,13 @@ var ArtifactStore = class {
   }
   async readResult(runId) {
     validateComponent(runId, "run id");
-    const runDirectory = path6.join(this.runsRoot, runId);
+    const runDirectory = path9.join(this.runsRoot, runId);
     const validated = await this.ensureExistingRunDirectory(runDirectory);
     if (validated === null) return null;
     try {
       return verifyAttemptResult(
         JSON.parse(await readRegularFile(
-          path6.join(validated.path, "result.json"),
+          path9.join(validated.path, "result.json"),
           validated.identity
         )),
         runId
@@ -25925,7 +26483,7 @@ var ArtifactStore = class {
       if (metadata.isSymbolicLink() || !metadata.isDirectory()) {
         throw new RuntimeError(`archive directory must not be a symbolic link: ${redact(directory)}`);
       }
-      const canonicalDirectory = await realpath2(directory);
+      const canonicalDirectory = await realpath3(directory);
       if (!isWithin(canonicalRunsRoot, canonicalDirectory)) {
         throw new RuntimeError("archive directory escapes plugin data");
       }
@@ -25939,13 +26497,13 @@ var ArtifactStore = class {
   }
   async readManifest(runId) {
     validateComponent(runId, "run id");
-    const runDirectory = path6.join(this.runsRoot, runId);
+    const runDirectory = path9.join(this.runsRoot, runId);
     const validated = await this.ensureExistingRunDirectory(runDirectory);
     if (validated === null) return null;
     try {
       return verifyRunManifest(
         JSON.parse(await readRegularFile(
-          path6.join(validated.path, "manifest.json"),
+          path9.join(validated.path, "manifest.json"),
           validated.identity
         )),
         runId
@@ -25963,12 +26521,12 @@ var ArtifactStore = class {
   }
   async readDecision(runId) {
     validateComponent(runId, "run id");
-    const runDirectory = path6.join(this.runsRoot, runId);
+    const runDirectory = path9.join(this.runsRoot, runId);
     const validated = await this.ensureExistingRunDirectory(runDirectory);
     if (validated === null) return null;
     try {
       const value = JSON.parse(await readRegularFile(
-        path6.join(validated.path, "decision.json"),
+        path9.join(validated.path, "decision.json"),
         validated.identity
       ));
       if (!["accepted", "rejected", "revision-requested"].includes(value.decision) || typeof value.recordedAt !== "string" || !Number.isFinite(Date.parse(value.recordedAt))) {
@@ -25987,7 +26545,7 @@ var ArtifactStore = class {
   }
   async entries() {
     const entries = await Promise.all((await this.list()).map(async (runId) => {
-      const directory = path6.join(this.runsRoot, runId);
+      const directory = path9.join(this.runsRoot, runId);
       try {
         const metadata = await lstat3(directory);
         if (metadata.isSymbolicLink() || !metadata.isDirectory()) return null;
@@ -26030,9 +26588,9 @@ var ArtifactStore = class {
     if (manifest.baseCommitOid !== candidate.baseCommitOid || manifest.candidateManifestHash !== candidate.manifestHash) {
       throw new RuntimeError("archived candidate does not match its run manifest");
     }
-    const canonicalRepoRoot = await realpath2(manifest.repoRoot);
+    const canonicalRepoRoot = await realpath3(manifest.repoRoot);
     const repositoryTopLevel = await git(canonicalRepoRoot, ["rev-parse", "--show-toplevel"]);
-    if (repositoryTopLevel.exitCode !== 0 || await realpath2(repositoryTopLevel.stdout.trim()) !== canonicalRepoRoot) {
+    if (repositoryTopLevel.exitCode !== 0 || await realpath3(repositoryTopLevel.stdout.trim()) !== canonicalRepoRoot) {
       throw new RuntimeError("archived repository root is not a canonical repository root");
     }
     const commit = await git(canonicalRepoRoot, [
@@ -26149,7 +26707,7 @@ var ArtifactStore = class {
     await enqueueCleanupJournalWrite(async () => {
       await this.ensureRunsRoot();
       const runsRootIdentity = await ensurePlainDirectory(this.runsRoot);
-      const filename = path6.join(this.runsRoot, CLEANUP_JOURNAL);
+      const filename = path9.join(this.runsRoot, CLEANUP_JOURNAL);
       const handle = await open3(
         filename,
         constants2.O_WRONLY | constants2.O_CREAT | constants2.O_APPEND | NO_FOLLOW,
@@ -26183,8 +26741,8 @@ var ArtifactStore = class {
     const removeEntry = async (entry, reason) => {
       if (attempted.has(entry.runId)) return;
       attempted.add(entry.runId);
-      const quarantineName = `.prune-${entry.runId}-${randomUUID()}`;
-      const quarantinePath = path6.join(this.runsRoot, quarantineName);
+      const quarantineName = `.prune-${entry.runId}-${randomUUID3()}`;
+      const quarantinePath = path9.join(this.runsRoot, quarantineName);
       let prepared = null;
       let transaction = null;
       let runsRootIdentity = null;
@@ -26303,175 +26861,6 @@ var ArtifactStore = class {
   }
 };
 
-// src/runtime/environment-policy.ts
-import path7 from "node:path";
-var POSIX_ESSENTIAL_ENV = [
-  "HOME",
-  "PATH",
-  "TMPDIR",
-  "LANG",
-  "LC_ALL",
-  "XDG_CONFIG_HOME",
-  "XDG_CACHE_HOME",
-  "XDG_DATA_HOME",
-  "XDG_STATE_HOME",
-  "XDG_RUNTIME_DIR"
-];
-var WIN32_ESSENTIAL_ENV = [
-  "SystemRoot",
-  "ComSpec",
-  "TEMP",
-  "TMP",
-  "USERPROFILE",
-  "APPDATA",
-  "LOCALAPPDATA",
-  "Path"
-];
-var SENSITIVE_ENV_NAME = /^(?:[A-Za-z][A-Za-z0-9]*_)*(?:TOKEN|SECRET|PASSWORD|KEY|CREDENTIAL)(?:_[A-Za-z0-9]+)*$/i;
-var COMMON_SENSITIVE_ENV_NAMES = /* @__PURE__ */ new Set([
-  "GOOGLE_APPLICATION_CREDENTIALS",
-  "MYSQL_PWD",
-  "PGPASSWORD",
-  "REDISCLI_AUTH"
-]);
-function normalizeEnvironmentName(name) {
-  return name.replace(/([A-Z]+)([A-Z][a-z])/g, "$1_$2").replace(/([a-z0-9])([A-Z])/g, "$1_$2").toUpperCase();
-}
-function isSensitiveEnvironmentName(name) {
-  const normalized = normalizeEnvironmentName(name);
-  return SENSITIVE_ENV_NAME.test(normalized) || COMMON_SENSITIVE_ENV_NAMES.has(normalized);
-}
-function validateEnvironmentName(name) {
-  if (name.length === 0 || name.includes("=") || name.includes("\0")) {
-    throw new RuntimeError(`invalid environment variable name: ${JSON.stringify(name)}`);
-  }
-}
-function validateEnvironmentValue(name, value) {
-  if (value.includes("\0")) {
-    throw new RuntimeError(`invalid environment variable value for ${JSON.stringify(name)}`);
-  }
-}
-function combineSecretRegistrations(registrations) {
-  let active = true;
-  return {
-    dispose() {
-      if (!active) return;
-      active = false;
-      for (const registration of registrations) registration.dispose();
-    }
-  };
-}
-function registerSensitiveValues(environment, validateEntries) {
-  const registrations = [];
-  try {
-    for (const [name, value] of Object.entries(environment)) {
-      if (value === void 0) continue;
-      if (validateEntries) {
-        validateEnvironmentName(name);
-        validateEnvironmentValue(name, value);
-      }
-      if (isSensitiveEnvironmentName(name)) {
-        registrations.push(registerSecretValue(value));
-      }
-    }
-    return combineSecretRegistrations(registrations);
-  } catch (error2) {
-    combineSecretRegistrations(registrations).dispose();
-    throw error2;
-  }
-}
-function registerSensitiveEnvironment(environment) {
-  return registerSensitiveValues(environment, true);
-}
-function setEnvironmentValue(environment, provenance, name, value, source) {
-  validateEnvironmentName(name);
-  validateEnvironmentValue(name, value);
-  Object.defineProperty(environment, name, {
-    value,
-    writable: true,
-    enumerable: true,
-    configurable: true
-  });
-  provenance.set(name, source);
-}
-function compareNames(left, right) {
-  return left < right ? -1 : left > right ? 1 : 0;
-}
-function buildEnvironment(args) {
-  const env = {};
-  const provenance = /* @__PURE__ */ new Map();
-  const hostSecretRegistration = registerSensitiveValues(process.env, false);
-  try {
-    const platformEnvironment = args.os === "win32" ? normalizeWindowsEnv(process.env) : process.env;
-    const platformNames = args.os === "win32" ? WIN32_ESSENTIAL_ENV : POSIX_ESSENTIAL_ENV;
-    for (const name of platformNames) {
-      if (args.tempHome !== void 0 && name.startsWith("XDG_")) continue;
-      const value = platformEnvironment[name];
-      if (value !== void 0) {
-        setEnvironmentValue(env, provenance, name, value, "platform");
-      }
-    }
-    if (args.tempHome !== void 0) {
-      if (args.os === "win32") {
-        setEnvironmentValue(env, provenance, "USERPROFILE", args.tempHome, "platform");
-        setEnvironmentValue(
-          env,
-          provenance,
-          "APPDATA",
-          path7.win32.join(args.tempHome, "AppData", "Roaming"),
-          "platform"
-        );
-        setEnvironmentValue(
-          env,
-          provenance,
-          "LOCALAPPDATA",
-          path7.win32.join(args.tempHome, "AppData", "Local"),
-          "platform"
-        );
-      } else {
-        setEnvironmentValue(env, provenance, "HOME", args.tempHome, "platform");
-      }
-    }
-    for (const name of args.adapterAllowlist) {
-      validateEnvironmentName(name);
-      if (args.os !== "win32" && args.tempHome !== void 0 && name.startsWith("XDG_")) continue;
-      if (!Object.prototype.hasOwnProperty.call(process.env, name)) continue;
-      const value = process.env[name];
-      if (value !== void 0) {
-        setEnvironmentValue(env, provenance, name, value, "adapter");
-      }
-    }
-    for (const [name, value] of Object.entries(args.adapterValues ?? {})) {
-      validateEnvironmentName(name);
-      if (args.os !== "win32" && args.tempHome !== void 0 && name.startsWith("XDG_")) continue;
-      if (Object.prototype.hasOwnProperty.call(env, name)) continue;
-      setEnvironmentValue(env, provenance, name, value, "adapter");
-    }
-    for (const [name, value] of Object.entries(args.specAdditions ?? {})) {
-      setEnvironmentValue(env, provenance, name, value, "spec");
-    }
-    setEnvironmentValue(
-      env,
-      provenance,
-      "CLAUDE_ARCHITECT_DELEGATED",
-      "1",
-      "platform"
-    );
-    const environmentSecretRegistration = registerSensitiveEnvironment(env);
-    return {
-      env,
-      provenance: [...provenance.entries()].map(([name, source]) => ({ name, source })).sort((left, right) => compareNames(left.name, right.name)),
-      secretRegistration: combineSecretRegistrations([
-        hostSecretRegistration,
-        environmentSecretRegistration
-      ])
-    };
-  } catch (error2) {
-    hostSecretRegistration.dispose();
-    throw error2;
-  }
-}
-
 // src/runtime/attempt-runtime.ts
 var MAX_PRODUCER_OUTPUT_BYTES = 1e6;
 var NO_FOLLOW2 = constants3.O_NOFOLLOW ?? 0;
@@ -26517,6 +26906,8 @@ function summaryForFailure(failure2) {
       return "candidate did not pass independent verification";
     case "invalid-specification":
       return "delegation specification is invalid";
+    case "environment-defect":
+      return "clean repository baseline did not pass verification";
   }
 }
 function producerLog(exit) {
@@ -26554,7 +26945,7 @@ async function resolveWatchdogPath() {
   let lastError;
   for (const candidate of candidates) {
     try {
-      await access2(candidate);
+      await access3(candidate);
       return fileURLToPath2(candidate);
     } catch (error2) {
       lastError = error2;
@@ -26565,7 +26956,7 @@ async function resolveWatchdogPath() {
 function assertDirectoryIdentity2(target) {
   return Promise.all([
     lstat4(target.publicDirectory),
-    realpath3(target.publicDirectory)
+    realpath4(target.publicDirectory)
   ]).then(([metadata, canonical]) => {
     if (!metadata.isDirectory() || metadata.isSymbolicLink() || metadata.dev !== target.identity.dev || metadata.ino !== target.identity.ino || canonical !== target.canonicalDirectory) {
       throw new RuntimeError("run archive directory identity changed");
@@ -26586,7 +26977,7 @@ async function syncDirectory2(directory) {
 }
 async function writeRunStart(target, record2, create) {
   await assertDirectoryIdentity2(target);
-  const destination = path8.join(target.canonicalDirectory, "run-start.json");
+  const destination = path10.join(target.canonicalDirectory, "run-start.json");
   const serialized = `${JSON.stringify(record2, null, 2)}
 `;
   if (create) {
@@ -26605,9 +26996,9 @@ async function writeRunStart(target, record2, create) {
     await assertDirectoryIdentity2(target);
     return;
   }
-  const temporaryPath = path8.join(
+  const temporaryPath = path10.join(
     target.canonicalDirectory,
-    `.run-start.${randomUUID2()}.tmp`
+    `.run-start.${randomUUID4()}.tmp`
   );
   let created = false;
   let handle;
@@ -26634,7 +27025,7 @@ async function writeRunStart(target, record2, create) {
 }
 async function initializeRunStart(store, record2) {
   await store.writeLog("lifecycle", "attempt lock acquired\n");
-  const canonicalDirectory = await realpath3(store.runDirectory);
+  const canonicalDirectory = await realpath4(store.runDirectory);
   const metadata = await lstat4(store.runDirectory);
   if (!metadata.isDirectory() || metadata.isSymbolicLink()) {
     throw new RuntimeError("run archive directory is not a plain directory");
@@ -26777,7 +27168,7 @@ async function runAttempt(checkoutPath, spec, deps) {
   const producerRegistry = deps.producerRegistry ?? registry2;
   const now = deps.now ?? Date.now;
   const startedAtMs = now();
-  const runId = (deps.runId ?? randomUUID2)();
+  const runId = (deps.runId ?? randomUUID4)();
   const store = new ArtifactStore(runId);
   const repositoryInstructions = deps.repositoryInstructions ?? [];
   const packagedVerifier = deps.packagedVerifier ?? { version: "pending", content: "" };
@@ -26791,6 +27182,72 @@ async function runAttempt(checkoutPath, spec, deps) {
       `repository precondition failed (${preconditions.reason})${detailSuffix}`,
       { reason: preconditions.reason, detail: preconditions.detail ?? [] }
     );
+  }
+  const executionMode = spec.executionMode;
+  let baselineEvidence = { baseline: "skipped \u2014 read-only spec" };
+  if (executionMode === "edit") {
+    reportPhase(deps, "verifying baseline");
+    let baseline;
+    try {
+      baseline = await verifyBaseline({
+        repoRoot: canonical.canonical,
+        headCommitOid: preconditions.baseCommitOid,
+        commands: spec.verification,
+        ps
+      });
+    } catch (error2) {
+      const message = error2 instanceof Error ? error2.message : String(error2);
+      return archiveTerminal({
+        store,
+        spec,
+        runId,
+        startedAtMs,
+        now,
+        repoRoot: canonical.canonical,
+        baseCommitOid: preconditions.baseCommitOid,
+        signals: { "environment-defect": true },
+        report: null,
+        profile: null,
+        invocation: null,
+        environment: [],
+        temporaryHomeApplied: false,
+        producerSummary: null,
+        candidate: null,
+        commandOutcomes: [],
+        unresolvedIssues: ["baseline-verifier-error"],
+        evidence: { baseline: `error: ${redact(message)}` },
+        producerLog: producerLog(null),
+        repositoryInstructions,
+        packagedVerifier
+      });
+    }
+    baselineEvidence = { baseline };
+    const baselineFailed = baseline.commands.some((command) => !command.ok);
+    if (baselineFailed && spec.expectBaselineFailure !== true) {
+      return archiveTerminal({
+        store,
+        spec,
+        runId,
+        startedAtMs,
+        now,
+        repoRoot: canonical.canonical,
+        baseCommitOid: preconditions.baseCommitOid,
+        signals: { "environment-defect": true },
+        report: null,
+        profile: null,
+        invocation: null,
+        environment: [],
+        temporaryHomeApplied: false,
+        producerSummary: null,
+        candidate: null,
+        commandOutcomes: [],
+        unresolvedIssues: ["baseline-verification-failed"],
+        evidence: baselineEvidence,
+        producerLog: producerLog(null),
+        repositoryInstructions,
+        packagedVerifier
+      });
+    }
   }
   reportPhase(deps, "probing producers");
   const reports = await probeAll({
@@ -26823,7 +27280,7 @@ async function runAttempt(checkoutPath, spec, deps) {
         routing.reason,
         ...routing.considered.map((candidate) => `producer ${candidate.producerId}: ${candidate.outcome}${candidate.detail === null ? "" : ` (${candidate.detail})`}`)
       ],
-      evidence: { routing: routing.reason, considered: routing.considered, reports },
+      evidence: { ...baselineEvidence, routing: routing.reason, considered: routing.considered, reports },
       producerLog: producerLog(null),
       repositoryInstructions,
       packagedVerifier
@@ -26850,7 +27307,7 @@ async function runAttempt(checkoutPath, spec, deps) {
       candidate: null,
       commandOutcomes: [],
       unresolvedIssues: ["selected-producer-contract-invalid"],
-      evidence: { routing: "selected-producer-contract-invalid" },
+      evidence: { ...baselineEvidence, routing: "selected-producer-contract-invalid" },
       producerLog: producerLog(null),
       repositoryInstructions,
       packagedVerifier
@@ -26957,7 +27414,7 @@ async function runAttempt(checkoutPath, spec, deps) {
     let candidate = null;
     let commandOutcomes = [];
     let unresolvedIssues = [];
-    let evidence = confinement === null ? {} : { confinement };
+    let evidence = confinement === null ? baselineEvidence : { ...baselineEvidence, confinement };
     if (exit.spawnError !== void 0) signals["spawn-failure"] = true;
     if (exit.cancelled) signals.cancelled = true;
     if (exit.timedOut) signals.timeout = true;
@@ -27050,278 +27507,6 @@ async function runAttempt(checkoutPath, spec, deps) {
       lock
     });
     if (primaryError === void 0 && cleanupError !== null) throw cleanupError;
-  }
-}
-
-// src/verify/project-verifier.ts
-import { randomUUID as randomUUID3 } from "node:crypto";
-import { realpath as realpath4 } from "node:fs/promises";
-import path9 from "node:path";
-var MAX_COMMAND_OUTPUT_BYTES = 1e6;
-var MAX_DIAGNOSTIC_LENGTH5 = 2e3;
-var POSIX_ESSENTIAL_ENV2 = [
-  "HOME",
-  "PATH",
-  "TMPDIR",
-  "LANG",
-  "LC_ALL",
-  "XDG_CONFIG_HOME",
-  "XDG_CACHE_HOME",
-  "XDG_DATA_HOME",
-  "XDG_STATE_HOME",
-  "XDG_RUNTIME_DIR"
-];
-function gitFailure3(action, result) {
-  const diagnostic = redact(result.stderr || result.stdout).trim().slice(0, MAX_DIAGNOSTIC_LENGTH5);
-  return new RuntimeError(`${action} failed${diagnostic ? `: ${diagnostic}` : ""}`);
-}
-async function checkedGit3(cwd, args) {
-  const result = await git(cwd, args);
-  if (result.exitCode !== 0) throw gitFailure3(`git ${args[0] ?? "command"}`, result);
-  return result.stdout;
-}
-function defineEnvironmentValue(environment, name, value) {
-  Object.defineProperty(environment, name, {
-    value,
-    writable: true,
-    enumerable: true,
-    configurable: true
-  });
-}
-function commandEnvironment(command, os) {
-  const environment = /* @__PURE__ */ Object.create(null);
-  const platformEnvironment = os === "win32" ? normalizeWindowsEnv(process.env) : process.env;
-  const platformNames = os === "win32" ? WIN32_ESSENTIAL_ENV : POSIX_ESSENTIAL_ENV2;
-  for (const name of platformNames) {
-    const value = platformEnvironment[name];
-    if (value !== void 0) defineEnvironmentValue(environment, name, value);
-  }
-  for (const [name, value] of Object.entries(command.environment ?? {})) {
-    defineEnvironmentValue(environment, name, value);
-  }
-  defineEnvironmentValue(environment, "CLAUDE_ARCHITECT_DELEGATED", "1");
-  return environment;
-}
-function isWithinScope(root, candidate, os) {
-  if (os === "win32") return canonicalizeForScope(candidate, root);
-  const relative = path9.posix.relative(root, candidate);
-  return relative === "" || !path9.posix.isAbsolute(relative) && relative !== ".." && !relative.startsWith("../");
-}
-async function resolveCommandCwd(worktreePath, commandCwd, os) {
-  if (path9.isAbsolute(commandCwd)) return null;
-  const lexical = path9.resolve(worktreePath, commandCwd);
-  if (!isWithinScope(worktreePath, lexical, os)) return null;
-  try {
-    const [canonicalRoot, canonicalCwd] = await Promise.all([
-      realpath4(worktreePath),
-      realpath4(lexical)
-    ]);
-    return isWithinScope(canonicalRoot, canonicalCwd, os) ? canonicalCwd : null;
-  } catch {
-    return null;
-  }
-}
-function appliesToPlatform(command, os, arch) {
-  if (command.platform?.os !== void 0 && !command.platform.os.includes(os)) {
-    return { applies: false, reason: "platform-os" };
-  }
-  if (command.platform?.arch !== void 0 && !command.platform.arch.includes(arch)) {
-    return { applies: false, reason: "platform-arch" };
-  }
-  return { applies: true };
-}
-function logName(index, stream) {
-  return `verification-${index}-${stream}`;
-}
-function logRef(name) {
-  return `logs/${name}.log`;
-}
-function errorMessage(error2) {
-  return error2 instanceof Error ? error2.message : String(error2);
-}
-function boundText(text) {
-  const bytes = Buffer.from(text);
-  if (bytes.length <= MAX_COMMAND_OUTPUT_BYTES) return { text, truncated: false };
-  let end = MAX_COMMAND_OUTPUT_BYTES;
-  while (end > 0 && (bytes[end] & 192) === 128) end -= 1;
-  return { text: bytes.subarray(0, end).toString("utf8"), truncated: true };
-}
-async function executeCommand(args) {
-  const { command, index, cwd, ps, now } = args;
-  const registration = registerSensitiveEnvironment(command.environment ?? {});
-  const stdoutName = logName(index, "stdout");
-  const stderrName = logName(index, "stderr");
-  const startedAt = now();
-  let executable = null;
-  let exit = null;
-  let failureText = "";
-  try {
-    const environment = commandEnvironment(command, ps.os);
-    executable = await ps.resolveExecutable({
-      name: command.executable,
-      ...path9.isAbsolute(command.executable) ? { explicitPath: command.executable } : {},
-      searchPath: environment.PATH ?? environment.Path ?? ""
-    });
-    exit = await supervise(ps, {
-      executable,
-      args: command.args,
-      cwd,
-      env: environment,
-      timeoutMs: command.timeoutMs,
-      maxOutputBytes: MAX_COMMAND_OUTPUT_BYTES
-    }, {});
-  } catch (error2) {
-    failureText = errorMessage(error2);
-  }
-  try {
-    const actualArgs = [...executable?.prefixArgs ?? [], ...command.args].map(redact);
-    const stdout = boundText(redact(exit?.stdout ?? ""));
-    const stderr = boundText(redact(exit === null ? failureText : [exit.stderr, exit.spawnError === void 0 ? "" : errorMessage(exit.spawnError)].filter(Boolean).join("\n")));
-    const exitCode = exit?.exitCode ?? null;
-    const failed = exitCode === null || exit?.timedOut === true || exit?.cancelled === true || exit?.spawnError !== void 0 || !command.expectedExitCodes.includes(exitCode);
-    return {
-      outcome: {
-        id: redact(command.id),
-        executable: redact(executable?.command ?? command.executable),
-        args: actualArgs,
-        exitCode,
-        timedOut: exit?.timedOut ?? false,
-        durationMs: Math.max(0, now() - startedAt),
-        stdoutRef: logRef(stdoutName),
-        stderrRef: logRef(stderrName)
-      },
-      evidence: {
-        id: redact(command.id),
-        confinement: "none",
-        networkPolicy: "unenforced",
-        requestedNetwork: command.network,
-        skipped: false,
-        resolvedFrom: executable === null ? null : redact(executable.resolvedFrom),
-        truncated: {
-          stdout: (exit?.truncated.stdout ?? false) || stdout.truncated,
-          stderr: (exit?.truncated.stderr ?? false) || stderr.truncated
-        },
-        spawnError: exit?.spawnError !== void 0
-      },
-      outputLogs: [
-        { name: stdoutName, text: stdout.text },
-        { name: stderrName, text: stderr.text }
-      ],
-      failed
-    };
-  } finally {
-    registration.dispose();
-  }
-}
-function skippedEvidence(command, reason) {
-  const registration = registerSensitiveEnvironment(command.environment ?? {});
-  try {
-    return {
-      id: redact(command.id),
-      confinement: "none",
-      networkPolicy: "unenforced",
-      requestedNetwork: command.network,
-      skipped: true,
-      skipReason: reason
-    };
-  } finally {
-    registration.dispose();
-  }
-}
-async function projectVerify(args) {
-  const ps = args.ps ?? getPlatformServices();
-  const arch = args.arch ?? process.arch;
-  const now = args.now ?? Date.now;
-  const verificationId = args.verificationId?.() ?? randomUUID3();
-  const manager = new WorktreeManager(args.repoRoot, `verify-${verificationId}`, ps);
-  const materialized = await manager.create(args.artifact.candidateCommitOid);
-  let primaryError;
-  try {
-    const materializedTree = (await checkedGit3(
-      materialized.path,
-      ["rev-parse", "HEAD^{tree}"]
-    )).trim();
-    if (materializedTree !== args.artifact.candidateTreeOid) {
-      return {
-        commandOutcomes: [],
-        mutated: false,
-        failures: ["candidate-materialization-mismatch"],
-        evidence: { commands: [] },
-        outputLogs: []
-      };
-    }
-    const commandOutcomes = [];
-    const failures = [];
-    const commandEvidence = [];
-    const outputLogs = [];
-    let mutated = false;
-    for (let index = 0; index < args.commands.length; index += 1) {
-      const command = args.commands[index];
-      const applicability = appliesToPlatform(command, ps.os, arch);
-      if (!applicability.applies) {
-        commandEvidence.push(skippedEvidence(command, applicability.reason));
-        continue;
-      }
-      const cwd = await resolveCommandCwd(materialized.path, command.cwd, ps.os);
-      if (cwd === null) {
-        const registration = registerSensitiveEnvironment(command.environment ?? {});
-        try {
-          failures.push(`invalid-command-cwd:${redact(command.id)}`);
-          commandEvidence.push({
-            id: redact(command.id),
-            confinement: "none",
-            networkPolicy: "unenforced",
-            requestedNetwork: command.network,
-            skipped: false
-          });
-        } finally {
-          registration.dispose();
-        }
-        continue;
-      }
-      const executed = await executeCommand({ command, index, cwd, ps, now });
-      commandOutcomes.push(executed.outcome);
-      commandEvidence.push(executed.evidence);
-      outputLogs.push(...executed.outputLogs);
-      if (executed.failed) failures.push(`command-failed:${executed.outcome.id}`);
-      const [status, currentHead] = await Promise.all([
-        checkedGit3(materialized.path, [
-          "status",
-          "--porcelain=v2",
-          "-z",
-          "--untracked-files=all",
-          "--ignored=matching",
-          "--ignore-submodules=none"
-        ]),
-        checkedGit3(materialized.path, ["rev-parse", "--verify", "HEAD"])
-      ]);
-      const disallowedRecords = command.allowedMutations === "ignored-paths" ? status.split("\0").filter((record2) => record2.length > 0 && !record2.startsWith("! ")) : status.length > 0 ? [status] : [];
-      if (disallowedRecords.length > 0 || currentHead.trim() !== args.artifact.candidateCommitOid) {
-        mutated = true;
-        failures.push("verification-mutated");
-        break;
-      }
-    }
-    return {
-      commandOutcomes,
-      mutated,
-      failures,
-      evidence: { commands: commandEvidence },
-      outputLogs
-    };
-  } catch (error2) {
-    primaryError = error2;
-    throw error2;
-  } finally {
-    try {
-      await materialized.cleanup();
-    } catch (cleanupError) {
-      if (primaryError === void 0) throw cleanupError;
-      throw new AggregateError(
-        [primaryError, cleanupError],
-        "project verification failed and its worktree could not be cleaned up"
-      );
-    }
   }
 }
 
@@ -27567,6 +27752,25 @@ function buildRoleSpec(role, base, pkg) {
   };
 }
 
+// src/pipeline/git-writable-roots.ts
+import { readFile as readFile2 } from "node:fs/promises";
+import path11 from "node:path";
+async function resolveLinkedWorktreeWritableRoots(worktreePath) {
+  const dotGit = path11.join(worktreePath, ".git");
+  let pointer;
+  try {
+    pointer = await readFile2(dotGit, "utf8");
+  } catch {
+    return [];
+  }
+  const match = /^gitdir: (.+)\r?\n?$/.exec(pointer);
+  if (match === null) return [];
+  const gitDir = path11.resolve(worktreePath, match[1]);
+  const commonDirValue = (await readFile2(path11.join(gitDir, "commondir"), "utf8")).trim();
+  const commonDir = path11.resolve(gitDir, commonDirValue);
+  return [gitDir, path11.join(commonDir, "objects")];
+}
+
 // src/pipeline/role-runner.ts
 var READ_ONLY_ROLES = /* @__PURE__ */ new Set([
   "reviewer-correctness",
@@ -27653,6 +27857,7 @@ async function runRole(args) {
     };
   }
   const readOnly = READ_ONLY_ROLES.has(args.role);
+  const extraWritableRoots = args.role === "fixer" ? await resolveLinkedWorktreeWritableRoots(args.worktreePath) : [];
   const nativeReadOnly = readOnly && selectSandboxBackend(report).backend?.kind === "producer-native";
   if (readOnly && !nativeReadOnly) {
     const osBackend = selectOsWriteConfinementBackend({
@@ -27678,6 +27883,7 @@ async function runRole(args) {
       tempHome = await args.ps.createSecureTempDirectory();
       let invocation = adapter.buildInvocation(roleSpec, {
         worktreePath: args.worktreePath,
+        ...extraWritableRoots.length === 0 ? {} : { extraWritableRoots },
         runId: args.runId,
         tempHome,
         capabilityReport: report,
@@ -28254,7 +28460,25 @@ async function runPipeline(checkoutPath, spec, deps) {
 
 // src/protocol/spec-validator.ts
 var schemas2 = loadSchemas();
+function resolveMinEditTimeoutMs() {
+  const raw = process.env.CLAUDE_ARCHITECT_MIN_EDIT_TIMEOUT_MS;
+  if (raw !== void 0) {
+    const parsed = Number(raw);
+    if (Number.isFinite(parsed) && parsed >= 1) return parsed;
+  }
+  return RUNTIME_MIN_EDIT_TIMEOUT_MS;
+}
 function validateSpec(input) {
+  const minEditTimeoutMs = resolveMinEditTimeoutMs();
+  if (typeof input === "object" && input !== null && "executionMode" in input && input.executionMode === "edit" && "timeoutMs" in input && typeof input.timeoutMs === "number" && input.timeoutMs < minEditTimeoutMs) {
+    return {
+      ok: false,
+      errors: [{
+        path: "/timeoutMs",
+        message: `must be at least ${minEditTimeoutMs}ms for edit-mode specs`
+      }]
+    };
+  }
   const ok = schemas2.delegationSpec(input);
   if (ok) return { ok: true, spec: input };
   const errors = (schemas2.delegationSpec.errors ?? []).map((e) => {
@@ -28704,7 +28928,7 @@ import {
   realpath as realpath5,
   rm as rm5
 } from "node:fs/promises";
-import path10 from "node:path";
+import path12 from "node:path";
 import nodeProcess4 from "node:process";
 var NO_FOLLOW3 = constants4.O_NOFOLLOW ?? 0;
 var MAX_STATE_FILE_BYTES = 8e6;
@@ -28733,7 +28957,7 @@ function validateRunId(runId) {
 async function stateRoot() {
   const configured = nodeProcess4.env.CLAUDE_PLUGIN_DATA ?? (nodeProcess4.env.NODE_ENV === "test" ? nodeProcess4.env.CLAUDE_ARCHITECT_STATE_DIR : void 0);
   if (configured === void 0) return null;
-  const root = path10.resolve(resolveStateDir());
+  const root = path12.resolve(resolveStateDir());
   try {
     const metadata = await lstat5(root);
     if (!isPlainDirectory(metadata)) {
@@ -28815,7 +29039,7 @@ function parseRunStart(text, expectedRunId) {
   }
   const record2 = value;
   validateRunId(record2.runId);
-  if (record2.runId !== expectedRunId || typeof record2.lockKey !== "string" || !/^[0-9a-f]{64}$/.test(record2.lockKey) || typeof record2.canonicalCommonDir !== "string" || !path10.isAbsolute(record2.canonicalCommonDir) || record2.pid !== null && (record2.pid === void 0 || !Number.isSafeInteger(record2.pid) || record2.pid <= 1) || record2.processToken !== void 0 && record2.processToken !== null && typeof record2.processToken !== "string" || typeof record2.startedAt !== "string" || !Number.isFinite(Date.parse(record2.startedAt))) {
+  if (record2.runId !== expectedRunId || typeof record2.lockKey !== "string" || !/^[0-9a-f]{64}$/.test(record2.lockKey) || typeof record2.canonicalCommonDir !== "string" || !path12.isAbsolute(record2.canonicalCommonDir) || record2.pid !== null && (record2.pid === void 0 || !Number.isSafeInteger(record2.pid) || record2.pid <= 1) || record2.processToken !== void 0 && record2.processToken !== null && typeof record2.processToken !== "string" || typeof record2.startedAt !== "string" || !Number.isFinite(Date.parse(record2.startedAt))) {
     throw new RuntimeError("run-start recovery record is malformed");
   }
   const expectedLockKey = createHash9("sha256").update(record2.canonicalCommonDir).digest("hex");
@@ -28855,7 +29079,7 @@ async function validateGitCommonDir(commonDir) {
   return canonical;
 }
 async function validateRepositoryRoot(repoRoot) {
-  if (!path10.isAbsolute(repoRoot)) {
+  if (!path12.isAbsolute(repoRoot)) {
     throw new RuntimeError("cleanup journal repository root is not absolute");
   }
   const canonical = await realpath5(repoRoot);
@@ -28938,7 +29162,7 @@ function cleanupOutcome(record2) {
 async function appendCleanupRecord(runsRoot, record2) {
   const identity = await plainDirectoryIdentity(runsRoot);
   if (identity === null) throw new RuntimeError("cleanup journal root disappeared");
-  const filename = path10.join(runsRoot, "cleanup.ndjson");
+  const filename = path12.join(runsRoot, "cleanup.ndjson");
   const handle = await open5(
     filename,
     constants4.O_WRONLY | constants4.O_CREAT | constants4.O_APPEND | NO_FOLLOW3,
@@ -29014,7 +29238,7 @@ async function commitCleanupRefs(record2) {
   await deleteExactRef(repoRoot, record2.backupRef, backupOid);
 }
 async function replayInterruptedPrunes(runsRoot) {
-  const text = await readCleanupJournal(path10.join(runsRoot, "cleanup.ndjson"));
+  const text = await readCleanupJournal(path12.join(runsRoot, "cleanup.ndjson"));
   if (text === null || text.trim() === "") return;
   const pending = /* @__PURE__ */ new Map();
   for (const line of text.trimEnd().split("\n")) {
@@ -29024,8 +29248,8 @@ async function replayInterruptedPrunes(runsRoot) {
     else pending.delete(record2.runId);
   }
   for (const record2 of [...pending.values()].sort((left, right) => left.runId.localeCompare(right.runId))) {
-    const runDirectory = path10.join(runsRoot, record2.runId);
-    const quarantinePath = path10.join(runsRoot, record2.quarantineName);
+    const runDirectory = path12.join(runsRoot, record2.runId);
+    const quarantinePath = path12.join(runsRoot, record2.quarantineName);
     const runIdentity = await plainDirectoryIdentity(runDirectory);
     const quarantineIdentity = await plainDirectoryIdentity(quarantinePath);
     if (runIdentity !== null && quarantineIdentity !== null) {
@@ -29068,7 +29292,7 @@ async function recoverRun(record2, root, ps, isProcessAlive, requestCooperativeT
     "recovery",
     "startup recovery reclaimed unfinished run\n"
   );
-  const worktreePath = path10.join(root, "worktrees", record2.runId);
+  const worktreePath = path12.join(root, "worktrees", record2.runId);
   const worktreeIdentity = await plainDirectoryIdentity(worktreePath);
   if (worktreeIdentity !== null) {
     await new WorktreeManager(commonDir, record2.runId, ps).remove(worktreePath);
@@ -29152,7 +29376,7 @@ async function reclaimLocks(locksRoot, isProcessAlive, getProcessStartToken) {
   for (const entry of entries.sort((left, right) => left.name.localeCompare(right.name))) {
     const match = LOCK_NAME.exec(entry.name);
     if (match === null) continue;
-    const lockPath = path10.join(locksRoot, entry.name);
+    const lockPath = path12.join(locksRoot, entry.name);
     if (!entry.isFile() || entry.isSymbolicLink()) {
       throw new RuntimeError("checkout lock must be a regular file during recovery");
     }
@@ -29167,14 +29391,14 @@ async function reclaimLocks(locksRoot, isProcessAlive, getProcessStartToken) {
   }
 }
 async function lockIsOwnedByLiveProcess(locksRoot, lockKey, isProcessAlive, getProcessStartToken) {
-  const contents = await readBoundedRegularFile(path10.join(locksRoot, `${lockKey}.lock`));
+  const contents = await readBoundedRegularFile(path12.join(locksRoot, `${lockKey}.lock`));
   if (contents === null) return false;
   return lockOwnerIsLive(parseLockOwner(contents), isProcessAlive, getProcessStartToken);
 }
 async function recoverStaleRuns(dependencies = {}) {
   const root = await stateRoot();
   if (root === null) return { recovered: [] };
-  const runsRoot = path10.join(root, "runs");
+  const runsRoot = path12.join(root, "runs");
   const runsIdentity = await plainDirectoryIdentity(runsRoot);
   if (runsIdentity !== null) await replayInterruptedPrunes(runsRoot);
   const ps = dependencies.platformServices ?? getPlatformServices();
@@ -29182,14 +29406,14 @@ async function recoverStaleRuns(dependencies = {}) {
   const requestCooperativeTermination = dependencies.requestCooperativeTermination ?? defaultRequestCooperativeTermination;
   const delayMs = dependencies.delayMs ?? defaultDelayMs;
   const graceMs = dependencies.graceMs ?? 3e3;
-  const locksRoot = path10.join(root, "locks");
+  const locksRoot = path12.join(root, "locks");
   const stale = [];
   if (runsIdentity !== null) {
     const runEntries = await readdir2(runsRoot, { withFileTypes: true });
     for (const entry of runEntries.sort((left, right) => left.name.localeCompare(right.name))) {
       if (!entry.isDirectory() || entry.isSymbolicLink() || !SAFE_RUN_ID.test(entry.name)) continue;
-      const runDirectory = path10.join(runsRoot, entry.name);
-      const runStartText = await readBoundedRegularFile(path10.join(runDirectory, "run-start.json"));
+      const runDirectory = path12.join(runsRoot, entry.name);
+      const runStartText = await readBoundedRegularFile(path12.join(runDirectory, "run-start.json"));
       if (runStartText === null) continue;
       const record2 = parseRunStart(runStartText, entry.name);
       const result = await new ArtifactStore(entry.name).readResult(entry.name);
