@@ -8,6 +8,7 @@ import { checkPreconditions } from "../../src/git/repo-preconditions.js";
 const filesystemProbe = vi.hoisted(() => ({
   markerAccessErrorCode: undefined as string | undefined,
   opendirCalls: 0,
+  removeAfterRealpath: undefined as string | undefined,
 }));
 
 vi.mock("node:fs/promises", async importOriginal => {
@@ -26,6 +27,14 @@ vi.mock("node:fs/promises", async importOriginal => {
     opendir: async (...args: Parameters<typeof actual.opendir>) => {
       filesystemProbe.opendirCalls += 1;
       return actual.opendir(...args);
+    },
+    realpath: async (...args: Parameters<typeof actual.realpath>) => {
+      const resolved = await actual.realpath(...args);
+      if (resolved === filesystemProbe.removeAfterRealpath) {
+        filesystemProbe.removeAfterRealpath = undefined;
+        await actual.rm(resolved);
+      }
+      return resolved;
     },
   };
 });
@@ -56,6 +65,7 @@ async function initRepo(): Promise<string> {
 afterEach(async () => {
   filesystemProbe.markerAccessErrorCode = undefined;
   filesystemProbe.opendirCalls = 0;
+  filesystemProbe.removeAfterRealpath = undefined;
   await Promise.all(temporaryPaths.splice(0).map(path =>
     rm(path, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })));
 });
@@ -368,6 +378,21 @@ describe("checkPreconditions", () => {
       .resolves.toEqual({ ok: false, reason: "nested-repository", detail: ["ignored-link"] });
   });
 
+  it.skipIf(process.platform === "win32")("does not confuse a literal backslash with a path separator", async () => {
+    const directory = await initRepo();
+    await writeFile(join(directory, ".gitignore"), "a/b\n");
+    await writeFile(join(directory, "target.txt"), "target\n");
+    await symlink("target.txt", join(directory, "a\\b"), "file");
+    await runGit(directory, ["add", "-A"]);
+    await runGit(directory, ["commit", "-q", "-m", "add literal backslash link"]);
+
+    await mkdir(join(directory, "a"));
+    await symlink("../target.txt", join(directory, "a", "b"), "file");
+
+    await expect(checkPreconditions(directory, { writeAllowlist: ["a/b"] }))
+      .resolves.toEqual({ ok: false, reason: "nested-repository", detail: ["a/b"] });
+  });
+
   it.skipIf(process.platform === "win32")("rejects a tracked symlink to Git metadata", async () => {
     const directory = await initRepo();
     await symlink(".git/config", join(directory, "git-config-link"), "file");
@@ -411,6 +436,20 @@ describe("checkPreconditions", () => {
     } finally {
       await chmod(external, 0o700);
     }
+  });
+
+  it.skipIf(process.platform === "win32")("fails closed when a symlink target disappears after resolution", async () => {
+    const directory = await initRepo();
+    const target = join(directory, "race-target.txt");
+    await writeFile(target, "target\n");
+    await symlink("race-target.txt", join(directory, "race-link"), "file");
+    await runGit(directory, ["add", "race-link", "race-target.txt"]);
+    await runGit(directory, ["commit", "-q", "-m", "add race link"]);
+    filesystemProbe.removeAfterRealpath = await realpath(target);
+
+    await expect(checkPreconditions(directory, { writeAllowlist: ["race-link"] }))
+      .resolves.toEqual({ ok: false, reason: "nested-repository-scan-failed" });
+    expect(filesystemProbe.removeAfterRealpath).toBeUndefined();
   });
 
   it("streams nested-repository discovery with opendir", async () => {

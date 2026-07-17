@@ -81,7 +81,7 @@ function indexPathsWithMode(output: string, mode: "120000" | "160000"): Set<stri
   for (const record of output.split("\0")) {
     if (!record.startsWith(`${mode} `)) continue;
     const separator = record.indexOf("\t");
-    if (separator !== -1) paths.add(record.slice(separator + 1).replace(/\\/g, "/"));
+    if (separator !== -1) paths.add(record.slice(separator + 1).split(path.sep).join("/"));
   }
   return paths;
 }
@@ -111,15 +111,17 @@ async function isSafeTrackedFileSymlink(
 ): Promise<boolean> {
   if (!trackedSymlinks.has(relativePath)) return false;
 
+  let target: string;
   try {
-    const target = await realpath(symlinkPath);
-    if (!pathIsWithin(repositoryRoot, target)) return false;
-    if (pathIsWithin(path.join(repositoryRoot, ".git"), target)) return false;
-    return (await lstat(target)).isFile();
+    target = await realpath(symlinkPath);
   } catch (error) {
     if (hasCode(error, ["ENOENT", "ENOTDIR", "ELOOP"])) return false;
     throw error;
   }
+
+  if (!pathIsWithin(repositoryRoot, target)) return false;
+  if (pathIsWithin(path.join(repositoryRoot, ".git"), target)) return false;
+  return (await lstat(target)).isFile();
 }
 
 async function findNestedRepositories(
