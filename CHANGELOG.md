@@ -6,6 +6,61 @@ All notable changes to Claude Architect are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.18.0] - 2026-07-17
+
+Second trust-hardening release from the same dogfood scouting pass, continuing
+where 0.17.0 left off. Every fix was driven through the `delegate` /
+`delegatePipeline` MCP lifecycle and independently verified.
+
+### Changed
+
+- Protocol contract advanced to `1.1.0` (the `environment-defect` classification
+  and per-command `expectBaselineFailure` were added without a marker bump in
+  0.17.x). `protocolVersion` is now a required strict literal on `delegate` /
+  `delegatePipeline`, unknown MCP input keys are rejected, and a mismatch yields a
+  diagnostic naming both versions.
+
+### Fixed
+
+- Pipeline fix rounds now validate fixer commit provenance (worktree HEAD match,
+  descent from the reviewed candidate, disposition OIDs bound to real in-lineage
+  objects), route the final verification through the AcceptanceVerifier so
+  per-command logs are archived, and reject a zero-executed (all-skipped)
+  verification instead of passing it.
+- Non-Codex fixer roles now run inside a write-confined Seatbelt profile and fail
+  closed with `sandbox-violation` when no usable confinement backend exists.
+- Schema boundaries are closed (`additionalProperties: false`), the edit timeout
+  floor is encoded in the delegation-spec schema with the env override honored
+  only under test, run manifests are validated on write, archived
+  `runtimeVersion` is treated as provenance instead of an upgrade-bricking
+  equality gate, 64-hex SHA-256 commit OIDs are accepted, and
+  `expectBaselineFailure` is per verification command so one expected-failing
+  reproducer no longer suppresses unrelated baseline failures.
+- Isolation scripts escalate a timed-out process tree with `timeout
+  --kill-after` (mapping exit 137 to the timeout result), the Codex wrapper
+  rejects sandbox-bypass and scope-expanding caller flags (including attached
+  short-option forms), and runtime `git` invocations are insulated from host
+  global/system/local/worktree config, hooks, fsmonitor, attributes, and content
+  filters (failing closed on a corrupting filter-driver name).
+- Persisted pipeline artifacts are redacted, doctor output no longer leaks
+  absolute home paths, and baseline/verify auxiliary worktrees use
+  run-id-derived names so crash recovery can reclaim them.
+- Structural verification rejects gitlink (mode 160000) tree entries and enforces
+  `forbiddenScope` for nested-repository paths; environment secret discovery now
+  covers `DATABASE_URL`, `*_PAT`, `*_COOKIE`, and `*_DSN`; the verification
+  mutation scan detects skip-worktree/assume-unchanged index bits that would hide
+  a mutation; and Linux WSL detection fails closed on an ambiguous probe.
+- Capability probes treat a timed-out or signal-terminated `--version` run as
+  probe-failed, and producer routing screens out unavailable producers and those
+  with no resolved executable.
+
+### Known limitations
+
+- Deferred to a later release: mandatory populated `packagedVerifier` /
+  `repositoryInstructions` (fail-closed reproducibility provenance), the fixer
+  private object store and read-only dependency mount (write-confinement
+  redesign), portable candidate-patch handling, and the checkout-lock ABA guard.
+
 ## [0.17.0] - 2026-07-17
 
 Trust-hardening release from a six-agent dogfood scouting pass (Codex GPT-5.6
