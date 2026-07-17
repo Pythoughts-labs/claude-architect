@@ -5,6 +5,7 @@ import { selectSandboxBackend } from "../platform/sandbox/backends.js";
 import { selectOsWriteConfinementBackend } from "../producers/plain-text.js";
 import {
   buildReadOnlySeatbeltPolicy,
+  buildWriteSeatbeltPolicy,
   wrapInvocationWithSeatbelt,
 } from "../platform/sandbox/seatbelt.js";
 import {
@@ -146,8 +147,9 @@ export async function runRole(args: RoleRunArgs): Promise<RoleRunResult> {
   }
 
   const readOnly = READ_ONLY_ROLES.has(args.role);
+  const fixer = args.role === "fixer";
   let extraWritableRoots: string[] = [];
-  if (args.role === "fixer") {
+  if (fixer) {
     try {
       extraWritableRoots = await resolveLinkedWorktreeWritableRoots(args.worktreePath);
     } catch {
@@ -165,6 +167,18 @@ export async function runRole(args: RoleRunArgs): Promise<RoleRunResult> {
   // Seatbelt wrap, so that path's availability is a host property.
   const nativeReadOnly = readOnly
     && selectSandboxBackend(report).backend?.kind === "producer-native";
+  const fixerBackend = fixer ? selectSandboxBackend(report).backend : null;
+  const seatbeltFixer = fixerBackend?.kind === "os"
+    && fixerBackend.id === "macos-seatbelt";
+  if (fixer && (fixerBackend === null
+    || (fixerBackend.kind === "os" && !seatbeltFixer))) {
+    return {
+      ok: false,
+      rawOutput: "",
+      failure: "sandbox-violation",
+      producerId,
+    };
+  }
   if (readOnly && !nativeReadOnly) {
     const osBackend = selectOsWriteConfinementBackend({
       ps: args.ps,
@@ -201,6 +215,15 @@ export async function runRole(args: RoleRunArgs): Promise<RoleRunResult> {
         invocation = wrapInvocationWithSeatbelt(
           invocation,
           buildReadOnlySeatbeltPolicy({ tempHome }),
+        );
+      } else if (seatbeltFixer) {
+        invocation = wrapInvocationWithSeatbelt(
+          invocation,
+          buildWriteSeatbeltPolicy({
+            worktreePath: args.worktreePath,
+            tempHome,
+            extraWritableRoots,
+          }),
         );
       }
       builtEnvironment = buildEnvironment({

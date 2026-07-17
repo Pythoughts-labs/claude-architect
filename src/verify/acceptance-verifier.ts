@@ -23,6 +23,8 @@ export interface AcceptanceVerifyArgs {
   spec: DelegationSpec;
   ps: PlatformServices;
   artifactStore: Pick<ArtifactStore, "writeLog">;
+  verificationId?: () => string;
+  logNamePrefix?: string;
 }
 
 export interface AcceptanceVerifyResult {
@@ -149,6 +151,8 @@ export class AcceptanceVerifier {
       artifact: args.artifact,
       commands: args.spec.verification,
       ps: args.ps,
+      ...(args.verificationId === undefined ? {} : { verificationId: args.verificationId }),
+      ...(args.logNamePrefix === undefined ? {} : { logNamePrefix: args.logNamePrefix }),
     });
     await archiveProjectLogs(project, args.artifactStore);
 

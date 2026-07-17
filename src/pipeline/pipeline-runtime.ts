@@ -1,7 +1,12 @@
 import { git, type GitResult } from "../git/git-exec.js";
 import { WorktreeManager } from "../git/worktree-manager.js";
 import { getPlatformServices } from "../platform/select-platform.js";
-import type { CandidateArtifact, AttemptResult } from "../protocol/attempt-result.js";
+import type {
+  CandidateArtifact,
+  AttemptResult,
+  CommandOutcome,
+  FailureClassification,
+} from "../protocol/attempt-result.js";
 import {
   resolveReviewConfig,
   type DelegationSpec,
@@ -15,7 +20,7 @@ import {
 } from "../runtime/attempt-runtime.js";
 import { ArtifactStore } from "../runtime/artifact-store.js";
 import { RuntimeError } from "../util/errors.js";
-import { projectVerify } from "../verify/project-verifier.js";
+import { AcceptanceVerifier } from "../verify/acceptance-verifier.js";
 import {
   recomputeManifest,
   structuralVerify,
@@ -49,9 +54,20 @@ export interface PipelineResult {
   status: "decision-ready" | "human-decision-required" | "failed";
   attempt: AttemptResult;
   rounds: PipelineRound[];
-  verification: VerificationReport | null;
+  verification: PipelineVerificationReport | null;
   gate: GateResult;
   finalCandidateCommit: string;
+  failure?: FailureClassification | null;
+}
+
+export interface PipelineVerificationEvidence {
+  failures: string[];
+  acceptance: Record<string, unknown>;
+  commandOutcomes: CommandOutcome[];
+}
+
+export interface PipelineVerificationReport extends VerificationReport {
+  evidence: PipelineVerificationEvidence;
 }
 
 export interface PipelineDependencies extends AttemptRuntimeDependencies {
@@ -75,7 +91,12 @@ type ReviewRunResult =
 
 type FixRunResult =
   | { ok: true; fix: FixReport; roleLogRefs: string[] }
-  | { ok: false; failedRoleLogRef: string; roleLogRefs: string[] };
+  | {
+    ok: false;
+    failure: FailureClassification;
+    failedRoleLogRef: string;
+    roleLogRefs: string[];
+  };
 
 const schemas = loadSchemas();
 const IGNORED_STRUCTURAL_FAILURES = new Set<StructuralFailure>([
@@ -135,6 +156,7 @@ function failedResult(
   rounds: PipelineRound[],
   finalCandidateCommit: string,
   reason: string,
+  failure: FailureClassification = "producer-failure",
 ): PipelineResult {
   return {
     runId: attempt.runId,
@@ -148,6 +170,7 @@ function failedResult(
       reasons: [reason],
     },
     finalCandidateCommit,
+    failure,
   };
 }
 
@@ -315,7 +338,12 @@ async function runFix(args: {
   const initial = await runArchivedRole(runner, callArgs, args.store, logName);
   const roleLogRefs = [initial.logRef];
   if (!initial.result.ok) {
-    return { ok: false, failedRoleLogRef: initial.logRef, roleLogRefs };
+    return {
+      ok: false,
+      failure: initial.result.failure ?? "producer-failure",
+      failedRoleLogRef: initial.logRef,
+      roleLogRefs,
+    };
   }
   const outcome = await parseStructuredReport<FixReport>(
     initial.result.rawOutput,
@@ -334,7 +362,93 @@ async function runFix(args: {
   );
   return outcome.ok
     ? { ok: true, fix: outcome.value, roleLogRefs }
-    : { ok: false, failedRoleLogRef: initial.logRef, roleLogRefs };
+    : {
+      ok: false,
+      failure: "invalid-output",
+      failedRoleLogRef: initial.logRef,
+      roleLogRefs,
+    };
+}
+
+interface FixProvenanceFailure {
+  failure: FailureClassification;
+  reason: string;
+}
+
+async function validateFixProvenance(args: {
+  worktreePath: string;
+  previousCandidateCommit: string;
+  fix: FixReport;
+}): Promise<FixProvenanceFailure | null> {
+  const candidateObject = await git(args.worktreePath, [
+    "cat-file",
+    "-e",
+    `${args.fix.candidateCommit}^{commit}`,
+  ]);
+  if (candidateObject.exitCode !== 0) {
+    return {
+      failure: "producer-failure",
+      reason: "fix phase reported a missing candidate commit",
+    };
+  }
+
+  const head = await git(args.worktreePath, ["rev-parse", "--verify", "HEAD^{commit}"]);
+  if (head.exitCode !== 0 || head.stdout.trim() !== args.fix.candidateCommit) {
+    return {
+      failure: "producer-failure",
+      reason: "fix phase reported a candidate commit that does not match its worktree HEAD",
+    };
+  }
+
+  const candidateAncestry = await git(args.worktreePath, [
+    "merge-base",
+    "--is-ancestor",
+    args.previousCandidateCommit,
+    args.fix.candidateCommit,
+  ]);
+  if (candidateAncestry.exitCode !== 0) {
+    return {
+      failure: "sandbox-violation",
+      reason: "fix phase candidate commit is not descended from the reviewed candidate",
+    };
+  }
+
+  const dispositionCommits = new Set(args.fix.dispositions.flatMap(disposition =>
+    disposition.commit === undefined ? [] : [disposition.commit]));
+  for (const dispositionCommit of dispositionCommits) {
+    const object = await git(args.worktreePath, [
+      "cat-file",
+      "-e",
+      `${dispositionCommit}^{commit}`,
+    ]);
+    if (object.exitCode !== 0) {
+      return {
+        failure: "producer-failure",
+        reason: "fix phase disposition reported a missing commit object",
+      };
+    }
+    const [afterPrevious, beforeCandidate] = await Promise.all([
+      git(args.worktreePath, [
+        "merge-base",
+        "--is-ancestor",
+        args.previousCandidateCommit,
+        dispositionCommit,
+      ]),
+      git(args.worktreePath, [
+        "merge-base",
+        "--is-ancestor",
+        dispositionCommit,
+        args.fix.candidateCommit,
+      ]),
+    ]);
+    if (afterPrevious.exitCode !== 0 || beforeCandidate.exitCode !== 0) {
+      return {
+        failure: "producer-failure",
+        reason: "fix phase disposition commit is outside the produced candidate lineage",
+      };
+    }
+  }
+  return null;
 }
 
 async function verifyCandidate(args: {
@@ -344,7 +458,8 @@ async function verifyCandidate(args: {
   attempt: AttemptResult;
   baselineCommit: string;
   candidateCommit: string;
-}): Promise<{ verification: VerificationReport; baselineDrift: boolean }> {
+  store: ArtifactStore;
+}): Promise<{ verification: PipelineVerificationReport; baselineDrift: boolean }> {
   const ps = args.deps.ps ?? getPlatformServices();
   const manager = new WorktreeManager(
     args.checkoutPath,
@@ -376,48 +491,62 @@ async function verifyCandidate(args: {
       anchorRef: args.attempt.candidate?.anchorRef ?? "",
       diffText,
     });
-    const [structural, project] = await Promise.all([
-      structuralVerify({
-        repoRoot: args.checkoutPath,
-        worktreePath: fresh.path,
-        baseCommitOid: args.baselineCommit,
-        artifact,
-        writeAllowlist: args.spec.writeAllowlist,
-        forbiddenScope: args.spec.forbiddenScope,
-      }),
-      projectVerify({
-        repoRoot: args.checkoutPath,
-        artifact,
-        commands: args.spec.verification,
-        ps,
-        verificationId: () => `${args.attempt.runId}-pipeline`,
-      }),
-    ]);
+    const verifier = new AcceptanceVerifier({
+      structural: async structuralArgs => {
+        const result = await structuralVerify(structuralArgs);
+        const failures = result.failures.filter(
+          failure => !IGNORED_STRUCTURAL_FAILURES.has(failure),
+        );
+        return { ...result, ok: failures.length === 0, failures };
+      },
+    });
+    const acceptance = await verifier.verify({
+      repoRoot: args.checkoutPath,
+      worktreePath: fresh.path,
+      baseCommitOid: args.baselineCommit,
+      artifact,
+      spec: args.spec,
+      ps,
+      artifactStore: args.store,
+      verificationId: () => `${args.attempt.runId}-pipeline`,
+      logNamePrefix: "pipeline-verification",
+    });
     const changedPaths = nameOnly.split("\n").map(line => line.trim()).filter(Boolean);
     const scopeViolations = changedPaths.filter(pathname =>
       !args.spec.writeAllowlist.some(pattern => globMatches(pattern, pathname))
       || args.spec.forbiddenScope.some(pattern => globMatches(pattern, pathname)));
     const weakened = detectWeakenedTests(diffText);
     const workspaceClean = status === "";
-    const structuralFailures = structural.failures.filter(
-      failure => !IGNORED_STRUCTURAL_FAILURES.has(failure),
+    const verificationCommands = new Map(
+      args.spec.verification.map(command => [command.id, command]),
     );
     return {
       verification: {
         reportVersion: "1",
-        pass: structuralFailures.length === 0
-          && project.failures.length === 0
+        pass: acceptance.ok
           && workspaceClean
           && scopeViolations.length === 0,
-        commandResults: project.commandOutcomes.map(command => ({
+        commandResults: acceptance.commandOutcomes.map(command => ({
           id: command.id,
           exitCode: command.exitCode ?? -1,
-          ok: command.exitCode !== null && command.exitCode === 0,
+          ok: command.exitCode !== null
+            && !command.timedOut
+            && (verificationCommands.get(command.id)?.expectedExitCodes.includes(
+              command.exitCode,
+            ) ?? false),
         })),
         workspaceClean,
         testsDeleted: weakened.testsDeleted,
         testsSkipped: weakened.testsSkipped,
         scopeViolations,
+        evidence: {
+          failures: [...acceptance.failures],
+          acceptance: acceptance.evidence,
+          commandOutcomes: acceptance.commandOutcomes.map(outcome => ({
+            ...outcome,
+            args: [...outcome.args],
+          })),
+        },
       },
       baselineDrift: ancestry.exitCode !== 0,
     };
@@ -532,21 +661,23 @@ export async function runPipeline(
           rounds,
           currentCandidateCommit,
           `fix phase did not produce valid structured output (see ${fixRun.failedRoleLogRef})`,
+          fixRun.failure,
         );
       }
       const { fix } = fixRun;
       await store.writePipelineArtifact(`round-${round}-fix`, fix);
-      const commit = await git(candidateWorktree.path, [
-        "cat-file",
-        "-e",
-        `${fix.candidateCommit}^{commit}`,
-      ]);
-      if (commit.exitCode !== 0) {
+      const provenanceFailure = await validateFixProvenance({
+        worktreePath: candidateWorktree.path,
+        previousCandidateCommit: currentCandidateCommit,
+        fix,
+      });
+      if (provenanceFailure !== null) {
         return failedResult(
           attempt,
           rounds,
           currentCandidateCommit,
-          "fix phase reported a missing candidate commit",
+          provenanceFailure.reason,
+          provenanceFailure.failure,
         );
       }
       currentCandidateCommit = fix.candidateCommit;
@@ -620,6 +751,7 @@ export async function runPipeline(
     attempt: finalAttempt,
     baselineCommit,
     candidateCommit: currentCandidateCommit,
+    store,
   });
   await store.writePipelineArtifact("verification", verified.verification);
   const lastRound = rounds.at(-1);
@@ -641,6 +773,7 @@ export async function runPipeline(
     verification: verified.verification,
     gate,
     finalCandidateCommit: currentCandidateCommit,
+    failure: null,
   };
   await store.writePipelineArtifact("pipeline-result", result);
   return result;

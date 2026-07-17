@@ -168,6 +168,51 @@ describe("AcceptanceVerifier", () => {
     expect(evidence.verificationPolicy[0]!.skipped).toBe(false);
   });
 
+  it("passes a distinct log namespace through to project verification", async () => {
+    const structural = vi.fn(async (): Promise<StructuralVerifyResult> => ({
+      ok: true,
+      failures: [],
+      manifestHash: artifact.manifestHash,
+    }));
+    const namespacedOutcome = {
+      ...outcome,
+      stdoutRef: "logs/pipeline-verification-0-stdout.log",
+      stderrRef: "logs/pipeline-verification-0-stderr.log",
+    };
+    const project = vi.fn(async (): Promise<ProjectVerifyResult> => ({
+      commandOutcomes: [namespacedOutcome],
+      mutated: false,
+      failures: [],
+      evidence: {
+        commands: [{
+          id: "check",
+          confinement: "none",
+          networkPolicy: "unenforced",
+          requestedNetwork: "denied",
+          skipped: false,
+        }],
+        dependencyLink: "none",
+      },
+      outputLogs: [
+        { name: "pipeline-verification-0-stdout", text: "" },
+        { name: "pipeline-verification-0-stderr", text: "" },
+      ],
+    }));
+    const verifyArgs = args();
+    verifyArgs.logNamePrefix = "pipeline-verification";
+
+    const result = await new AcceptanceVerifier({ structural, project }).verify(verifyArgs);
+
+    expect(result.ok).toBe(true);
+    expect(project).toHaveBeenCalledWith(expect.objectContaining({
+      logNamePrefix: "pipeline-verification",
+    }));
+    expect(verifyArgs.artifactStore.writeLog).toHaveBeenCalledWith(
+      "pipeline-verification-0-stdout",
+      "",
+    );
+  });
+
   it("fails when project verification reports mutation without a failure string", async () => {
     const structural = vi.fn(async (): Promise<StructuralVerifyResult> => ({
       ok: true,

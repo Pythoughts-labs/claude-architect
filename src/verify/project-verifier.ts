@@ -38,6 +38,7 @@ export interface ProjectVerifyArgs {
   arch?: string;
   now?: () => number;
   verificationId?: () => string;
+  logNamePrefix?: string;
 }
 
 export interface ProjectCommandEvidence {
@@ -154,8 +155,12 @@ export function appliesToPlatform(
   return { applies: true };
 }
 
-function logName(index: number, stream: "stdout" | "stderr"): string {
-  return `verification-${index}-${stream}`;
+function logName(
+  index: number,
+  stream: "stdout" | "stderr",
+  prefix = "verification",
+): string {
+  return `${prefix}-${index}-${stream}`;
 }
 
 function logRef(name: string): string {
@@ -181,11 +186,12 @@ export async function executeCommand(args: {
   ps: PlatformServices;
   now: () => number;
   abortSignal?: AbortSignal;
+  logNamePrefix?: string;
 }): Promise<ExecutedCommand> {
   const { command, index, cwd, ps, now } = args;
   const registration = registerSensitiveEnvironment(command.environment ?? {});
-  const stdoutName = logName(index, "stdout");
-  const stderrName = logName(index, "stderr");
+  const stdoutName = logName(index, "stdout", args.logNamePrefix);
+  const stderrName = logName(index, "stderr", args.logNamePrefix);
   const startedAt = now();
   let executable: ResolvedExecutable | null = null;
   let exit: SupervisedExit | null = null;
@@ -359,7 +365,14 @@ export async function projectVerify(args: ProjectVerifyArgs): Promise<ProjectVer
         continue;
       }
 
-      const executed = await executeCommand({ command, index, cwd, ps, now });
+      const executed = await executeCommand({
+        command,
+        index,
+        cwd,
+        ps,
+        now,
+        ...(args.logNamePrefix === undefined ? {} : { logNamePrefix: args.logNamePrefix }),
+      });
       commandOutcomes.push(executed.outcome);
       commandEvidence.push(executed.evidence);
       outputLogs.push(...executed.outputLogs);

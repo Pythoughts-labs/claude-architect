@@ -360,6 +360,119 @@ describe("runPipeline", () => {
     expect(result.rounds[0]?.roleLogRefs).toContain("logs/role-fixer-round1.log");
   });
 
+  it("rejects a fixer report whose candidate does not match worktree HEAD", async () => {
+    const repo = await initRepo();
+    const roleRunner = roundReviews([
+      { correctness: blocker, systems: approve },
+    ], async args => {
+      const reportedCommit = args.pkg.candidateCommit;
+      await commitFix(args, "unreported-head\n");
+      return success(fenced({
+        reportVersion: "1",
+        candidateCommit: reportedCommit,
+        dispositions: [{
+          findingId: "F-001",
+          disposition: "fixed",
+          evidence: "Claimed the old candidate instead of the produced HEAD.",
+          commit: reportedCommit,
+        }],
+      }));
+    });
+
+    const result = await runPipeline(
+      repo,
+      validSpec(),
+      dependencies({ runId: "pipeline-fix-head-mismatch", roleRunner }),
+    );
+
+    expect(result.status).toBe("failed");
+    expect(result.failure).toBe("producer-failure");
+    expect(result.gate.reasons).toContain(
+      "fix phase reported a candidate commit that does not match its worktree HEAD",
+    );
+    expect(result.finalCandidateCommit).toBe(result.attempt.candidate?.candidateCommitOid);
+  });
+
+  it("rejects a fixer HEAD that is not descended from the reviewed candidate", async () => {
+    const repo = await initRepo();
+    const roleRunner = roundReviews([
+      { correctness: blocker, systems: approve },
+    ], async args => {
+      const baselineTree = await runGit(
+        args.worktreePath,
+        ["rev-parse", `${args.pkg.baselineCommit}^{tree}`],
+      );
+      const sibling = await runGit(args.worktreePath, [
+        "commit-tree",
+        baselineTree,
+        "-p",
+        args.pkg.baselineCommit,
+        "-m",
+        "discard reviewed candidate",
+      ]);
+      await runGit(args.worktreePath, [
+        "update-ref",
+        "HEAD",
+        sibling,
+        args.pkg.candidateCommit,
+      ]);
+      return success(fenced({
+        reportVersion: "1",
+        candidateCommit: sibling,
+        dispositions: [{
+          findingId: "F-001",
+          disposition: "fixed",
+          evidence: "Replaced the reviewed lineage.",
+          commit: sibling,
+        }],
+      }));
+    });
+
+    const result = await runPipeline(
+      repo,
+      validSpec(),
+      dependencies({ runId: "pipeline-fix-sibling", roleRunner }),
+    );
+
+    expect(result.status).toBe("failed");
+    expect(result.failure).toBe("sandbox-violation");
+    expect(result.gate.reasons).toContain(
+      "fix phase candidate commit is not descended from the reviewed candidate",
+    );
+    expect(result.finalCandidateCommit).toBe(result.attempt.candidate?.candidateCommitOid);
+  });
+
+  it("rejects a fixer disposition that cites a nonexistent commit", async () => {
+    const repo = await initRepo();
+    const roleRunner = roundReviews([
+      { correctness: blocker, systems: approve },
+    ], async args => {
+      const commit = await commitFix(args, "fixed-with-false-evidence\n");
+      return success(fenced({
+        reportVersion: "1",
+        candidateCommit: commit,
+        dispositions: [{
+          findingId: "F-001",
+          disposition: "fixed",
+          evidence: "Cited an object that does not exist.",
+          commit: "d".repeat(40),
+        }],
+      }));
+    });
+
+    const result = await runPipeline(
+      repo,
+      validSpec(),
+      dependencies({ runId: "pipeline-fix-missing-disposition", roleRunner }),
+    );
+
+    expect(result.status).toBe("failed");
+    expect(result.failure).toBe("producer-failure");
+    expect(result.gate.reasons).toContain(
+      "fix phase disposition reported a missing commit object",
+    );
+  });
+
   it("requires human decision when the final-round fix was not re-reviewed", async () => {
     const repo = await initRepo();
     const roleRunner = roundReviews([
@@ -466,9 +579,53 @@ describe("runPipeline", () => {
     await expect(store.readPipelineArtifact(runId, "round-1-consolidated"))
       .resolves.toMatchObject({ findings: [], contradictions: [] });
     await expect(store.readPipelineArtifact(runId, "verification"))
-      .resolves.toMatchObject({ pass: true, workspaceClean: true });
+      .resolves.toMatchObject({
+        pass: true,
+        workspaceClean: true,
+        evidence: {
+          failures: [],
+          commandOutcomes: [{
+            stdoutRef: "logs/pipeline-verification-0-stdout.log",
+            stderrRef: "logs/pipeline-verification-0-stderr.log",
+          }],
+        },
+      });
+    await expect(readFile(
+      path.join(store.runDirectory, "logs", "pipeline-verification-0-stdout.log"),
+      "utf8",
+    )).resolves.toBe("");
+    await expect(readFile(
+      path.join(store.runDirectory, "logs", "pipeline-verification-0-stderr.log"),
+      "utf8",
+    )).resolves.toBe("");
     await expect(store.readPipelineArtifact(runId, "pipeline-result"))
       .resolves.toMatchObject({ status: "decision-ready", runId });
+  });
+
+  it("fails the final gate when every verification command is platform-skipped", async () => {
+    const repo = await initRepo();
+    const spec = validSpec();
+    spec.verification[0] = {
+      ...spec.verification[0]!,
+      platform: {
+        os: [getPlatformServices().os === "darwin" ? "linux" : "darwin"],
+      },
+    };
+    const roleRunner = roundReviews(
+      [{ correctness: approve, systems: approve }],
+      async () => { throw new Error("fixer must not run"); },
+    );
+
+    const result = await runPipeline(
+      repo,
+      spec,
+      dependencies({ runId: "pipeline-all-skipped", roleRunner }),
+    );
+
+    expect(result.status).toBe("human-decision-required");
+    expect(result.verification?.pass).toBe(false);
+    expect(result.verification?.evidence.failures).toContain("empty-verification");
+    expect(result.gate.reasons).toContain("clean-room verification failed");
   });
 });
 

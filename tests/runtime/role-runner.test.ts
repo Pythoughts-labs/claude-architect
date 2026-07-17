@@ -90,6 +90,7 @@ class FakeAdapter implements ProducerAdapter {
   invocationCount = 0;
   readonly tempHomes: string[] = [];
   readonly spawnedCommands: string[] = [];
+  readonly spawnedArgs: string[][] = [];
   readonly readOnlyRequests: boolean[] = [];
   readonly extraWritableRootRequests: Array<string[] | undefined> = [];
 
@@ -134,9 +135,10 @@ class FakeAdapter implements ProducerAdapter {
     };
   }
 
-  recordSpawn(command: string): SupervisedExit {
+  recordSpawn(command: string, args: string[]): SupervisedExit {
     this.spawnCount += 1;
     this.spawnedCommands.push(command);
+    this.spawnedArgs.push([...args]);
     const failsThisAttempt = this.options.failFirstAttempt === true && this.spawnCount === 1;
     const exit = supervisedExit({
       exitCode: failsThisAttempt ? 1 : (this.options.exitCode ?? 0),
@@ -172,7 +174,7 @@ function platformServices(adapter: FakeAdapter): PlatformServices {
         pid: 42,
         stdout: Readable.from([]),
         stderr: Readable.from([]),
-        done: Promise.resolve(adapter.recordSpawn(request.executable.command)),
+        done: Promise.resolve(adapter.recordSpawn(request.executable.command, request.args)),
       };
     },
     async requestCooperativeCancellation() {},
@@ -360,6 +362,55 @@ describe("runRole", () => {
       await realpath(gitDir),
       join(await realpath(commonDir), "objects"),
     ]]);
+  });
+
+  it("wraps an OS-confined fixer with write-enabled Seatbelt roots", async () => {
+    await configureFixerGitRoots();
+    const adapter = new FakeAdapter({ writeConfinementBackend: "macos-seatbelt" });
+
+    const result = await runRole(argsWith(adapter, "fixer"));
+
+    expect(result.ok).toBe(true);
+    expect(adapter.spawnedCommands).toEqual(["/usr/bin/sandbox-exec"]);
+    const profile = adapter.spawnedArgs[0]?.[1] ?? "";
+    expect(profile).toContain(worktreePath);
+    for (const writableRoot of adapter.extraWritableRootRequests[0] ?? []) {
+      expect(profile).toContain(writableRoot);
+    }
+  });
+
+  it("keeps a producer-native fixer unwrapped", async () => {
+    const codex = SANDBOX_BACKENDS.find(backend => backend.id === "codex-native-sandbox");
+    if (codex === undefined) throw new Error("codex-native-sandbox backend is missing");
+    codex.platforms.push({ os: "darwin", environmentType: "native", state: "tested" });
+    try {
+      await configureFixerGitRoots();
+      const adapter = new FakeAdapter({
+        writeConfinementBackend: "codex-native-sandbox",
+      });
+
+      const result = await runRole(argsWith(adapter, "fixer"));
+
+      expect(result.ok).toBe(true);
+      expect(adapter.spawnedCommands).toEqual([process.execPath]);
+    } finally {
+      codex.platforms.pop();
+    }
+  });
+
+  it("fails closed before invoking a fixer with no confinement backend", async () => {
+    await configureFixerGitRoots();
+    const adapter = new FakeAdapter({ writeConfinementBackend: null });
+
+    const result = await runRole(argsWith(adapter, "fixer"));
+
+    expect(result).toMatchObject({
+      ok: false,
+      failure: "sandbox-violation",
+      producerId: "fake",
+    });
+    expect(adapter.invocationCount).toBe(0);
+    expect(adapter.spawnCount).toBe(0);
   });
 
   it("fails closed when fixer writable-root validation fails", async () => {

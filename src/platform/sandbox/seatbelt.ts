@@ -7,6 +7,7 @@ export interface SeatbeltPolicy {
   worktreePath: string;
   tempHome: string | null;
   allowNetwork: boolean;
+  extraWritableRoots?: string[];
 }
 
 /**
@@ -24,6 +25,19 @@ export function buildReadOnlySeatbeltPolicy(
     // matching the edit lane, where Codex's native sandbox permits its own
     // API traffic while denying out-of-worktree writes.
     allowNetwork: true,
+  };
+}
+
+export function buildWriteSeatbeltPolicy(args: {
+  worktreePath: string;
+  tempHome: string | null;
+  extraWritableRoots: string[];
+}): SeatbeltPolicy {
+  return {
+    worktreePath: args.worktreePath,
+    tempHome: args.tempHome,
+    allowNetwork: true,
+    extraWritableRoots: [...args.extraWritableRoots],
   };
 }
 
@@ -102,6 +116,7 @@ function buildProfile(policy: SeatbeltPolicy, additionalWritable: string[]): str
     process.env.TMPDIR ?? "/private/tmp",
     "/private/tmp",
     "/dev",
+    ...(policy.extraWritableRoots ?? []),
     ...additionalWritable,
   ]
     .filter((path): path is string => typeof path === "string" && path.length > 0)
