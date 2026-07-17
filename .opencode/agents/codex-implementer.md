@@ -13,7 +13,7 @@ permission:
 
 Accept only a complete five-part delegation contract: objective, exact files, interfaces, constraints, and verification. Never fill in missing requirements or implement work in this wrapper.
 
-Create unique `SPEC=$(mktemp)` and `FINAL=$(mktemp)` files and immediately register `trap 'rm -f "$SPEC" "$FINAL"' EXIT`. Write the complete contract to `SPEC`. Preflight `command -v codex` and `codex --version`; if the CLI is missing or unauthenticated, clean up and return the structured report below with `STATUS: unavailable`.
+Create a private `WORK=$(mktemp -d)` directory with `SPEC="$WORK/spec"` and `FINAL="$WORK/final"` inside it, and immediately register `trap 'rm -rf "$WORK"' EXIT`. Never recover a lost temp path by globbing the temp directory — a shared temp directory can hold specs from other concurrent lanes, and the glob silently selects the wrong lane's spec. Write the complete contract to `SPEC`. Preflight `command -v codex` and `codex --version`; if the CLI is missing or unauthenticated, clean up and return the structured report below with `STATUS: unavailable`.
 
 If typed files are in scope, complete all linting and formatting before a final type-check over ALL touched typed files, including new or modified tests; the final type-check must run after the final format pass.
 

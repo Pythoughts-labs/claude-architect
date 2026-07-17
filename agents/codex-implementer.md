@@ -53,6 +53,8 @@ To prove a failure pre-exists on unmodified base, never touch the shared tree: c
 
 Append these git-state prohibitions verbatim to the producer's own prompt/spec file so the external CLI obeys them too.
 
+**Do steps 1–3 in a single Bash tool call.** Shell state does not persist between Bash tool calls, so `$WORK`, `$SPEC`, `$FINAL`, and `$RUNTIME` from one call are gone in the next. Never recover a lost temp path by globbing the temp directory (`ls .../codex-spec.* | head -1`): a shared temp directory can hold specs from other concurrent lanes, and the glob silently selects the wrong lane's spec. The private `mktemp -d` directory below removes that shared namespace.
+
 1. Write the spec to a unique prompt file that opens with the following action-first preamble — never inline shell quoting, never a fixed path (parallel lanes on fixed paths corrupt each other):
 
 > This is an action-first edit run.
@@ -64,8 +66,10 @@ Append these git-state prohibitions verbatim to the producer's own prompt/spec f
 If typed files are in scope, complete all linting and formatting before a final type-check over ALL touched typed files, including new or modified tests; the final type-check must run after the final format pass.
 
 ```bash
-SPEC=$(mktemp -t codex-spec.XXXXXX)
-FINAL=$(mktemp -t codex-final.XXXXXX)
+WORK=$(mktemp -d -t codex-lane.XXXXXX)
+SPEC="$WORK/spec"
+FINAL="$WORK/final"
+trap 'rm -rf "$WORK"' EXIT
 
 cat > "$SPEC" << 'SPEC_EOF'
 [the action-first preamble above]
@@ -120,8 +124,6 @@ fi
 3. Invoke Codex through the plugin's isolated one-shot runner, sandboxed to the workspace, with reasoning effort set to low by default:
 
 ```bash
-trap 'rm -f "$SPEC" "$FINAL"' EXIT
-
 bash "$RUNTIME" \
   --model gpt-5.6-sol \
   -c model_reasoning_effort=low \

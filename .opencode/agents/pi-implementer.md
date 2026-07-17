@@ -13,7 +13,7 @@ permission:
 
 Accept only a complete five-part delegation contract: objective, exact files, interfaces, constraints, and verification. Never fill in missing requirements or implement work in this wrapper.
 
-Create unique `SPEC=$(mktemp)` and `FINAL=$(mktemp)` files and immediately register `trap 'rm -f "$SPEC" "$FINAL"' EXIT`. Write the complete contract to `SPEC`. Preflight `command -v pi` and `pi --version`. Before checking any backend, resolve the model: use exact `MODEL` when supplied; otherwise inspect Pi's configured/CLI-reported selection and record the exact value or `unresolved`—never guess. Then check the selected backend and authentication. If unavailable, clean up and return `PI REPORT` with `STATUS: unavailable`.
+Create a private `WORK=$(mktemp -d)` directory with `SPEC="$WORK/spec"` and `FINAL="$WORK/final"` inside it, and immediately register `trap 'rm -rf "$WORK"' EXIT`. Never recover a lost temp path by globbing the temp directory — a shared temp directory can hold specs from other concurrent lanes, and the glob silently selects the wrong lane's spec. Write the complete contract to `SPEC`. Preflight `command -v pi` and `pi --version`. Before checking any backend, resolve the model: use exact `MODEL` when supplied; otherwise inspect Pi's configured/CLI-reported selection and record the exact value or `unresolved`—never guess. Then check the selected backend and authentication. If unavailable, clean up and return `PI REPORT` with `STATUS: unavailable`.
 
 Execute this resolver exactly and capture its single output as `RUNTIME`:
 

@@ -81,12 +81,14 @@ for (const [host, lane, file, adapter] of agents) {
     /never[^.\n]{0,100}\b(?:implement|substitut)|do not (?:write|implement)/i,
     `${context}: missing prohibition on self-implementation fallback`,
   );
-  requirePattern(source, /SPEC=\$\(mktemp(?:\s[^)]*)?\)/, `${context}: SPEC must use mktemp`);
-  requirePattern(source, /FINAL=\$\(mktemp(?:\s[^)]*)?\)/, `${context}: FINAL must use mktemp`);
+  requirePattern(source, /WORK=\$\(mktemp -d(?:\s[^)]*)?\)/, `${context}: SPEC and FINAL must live in a private mktemp -d WORK directory, not a shared temp namespace`);
+  requirePattern(source, /SPEC="\$WORK\/[^"]+"/, `${context}: SPEC must live inside the private WORK directory`);
+  requirePattern(source, /FINAL="\$WORK\/[^"]+"/, `${context}: FINAL must live inside the private WORK directory`);
+  requirePattern(source, /trap\s+'rm -rf "\$WORK"'\s+EXIT/, `${context}: missing private WORK directory cleanup`);
   requirePattern(
     source,
-    /(?:trap\s+'rm -f "\$SPEC" "\$FINAL"'\s+EXIT|remove `SPEC` and `FINAL`)/,
-    `${context}: missing SPEC and FINAL cleanup`,
+    /never recover a lost temp path by globbing/i,
+    `${context}: missing prohibition on re-globbing the shared temp dir to recover a lost spec path`,
   );
   if (host === "OpenCode") {
     requirePattern(
@@ -158,6 +160,7 @@ for (const file of claudeLaneFiles) {
 
   requirePattern(source, /### Foreground execution and turn completion — hard constraint/, `${context}: missing foreground lifecycle section`);
   requirePattern(source, /one foreground blocking Bash call with timeout 600000ms/i, `${context}: missing mandatory Bash timeout`);
+  requirePattern(source, /single Bash tool call/i, `${context}: missing single-Bash-tool-call atomicity rule for spec/runtime/producer steps`);
   requirePattern(source, /Do not use `run_in_background`[^\n]*`nohup`[^\n]*Monitor[^\n]*"wait for notification"/i, `${context}: missing Monitor/background prohibition`);
   requirePattern(source, /exactly two valid turn endings:[^\n]*full report after independent verification[^\n]*concrete blocker report/i, `${context}: missing two-valid-endings contract`);
   requirePattern(source, /stall detection[^\n]*Every cycle must check progress by output-file growth or process CPU-time delta[^\n]*10 consecutive minutes/i, `${context}: missing PID-rejoin stall detection`);

@@ -84,12 +84,15 @@ To prove a failure pre-exists on unmodified base, never touch the shared tree: c
 
 Append these git-state prohibitions verbatim to the producer's own prompt/spec file so the external CLI obeys them too.
 
+**Do steps 1–3 in a single Bash tool call.** Shell state does not persist between Bash tool calls, so `$WORK`, `$SPEC`, `$FINAL`, and `$RUNTIME` from one call are gone in the next. Never recover a lost temp path by globbing the temp directory (`ls .../pi-spec.* | head -1`): a shared temp directory can hold specs from other concurrent lanes, and the glob silently selects the wrong lane's spec. The private `mktemp -d` directory below removes that shared namespace.
+
 1. Write the spec to a unique prompt file — never inline shell quoting, never a fixed path (parallel lanes on fixed paths corrupt each other):
 
 ```bash
-SPEC=$(mktemp -t pi-spec.XXXXXX)
-FINAL=$(mktemp -t pi-final.XXXXXX)
-trap 'rm -f "$SPEC" "$FINAL"' EXIT
+WORK=$(mktemp -d -t pi-lane.XXXXXX)
+SPEC="$WORK/spec"
+FINAL="$WORK/final"
+trap 'rm -rf "$WORK"' EXIT
 
 cat > "$SPEC" << 'SPEC_EOF'
 [the full spec, restated cleanly: objective, files, interfaces,
