@@ -234,6 +234,12 @@ for (const file of openCodeLaneFiles) {
 for (const file of codexLaneFiles) {
   const source = read(file);
   const context = `Codex ${file}`;
+  const invocation = shellFenceCommands(source).find(command =>
+    command.includes("$RUNTIME") && command.includes("--output-last-message"));
+
+  assert.ok(invocation, `${context}: missing Codex runtime invocation`);
+  requirePattern(invocation, /--lane-mode\s+edit/u, `${context}: implementation invocation must select wrapper-owned edit mode`);
+  assert.doesNotMatch(invocation, /--sandbox(?:=|\s)|--cd(?:=|\s)|(?:^|\s)-C(?:=|\s)/u, `${context}: invocation must not pass raw Codex sandbox or cwd controls`);
 
   requirePattern(
     source,

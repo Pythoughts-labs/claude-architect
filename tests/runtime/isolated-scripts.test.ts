@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { access, chmod, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { access, chmod, mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -16,9 +16,14 @@ interface RunResult {
   exitCode: number;
 }
 
-function run(script: string, args: string[], env: NodeJS.ProcessEnv): Promise<RunResult> {
+function run(
+  script: string,
+  args: string[],
+  env: NodeJS.ProcessEnv,
+  cwd?: string,
+): Promise<RunResult> {
   return new Promise(resolve => {
-    execFile("/bin/bash", [script, ...args], { env }, (error, stdout, stderr) => {
+    execFile("/bin/bash", [script, ...args], { env, cwd }, (error, stdout, stderr) => {
       const exitCode = error !== null && "code" in error && typeof error.code === "number"
         ? error.code
         : 0;
@@ -150,7 +155,30 @@ wait
     expect(result.stderr).toContain("unsafe Codex");
   });
 
-  it("forwards safe Codex arguments unchanged", async () => {
+  it("rejects malformed private lane modes without executing Codex", async () => {
+    const fixture = await makeBin();
+    const marker = path.join(fixture.root, "codex-started");
+    const codex = path.join(fixture.bin, "codex");
+    await writeFile(codex, `#!/bin/bash\nprintf started > "${marker}"\n`);
+    await chmod(codex, 0o755);
+
+    for (const args of [
+      ["--lane-mode"],
+      ["--lane-mode", "danger-full-access"],
+      ["--lane-mode", "edit", "--lane-mode", "read-only"],
+      ["--lane-mode=edit"],
+      ["--model", "gpt-5", "--lane-mode", "edit"],
+    ]) {
+      const result = await run(runCodexIsolated, args, {
+        PATH: fixture.bin,
+        CODEX_TIMEOUT_SECONDS: "0",
+      }, fixture.root);
+      expect(result.exitCode).toBe(64);
+    }
+    await expect(access(marker)).rejects.toBeDefined();
+  });
+
+  it("injects a read-only sandbox and physical cwd by default", async () => {
     const fixture = await makeBin();
     const argsFile = path.join(fixture.root, "args");
     const promptFile = path.join(fixture.root, "prompt.txt");
@@ -160,17 +188,50 @@ wait
     await chmod(codex, 0o755);
 
     const safeArgs = ["--model", "gpt-5", "-c", "model_reasoning_effort=high", promptFile];
+    const physicalRoot = await realpath(fixture.root);
     const result = await run(runCodexIsolated, safeArgs, {
       PATH: fixture.bin,
       CODEX_TIMEOUT_SECONDS: "0",
-    });
+    }, fixture.root);
 
     expect(result.exitCode).toBe(0);
     const forwarded = (await readFile(argsFile, "utf8")).split("\0").filter(Boolean);
     expect(forwarded).toEqual([
-      "exec", "--ignore-user-config", "--ephemeral", ...safeArgs,
+      "exec", "--ignore-user-config", "--ephemeral",
+      "--sandbox", "read-only",
+      "--cd", physicalRoot,
+      ...safeArgs,
       "--disable", "multi_agent",
       "-c", "features.multi_agent_v2={enabled=false,max_concurrent_threads_per_session=1}",
     ]);
+  });
+
+  it("injects a workspace-write sandbox for explicit edit mode", async () => {
+    const fixture = await makeBin();
+    const argsFile = path.join(fixture.root, "args");
+    const promptFile = path.join(fixture.root, "prompt.txt");
+    await writeFile(promptFile, "safe prompt\n");
+    const codex = path.join(fixture.bin, "codex");
+    await writeFile(codex, `#!/bin/bash\nprintf '%s\\0' "$@" > "${argsFile}"\n`);
+    await chmod(codex, 0o755);
+
+    const safeArgs = ["--model", "gpt-5", "-c", "model_reasoning_effort=high", promptFile];
+    const physicalRoot = await realpath(fixture.root);
+    const result = await run(runCodexIsolated, ["--lane-mode", "edit", ...safeArgs], {
+      PATH: fixture.bin,
+      CODEX_TIMEOUT_SECONDS: "0",
+    }, fixture.root);
+
+    expect(result.exitCode).toBe(0);
+    const forwarded = (await readFile(argsFile, "utf8")).split("\0").filter(Boolean);
+    expect(forwarded).toEqual([
+      "exec", "--ignore-user-config", "--ephemeral",
+      "--sandbox", "workspace-write",
+      "--cd", physicalRoot,
+      ...safeArgs,
+      "--disable", "multi_agent",
+      "-c", "features.multi_agent_v2={enabled=false,max_concurrent_threads_per_session=1}",
+    ]);
+    expect(forwarded).not.toContain("--lane-mode");
   });
 });

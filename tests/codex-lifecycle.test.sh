@@ -111,6 +111,8 @@ run_case() {
   grep -Fxq -- 'exec' "$state/args"
   grep -Fxq -- '--ignore-user-config' "$state/args"
   grep -Fxq -- '--ephemeral' "$state/args"
+  assert_adjacent_args "$state/args" --sandbox read-only "$mode default sandbox"
+  assert_adjacent_args "$state/args" --cd "$(pwd -P)" "$mode physical cwd"
   assert_adjacent_args "$state/args" --disable multi_agent "$mode branch"
   assert_adjacent_args "$state/args" -c \
     'features.multi_agent_v2={enabled=false,max_concurrent_threads_per_session=1}' \
@@ -309,6 +311,8 @@ EOF
     exit 1
   fi
 
+  assert_adjacent_args "$state/args" --sandbox read-only 'stderr logging default sandbox'
+  assert_adjacent_args "$state/args" --cd "$(pwd -P)" 'stderr logging physical cwd'
   assert_adjacent_args "$state/args" --disable multi_agent 'stderr logging branch'
   assert_adjacent_args "$state/args" -c \
     'features.multi_agent_v2={enabled=false,max_concurrent_threads_per_session=1}' \

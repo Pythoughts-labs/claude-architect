@@ -22,6 +22,10 @@ reject_unsafe_args() {
   for ((i = 0; i < ${#argv[@]}; i++)); do
     arg=${argv[$i]}
     case "$arg" in
+      --lane-mode|--lane-mode=*)
+        printf 'ERROR: --lane-mode must appear once at the start\n' >&2
+        return 64
+        ;;
       --sandbox|--sandbox=*|-s|-s=*|-s?*| \
       --add-dir|--add-dir=*|--disable-sandbox|--disable-sandbox=*| \
       --cd|--cd=*|-C|-C=*|-C?*| \
@@ -57,7 +61,31 @@ reject_unsafe_args() {
   done
 }
 
+LANE_MODE=read-only
+if [[ "${1:-}" == --lane-mode ]]; then
+  if (( $# < 2 )); then
+    printf 'ERROR: --lane-mode requires edit or read-only\n' >&2
+    exit 64
+  fi
+  LANE_MODE=$2
+  shift 2
+fi
+
+case "$LANE_MODE" in
+  edit) CODEX_SANDBOX=workspace-write ;;
+  read-only) CODEX_SANDBOX=read-only ;;
+  *)
+    printf 'ERROR: --lane-mode must be edit or read-only; got %q\n' "$LANE_MODE" >&2
+    exit 64
+    ;;
+esac
+
 reject_unsafe_args "$@" || exit $?
+
+if ! WORKSPACE_ROOT=$(pwd -P); then
+  printf 'ERROR: unable to resolve the Codex workspace root\n' >&2
+  exit 69
+fi
 
 TIMEOUT_SECONDS=${CODEX_TIMEOUT_SECONDS:-600}
 TIMEOUT_IS_DEFAULT=$([[ -z "${CODEX_TIMEOUT_SECONDS:-}" ]] && echo 1 || echo 0)
@@ -112,7 +140,8 @@ if [[ -n "$ERR_DIR" ]] && mkdir -p "$ERR_DIR" 2>/dev/null; then
   ERR_FILE="$ERR_DIR/codex-$(date +%Y%m%d-%H%M%S)-$$.stderr"
   RUN_TIMEOUT_SECONDS=$TIMEOUT_SECONDS \
     exec "$BASH" "$SCRIPT_DIR/run-isolated.sh" \
-      codex exec --ignore-user-config --ephemeral "$@" \
+      codex exec --ignore-user-config --ephemeral \
+      --sandbox "$CODEX_SANDBOX" --cd "$WORKSPACE_ROOT" "$@" \
       --disable multi_agent \
       -c 'features.multi_agent_v2={enabled=false,max_concurrent_threads_per_session=1}' \
       2> >(tee -a "$ERR_FILE" >&2)
@@ -120,6 +149,7 @@ fi
 
 RUN_TIMEOUT_SECONDS=$TIMEOUT_SECONDS \
   exec "$BASH" "$SCRIPT_DIR/run-isolated.sh" \
-    codex exec --ignore-user-config --ephemeral "$@" \
+    codex exec --ignore-user-config --ephemeral \
+    --sandbox "$CODEX_SANDBOX" --cd "$WORKSPACE_ROOT" "$@" \
     --disable multi_agent \
     -c 'features.multi_agent_v2={enabled=false,max_concurrent_threads_per_session=1}'
