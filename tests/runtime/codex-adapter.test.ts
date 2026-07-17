@@ -74,6 +74,7 @@ function unavailablePlatformServices(): PlatformServices {
 function versionPlatformServices(
   resolvedExecutable: ResolvedExecutable,
   spawned: ResolvedExecutable[],
+  supervisedExit: SupervisedExit = exit({ stdout: "codex-cli 0.144.4\n" }),
 ): PlatformServices {
   return {
     os: "darwin",
@@ -86,7 +87,7 @@ function versionPlatformServices(
         pid: 42,
         stdout: Readable.from([]),
         stderr: Readable.from([]),
-        done: Promise.resolve(exit({ stdout: "codex-cli 0.144.4\n" })),
+        done: Promise.resolve(supervisedExit),
       };
     },
     async requestCooperativeCancellation() {},
@@ -305,6 +306,27 @@ describe("CodexAdapter", () => {
       resolvedExecutable: null,
       version: null,
       authState: "unknown",
+      writeConfinementBackend: null,
+      laneEligibility: { edit: false },
+    });
+  });
+
+  it.each([
+    ["times out", exit({ timedOut: true, stdout: "codex-cli 0.144.4\n" })],
+    ["is signal-terminated", exit({ exitCode: null, signal: "SIGTERM", stdout: "codex-cli 0.144.4\n" })],
+  ])("reports probe-failed when the version probe %s", async (_description, supervisedExit) => {
+    const report = await new CodexAdapter().probe({
+      ps: versionPlatformServices(executable, [], supervisedExit),
+      os: "darwin",
+      arch: "arm64",
+      environmentType: "native",
+    });
+
+    expect(report).toMatchObject({
+      available: false,
+      reason: "probe-failed",
+      resolvedExecutable: executable,
+      version: null,
       writeConfinementBackend: null,
       laneEligibility: { edit: false },
     });

@@ -23,7 +23,7 @@ function report(
     authState: "unknown",
     executionModes: ["edit"],
     structuredOutput: true,
-    writeConfinementBackend: `${producerId}-sandbox`,
+    writeConfinementBackend: "macos-seatbelt",
     laneEligibility: { edit: true },
     ...overrides,
   };
@@ -111,6 +111,22 @@ describe("route", () => {
       ],
     });
   });
+
+  it.each([
+    ["is unavailable", { available: false }, "available=false"],
+    ["has no resolved executable", { resolvedExecutable: null }, "resolvedExecutable=null"],
+  ] satisfies Array<[string, Partial<CapabilityReport>, string]>) (
+    "falls through when edit eligibility is true but the report %s",
+    (_description, overrides, detail) => {
+      expect(route(["pi", "codex"], [report("pi", overrides), report("codex")])).toEqual({
+        producerId: "codex",
+        considered: [
+          { producerId: "pi", outcome: "ineligible", detail },
+          { producerId: "codex", outcome: "selected", detail: null },
+        ],
+      });
+    },
+  );
 
   it("reports a considered trail for an ineligible preferred producer", () => {
     const reports = [

@@ -205,7 +205,11 @@ export class CodexAdapter implements ProducerAdapter {
         timeoutMs: VERSION_TIMEOUT_MS,
         maxOutputBytes: VERSION_OUTPUT_LIMIT,
       }, {});
-      const version = result.spawnError === undefined && result.exitCode === 0
+      const version = result.spawnError === undefined
+        && result.exitCode === 0
+        && result.signal === null
+        && result.timedOut === false
+        && result.cancelled === false
         ? parseVersion(result.stdout)
         : null;
       if (version === null) return unavailableReport(ctx, "probe-failed", executable);

@@ -29,15 +29,23 @@ export function route(
       considered.push({ producerId, outcome: "authentication-required", detail: report.reason });
       return { producerId: null, reason: "authentication-required", considered };
     }
-    if (report.laneEligibility.edit === true) {
-      considered.push({ producerId, outcome: "selected", detail: null });
-      return { producerId, considered };
+    // Write-confinement enforcement (and its specific diagnostics) is owned by
+    // the attempt runtime's edit-mode gate; routing only screens out producers
+    // that are unavailable, have no resolved executable, or are edit-ineligible.
+    let ineligibleDetail: string | null = null;
+    if (report.available !== true) {
+      ineligibleDetail = report.reason ?? "available=false";
+    } else if (report.resolvedExecutable === null) {
+      ineligibleDetail = "resolvedExecutable=null";
+    } else if (report.laneEligibility.edit !== true) {
+      ineligibleDetail = report.reason ?? "laneEligibility.edit=false";
     }
-    considered.push({
-      producerId,
-      outcome: "ineligible",
-      detail: report.reason ?? "laneEligibility.edit=false",
-    });
+    if (ineligibleDetail !== null) {
+      considered.push({ producerId, outcome: "ineligible", detail: ineligibleDetail });
+      continue;
+    }
+    considered.push({ producerId, outcome: "selected", detail: null });
+    return { producerId, considered };
   }
 
   return { producerId: null, reason: "no-eligible-producer", considered };
