@@ -57,6 +57,12 @@ async function checkedGit(
   indexFile?: string,
 ): Promise<string> {
   const result = await git(cwd, args, indexFile);
+  if (result.truncated?.stdout === true || result.truncated?.stderr === true) {
+    throw new RuntimeError(`git ${args[0] ?? "command"} output exceeded the runtime bound`, {
+      command: args[0] ?? "command",
+      truncated: result.truncated,
+    });
+  }
   if (result.exitCode !== 0) throw gitFailure(`git ${args[0] ?? "command"}`, result);
   return result.stdout;
 }

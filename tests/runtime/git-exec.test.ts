@@ -136,4 +136,13 @@ describe("git execution hardening", () => {
 
     expect(result.stdout.trim()).toBe("input");
   });
+
+  it("reports output truncated at a caller-supplied bound", async () => {
+    const fixture = await makeRepo();
+
+    const result = await git(fixture.repo, ["show", "HEAD:base.txt"], { maxOutputBytes: 2 });
+
+    expect(result.exitCode).toBe(0);
+    expect(result.truncated?.stdout).toBe(true);
+  });
 });

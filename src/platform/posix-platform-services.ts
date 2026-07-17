@@ -37,11 +37,23 @@ export async function acquireWxFileLock(
   for (;;) {
     try {
       const handle = await fs.open(lockPath, "wx");
+      const ownerPid = nodeProcess.pid;
       try {
-        await handle.writeFile(JSON.stringify({ pid: nodeProcess.pid, processToken: ownerToken }));
+        await handle.writeFile(JSON.stringify({ pid: ownerPid, processToken: ownerToken }));
       }
       finally { await handle.close(); }
-      return { key, release: async () => { await fs.rm(lockPath, { force: true }); } };
+      return {
+        key,
+        release: async () => {
+          let recordedOwner: unknown;
+          try { recordedOwner = JSON.parse(await fs.readFile(lockPath, "utf8")); }
+          catch { return; }
+          if (!isRecord(recordedOwner)
+            || recordedOwner.pid !== ownerPid
+            || recordedOwner.processToken !== ownerToken) return;
+          await fs.rm(lockPath, { force: true });
+        },
+      };
     } catch (error) {
       if (errorCode(error) !== "EEXIST") throw error;
       if (Date.now() >= deadline) {
@@ -50,6 +62,10 @@ export async function acquireWxFileLock(
       await delay(LOCK_RETRY_MS);
     }
   }
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 async function gitCommonDir(cwd: string): Promise<string> {

@@ -22026,14 +22026,25 @@ async function acquireWxFileLock(key, timeoutMessage, ownerToken = null) {
   for (; ; ) {
     try {
       const handle = await fs.open(lockPath, "wx");
+      const ownerPid = nodeProcess2.pid;
       try {
-        await handle.writeFile(JSON.stringify({ pid: nodeProcess2.pid, processToken: ownerToken }));
+        await handle.writeFile(JSON.stringify({ pid: ownerPid, processToken: ownerToken }));
       } finally {
         await handle.close();
       }
-      return { key, release: async () => {
-        await fs.rm(lockPath, { force: true });
-      } };
+      return {
+        key,
+        release: async () => {
+          let recordedOwner;
+          try {
+            recordedOwner = JSON.parse(await fs.readFile(lockPath, "utf8"));
+          } catch {
+            return;
+          }
+          if (!isRecord(recordedOwner) || recordedOwner.pid !== ownerPid || recordedOwner.processToken !== ownerToken) return;
+          await fs.rm(lockPath, { force: true });
+        }
+      };
     } catch (error2) {
       if (errorCode(error2) !== "EEXIST") throw error2;
       if (Date.now() >= deadline) {
@@ -22042,6 +22053,9 @@ async function acquireWxFileLock(key, timeoutMessage, ownerToken = null) {
       await delay(LOCK_RETRY_MS);
     }
   }
+}
+function isRecord(value) {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 async function gitCommonDir(cwd) {
   return new Promise((resolve, reject) => {
@@ -22641,6 +22655,7 @@ async function git(cwd, args, indexFileOrOptions) {
   const executable = await platformServices.resolveExecutable({ name: "git" });
   const nullDevice = process.platform === "win32" ? "NUL" : "/dev/null";
   const options = typeof indexFileOrOptions === "string" ? { indexFile: indexFileOrOptions } : indexFileOrOptions ?? {};
+  const maxOutputBytes = options.maxOutputBytes ?? 8e6;
   const env = {
     PATH: process.env.PATH ?? "",
     GIT_CONFIG_GLOBAL: nullDevice,
@@ -22686,7 +22701,7 @@ async function git(cwd, args, indexFileOrOptions) {
       cwd,
       env,
       timeoutMs: 6e4,
-      maxOutputBytes: 8e6
+      maxOutputBytes
     }, {});
     if (localDiscovery.exitCode !== 0 && !(localDiscovery.exitCode === 1 && localDiscovery.stdout === "")) {
       return toGitResult(localDiscovery);
@@ -22709,7 +22724,7 @@ async function git(cwd, args, indexFileOrOptions) {
         cwd,
         env,
         timeoutMs: 6e4,
-        maxOutputBytes: 8e6
+        maxOutputBytes
       }, {});
       if (worktreeDiscovery.exitCode !== 0 && !(worktreeDiscovery.exitCode === 1 && worktreeDiscovery.stdout === "")) {
         return toGitResult(worktreeDiscovery);
@@ -22726,7 +22741,7 @@ async function git(cwd, args, indexFileOrOptions) {
     env,
     ...options.stdin === void 0 ? {} : { stdin: options.stdin },
     timeoutMs: 6e4,
-    maxOutputBytes: 8e6
+    maxOutputBytes
   }, {});
   return toGitResult(exit);
 }
@@ -22783,11 +22798,11 @@ var CODEX_REQUIRED_ENV = [
 var MULTI_AGENT_CONTROL = "features.multi_agent_v2={enabled=false,max_concurrent_threads_per_session=1}";
 var VERSION_TIMEOUT_MS = 1e4;
 var VERSION_OUTPUT_LIMIT = 64 * 1024;
-function isRecord(value) {
+function isRecord2(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 function stringProperty(value, name) {
-  if (!isRecord(value)) return void 0;
+  if (!isRecord2(value)) return void 0;
   const property = value[name];
   return typeof property === "string" ? property : void 0;
 }
@@ -23028,7 +23043,7 @@ var CodexAdapter = class {
     try {
       for (const line of lines) {
         const parsed = JSON.parse(line);
-        if (!isRecord(parsed) || typeof parsed.type !== "string") {
+        if (!isRecord2(parsed) || typeof parsed.type !== "string") {
           return { events: [], producerSummary: null, ok: false };
         }
         if (parsed.type === "turn.completed") {
@@ -25046,6 +25061,12 @@ function gitFailure2(action, result) {
 }
 async function checkedGit2(cwd, args, indexFile) {
   const result = await git(cwd, args, indexFile);
+  if (result.truncated?.stdout === true || result.truncated?.stderr === true) {
+    throw new RuntimeError(`git ${args[0] ?? "command"} output exceeded the runtime bound`, {
+      command: args[0] ?? "command",
+      truncated: result.truncated
+    });
+  }
   if (result.exitCode !== 0) throw gitFailure2(`git ${args[0] ?? "command"}`, result);
   return result.stdout;
 }
@@ -26168,11 +26189,11 @@ function withManifestHash(body) {
     manifestHash: sha256(stableJson(sanitized))
   };
 }
-function isRecord2(value) {
+function isRecord3(value) {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 function hasExactKeys(value, expected) {
-  if (!isRecord2(value)) return false;
+  if (!isRecord3(value)) return false;
   const actual = Object.keys(value);
   return actual.length === expected.length && expected.every((key) => actual.includes(key));
 }
@@ -26184,6 +26205,12 @@ function isSha256(value) {
 }
 function isObjectId(value) {
   return typeof value === "string" && /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(value);
+}
+function protocolMajor(version2) {
+  const match = /^(\d+)\.\d+\.\d+$/.exec(version2);
+  if (match === null) return null;
+  const major = Number(match[1]);
+  return Number.isSafeInteger(major) ? major : null;
 }
 function assertManifestShape(value) {
   if (!hasExactKeys(value, [
@@ -26203,7 +26230,7 @@ function assertManifestShape(value) {
     "schemaVersions",
     "packagedVerifier",
     "manifestHash"
-  ]) || value.manifestVersion !== "1" || typeof value.runId !== "string" || typeof value.repoRoot !== "string" || !isObjectId(value.baseCommitOid) || value.candidateManifestHash !== null && !isSha256(value.candidateManifestHash) || !hasExactKeys(value.producer, ["id", "version", "model"]) || !isNullableString(value.producer.id) || !isNullableString(value.producer.version) || !isNullableString(value.producer.model) || !isRecord2(value.effectivePolicy) || !Array.isArray(value.repositoryInstructions) || !value.repositoryInstructions.every((instruction) => hasExactKeys(instruction, ["path", "hash"]) && typeof instruction.path === "string" && isSha256(instruction.hash)) || !isSha256(value.promptHash) || !isRecord2(value.executionPolicy) || !Array.isArray(value.environment) || !value.environment.every((entry) => hasExactKeys(entry, ["name", "source"]) && typeof entry.name === "string" && typeof entry.source === "string") || typeof value.runtimeVersion !== "string" || typeof value.protocolVersion !== "string" || !hasExactKeys(value.schemaVersions, ["delegationSpec", "attemptResult"]) || typeof value.schemaVersions.delegationSpec !== "string" || typeof value.schemaVersions.attemptResult !== "string" || !hasExactKeys(value.packagedVerifier, ["version", "hash"]) || typeof value.packagedVerifier.version !== "string" || !isSha256(value.packagedVerifier.hash) || !isSha256(value.manifestHash)) {
+  ]) || value.manifestVersion !== "1" || typeof value.runId !== "string" || typeof value.repoRoot !== "string" || !isObjectId(value.baseCommitOid) || value.candidateManifestHash !== null && !isSha256(value.candidateManifestHash) || !hasExactKeys(value.producer, ["id", "version", "model"]) || !isNullableString(value.producer.id) || !isNullableString(value.producer.version) || !isNullableString(value.producer.model) || !isRecord3(value.effectivePolicy) || !Array.isArray(value.repositoryInstructions) || !value.repositoryInstructions.every((instruction) => hasExactKeys(instruction, ["path", "hash"]) && typeof instruction.path === "string" && isSha256(instruction.hash)) || !isSha256(value.promptHash) || !isRecord3(value.executionPolicy) || !Array.isArray(value.environment) || !value.environment.every((entry) => hasExactKeys(entry, ["name", "source"]) && typeof entry.name === "string" && typeof entry.source === "string") || typeof value.runtimeVersion !== "string" || typeof value.protocolVersion !== "string" || !hasExactKeys(value.schemaVersions, ["delegationSpec", "attemptResult"]) || typeof value.schemaVersions.delegationSpec !== "string" || typeof value.schemaVersions.attemptResult !== "string" || !hasExactKeys(value.packagedVerifier, ["version", "hash"]) || typeof value.packagedVerifier.version !== "string" || !isSha256(value.packagedVerifier.hash) || !isSha256(value.manifestHash)) {
     throw new RuntimeError("archived run manifest is malformed");
   }
 }
@@ -26218,7 +26245,14 @@ function verifyRunManifest(value, expectedRunId) {
   if (sha256(stableJson(body)) !== manifestHash) {
     throw new RuntimeError("archived run manifest integrity check failed");
   }
-  if (body.protocolVersion !== PROTOCOL_VERSION || body.schemaVersions.delegationSpec !== DELEGATION_SPEC_VERSION || body.schemaVersions.attemptResult !== ATTEMPT_RESULT_VERSION) {
+  const archivedProtocolMajor = protocolMajor(body.protocolVersion);
+  const runtimeProtocolMajor = protocolMajor(PROTOCOL_VERSION);
+  if (archivedProtocolMajor === null || runtimeProtocolMajor === null || archivedProtocolMajor !== runtimeProtocolMajor) {
+    throw new RuntimeError(
+      `archived run manifest protocol ${body.protocolVersion} is incompatible with runtime protocol ${PROTOCOL_VERSION}`
+    );
+  }
+  if (body.schemaVersions.delegationSpec !== DELEGATION_SPEC_VERSION || body.schemaVersions.attemptResult !== ATTEMPT_RESULT_VERSION) {
     throw new RuntimeError("archived run manifest contract is invalid");
   }
   if (expectedRunId !== void 0 && body.runId !== expectedRunId) {
@@ -29419,7 +29453,7 @@ function errorResult(error2) {
   const diagnostic = error2 instanceof Error ? error2.message : String(error2);
   return { ok: false, error: code, diagnostic: redact(diagnostic) };
 }
-function isRecord3(value) {
+function isRecord4(value) {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 async function loadArchivedRun(runId, deps) {
@@ -29465,7 +29499,7 @@ function requireVerifiedCandidate(run) {
   return requireCandidate(run);
 }
 function schemaCompatibility(input) {
-  if (isRecord3(input) && input.specVersion !== void 0 && input.specVersion !== DELEGATION_SPEC_VERSION) {
+  if (isRecord4(input) && input.specVersion !== void 0 && input.specVersion !== DELEGATION_SPEC_VERSION) {
     return {
       ok: false,
       diagnostic: `delegation spec version mismatch: request declares ${String(input.specVersion)}, runtime expects ${DELEGATION_SPEC_VERSION}`

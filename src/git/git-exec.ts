@@ -12,6 +12,7 @@ export interface GitExecOptions {
   indexFile?: string;
   env?: Record<string, string>;
   stdin?: string;
+  maxOutputBytes?: number;
 }
 
 const FILTER_KEY_PATTERN = "^filter\\..*\\.(clean|smudge|process|required)$";
@@ -94,6 +95,7 @@ export async function git(
   const options = typeof indexFileOrOptions === "string"
     ? { indexFile: indexFileOrOptions }
     : indexFileOrOptions ?? {};
+  const maxOutputBytes = options.maxOutputBytes ?? 8_000_000;
   const env: Record<string, string> = {
     PATH: process.env.PATH ?? "",
     GIT_CONFIG_GLOBAL: nullDevice,
@@ -131,7 +133,7 @@ export async function git(
       cwd,
       env,
       timeoutMs: 60_000,
-      maxOutputBytes: 8_000_000,
+      maxOutputBytes,
     }, {});
     if (localDiscovery.exitCode !== 0 && !(localDiscovery.exitCode === 1 && localDiscovery.stdout === "")) {
       return toGitResult(localDiscovery);
@@ -150,7 +152,7 @@ export async function git(
         cwd,
         env,
         timeoutMs: 60_000,
-        maxOutputBytes: 8_000_000,
+        maxOutputBytes,
       }, {});
       if (worktreeDiscovery.exitCode !== 0
         && !(worktreeDiscovery.exitCode === 1 && worktreeDiscovery.stdout === "")) {
@@ -169,7 +171,7 @@ export async function git(
     env,
     ...(options.stdin === undefined ? {} : { stdin: options.stdin }),
     timeoutMs: 60_000,
-    maxOutputBytes: 8_000_000,
+    maxOutputBytes,
   }, {});
   return toGitResult(exit);
 }

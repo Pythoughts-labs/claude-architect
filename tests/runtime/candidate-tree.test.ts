@@ -9,6 +9,7 @@ const temporaryPaths: string[] = [];
 const gitHooks = vi.hoisted(() => ({
   afterReadTree: undefined as (() => Promise<void>) | undefined,
   failCommand: undefined as string | undefined,
+  truncateCommand: undefined as string | undefined,
 }));
 
 vi.mock("../../src/git/git-exec.js", async importOriginal => {
@@ -20,6 +21,9 @@ vi.mock("../../src/git/git-exec.js", async importOriginal => {
         return { stdout: "", stderr: `forced ${gitHooks.failCommand} failure`, exitCode: 1 };
       }
       const result = await actual.git(...args);
+      if (args[1][0] === gitHooks.truncateCommand) {
+        return { ...result, truncated: { stdout: true, stderr: false } };
+      }
       if (args[1][0] === "read-tree" && gitHooks.afterReadTree !== undefined) {
         const hook = gitHooks.afterReadTree;
         gitHooks.afterReadTree = undefined;
@@ -67,6 +71,7 @@ async function initRepoAndWorktree(
 afterEach(async () => {
   gitHooks.afterReadTree = undefined;
   gitHooks.failCommand = undefined;
+  gitHooks.truncateCommand = undefined;
   await Promise.all(temporaryPaths.splice(0).map(path => rm(path, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })));
 });
 
@@ -159,6 +164,30 @@ describe("freezeCandidate", () => {
       writeAllowlist: ["a.txt"],
       forbiddenScope: [],
     })).rejects.toThrow("git diff failed");
+
+    const refResult = await git(fixture.repoRoot, ["show-ref", "--verify", "--quiet", anchorRef]);
+    expect(refResult.exitCode).not.toBe(0);
+  });
+
+  it("fails closed without publishing an anchor when git output is truncated", async () => {
+    const fixture = await initRepoAndWorktree();
+    await writeFile(join(fixture.worktreePath, "a.txt"), "updated\n");
+    const anchorRef = "refs/claude-architect/candidates/run-truncated-diff";
+    gitHooks.truncateCommand = "diff";
+
+    await expect(freezeCandidate({
+      ...fixture,
+      runId: "run-truncated-diff",
+      writeAllowlist: ["a.txt"],
+      forbiddenScope: [],
+    })).rejects.toMatchObject({
+      name: "RuntimeError",
+      message: "git diff output exceeded the runtime bound",
+      detail: {
+        command: "diff",
+        truncated: { stdout: true, stderr: false },
+      },
+    });
 
     const refResult = await git(fixture.repoRoot, ["show-ref", "--verify", "--quiet", anchorRef]);
     expect(refResult.exitCode).not.toBe(0);

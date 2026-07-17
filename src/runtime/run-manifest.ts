@@ -43,7 +43,7 @@ export interface RunManifest {
   executionPolicy: Record<string, unknown>;
   environment: Array<{ name: string; source: string }>;
   runtimeVersion: string;
-  protocolVersion: typeof PROTOCOL_VERSION;
+  protocolVersion: string;
   schemaVersions: {
     delegationSpec: typeof DELEGATION_SPEC_VERSION;
     attemptResult: typeof ATTEMPT_RESULT_VERSION;
@@ -179,6 +179,13 @@ function isObjectId(value: unknown): value is string {
   return typeof value === "string" && /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(value);
 }
 
+function protocolMajor(version: string): number | null {
+  const match = /^(\d+)\.\d+\.\d+$/.exec(version);
+  if (match === null) return null;
+  const major = Number(match[1]);
+  return Number.isSafeInteger(major) ? major : null;
+}
+
 function assertManifestShape(value: unknown): asserts value is RunManifest {
   if (!hasExactKeys(value, [
     "manifestVersion",
@@ -245,8 +252,16 @@ export function verifyRunManifest(value: unknown, expectedRunId?: string): RunMa
   if (sha256(stableJson(body)) !== manifestHash) {
     throw new RuntimeError("archived run manifest integrity check failed");
   }
-  if (body.protocolVersion !== PROTOCOL_VERSION
-    || body.schemaVersions.delegationSpec !== DELEGATION_SPEC_VERSION
+  const archivedProtocolMajor = protocolMajor(body.protocolVersion);
+  const runtimeProtocolMajor = protocolMajor(PROTOCOL_VERSION);
+  if (archivedProtocolMajor === null
+    || runtimeProtocolMajor === null
+    || archivedProtocolMajor !== runtimeProtocolMajor) {
+    throw new RuntimeError(
+      `archived run manifest protocol ${body.protocolVersion} is incompatible with runtime protocol ${PROTOCOL_VERSION}`,
+    );
+  }
+  if (body.schemaVersions.delegationSpec !== DELEGATION_SPEC_VERSION
     || body.schemaVersions.attemptResult !== ATTEMPT_RESULT_VERSION) {
     throw new RuntimeError("archived run manifest contract is invalid");
   }

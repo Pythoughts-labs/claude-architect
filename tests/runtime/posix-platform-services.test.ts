@@ -105,6 +105,28 @@ describe("PosixPlatformServices", () => {
     await lockB.release();
   });
 
+  it("does not release a checkout lock that has been replaced by another owner", async () => {
+    const lock = await ps.acquireCheckoutLock(repoPath);
+    const lockPath = path.join(resolveStateDir(), "locks", `${lock.key}.lock`);
+    const replacement = { pid: process.pid + 1, processToken: "replacement-owner" };
+    await fs.writeFile(lockPath, JSON.stringify(replacement));
+
+    await expect(lock.release()).resolves.toBeUndefined();
+    await expect(fs.readFile(lockPath, "utf8").then(contents => JSON.parse(contents)))
+      .resolves.toEqual(replacement);
+
+    await fs.rm(lockPath);
+  });
+
+  it("removes an owned checkout lock and permits idempotent release", async () => {
+    const lock = await ps.acquireCheckoutLock(repoPath);
+    const lockPath = path.join(resolveStateDir(), "locks", `${lock.key}.lock`);
+
+    await expect(lock.release()).resolves.toBeUndefined();
+    await expect(fs.readFile(lockPath)).rejects.toMatchObject({ code: "ENOENT" });
+    await expect(lock.release()).resolves.toBeUndefined();
+  });
+
   it("canonicalizes symlink aliases to the same git common directory and lock key", async () => {
     const real = await ps.canonicalizePath(repoPath);
     const alias = await ps.canonicalizePath(aliasPath);
