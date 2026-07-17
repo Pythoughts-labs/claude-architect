@@ -14,6 +14,36 @@ config_key_is_unsafe() {
   esac
 }
 
+config_assignment_is_valid() {
+  local assignment=$1
+  local key value
+
+  [[ "$assignment" == *=* ]] || return 1
+  key=${assignment%%=*}
+  value=${assignment#*=}
+  [[ -n "$key" && -n "$value" ]]
+}
+
+reject_denied_option() {
+  local arg=$1
+
+  case "$arg" in
+    --lane-mode|--lane-mode=*)
+      printf 'ERROR: --lane-mode must appear once at the start\n' >&2
+      return 64
+      ;;
+    --sandbox|--sandbox=*|-s|-s=*|-s?*| \
+    --add-dir|--add-dir=*|--disable-sandbox|--disable-sandbox=*| \
+    --cd|--cd=*|-C|-C=*|-C?*| \
+    --ask-for-approval|--ask-for-approval=*|-a|-a=*|-a?*| \
+    --dangerously*|--full-auto|--full-auto=*|--yolo|--yolo=*| \
+    --enable|--enable=*)
+      printf 'ERROR: unsafe Codex option rejected: %s\n' "${arg%%=*}" >&2
+      return 65
+      ;;
+  esac
+}
+
 reject_unsafe_args() {
   local arg value
   local -a argv=("$@")
@@ -21,22 +51,21 @@ reject_unsafe_args() {
 
   for ((i = 0; i < ${#argv[@]}; i++)); do
     arg=${argv[$i]}
+    reject_denied_option "$arg" || return $?
+
     case "$arg" in
-      --lane-mode|--lane-mode=*)
-        printf 'ERROR: --lane-mode must appear once at the start\n' >&2
-        return 64
-        ;;
-      --sandbox|--sandbox=*|-s|-s=*|-s?*| \
-      --add-dir|--add-dir=*|--disable-sandbox|--disable-sandbox=*| \
-      --cd|--cd=*|-C|-C=*|-C?*| \
-      --ask-for-approval|--ask-for-approval=*|-a|-a=*|-a?*| \
-      --dangerously*|--full-auto|--full-auto=*|--yolo|--yolo=*| \
-      --enable|--enable=*)
-        printf 'ERROR: unsafe Codex option rejected: %s\n' "${arg%%=*}" >&2
-        return 65
-        ;;
       -c|--config)
-        if ((i + 1 < ${#argv[@]})) && config_key_is_unsafe "${argv[$((i + 1))]}"; then
+        if ((i + 1 >= ${#argv[@]})); then
+          printf 'ERROR: Codex config must be a key=value assignment\n' >&2
+          return 64
+        fi
+        value=${argv[$((i + 1))]}
+        reject_denied_option "$value" || return $?
+        if ! config_assignment_is_valid "$value"; then
+          printf 'ERROR: Codex config must be a key=value assignment\n' >&2
+          return 64
+        fi
+        if config_key_is_unsafe "$value"; then
           printf 'ERROR: unsafe Codex config key rejected\n' >&2
           return 65
         fi
@@ -45,6 +74,10 @@ reject_unsafe_args() {
       -c=*|-c?*)
         value=${arg#-c}
         value=${value#=}
+        if ! config_assignment_is_valid "$value"; then
+          printf 'ERROR: Codex config must be a key=value assignment\n' >&2
+          return 64
+        fi
         if config_key_is_unsafe "$value"; then
           printf 'ERROR: unsafe Codex config key rejected\n' >&2
           return 65
@@ -52,6 +85,10 @@ reject_unsafe_args() {
         ;;
       --config=*)
         value=${arg#--config=}
+        if ! config_assignment_is_valid "$value"; then
+          printf 'ERROR: Codex config must be a key=value assignment\n' >&2
+          return 64
+        fi
         if config_key_is_unsafe "$value"; then
           printf 'ERROR: unsafe Codex config key rejected\n' >&2
           return 65

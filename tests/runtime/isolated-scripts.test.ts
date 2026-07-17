@@ -155,6 +155,95 @@ wait
     expect(result.stderr).toContain("unsafe Codex");
   });
 
+  it.each([
+    {
+      args: ["--lane-mode", "edit", "-c", "--lane-mode", "read-only"],
+      expectedExitCode: 64,
+      expectedError: "--lane-mode",
+    },
+    {
+      args: ["--lane-mode", "edit", "--config", "--lane-mode=read-only"],
+      expectedExitCode: 64,
+      expectedError: "--lane-mode",
+    },
+    {
+      args: ["-c", "--sandbox", "danger-full-access"],
+      expectedExitCode: 65,
+      expectedError: "unsafe Codex option",
+    },
+    {
+      args: ["--config", "--cd", "/tmp"],
+      expectedExitCode: 65,
+      expectedError: "unsafe Codex option",
+    },
+    {
+      args: ["-c"],
+      expectedExitCode: 64,
+      expectedError: "config must be a key=value assignment",
+    },
+    {
+      args: ["--config"],
+      expectedExitCode: 64,
+      expectedError: "config must be a key=value assignment",
+    },
+    {
+      args: ["-c", "model_reasoning_effort"],
+      expectedExitCode: 64,
+      expectedError: "config must be a key=value assignment",
+    },
+    {
+      args: ["--config", "model_reasoning_effort"],
+      expectedExitCode: 64,
+      expectedError: "config must be a key=value assignment",
+    },
+    {
+      args: ["-cmodel_reasoning_effort"],
+      expectedExitCode: 64,
+      expectedError: "config must be a key=value assignment",
+    },
+    {
+      args: ["--config=model_reasoning_effort"],
+      expectedExitCode: 64,
+      expectedError: "config must be a key=value assignment",
+    },
+  ])("rejects Codex config parser bypasses without executing Codex: $args", async ({
+    args,
+    expectedExitCode,
+    expectedError,
+  }) => {
+    const fixture = await makeBin();
+    const marker = path.join(fixture.root, "codex-started");
+    const codex = path.join(fixture.bin, "codex");
+    await writeFile(codex, `#!/bin/bash\nprintf started > "${marker}"\n`);
+    await chmod(codex, 0o755);
+
+    const result = await run(runCodexIsolated, args, {
+      PATH: fixture.bin,
+      CODEX_TIMEOUT_SECONDS: "0",
+    }, fixture.root);
+
+    expect(result.exitCode).toBe(expectedExitCode);
+    await expect(access(marker)).rejects.toBeDefined();
+    expect(result.stderr).toContain(expectedError);
+  });
+
+  it("continues forwarding a safe split Codex config assignment", async () => {
+    const fixture = await makeBin();
+    const argsFile = path.join(fixture.root, "args");
+    const codex = path.join(fixture.bin, "codex");
+    await writeFile(codex, `#!/bin/bash\nprintf '%s\\0' "$@" > "${argsFile}"\n`);
+    await chmod(codex, 0o755);
+
+    const result = await run(runCodexIsolated, ["-c", "model_reasoning_effort=high"], {
+      PATH: fixture.bin,
+      CODEX_TIMEOUT_SECONDS: "0",
+    }, fixture.root);
+
+    expect(result.exitCode).toBe(0);
+    const forwarded = (await readFile(argsFile, "utf8")).split("\0").filter(Boolean);
+    expect(forwarded).toContain("model_reasoning_effort=high");
+  });
+
   it("rejects malformed private lane modes without executing Codex", async () => {
     const fixture = await makeBin();
     const marker = path.join(fixture.root, "codex-started");
