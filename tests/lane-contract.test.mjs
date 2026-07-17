@@ -158,6 +158,12 @@ for (const file of claudeLaneFiles) {
   requirePattern(source, /exactly two valid turn endings:[^\n]*full report after independent verification[^\n]*concrete blocker report/i, `${context}: missing two-valid-endings contract`);
   requirePattern(source, /stall detection[^\n]*Every cycle must check progress by output-file growth or process CPU-time delta[^\n]*10 consecutive minutes/i, `${context}: missing PID-rejoin stall detection`);
   requirePattern(source, /10 consecutive minutes, kill the process, then either relaunch fresh once or return a concrete blocker report/i, `${context}: missing stalled-PID kill and bounded relaunch outcome`);
+  requirePattern(source, /### Worktree isolation and git-state discipline — hard constraint/, `${context}: missing worktree isolation and git-state discipline section`);
+  requirePattern(source, /git worktree add --detach/, `${context}: missing detached worktree procedure`);
+  requirePattern(source, /NEVER run tree-wide git state mutations[^\n]*`git stash`[^\n]*`git reset --hard`[^\n]*`git clean`/i, `${context}: missing shared-checkout git-state prohibition`);
+  requirePattern(source, /git worktree remove --force/, `${context}: missing disposable-worktree cleanup procedure`);
+  requirePattern(source, /Always run the producer inside a dedicated git worktree — never directly in a shared or pre-existing checkout, whether or not the dispatch is concurrent/, `${context}: worktree isolation must be unconditional`);
+  requirePattern(source, /must also be appended verbatim to the producer's own prompt\/spec file/, `${context}: missing producer-prompt propagation of git-state prohibitions`);
 }
 
 assert.equal(

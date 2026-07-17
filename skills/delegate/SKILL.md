@@ -106,6 +106,10 @@ edits).
 
 The pre-0.8 prose lane definitions remain packaged during migration: `codex-implementer`, `opencode-implementer`, `pi-implementer`, and `pythinker-implementer`. OpenCode, Pi, and Pythinker may use their selected legacy lane while their MCP adapters are not yet certified. Keep the objective, files, interfaces, constraints, and verification unchanged, isolate writes in the lane's worktree, and independently inspect its diff and verification output. Never silently substitute Claude implementation for a named Producer.
 
+Every legacy lane — dispatched alone or concurrently — must receive its own worktree; concurrent lanes are pinned to one frozen base commit. Lanes whose `writeAllowlist` globs overlap, or cannot be proven disjoint (including any `**`), must be serialized, with the next lane rebased after each integration. Lanes never merge themselves — the architect integrates accepted diffs centrally and reruns verification on the composed tree.
+
+Tree-wide git-state mutations are forbidden on shared checkouts: `git stash` (push/pop/apply/drop), `git checkout -- .`, `git restore .`, `git reset --hard`, and `git clean`; use a disposable worktree for pre-existence checks.
+
 The legacy wrapper lifecycle is synchronous: keep its producer call in the foreground. There are exactly two valid turn endings: a full report after independent verification, or a concrete blocker report; never end a turn waiting for a background monitor or notification.
 
 The `codex-implementer` definition is retained only for administrators migrating a pre-0.8 installation. This 0.8 flow must not fall back to `claude-architect:codex-implementer` when the MCP runtime denies Codex edit eligibility or confinement; stop with the structured diagnostic. If an administrator deliberately invokes the old pre-0.8 surface outside this flow, route Codex fallback work explicitly to `claude-architect:codex-implementer`, never `codex:codex-rescue`, its persistent `app-server`, or any detached companion.

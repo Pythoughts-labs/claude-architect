@@ -66,6 +66,16 @@ Run the producer CLI through the isolated adapter in **one foreground blocking B
 
 PID-rejoin recovery is the only exception to the one-call shape, and the rejoin itself must remain blocking and include stall detection. Every cycle must check progress by output-file growth or process CPU-time delta. If neither changes for 10 consecutive minutes, kill the process, then either relaunch fresh once or return a concrete blocker report. Never wait indefinitely on a silent PID.
 
+### Worktree isolation and git-state discipline — hard constraint
+
+Always run the producer inside a dedicated git worktree — never directly in a shared or pre-existing checkout, whether or not the dispatch is concurrent. Create it from the caller-specified base commit (`git worktree add --detach <lane-dir> <base-oid>`; default to the checkout's current HEAD when the caller names no base) and pass that directory as the producer working root instead of `$(pwd)`. Remove the worktree only after the caller has collected the diff. These git-state prohibitions must also be appended verbatim to the producer's own prompt/spec file so the external CLI obeys them too.
+
+NEVER run tree-wide git state mutations on a shared or pre-existing checkout: `git stash` (push/pop/apply/drop), `git checkout -- .`, `git restore .`, `git reset --hard`, `git clean`, or any command that rewrites uncommitted state you did not author — these have destroyed concurrent lanes' work.
+
+To prove a failure pre-exists on unmodified base, never touch the shared tree: create a disposable worktree (`git worktree add --detach <tmpdir> <base-oid>`), run the failing command there, then `git worktree remove --force <tmpdir>`.
+
+Append these git-state prohibitions verbatim to the producer's own prompt/spec file so the external CLI obeys them too.
+
 1. Write the spec to a unique prompt file — never a fixed path (parallel lanes on fixed paths corrupt each other):
 
 ```bash
