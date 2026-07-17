@@ -664,7 +664,10 @@ export class ArtifactStore {
 
   async writePipelineArtifact(name: string, value: unknown): Promise<void> {
     validateComponent(name, "log name");
-    await this.writeJson(path.posix.join("pipeline", `${name}.json`), value);
+    await this.writeJson(
+      path.posix.join("pipeline", `${name}.json`),
+      redactRecord(value),
+    );
   }
 
   async readPipelineArtifact<T>(runId: string, name: string): Promise<T | null> {

@@ -512,10 +512,16 @@ async function recoverRun(
     "recovery",
     "startup recovery reclaimed unfinished run\n",
   );
-  const worktreePath = path.join(root, "worktrees", record.runId);
-  const worktreeIdentity = await plainDirectoryIdentity(worktreePath);
-  if (worktreeIdentity !== null) {
-    await new WorktreeManager(commonDir, record.runId, ps).remove(worktreePath);
+  for (const managedId of [
+    record.runId,
+    `baseline-${record.runId}`,
+    `verify-${record.runId}`,
+  ]) {
+    const worktreePath = path.join(root, "worktrees", managedId);
+    const worktreeIdentity = await plainDirectoryIdentity(worktreePath);
+    if (worktreeIdentity !== null) {
+      await new WorktreeManager(commonDir, managedId, ps).remove(worktreePath);
+    }
   }
   await removeStaleCandidateAnchor(commonDir, record.runId);
   await store.writeResult({

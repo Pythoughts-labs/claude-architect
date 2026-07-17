@@ -13,7 +13,30 @@ import {
   PROTOCOL_VERSION,
   RUNTIME_VERSION,
 } from "../protocol/versions.js";
-import { redact } from "../runtime/redaction.js";
+import { redact, redactRecord } from "../runtime/redaction.js";
+
+const POSIX_HOME_PATH = /\/(?:Users|home)\/[^/\\\s"']+(?:\/[^/\\\s"']+)*/g;
+const WINDOWS_HOME_PATH = /[A-Za-z]:\\Users\\[^/\\\s"']+(?:\\[^/\\\s"']+)*/gi;
+
+function redactAbsoluteHomePaths(text: string): string {
+  return redact(text)
+    .replace(WINDOWS_HOME_PATH, match => `[path]\\${match.split("\\").at(-1) ?? ""}`)
+    .replace(POSIX_HOME_PATH, match => `[path]/${match.split("/").at(-1) ?? ""}`);
+}
+
+function sanitizeDoctorValue(value: unknown): unknown {
+  if (typeof value === "string") return redactAbsoluteHomePaths(value);
+  if (Array.isArray(value)) return value.map(sanitizeDoctorValue);
+  if (value === null || typeof value !== "object") return value;
+  return Object.fromEntries(Object.entries(value).map(([key, child]) => [
+    key,
+    sanitizeDoctorValue(child),
+  ]));
+}
+
+function sanitizeCapabilityReports(reports: CapabilityReport[]): CapabilityReport[] {
+  return sanitizeDoctorValue(redactRecord(reports)) as CapabilityReport[];
+}
 
 export interface DoctorResult {
   node: { version: string; ok: boolean };
@@ -94,12 +117,12 @@ export async function doctor(deps: DoctorDependencies = {}): Promise<DoctorResul
 
   let producers: CapabilityReport[] = [];
   try {
-    producers = await (deps.probeAll ?? probeProducers)({
+    producers = sanitizeCapabilityReports(await (deps.probeAll ?? probeProducers)({
       ps,
       os: ps.os,
       arch,
       environmentType,
-    });
+    }));
     for (const producer of producers) {
       if (!producer.available && producer.reason !== null) {
         issues.push(redact(`producer:${producer.producerId}:${producer.reason}`));

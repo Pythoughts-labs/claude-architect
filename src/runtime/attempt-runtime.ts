@@ -518,6 +518,7 @@ export async function runAttempt(
         headCommitOid: preconditions.baseCommitOid,
         commands: spec.verification,
         ps,
+        runId,
         ...(deps.abortSignal === undefined ? {} : { abortSignal: deps.abortSignal }),
       });
     } catch (error) {

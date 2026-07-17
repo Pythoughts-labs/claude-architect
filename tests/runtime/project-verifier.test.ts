@@ -1,4 +1,4 @@
-import { access, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { access, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -97,6 +97,24 @@ afterEach(async () => {
 });
 
 describe("projectVerify", () => {
+  it("derives its managed worktree name from the artifact run id", async () => {
+    const fixture = await frozenFixture();
+    const marker = join(await temporaryDirectory("ca-project-verifier-marker-"), "cwd.txt");
+
+    await projectVerify({
+      repoRoot: fixture.repoRoot,
+      artifact: fixture.artifact,
+      commands: [command({
+        args: [
+          "-e",
+          `require('node:fs').writeFileSync(${JSON.stringify(marker)}, process.cwd())`,
+        ],
+      })],
+    });
+
+    expect(await readFile(marker, "utf8")).toMatch(/verify-project-verifier$/);
+  });
+
   it("records a passing Host-authorized command without mutation", async () => {
     const fixture = await frozenFixture();
 

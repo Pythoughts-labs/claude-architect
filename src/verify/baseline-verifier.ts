@@ -1,4 +1,3 @@
-import { randomUUID } from "node:crypto";
 import { WorktreeManager } from "../git/worktree-manager.js";
 import type { PlatformServices } from "../platform/platform-services.js";
 import { getPlatformServices } from "../platform/select-platform.js";
@@ -26,6 +25,7 @@ export interface BaselineVerifyArgs {
   ps?: PlatformServices;
   arch?: string;
   now?: () => number;
+  runId?: string;
   verificationId?: () => string;
   abortSignal?: AbortSignal;
 }
@@ -42,7 +42,7 @@ export async function verifyBaseline(args: BaselineVerifyArgs): Promise<Baseline
   const now = args.now ?? Date.now;
   const manager = new WorktreeManager(
     args.repoRoot,
-    `baseline-${args.verificationId?.() ?? randomUUID()}`,
+    `baseline-${args.runId ?? args.verificationId?.() ?? args.headCommitOid}`,
     ps,
   );
   const materialized = await manager.create(args.headCommitOid);

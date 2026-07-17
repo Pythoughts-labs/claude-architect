@@ -166,6 +166,29 @@ afterEach(async () => {
 });
 
 describe("ArtifactStore", () => {
+  it("redacts secrets in persisted pipeline artifacts", async () => {
+    const runId = "run-pipeline-redaction";
+    const secret = "sk-pipeline-secret-12345678";
+    const store = new ArtifactStore(runId);
+
+    await store.writePipelineArtifact("round-1-review", {
+      summary: `provider returned ${secret}`,
+      nested: { rawOutput: `Bearer bearer-secret-value and ${secret}` },
+    });
+
+    const persisted = await readFile(join(
+      store.runDirectory,
+      "pipeline",
+      "round-1-review.json",
+    ), "utf8");
+    expect(persisted).not.toContain(secret);
+    expect(persisted).not.toContain("bearer-secret-value");
+    await expect(store.readPipelineArtifact(runId, "round-1-review")).resolves.toEqual({
+      nested: { rawOutput: "Bearer [b] and [k]" },
+      summary: "provider returned [k]",
+    });
+  });
+
   it("promotes terminal artifacts before a decision and recomputes manifest integrity", async () => {
     const runId = "run-promote";
     const store = new ArtifactStore(runId);

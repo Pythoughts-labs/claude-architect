@@ -119,6 +119,17 @@ describe("recoverStaleRuns", () => {
       startedAt: "2026-07-14T12:00:00.000Z",
     })}\n`);
     const worktree = await new WorktreeManager(repo.directory, runId).create(repo.head);
+    const baselineWorktree = await new WorktreeManager(
+      repo.directory,
+      `baseline-${runId}`,
+    ).create(repo.head);
+    const verifyWorktree = await new WorktreeManager(
+      repo.directory,
+      `verify-${runId}`,
+    ).create(repo.head);
+    const unmanagedParent = await temporaryDirectory("ca-recovery-unmanaged-");
+    const unmanagedWorktree = path.join(unmanagedParent, "external-worktree");
+    await runGit(repo.directory, ["worktree", "add", "--detach", unmanagedWorktree, repo.head]);
     const anchorRef = `refs/claude-architect/candidates/${runId}`;
     await runGit(repo.directory, ["update-ref", anchorRef, repo.head]);
     const lockPath = path.join(process.env.CLAUDE_PLUGIN_DATA!, "locks", `${lockKey}.lock`);
@@ -138,6 +149,9 @@ describe("recoverStaleRuns", () => {
     expect(result).toEqual({ recovered: [runId] });
     expect(terminated).toEqual([]);
     await expectMissing(worktree.path);
+    await expectMissing(baselineWorktree.path);
+    await expectMissing(verifyWorktree.path);
+    await expect(access(unmanagedWorktree)).resolves.toBeUndefined();
     await expectMissing(lockPath);
     expect((await git(repo.directory, ["rev-parse", "--verify", "--quiet", anchorRef])).exitCode)
       .not.toBe(0);

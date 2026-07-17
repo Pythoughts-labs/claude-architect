@@ -9,6 +9,7 @@ import { git, type GitResult } from "./git-exec.js";
 const MAX_DIAGNOSTIC_LENGTH = 2_000;
 const WINDOWS_REMOVE_ATTEMPTS = 5;
 const WINDOWS_REMOVE_RETRY_DELAY_MS = 250;
+const SAFE_MANAGED_ID = /^[a-z0-9][a-z0-9._-]*$/;
 
 interface WorktreeManagerDependencies {
   git?: typeof git;
@@ -33,6 +34,9 @@ export class WorktreeManager {
   ) {}
 
   private managedWorktreePath(): { worktreesRoot: string; worktreePath: string } {
+    if (!SAFE_MANAGED_ID.test(this.runId)) {
+      throw new RuntimeError("invalid worktree run id");
+    }
     const worktreesRoot = path.resolve(resolveStateDir(), "worktrees");
     const worktreePath = path.resolve(worktreesRoot, this.runId);
     if (worktreePath === worktreesRoot || !worktreePath.startsWith(`${worktreesRoot}${path.sep}`)) {

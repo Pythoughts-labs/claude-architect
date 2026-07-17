@@ -149,4 +149,33 @@ describe("doctor", () => {
     expect(result.node).toEqual({ version: "22.17.0", ok: false });
     expect(result.issues).toContain("initial-node-unavailable");
   });
+
+  it("redacts absolute home paths from Producer diagnostics", async () => {
+    const report: CapabilityReport = {
+      ...codexReport("darwin"),
+      resolvedExecutable: {
+        kind: "native",
+        command: "/Users/alice/.local/bin/codex",
+        prefixArgs: [
+          "--config=/home/bob/.config/codex/config.json",
+          "C:\\Users\\carol\\AppData\\Local\\codex\\launcher.js",
+        ],
+        resolvedFrom: "/home/dana/.local/bin/codex",
+      },
+    };
+
+    const result = await doctor({
+      ps: platform("darwin"),
+      env: { CLAUDE_PLUGIN_DATA: "/plugin-data" },
+      nodeVersion: "22.17.0",
+      git: async () => ({ stdout: "git version 2.49.0\n", stderr: "", exitCode: 0 }),
+      probeAll: async () => [report],
+    });
+
+    const serialized = JSON.stringify(result);
+    expect(serialized).not.toMatch(/\/Users\/alice|\/home\/(?:bob|dana)|C:\\\\Users\\\\carol/i);
+    expect(serialized).toContain("codex");
+    expect(serialized).toContain("config.json");
+    expect(serialized).toContain("launcher.js");
+  });
 });

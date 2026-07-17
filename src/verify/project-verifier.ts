@@ -1,4 +1,3 @@
-import { randomUUID } from "node:crypto";
 import { realpath } from "node:fs/promises";
 import path from "node:path";
 import { git, type GitResult } from "../git/git-exec.js";
@@ -37,6 +36,7 @@ export interface ProjectVerifyArgs {
   ps?: PlatformServices;
   arch?: string;
   now?: () => number;
+  runId?: string;
   verificationId?: () => string;
   logNamePrefix?: string;
 }
@@ -314,8 +314,15 @@ export async function projectVerify(args: ProjectVerifyArgs): Promise<ProjectVer
   const ps = args.ps ?? getPlatformServices();
   const arch = args.arch ?? process.arch;
   const now = args.now ?? Date.now;
-  const verificationId = args.verificationId?.() ?? randomUUID();
-  const manager = new WorktreeManager(args.repoRoot, `verify-${verificationId}`, ps);
+  const anchorPrefix = "refs/claude-architect/candidates/";
+  const artifactRunId = args.artifact.anchorRef.startsWith(anchorPrefix)
+    ? args.artifact.anchorRef.slice(anchorPrefix.length)
+    : args.artifact.candidateCommitOid;
+  const manager = new WorktreeManager(
+    args.repoRoot,
+    `verify-${args.runId ?? artifactRunId}`,
+    ps,
+  );
   const materialized = await manager.create(args.artifact.candidateCommitOid);
   let primaryError: unknown;
   try {

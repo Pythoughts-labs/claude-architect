@@ -1,4 +1,4 @@
-import { access, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { access, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -48,6 +48,27 @@ afterEach(async () => {
 });
 
 describe("verifyBaseline", () => {
+  it("derives its managed worktree name from the run id", async () => {
+    const repo = await fixture();
+    const markerDirectory = await mkdtemp(join(tmpdir(), "ca-baseline-marker-"));
+    temporaryPaths.push(markerDirectory);
+    const marker = join(markerDirectory, "worktree-path.txt");
+
+    await verifyBaseline({
+      ...repo,
+      runId: "run-baseline-name",
+      commands: [{
+        ...command(0),
+        args: [
+          "-e",
+          `require('node:fs').writeFileSync(${JSON.stringify(marker)}, process.cwd())`,
+        ],
+      }],
+    });
+
+    expect(await readFile(marker, "utf8")).toMatch(/baseline-run-baseline-name$/);
+  });
+
   it("passes a green command against clean HEAD", async () => {
     const repo = await fixture();
     await expect(verifyBaseline({ ...repo, commands: [command(0)] })).resolves.toEqual({
