@@ -41,13 +41,20 @@ Run the producer CLI through the isolated adapter in **one foreground blocking B
 
 PID-rejoin recovery is the only exception to the one-call shape, and the rejoin itself must remain blocking and include stall detection. Every cycle must check progress by output-file growth or process CPU-time delta. If neither changes for 10 consecutive minutes, kill the process, then either relaunch fresh once or return a concrete blocker report. Never wait indefinitely on a silent PID.
 
-1. Write the spec to a unique prompt file — never inline shell quoting, never a fixed path (parallel lanes on fixed paths corrupt each other):
+1. Write the spec to a unique prompt file that opens with the following action-first preamble — never inline shell quoting, never a fixed path (parallel lanes on fixed paths corrupt each other):
+
+> This is an action-first edit run.
+> Constraints are fully pre-digested in this spec.
+> Do not read AGENTS.md, CLAUDE.md, SKILL.md, lessons files, or any agent-rule/skill documents.
+> Begin by opening the implementation files authorized in the spec.
+> A plan-only final message with zero edits is a failed run.
 
 ```bash
 SPEC=$(mktemp -t codex-spec.XXXXXX)
 FINAL=$(mktemp -t codex-final.XXXXXX)
 
 cat > "$SPEC" << 'SPEC_EOF'
+[the action-first preamble above]
 [the full spec, restated cleanly: objective, files, interfaces,
 constraints, verification. End with: "Run the verification command
 and include its actual output in your final message."]
@@ -123,7 +130,7 @@ Flag discipline (non-negotiable):
 | `-c model_reasoning_effort=low` | Uses low reasoning by default. If the caller selects `medium`, `high`, `xhigh`, or `max`, pass that value instead. |
 | `--skip-git-repo-check` + `--cd "$(pwd)"` | Deterministic working root; works outside git repos. |
 | `- < spec file` | Prompt via stdin. No quoting hazards, no truncated specs. |
-| isolated runner | Adds `--ignore-user-config --ephemeral`, then appends `--disable multi_agent` and the V2 one-thread cap after caller arguments so they cannot be overridden. It terminates the run's isolated process group on exit. Its internal timeout does not replace the mandatory 600000ms Bash-tool timeout; the outer Bash timeout must exceed any producer-internal timeout. Set a positive `CODEX_TIMEOUT_SECONDS` for a task-specific cap (`timeout`/`gtimeout` required); `0` leaves the internal runner uncapped, and malformed or unenforceable values fail before Codex starts. On timeout, report `STATUS: timeout` with whatever landed. |
+| isolated runner | Adds `--ignore-user-config --ephemeral`, then appends `--disable multi_agent` and the V2 one-thread cap after caller arguments so they cannot be overridden. It terminates the run's isolated process group on exit. Its internal timeout does not replace the mandatory 600000ms Bash-tool timeout; the outer Bash timeout must exceed any producer-internal timeout. `CODEX_TIMEOUT_SECONDS` defaults to `600`; an explicit positive override sets a task-specific cap (`timeout`/`gtimeout` required), while explicit `0` leaves the internal runner uncapped. Malformed or unenforceable values fail before Codex starts. On timeout, report `STATUS: timeout` with whatever landed. |
 
 `--model gpt-5.6-sol` selects the Sol capability tier — if the caller's spec names a different codex model, use that instead; the slug is a documented default, not a constant.
 

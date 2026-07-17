@@ -282,7 +282,7 @@ function validSpec(): DelegationSpec {
       expectedExitCodes: [0],
     }],
     executionMode: "edit",
-    timeoutMs: 10_000,
+    timeoutMs: 600_000,
     producerPreferences: ["codex"],
     expectedOutput: "candidate-patch",
     review: { reviewers: ["correctness", "systems"], maxRounds: 2 },

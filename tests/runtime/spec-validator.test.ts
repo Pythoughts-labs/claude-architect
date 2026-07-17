@@ -1,4 +1,5 @@
 import { describe, it, expect } from "vitest";
+import { RUNTIME_MIN_EDIT_TIMEOUT_MS } from "../../src/protocol/delegation-spec.js";
 import { validateSpec } from "../../src/protocol/spec-validator.js";
 
 const base = {
@@ -14,7 +15,7 @@ const base = {
     expectedExitCodes: [0],
   }],
   executionMode: "edit",
-  timeoutMs: 60000, producerPreferences: ["codex"], expectedOutput: "candidate-patch",
+  timeoutMs: 600000, producerPreferences: ["codex"], expectedOutput: "candidate-patch",
 };
 describe("validateSpec", () => {
   it("accepts a valid spec", () => expect(validateSpec(base).ok).toBe(true));
@@ -29,6 +30,16 @@ describe("validateSpec", () => {
   });
   it("rejects over-ceiling timeout", () =>
     expect(validateSpec({ ...base, timeoutMs: 9_000_000 }).ok).toBe(false));
+  it("rejects edit specs below the timeout floor and accepts the floor", () => {
+    expect(validateSpec({ ...base, timeoutMs: RUNTIME_MIN_EDIT_TIMEOUT_MS - 1 })).toEqual({
+      ok: false,
+      errors: [{
+        path: "/timeoutMs",
+        message: "must be at least 600000ms for edit-mode specs",
+      }],
+    });
+    expect(validateSpec({ ...base, timeoutMs: RUNTIME_MIN_EDIT_TIMEOUT_MS }).ok).toBe(true);
+  });
   it("rejects non-positive attempt and verification timeouts", () => {
     expect(validateSpec({ ...base, timeoutMs: 0 }).ok).toBe(false);
     expect(validateSpec({ ...base, timeoutMs: -1 }).ok).toBe(false);

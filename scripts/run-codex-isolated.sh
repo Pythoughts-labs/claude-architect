@@ -2,7 +2,7 @@
 
 set -euo pipefail
 
-TIMEOUT_SECONDS=${CODEX_TIMEOUT_SECONDS:-0}
+TIMEOUT_SECONDS=${CODEX_TIMEOUT_SECONDS:-600}
 
 if [[ "$TIMEOUT_SECONDS" == 0 ]]; then
   :

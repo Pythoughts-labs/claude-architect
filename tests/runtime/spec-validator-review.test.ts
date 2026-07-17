@@ -18,7 +18,7 @@ function makeValidSpec() {
       expectedExitCodes: [0],
     }],
     executionMode: "edit",
-    timeoutMs: 60000, producerPreferences: ["codex"], expectedOutput: "candidate-patch",
+    timeoutMs: 600000, producerPreferences: ["codex"], expectedOutput: "candidate-patch",
   };
 }
 

@@ -41,11 +41,13 @@ Construct a candidate spec with every required field:
 5. `forbiddenScope`: explicit paths the Producer must never change.
 6. `successCriteria`: reviewable conditions.
 7. `verification`: Host-authorized commands with executable, argv, relative cwd, timeout, network policy, expected exit codes, and optional platform filters.
-8. `executionMode: "edit"`, a bounded `timeoutMs`, ordered `producerPreferences`, optional supported overrides, and `expectedOutput: "candidate-patch"`.
+8. `executionMode: "edit"`, a bounded `timeoutMs` of at least `600000`ms, ordered `producerPreferences`, optional supported overrides, and `expectedOutput: "candidate-patch"`.
 
 **Acceptance criteria:**
 
 - Every success criterion must be objectively checkable.
+- Distill all applicable constraints into `context`; do not point the Producer to `AGENTS.md`, `CLAUDE.md`, `SKILL.md`, lessons files, or other agent-rule/skill documents.
+- Edit delegations are action-first: the Producer must begin by opening the implementation files authorized in the spec, and a plan-only result with zero edits is a failed run.
 - At least one verification command must mechanically cover each criterion.
 - Criteria that cannot be commanded, such as "code is clean", belong in the `review` block, not `successCriteria`.
 - Prefer explicit test file paths in verification args; directory args can resolve differently between the Producer sandbox and clean-room verification.

@@ -45,3 +45,4 @@ export function resolveReviewConfig(spec: DelegationSpec): ReviewConfig {
 }
 
 export const RUNTIME_MAX_TIMEOUT_MS = 1_800_000; // 30 min hard ceiling
+export const RUNTIME_MIN_EDIT_TIMEOUT_MS = 600_000; // 10 min edit-run floor

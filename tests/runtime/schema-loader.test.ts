@@ -19,7 +19,7 @@ const validDelegationSpec = {
     expectedExitCodes: [0],
   }],
   executionMode: "edit",
-  timeoutMs: 60000,
+  timeoutMs: 600000,
   producerPreferences: ["codex"],
   expectedOutput: "candidate-patch",
 };

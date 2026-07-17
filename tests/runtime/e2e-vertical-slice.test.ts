@@ -206,7 +206,7 @@ function validSpec(): DelegationSpec {
       expectedExitCodes: [0],
     }],
     executionMode: "edit",
-    timeoutMs: 10_000,
+    timeoutMs: 600_000,
     producerPreferences: ["codex"],
     expectedOutput: "candidate-patch",
   };
@@ -341,6 +341,7 @@ describe("P0-A end-to-end vertical slice", () => {
           break;
         }
         case "timeout":
+          process.env.CLAUDE_ARCHITECT_MIN_EDIT_TIMEOUT_MS = "1";
           spec.timeoutMs = 100;
           adapter = new FakeAdapter({ sleepMs: 60_000 });
           break;
@@ -359,11 +360,16 @@ describe("P0-A end-to-end vertical slice", () => {
         default:
           classification satisfies never;
       }
-      const output = await handleDelegate(
-        repoRoot,
-        spec,
-        dependencies(adapter, `e2e-${classification}`, { verifier, abortSignal }),
-      );
+      let output;
+      try {
+        output = await handleDelegate(
+          repoRoot,
+          spec,
+          dependencies(adapter, `e2e-${classification}`, { verifier, abortSignal }),
+        );
+      } finally {
+        delete process.env.CLAUDE_ARCHITECT_MIN_EDIT_TIMEOUT_MS;
+      }
       const expectedFailure = classification === "spawn-failure" ? "producer-failure" : classification;
       expect(output).toMatchObject({
         ok: true,

@@ -13,7 +13,11 @@ import type {
 } from "../../src/platform/platform-services.js";
 import { PosixPlatformServices } from "../../src/platform/posix-platform-services.js";
 import type { DelegationSpec } from "../../src/protocol/delegation-spec.js";
-import { CodexAdapter, defaultCodexEnv } from "../../src/producers/codex-adapter.js";
+import {
+  CODEX_EDIT_ACTION_PREAMBLE,
+  CodexAdapter,
+  defaultCodexEnv,
+} from "../../src/producers/codex-adapter.js";
 import type {
   CapabilityReport,
   InvocationContext,
@@ -136,7 +140,7 @@ function sampleSpec(): DelegationSpec {
       expectedExitCodes: [0],
     }],
     executionMode: "edit",
-    timeoutMs: 60_000,
+    timeoutMs: 600_000,
     producerPreferences: ["codex"],
     producerOverrides: { model: "gpt-test", reasoningEffort: "high" },
     expectedOutput: "candidate-patch",
@@ -225,6 +229,7 @@ describe("CodexAdapter", () => {
     const sandboxIndex = invocation.args.indexOf("--sandbox");
     expect(invocation.args[sandboxIndex + 1]).toBe("read-only");
     expect(invocation.args).not.toContain("workspace-write");
+    expect(invocation.stdin).not.toContain(CODEX_EDIT_ACTION_PREAMBLE);
   });
 
   it("carries the defaulted auth store on the invocation env", () => {
@@ -257,6 +262,7 @@ describe("CodexAdapter", () => {
     expect(invocation.args.at(-1)).toBe("-");
     expect(invocation.args.join(" ")).not.toContain(spec.objective);
     expect(invocation.stdin).toContain(spec.objective);
+    expect(invocation.stdin.startsWith(`${CODEX_EDIT_ACTION_PREAMBLE}\n\n`)).toBe(true);
     expect(invocation.stdin).toContain(spec.context);
     expect(invocation.stdin).toContain("src/greeting.ts");
     expect(invocation.requiredEnv).toEqual([
