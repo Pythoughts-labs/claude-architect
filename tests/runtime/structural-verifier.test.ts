@@ -262,6 +262,68 @@ describe("structuralVerify", () => {
     expect(result.failures).toContain("modified-symlink");
   });
 
+  it("rejects a gitlink encoded directly in the immutable candidate tree", async () => {
+    const fixture = await frozenFixture();
+    const indexFile = join(fixture.repoRoot, ".git", "structural-gitlink-index");
+    await runGit(fixture.repoRoot, ["read-tree", fixture.baseCommitOid], indexFile);
+    await runGit(fixture.repoRoot, [
+      "update-index",
+      "--add",
+      "--cacheinfo",
+      `160000,${fixture.baseCommitOid},nested`,
+    ], indexFile);
+    const candidateTreeOid = await runGit(fixture.repoRoot, ["write-tree"], indexFile);
+    const changedPaths: CandidateArtifact["changedPaths"] = [{
+      path: "nested",
+      changeType: "added",
+      mode: "160000",
+      contentHash: fixture.baseCommitOid,
+    }];
+
+    const result = await verify(fixture, {
+      ...fixture.artifact,
+      candidateTreeOid,
+      changedPaths,
+      manifestHash: manifestHash(changedPaths),
+    }, {
+      writeAllowlist: ["nested"],
+      forbiddenScope: [],
+    });
+
+    expect(result.failures).toContain("modified-symlink");
+  });
+
+  it("enforces forbidden scope against an opaque nested-repository path", async () => {
+    const fixture = await frozenFixture();
+    const indexFile = join(fixture.repoRoot, ".git", "structural-forbidden-index");
+    await runGit(fixture.repoRoot, ["read-tree", fixture.baseCommitOid], indexFile);
+    await runGit(fixture.repoRoot, [
+      "update-index",
+      "--add",
+      "--cacheinfo",
+      `160000,${fixture.baseCommitOid},vendor`,
+    ], indexFile);
+    const candidateTreeOid = await runGit(fixture.repoRoot, ["write-tree"], indexFile);
+    const changedPaths: CandidateArtifact["changedPaths"] = [{
+      path: "vendor",
+      changeType: "added",
+      mode: "160000",
+      contentHash: fixture.baseCommitOid,
+    }];
+
+    const result = await verify(fixture, {
+      ...fixture.artifact,
+      candidateTreeOid,
+      changedPaths,
+      manifestHash: manifestHash(changedPaths),
+    }, {
+      writeAllowlist: ["vendor"],
+      forbiddenScope: ["vendor/**"],
+    });
+
+    expect(result.failures).toContain("out-of-scope-write");
+  });
+
   it("rejects a candidate tree identical to the base tree", async () => {
     const fixture = await frozenFixture();
     const candidateTreeOid = await runGit(

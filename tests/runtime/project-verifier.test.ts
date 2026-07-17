@@ -198,6 +198,25 @@ describe("projectVerify", () => {
     expect(result.failures).toContain("verification-mutated");
   });
 
+  it("detects a tracked mutation hidden by the skip-worktree index bit", async () => {
+    const fixture = await frozenFixture();
+
+    const result = await projectVerify({
+      repoRoot: fixture.repoRoot,
+      artifact: fixture.artifact,
+      commands: [command({
+        id: "hidden-mutation",
+        args: [
+          "-e",
+          "require('node:child_process').execFileSync('git', ['update-index', '--skip-worktree', 'a.txt']); require('node:fs').writeFileSync('a.txt', 'hidden change\\n')",
+        ],
+      })],
+    });
+
+    expect(result.mutated).toBe(true);
+    expect(result.failures).toContain("verification-mutated");
+  });
+
   it("does not run later commands after verification mutates the candidate", async () => {
     const fixture = await frozenFixture();
     const marker = join(await temporaryDirectory("ca-project-verifier-marker-"), "marker.txt");

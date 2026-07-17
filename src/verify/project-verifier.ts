@@ -270,7 +270,7 @@ export async function scanCommandMutations(args: {
   dependencyLink: DependencyLink;
   allowedMutations?: VerificationCommand["allowedMutations"];
 }): Promise<{ mutated: boolean; records: string[]; headChanged: boolean }> {
-  const [status, currentHead] = await Promise.all([
+  const [status, currentHead, indexEntries] = await Promise.all([
     checkedGit(args.worktreePath, [
       "status",
       "--porcelain=v2",
@@ -280,10 +280,15 @@ export async function scanCommandMutations(args: {
       "--ignore-submodules=none",
     ]),
     checkedGit(args.worktreePath, ["rev-parse", "--verify", "HEAD"]),
+    checkedGit(args.worktreePath, ["ls-files", "-v", "-z"]),
   ]);
-  const records = status.split("\0").filter(record =>
+  const statusRecords = status.split("\0").filter(record =>
     record.length > 0
     && !(args.dependencyLink === "inherited" && /^[?!] node_modules\/?$/.test(record)));
+  const hiddenIndexRecords = indexEntries.split("\0")
+    .filter(record => /^(?:S|[a-z]) /.test(record))
+    .map(record => `index ${record}`);
+  const records = [...statusRecords, ...hiddenIndexRecords];
   const disallowedRecords = args.allowedMutations === "ignored-paths"
     ? records.filter(record => !record.startsWith("! "))
     : records;

@@ -135,9 +135,16 @@ function globMatches(pattern: string, candidate: string, caseInsensitive = false
   return new RegExp(`${expression}$`, caseInsensitive ? "i" : undefined).test(candidate);
 }
 
-function isAllowed(pathname: string, writeAllowlist: string[], forbiddenScope: string[]): boolean {
-  return writeAllowlist.some(pattern => globMatches(pattern, pathname))
-    && !forbiddenScope.some(pattern => globMatches(pattern, pathname, true));
+function isAllowed(
+  pathname: string,
+  writeAllowlist: string[],
+  forbiddenScope: string[],
+  opaqueDirectory = false,
+): boolean {
+  const scopePaths = opaqueDirectory ? [pathname, `${pathname}/`] : [pathname];
+  return writeAllowlist.some(pattern => scopePaths.some(candidate => globMatches(pattern, candidate)))
+    && !forbiddenScope.some(pattern =>
+      scopePaths.some(candidate => globMatches(pattern, candidate, true)));
 }
 
 export async function recomputeManifest(args: Pick<
@@ -252,10 +259,16 @@ export async function structuralVerify(args: StructuralVerifyArgs): Promise<Stru
     failures.add("artifact-divergence");
   }
   if (manifest.changedPaths.some(change =>
-    !isAllowed(change.path, args.writeAllowlist, args.forbiddenScope))) {
+    !isAllowed(
+      change.path,
+      args.writeAllowlist,
+      args.forbiddenScope,
+      change.mode === "160000",
+    ))) {
     failures.add("out-of-scope-write");
   }
-  if (manifest.rawDiff.some(entry => entry.oldMode === "120000" || entry.newMode === "120000")) {
+  if (manifest.rawDiff.some(entry =>
+    [entry.oldMode, entry.newMode].some(mode => mode === "120000" || mode === "160000"))) {
     failures.add("modified-symlink");
   }
   if (manifest.changedPaths.length === 0

@@ -53,9 +53,10 @@ export const WIN32_ESSENTIAL_ENV = [
 ] as const;
 
 const SENSITIVE_ENV_NAME =
-  /^(?:[A-Za-z][A-Za-z0-9]*_)*(?:TOKEN|SECRET|PASSWORD|KEY|CREDENTIAL)(?:_[A-Za-z0-9]+)*$/i;
+  /^(?:[A-Za-z][A-Za-z0-9]*_)*(?:TOKEN|SECRET|PASSWORD|KEY|CREDENTIAL|PAT|COOKIE|DSN)(?:_[A-Za-z0-9]+)*$/i;
 
 const COMMON_SENSITIVE_ENV_NAMES = new Set([
+  "DATABASE_URL",
   "GOOGLE_APPLICATION_CREDENTIALS",
   "MYSQL_PWD",
   "PGPASSWORD",

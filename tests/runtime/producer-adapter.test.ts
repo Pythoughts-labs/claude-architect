@@ -80,6 +80,23 @@ describe("ProducerAdapter", () => {
     }
   });
 
+  it("fails closed for uncertain Linux WSL probes while preserving clear native detection", () => {
+    const originalPlatform = process.platform;
+    Object.defineProperty(process, "platform", { configurable: true, value: "linux" });
+    try {
+      expect(detectEnvironmentType(() => "Linux version 6.8.0-generic")).toBe("native");
+      expect(detectEnvironmentType(() => "")).toBe("wsl");
+      expect(detectEnvironmentType(() => {
+        throw new Error("unreadable /proc/version");
+      })).toBe("wsl");
+    } finally {
+      Object.defineProperty(process, "platform", {
+        configurable: true,
+        value: originalPlatform,
+      });
+    }
+  });
+
   it("supports a shared adapter contract with boolean edit eligibility", async () => {
     const adapter: ProducerAdapter = new FakeAdapter();
     const report = await adapter.probe({

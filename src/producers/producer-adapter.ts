@@ -84,13 +84,15 @@ export type ProducerConfigurationProfile = {
   temporaryHomeStrategy: string;
 };
 
-export function detectEnvironmentType(): EnvironmentType {
+export function detectEnvironmentType(
+  readProcVersion: () => string = () => readFileSync("/proc/version", "utf8"),
+): EnvironmentType {
   if (process.platform !== "linux") return "native";
   try {
-    return readFileSync("/proc/version", "utf8").toLowerCase().includes("microsoft")
-      ? "wsl"
-      : "native";
+    const version = readProcVersion().trim().toLowerCase();
+    if (version.includes("microsoft")) return "wsl";
+    return /^linux version(?:\s|$)/.test(version) ? "native" : "wsl";
   } catch {
-    return "native";
+    return "wsl";
   }
 }

@@ -135,9 +135,16 @@ function globMatches(pattern: string, candidate: string, caseInsensitive = false
   return new RegExp(`${expression}$`, caseInsensitive ? "i" : undefined).test(candidate);
 }
 
-function isAllowed(pathname: string, writeAllowlist: string[], forbiddenScope: string[]): boolean {
-  return writeAllowlist.some(pattern => globMatches(pattern, pathname))
-    && !forbiddenScope.some(pattern => globMatches(pattern, pathname, true));
+function isAllowed(
+  pathname: string,
+  writeAllowlist: string[],
+  forbiddenScope: string[],
+  opaqueDirectory = false,
+): boolean {
+  const scopePaths = opaqueDirectory ? [pathname, `${pathname}/`] : [pathname];
+  return writeAllowlist.some(pattern => scopePaths.some(candidate => globMatches(pattern, candidate)))
+    && !forbiddenScope.some(pattern =>
+      scopePaths.some(candidate => globMatches(pattern, candidate, true)));
 }
 
 async function advisoryLstatScan(worktreePath: string, changedPaths: string[]): Promise<boolean> {
@@ -256,7 +263,22 @@ export async function freezeCandidate(args: FreezeCandidateArgs): Promise<Freeze
       args.baseCommitOid,
       candidateTreeOid,
     ]));
-    if (rawDiff.some(entry => entry.oldMode === "120000" || entry.newMode === "120000")) {
+    const frozenOutOfScope = rawDiff.filter(entry =>
+      !isAllowed(
+        entry.path,
+        args.writeAllowlist,
+        args.forbiddenScope,
+        entry.oldMode === "160000" || entry.newMode === "160000",
+      )).map(entry => entry.path);
+    if (frozenOutOfScope.length > 0) {
+      return {
+        ok: false,
+        reason: "out-of-scope-write",
+        paths: frozenOutOfScope.slice(0, MAX_REJECT_PATHS),
+      };
+    }
+    if (rawDiff.some(entry =>
+      [entry.oldMode, entry.newMode].some(mode => mode === "120000" || mode === "160000"))) {
       return { ok: false, reason: "modified-symlink" };
     }
 

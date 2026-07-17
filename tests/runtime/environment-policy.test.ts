@@ -173,6 +173,8 @@ describe("buildEnvironment", () => {
     "apiKey",
     "clientSecret",
     "GOOGLE_APPLICATION_CREDENTIALS",
+    "DATABASE_URL",
+    "DEPLOY_PAT",
   ])("registers the standard sensitive name %s", name => {
     const secret = `value-for-${name}`;
 
