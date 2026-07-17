@@ -51,6 +51,8 @@ export interface ProbeContext {
 export interface InvocationContext {
   worktreePath: string;
   extraWritableRoots?: string[];
+  gitObjectDirectory?: string;
+  gitAlternateObjectDirectories?: string;
   runId: string;
   tempHome?: string;
   capabilityReport: CapabilityReport;

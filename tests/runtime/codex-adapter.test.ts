@@ -282,12 +282,27 @@ describe("CodexAdapter", () => {
 
   it("renders additional writable roots for linked-worktree git metadata", () => {
     const context = invocationContext();
-    context.extraWritableRoots = ["/repo/.git/worktrees/fix", "/repo/.git/objects"];
+    context.extraWritableRoots = [
+      "/repo/.git/worktrees/fix",
+      "/repo/.git/worktrees/fix/private-objects",
+    ];
+    context.gitObjectDirectory = "/repo/.git/worktrees/fix/private-objects";
+    context.gitAlternateObjectDirectories = "/repo/.git/objects";
 
     const invocation = new CodexAdapter().buildInvocation(sampleSpec(), context);
 
     expect(invocation.args).toContain(
+      'sandbox_workspace_write.writable_roots=["/repo/.git/worktrees/fix","/repo/.git/worktrees/fix/private-objects"]',
+    );
+    expect(invocation.args.join("\n")).not.toContain(
       'sandbox_workspace_write.writable_roots=["/repo/.git/worktrees/fix","/repo/.git/objects"]',
+    );
+    expect(invocation.env).toMatchObject({
+      GIT_OBJECT_DIRECTORY: "/repo/.git/worktrees/fix/private-objects",
+      GIT_ALTERNATE_OBJECT_DIRECTORIES: "/repo/.git/objects",
+    });
+    expect(invocation.args).toContain(
+      'shell_environment_policy.include_only=["PATH","HOME","TMPDIR","LANG","LC_ALL","CLAUDE_ARCHITECT_DELEGATED","GIT_OBJECT_DIRECTORY","GIT_ALTERNATE_OBJECT_DIRECTORIES"]',
     );
   });
 

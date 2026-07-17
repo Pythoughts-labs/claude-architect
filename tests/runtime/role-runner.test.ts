@@ -91,8 +91,11 @@ class FakeAdapter implements ProducerAdapter {
   readonly tempHomes: string[] = [];
   readonly spawnedCommands: string[] = [];
   readonly spawnedArgs: string[][] = [];
+  readonly spawnedEnvs: Record<string, string>[] = [];
   readonly readOnlyRequests: boolean[] = [];
   readonly extraWritableRootRequests: Array<string[] | undefined> = [];
+  readonly gitObjectDirectoryRequests: Array<string | undefined> = [];
+  readonly gitAlternateDirectoryRequests: Array<string | undefined> = [];
 
   constructor(private readonly options: FakeAdapterOptions = {}) {}
 
@@ -105,6 +108,8 @@ class FakeAdapter implements ProducerAdapter {
     if (ctx.tempHome !== undefined) this.tempHomes.push(ctx.tempHome);
     this.readOnlyRequests.push(ctx.readOnly === true);
     this.extraWritableRootRequests.push(ctx.extraWritableRoots);
+    this.gitObjectDirectoryRequests.push(ctx.gitObjectDirectory);
+    this.gitAlternateDirectoryRequests.push(ctx.gitAlternateObjectDirectories);
     return {
       executable: nodeExecutable,
       args: [],
@@ -135,10 +140,11 @@ class FakeAdapter implements ProducerAdapter {
     };
   }
 
-  recordSpawn(command: string, args: string[]): SupervisedExit {
+  recordSpawn(command: string, args: string[], env: Record<string, string>): SupervisedExit {
     this.spawnCount += 1;
     this.spawnedCommands.push(command);
     this.spawnedArgs.push([...args]);
+    this.spawnedEnvs.push({ ...env });
     const failsThisAttempt = this.options.failFirstAttempt === true && this.spawnCount === 1;
     const exit = supervisedExit({
       exitCode: failsThisAttempt ? 1 : (this.options.exitCode ?? 0),
@@ -174,7 +180,11 @@ function platformServices(adapter: FakeAdapter): PlatformServices {
         pid: 42,
         stdout: Readable.from([]),
         stderr: Readable.from([]),
-        done: Promise.resolve(adapter.recordSpawn(request.executable.command, request.args)),
+        done: Promise.resolve(adapter.recordSpawn(
+          request.executable.command,
+          request.args,
+          request.env,
+        )),
       };
     },
     async requestCooperativeCancellation() {},
@@ -360,8 +370,21 @@ describe("runRole", () => {
     // The resolver canonicalizes via realpath (e.g. macOS /var -> /private/var).
     expect(adapter.extraWritableRootRequests).toEqual([[
       await realpath(gitDir),
-      join(await realpath(commonDir), "objects"),
+      join(await realpath(gitDir), "private-objects"),
     ]]);
+    expect(adapter.extraWritableRootRequests[0]).not.toContain(
+      join(await realpath(commonDir), "objects"),
+    );
+    expect(adapter.gitObjectDirectoryRequests).toEqual([
+      join(await realpath(gitDir), "private-objects"),
+    ]);
+    expect(adapter.gitAlternateDirectoryRequests).toEqual([
+      join(await realpath(commonDir), "objects"),
+    ]);
+    expect(adapter.spawnedEnvs[0]).toMatchObject({
+      GIT_OBJECT_DIRECTORY: join(await realpath(gitDir), "private-objects"),
+      GIT_ALTERNATE_OBJECT_DIRECTORIES: join(await realpath(commonDir), "objects"),
+    });
   });
 
   it.skipIf(process.platform === "win32")("wraps an OS-confined fixer with write-enabled Seatbelt roots", async () => {

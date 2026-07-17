@@ -239,6 +239,19 @@ export class CodexAdapter implements ProducerAdapter {
   }
 
   buildInvocation(spec: DelegationSpec, ctx: InvocationContext): ProducerInvocation {
+    const redirectedGitObjects = ctx.gitObjectDirectory !== undefined
+      && ctx.gitAlternateObjectDirectories !== undefined;
+    const shellEnvironment = [
+      "PATH",
+      "HOME",
+      "TMPDIR",
+      "LANG",
+      "LC_ALL",
+      "CLAUDE_ARCHITECT_DELEGATED",
+      ...(redirectedGitObjects
+        ? ["GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES"]
+        : []),
+    ];
     const args = [
       "exec",
       "--json",
@@ -270,7 +283,7 @@ export class CodexAdapter implements ProducerAdapter {
       "-c",
       'shell_environment_policy.inherit="none"',
       "-c",
-      'shell_environment_policy.include_only=["PATH","HOME","TMPDIR","LANG","LC_ALL","CLAUDE_ARCHITECT_DELEGATED"]',
+      `shell_environment_policy.include_only=${JSON.stringify(shellEnvironment)}`,
       "-c",
       'web_search="disabled"',
       "--cd",
@@ -287,16 +300,25 @@ export class CodexAdapter implements ProducerAdapter {
     }
     args.push("-");
 
+    const defaultEnv = defaultCodexEnv({
+      env: this.deps.env,
+      homeDirectory: this.deps.homeDirectory,
+      hasAuthStore: directory => this.hasAuthStore(directory),
+    });
     return {
       executable: ctx.executable,
       args,
       stdin: renderPrompt(spec, ctx.readOnly === true),
       requiredEnv: [...CODEX_REQUIRED_ENV],
-      env: defaultCodexEnv({
-        env: this.deps.env,
-        homeDirectory: this.deps.homeDirectory,
-        hasAuthStore: directory => this.hasAuthStore(directory),
-      }),
+      env: {
+        ...defaultEnv,
+        ...(redirectedGitObjects
+          ? {
+            GIT_OBJECT_DIRECTORY: ctx.gitObjectDirectory!,
+            GIT_ALTERNATE_OBJECT_DIRECTORIES: ctx.gitAlternateObjectDirectories!,
+          }
+          : {}),
+      },
       network: "denied",
     };
   }

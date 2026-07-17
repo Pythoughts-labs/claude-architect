@@ -14,7 +14,7 @@ afterEach(async () => {
 });
 
 describe("resolveLinkedWorktreeWritableRoots", () => {
-  it("resolves the private gitdir and shared objects directory", async () => {
+  it("creates a private object directory without making shared objects writable", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "ca-git-roots-"));
     temporaryPaths.push(root);
     const repo = path.join(root, "repo");
@@ -33,10 +33,15 @@ describe("resolveLinkedWorktreeWritableRoots", () => {
       (await git(linked, ["rev-parse", "--absolute-git-dir"])).stdout.trim());
     const commonGitDir = await realpath(
       (await git(linked, ["rev-parse", "--path-format=absolute", "--git-common-dir"])).stdout.trim());
-    await expect(resolveLinkedWorktreeWritableRoots(linked)).resolves.toEqual([
-      privateGitDir,
-      path.join(commonGitDir, "objects"),
-    ]);
+    const result = await resolveLinkedWorktreeWritableRoots(linked);
+    expect(result).toEqual({
+      gitDir: privateGitDir,
+      privateObjectsDir: path.join(privateGitDir, "private-objects"),
+      sharedObjectsDir: path.join(commonGitDir, "objects"),
+      writableRoots: [privateGitDir, path.join(privateGitDir, "private-objects")],
+    });
+    expect(result.writableRoots).not.toContain(path.join(commonGitDir, "objects"));
+    await expect(realpath(result.privateObjectsDir)).resolves.toBe(result.privateObjectsDir);
   });
 
   it("rejects a symlinked .git entry with a structured error", async () => {

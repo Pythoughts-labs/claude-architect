@@ -1,4 +1,5 @@
-import { git, type GitResult } from "../git/git-exec.js";
+import path from "node:path";
+import { git, type GitExecOptions, type GitResult } from "../git/git-exec.js";
 import { WorktreeManager } from "../git/worktree-manager.js";
 import { getPlatformServices } from "../platform/select-platform.js";
 import type {
@@ -40,6 +41,10 @@ import {
   type RoleRunResult,
 } from "./role-runner.js";
 import { parseStructuredReport } from "./structured-output.js";
+import {
+  resolveLinkedWorktreeWritableRoots,
+  type LinkedWorktreeGitAccess,
+} from "./git-writable-roots.js";
 
 export interface PipelineRound {
   round: number;
@@ -109,10 +114,48 @@ function gitFailure(action: string, result: GitResult): RuntimeError {
   return new RuntimeError(`${action} failed${diagnostic ? `: ${diagnostic}` : ""}`);
 }
 
-async function checkedGit(cwd: string, args: string[]): Promise<string> {
-  const result = await git(cwd, args);
+async function checkedGit(
+  cwd: string,
+  args: string[],
+  options?: GitExecOptions,
+): Promise<string> {
+  const result = await git(cwd, args, options);
   if (result.exitCode !== 0) throw gitFailure(`git ${args[0] ?? "command"}`, result);
   return result.stdout;
+}
+
+function privateObjectReadOptions(access: LinkedWorktreeGitAccess): GitExecOptions {
+  return {
+    env: { GIT_ALTERNATE_OBJECT_DIRECTORIES: access.privateObjectsDir },
+  };
+}
+
+async function importPromotedObjects(args: {
+  checkoutPath: string;
+  baselineCommit: string;
+  promotedCommit: string;
+  access: LinkedWorktreeGitAccess;
+}): Promise<void> {
+  const privateObjects = privateObjectReadOptions(args.access);
+  const packPrefix = path.join(args.access.sharedObjectsDir, "pack", "pack");
+  await checkedGit(
+    args.checkoutPath,
+    ["pack-objects", "--revs", packPrefix],
+    {
+      ...privateObjects,
+      stdin: `${args.promotedCommit}\n^${args.baselineCommit}\n`,
+    },
+  );
+
+  await checkedGit(args.checkoutPath, ["cat-file", "-e", `${args.promotedCommit}^{commit}`]);
+  await checkedGit(args.checkoutPath, ["rev-parse", `${args.promotedCommit}^{tree}`]);
+  await checkedGit(args.checkoutPath, [
+    "rev-list",
+    "--objects",
+    args.promotedCommit,
+    "--not",
+    args.baselineCommit,
+  ]);
 }
 
 function roleArgs(args: {
@@ -122,6 +165,7 @@ function roleArgs(args: {
   worktreePath: string;
   deps: PipelineDependencies;
   runId: string;
+  gitObjectAccess?: LinkedWorktreeGitAccess;
 }): RoleRunArgs {
   const ps = args.deps.ps ?? getPlatformServices();
   return {
@@ -132,6 +176,7 @@ function roleArgs(args: {
     ps,
     registry: args.deps.registry,
     runId: args.runId,
+    ...(args.gitObjectAccess === undefined ? {} : { gitObjectAccess: args.gitObjectAccess }),
     ...(args.deps.env === undefined ? {} : { env: args.deps.env }),
     ...(args.deps.abortSignal === undefined ? {} : { abortSignal: args.deps.abortSignal }),
   };
@@ -324,6 +369,7 @@ async function runFix(args: {
   runId: string;
   round: number;
   store: ArtifactStore;
+  gitObjectAccess: LinkedWorktreeGitAccess;
 }): Promise<FixRunResult> {
   const runner = args.deps.roleRunner ?? defaultRunRole;
   const callArgs = roleArgs({
@@ -333,6 +379,7 @@ async function runFix(args: {
     worktreePath: args.worktreePath,
     deps: args.deps,
     runId: args.runId,
+    gitObjectAccess: args.gitObjectAccess,
   });
   const logName = `role-fixer-round${args.round}`;
   const initial = await runArchivedRole(runner, callArgs, args.store, logName);
@@ -379,12 +426,14 @@ async function validateFixProvenance(args: {
   worktreePath: string;
   previousCandidateCommit: string;
   fix: FixReport;
+  gitObjectAccess: LinkedWorktreeGitAccess;
 }): Promise<FixProvenanceFailure | null> {
+  const privateObjects = privateObjectReadOptions(args.gitObjectAccess);
   const candidateObject = await git(args.worktreePath, [
     "cat-file",
     "-e",
     `${args.fix.candidateCommit}^{commit}`,
-  ]);
+  ], privateObjects);
   if (candidateObject.exitCode !== 0) {
     return {
       failure: "producer-failure",
@@ -392,7 +441,11 @@ async function validateFixProvenance(args: {
     };
   }
 
-  const head = await git(args.worktreePath, ["rev-parse", "--verify", "HEAD^{commit}"]);
+  const head = await git(
+    args.worktreePath,
+    ["rev-parse", "--verify", "HEAD^{commit}"],
+    privateObjects,
+  );
   if (head.exitCode !== 0 || head.stdout.trim() !== args.fix.candidateCommit) {
     return {
       failure: "producer-failure",
@@ -405,7 +458,7 @@ async function validateFixProvenance(args: {
     "--is-ancestor",
     args.previousCandidateCommit,
     args.fix.candidateCommit,
-  ]);
+  ], privateObjects);
   if (candidateAncestry.exitCode !== 0) {
     return {
       failure: "sandbox-violation",
@@ -420,7 +473,7 @@ async function validateFixProvenance(args: {
       "cat-file",
       "-e",
       `${dispositionCommit}^{commit}`,
-    ]);
+    ], privateObjects);
     if (object.exitCode !== 0) {
       return {
         failure: "producer-failure",
@@ -433,13 +486,13 @@ async function validateFixProvenance(args: {
         "--is-ancestor",
         args.previousCandidateCommit,
         dispositionCommit,
-      ]),
+      ], privateObjects),
       git(args.worktreePath, [
         "merge-base",
         "--is-ancestor",
         dispositionCommit,
         args.fix.candidateCommit,
-      ]),
+      ], privateObjects),
     ]);
     if (afterPrevious.exitCode !== 0 || beforeCandidate.exitCode !== 0) {
       return {
@@ -593,13 +646,14 @@ export async function runPipeline(
     `${attempt.runId}-pipeline`,
     deps.ps ?? getPlatformServices(),
   ).create(currentCandidateCommit);
+  let gitObjectAccess: LinkedWorktreeGitAccess | null = null;
   let primaryError: unknown;
   try {
     for (let round = 1; round <= maxRounds; round += 1) {
       const diffText = await checkedGit(candidateWorktree.path, [
         "diff",
         `${baselineCommit}..${currentCandidateCommit}`,
-      ]);
+      ], gitObjectAccess === null ? undefined : privateObjectReadOptions(gitObjectAccess));
       const pkg: RolePackage = {
         spec,
         baselineCommit,
@@ -646,6 +700,18 @@ export async function runPipeline(
         break;
       }
 
+      try {
+        gitObjectAccess ??= await resolveLinkedWorktreeWritableRoots(candidateWorktree.path);
+      } catch {
+        return failedResult(
+          attempt,
+          rounds,
+          currentCandidateCommit,
+          "fixer git object isolation could not be established",
+          "sandbox-violation",
+        );
+      }
+
       const fixRun = await runFix({
         spec,
         pkg: { ...pkg, findings: consolidated.findings },
@@ -654,6 +720,7 @@ export async function runPipeline(
         runId: attempt.runId,
         round,
         store,
+        gitObjectAccess,
       });
       if (!fixRun.ok) {
         return failedResult(
@@ -670,6 +737,7 @@ export async function runPipeline(
         worktreePath: candidateWorktree.path,
         previousCandidateCommit: currentCandidateCommit,
         fix,
+        gitObjectAccess,
       });
       if (provenanceFailure !== null) {
         return failedResult(
@@ -689,6 +757,74 @@ export async function runPipeline(
         roleLogRefs: [...reviewRun.roleLogRefs, ...fixRun.roleLogRefs],
       });
     }
+
+    if (currentCandidateCommit !== attempt.candidate.candidateCommitOid) {
+      if (gitObjectAccess === null) {
+        return failedResult(
+          attempt,
+          rounds,
+          currentCandidateCommit,
+          "fixer git object isolation state is missing during promotion",
+          "sandbox-violation",
+        );
+      }
+      let canonicalCommit: string;
+      try {
+        const privateObjects = privateObjectReadOptions(gitObjectAccess);
+        const finalTree = (await checkedGit(
+          checkoutPath,
+          ["rev-parse", `${currentCandidateCommit}^{tree}`],
+          privateObjects,
+        )).trim();
+        canonicalCommit = (await checkedGit(checkoutPath, [
+          "commit-tree",
+          finalTree,
+          "-p",
+          baselineCommit,
+          "-m",
+          `candidate ${attempt.runId}`,
+        ], privateObjects)).trim();
+        await importPromotedObjects({
+          checkoutPath,
+          baselineCommit,
+          promotedCommit: canonicalCommit,
+          access: gitObjectAccess,
+        });
+      } catch {
+        return failedResult(
+          attempt,
+          rounds,
+          currentCandidateCommit,
+          "fixer objects could not be imported into the shared git object store",
+          "sandbox-violation",
+        );
+      }
+      await checkedGit(checkoutPath, [
+        "update-ref",
+        attempt.candidate.anchorRef,
+        canonicalCommit,
+        attempt.candidate.candidateCommitOid,
+      ]);
+      currentCandidateCommit = canonicalCommit;
+      const diffText = await checkedGit(
+        checkoutPath,
+        ["diff", `${baselineCommit}..${canonicalCommit}`],
+      );
+      const candidate = await candidateArtifact({
+        worktreePath: checkoutPath,
+        baselineCommit,
+        candidateCommit: canonicalCommit,
+        anchorRef: attempt.candidate.anchorRef,
+        diffText,
+      });
+      const manifest = await store.readManifest(attempt.runId);
+      if (manifest === null) throw new RuntimeError("run manifest is missing during promotion");
+      finalAttempt = { ...attempt, candidate };
+      await store.promoteTerminalArtifacts({
+        result: finalAttempt,
+        manifest: { ...manifest, candidateManifestHash: candidate.manifestHash },
+      });
+    }
   } catch (error) {
     primaryError = error;
     throw error;
@@ -702,46 +838,6 @@ export async function runPipeline(
         "pipeline rounds failed and their worktree could not be cleaned up",
       );
     }
-  }
-
-  if (currentCandidateCommit !== attempt.candidate.candidateCommitOid) {
-    const finalTree = (await checkedGit(
-      checkoutPath,
-      ["rev-parse", `${currentCandidateCommit}^{tree}`],
-    )).trim();
-    const canonicalCommit = (await checkedGit(checkoutPath, [
-      "commit-tree",
-      finalTree,
-      "-p",
-      baselineCommit,
-      "-m",
-      `candidate ${attempt.runId}`,
-    ])).trim();
-    await checkedGit(checkoutPath, [
-      "update-ref",
-      attempt.candidate.anchorRef,
-      canonicalCommit,
-      attempt.candidate.candidateCommitOid,
-    ]);
-    currentCandidateCommit = canonicalCommit;
-    const diffText = await checkedGit(
-      checkoutPath,
-      ["diff", `${baselineCommit}..${canonicalCommit}`],
-    );
-    const candidate = await candidateArtifact({
-      worktreePath: checkoutPath,
-      baselineCommit,
-      candidateCommit: canonicalCommit,
-      anchorRef: attempt.candidate.anchorRef,
-      diffText,
-    });
-    const manifest = await store.readManifest(attempt.runId);
-    if (manifest === null) throw new RuntimeError("run manifest is missing during promotion");
-    finalAttempt = { ...attempt, candidate };
-    await store.promoteTerminalArtifacts({
-      result: finalAttempt,
-      manifest: { ...manifest, candidateManifestHash: candidate.manifestHash },
-    });
   }
 
   const verified = await verifyCandidate({

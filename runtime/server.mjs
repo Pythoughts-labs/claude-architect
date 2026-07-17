@@ -3226,8 +3226,8 @@ var require_utils = __commonJS({
       }
       return ind;
     }
-    function removeDotSegments(path14) {
-      let input = path14;
+    function removeDotSegments(path15) {
+      let input = path15;
       const output = [];
       let nextSlash = -1;
       let len = 0;
@@ -3479,8 +3479,8 @@ var require_schemes = __commonJS({
         wsComponent.secure = void 0;
       }
       if (wsComponent.resourceName) {
-        const [path14, query] = wsComponent.resourceName.split("?");
-        wsComponent.path = path14 && path14 !== "/" ? path14 : void 0;
+        const [path15, query] = wsComponent.resourceName.split("?");
+        wsComponent.path = path15 && path15 !== "/" ? path15 : void 0;
         wsComponent.query = query;
         wsComponent.resourceName = void 0;
       }
@@ -8191,8 +8191,8 @@ function getErrorMap() {
 
 // node_modules/zod/v3/helpers/parseUtil.js
 var makeIssue = (params) => {
-  const { data, path: path14, errorMaps, issueData } = params;
-  const fullPath = [...path14, ...issueData.path || []];
+  const { data, path: path15, errorMaps, issueData } = params;
+  const fullPath = [...path15, ...issueData.path || []];
   const fullIssue = {
     ...issueData,
     path: fullPath
@@ -8308,11 +8308,11 @@ var errorUtil;
 
 // node_modules/zod/v3/types.js
 var ParseInputLazyPath = class {
-  constructor(parent, value, path14, key) {
+  constructor(parent, value, path15, key) {
     this._cachedPath = [];
     this.parent = parent;
     this.data = value;
-    this._path = path14;
+    this._path = path15;
     this._key = key;
   }
   get path() {
@@ -11950,10 +11950,10 @@ function assignProp(target, prop, value) {
     configurable: true
   });
 }
-function getElementAtPath(obj, path14) {
-  if (!path14)
+function getElementAtPath(obj, path15) {
+  if (!path15)
     return obj;
-  return path14.reduce((acc, key) => acc?.[key], obj);
+  return path15.reduce((acc, key) => acc?.[key], obj);
 }
 function promiseAllObject(promisesObj) {
   const keys = Object.keys(promisesObj);
@@ -12273,11 +12273,11 @@ function aborted(x, startIndex = 0) {
   }
   return false;
 }
-function prefixIssues(path14, issues) {
+function prefixIssues(path15, issues) {
   return issues.map((iss) => {
     var _a;
     (_a = iss).path ?? (_a.path = []);
-    iss.path.unshift(path14);
+    iss.path.unshift(path15);
     return iss;
   });
 }
@@ -22636,10 +22636,11 @@ function filterNeutralizations(keys) {
   }
   return { args };
 }
-async function git(cwd, args, indexFile) {
+async function git(cwd, args, indexFileOrOptions) {
   const platformServices = getPlatformServices();
   const executable = await platformServices.resolveExecutable({ name: "git" });
   const nullDevice = process.platform === "win32" ? "NUL" : "/dev/null";
+  const options = typeof indexFileOrOptions === "string" ? { indexFile: indexFileOrOptions } : indexFileOrOptions ?? {};
   const env = {
     PATH: process.env.PATH ?? "",
     GIT_CONFIG_GLOBAL: nullDevice,
@@ -22656,7 +22657,8 @@ async function git(cwd, args, indexFile) {
     GIT_COMMITTER_EMAIL: "runtime@claude-architect.invalid",
     GIT_AUTHOR_DATE: "2000-01-01T00:00:00Z",
     GIT_COMMITTER_DATE: "2000-01-01T00:00:00Z",
-    ...indexFile ? { GIT_INDEX_FILE: indexFile } : {}
+    ...options.indexFile ? { GIT_INDEX_FILE: options.indexFile } : {},
+    ...options.env
   };
   const hardeningArgs = [
     "-c",
@@ -22722,6 +22724,7 @@ async function git(cwd, args, indexFile) {
     args: [...hardeningArgs, ...neutralizations.args ?? [], ...args],
     cwd,
     env,
+    ...options.stdin === void 0 ? {} : { stdin: options.stdin },
     timeoutMs: 6e4,
     maxOutputBytes: 8e6
   }, {});
@@ -22937,6 +22940,16 @@ var CodexAdapter = class {
     }
   }
   buildInvocation(spec, ctx) {
+    const redirectedGitObjects = ctx.gitObjectDirectory !== void 0 && ctx.gitAlternateObjectDirectories !== void 0;
+    const shellEnvironment = [
+      "PATH",
+      "HOME",
+      "TMPDIR",
+      "LANG",
+      "LC_ALL",
+      "CLAUDE_ARCHITECT_DELEGATED",
+      ...redirectedGitObjects ? ["GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES"] : []
+    ];
     const args = [
       "exec",
       "--json",
@@ -22966,7 +22979,7 @@ var CodexAdapter = class {
       "-c",
       'shell_environment_policy.inherit="none"',
       "-c",
-      'shell_environment_policy.include_only=["PATH","HOME","TMPDIR","LANG","LC_ALL","CLAUDE_ARCHITECT_DELEGATED"]',
+      `shell_environment_policy.include_only=${JSON.stringify(shellEnvironment)}`,
       "-c",
       'web_search="disabled"',
       "--cd",
@@ -22982,16 +22995,23 @@ var CodexAdapter = class {
       );
     }
     args.push("-");
+    const defaultEnv = defaultCodexEnv({
+      env: this.deps.env,
+      homeDirectory: this.deps.homeDirectory,
+      hasAuthStore: (directory) => this.hasAuthStore(directory)
+    });
     return {
       executable: ctx.executable,
       args,
       stdin: renderPrompt(spec, ctx.readOnly === true),
       requiredEnv: [...CODEX_REQUIRED_ENV],
-      env: defaultCodexEnv({
-        env: this.deps.env,
-        homeDirectory: this.deps.homeDirectory,
-        hasAuthStore: (directory) => this.hasAuthStore(directory)
-      }),
+      env: {
+        ...defaultEnv,
+        ...redirectedGitObjects ? {
+          GIT_OBJECT_DIRECTORY: ctx.gitObjectDirectory,
+          GIT_ALTERNATE_OBJECT_DIRECTORIES: ctx.gitAlternateObjectDirectories
+        } : {}
+      },
       network: "denied"
     };
   }
@@ -24173,9 +24193,9 @@ async function recomputeManifest(args) {
   const rawDiff = parseRawDiff(rawOutput);
   const rawByPath = new Map(rawDiff.map((entry) => [entry.path, entry]));
   const treeByPath = parseTree(treeOutput);
-  const changedPaths = sortChangedPaths(parseNameStatus(nameStatusOutput).map(({ path: path14, status }) => {
-    const rawEntry = rawByPath.get(path14);
-    const treeEntry = treeByPath.get(path14);
+  const changedPaths = sortChangedPaths(parseNameStatus(nameStatusOutput).map(({ path: path15, status }) => {
+    const rawEntry = rawByPath.get(path15);
+    const treeEntry = treeByPath.get(path15);
     if (treeEntry === void 0 && status !== "D") {
       throw new RuntimeError("candidate tree is missing a changed path");
     }
@@ -24183,7 +24203,7 @@ async function recomputeManifest(args) {
       throw new RuntimeError("git diff-tree outputs disagree");
     }
     return {
-      path: path14,
+      path: path15,
       changeType: changeType(status),
       mode: treeEntry?.mode ?? rawEntry.oldMode,
       contentHash: treeEntry?.oid ?? null
@@ -24383,6 +24403,9 @@ async function applyCandidateTree(args) {
     }
   }
 }
+
+// src/pipeline/pipeline-runtime.ts
+import path12 from "node:path";
 
 // src/git/worktree-manager.ts
 import { mkdir } from "node:fs/promises";
@@ -25312,14 +25335,14 @@ function buildWriteSeatbeltPolicy(args) {
     extraWritableRoots: [...args.extraWritableRoots]
   };
 }
-function sbPath(path14) {
-  for (const character of path14) {
+function sbPath(path15) {
+  for (const character of path15) {
     const codePoint = character.codePointAt(0);
     if (codePoint !== void 0 && (codePoint < 32 || codePoint === 127)) {
-      throw new Error(`seatbelt: control character in path: ${JSON.stringify(path14)}`);
+      throw new Error(`seatbelt: control character in path: ${JSON.stringify(path15)}`);
     }
   }
-  return `"${path14.replace(/\\/gu, "\\\\").replace(/"/gu, '\\"')}"`;
+  return `"${path15.replace(/\\/gu, "\\\\").replace(/"/gu, '\\"')}"`;
 }
 function openCodeWritablePaths(invocation, policy) {
   if (policy.tempHome !== null || !invocation.requiredEnv.includes("OPENCODE_CONFIG_DIR")) return [];
@@ -25358,18 +25381,18 @@ function buildProfile(policy, additionalWritable) {
     "/dev",
     ...policy.extraWritableRoots ?? [],
     ...additionalWritable
-  ].filter((path14) => typeof path14 === "string" && path14.length > 0).flatMap((path14) => {
+  ].filter((path15) => typeof path15 === "string" && path15.length > 0).flatMap((path15) => {
     try {
-      return [path14, realpathSync(path14)];
+      return [path15, realpathSync(path15)];
     } catch {
-      return [path14];
+      return [path15];
     }
   }))];
   const lines = [
     "(version 1)",
     "(allow default)",
     "(deny file-write*)",
-    ...writable.map((path14) => `(allow file-write* (subpath ${sbPath(path14)}))`),
+    ...writable.map((path15) => `(allow file-write* (subpath ${sbPath(path15)}))`),
     '(allow file-write* (literal "/dev/null") (literal "/dev/tty"))'
   ];
   if (!policy.allowNetwork) lines.push("(deny network*)");
@@ -28286,7 +28309,7 @@ function buildRoleSpec(role, base, pkg) {
 }
 
 // src/pipeline/git-writable-roots.ts
-import { lstat as lstat5, readFile as readFile3, realpath as realpath5 } from "node:fs/promises";
+import { lstat as lstat5, mkdir as mkdir3, readFile as readFile3, realpath as realpath5 } from "node:fs/promises";
 import path11 from "node:path";
 function invalidWritableRoots(message, cause) {
   return new RuntimeError(message, {
@@ -28348,9 +28371,21 @@ async function resolveLinkedWorktreeWritableRoots(worktreePath) {
     if (!isContainedBy(worktreesDir, gitDir)) {
       throw invalidWritableRoots("linked worktree private git directory escapes common git worktrees");
     }
-    const objectsDir = path11.join(commonDir, "objects");
-    await requirePlainDirectory(objectsDir, "common git objects directory");
-    return [gitDir, objectsDir];
+    const sharedObjectsDir = await realpath5(path11.join(commonDir, "objects"));
+    await requirePlainDirectory(sharedObjectsDir, "common git objects directory");
+    const privateObjectsPath = path11.join(gitDir, "private-objects");
+    await mkdir3(privateObjectsPath, { recursive: true, mode: 448 });
+    await requirePlainDirectory(privateObjectsPath, "private git objects directory");
+    const privateObjectsDir = await realpath5(privateObjectsPath);
+    if (!isContainedBy(gitDir, privateObjectsDir)) {
+      throw invalidWritableRoots("private git objects directory escapes linked worktree git directory");
+    }
+    return {
+      gitDir,
+      privateObjectsDir,
+      sharedObjectsDir,
+      writableRoots: [gitDir, privateObjectsDir]
+    };
   } catch (error2) {
     if (error2 instanceof RuntimeError) throw error2;
     throw invalidWritableRoots("linked worktree writable roots are invalid", error2);
@@ -28445,9 +28480,11 @@ async function runRole(args) {
   const readOnly = READ_ONLY_ROLES.has(args.role);
   const fixer = args.role === "fixer";
   let extraWritableRoots = [];
+  let gitObjectAccess;
   if (fixer) {
     try {
-      extraWritableRoots = await resolveLinkedWorktreeWritableRoots(args.worktreePath);
+      gitObjectAccess = await resolveLinkedWorktreeWritableRoots(args.worktreePath);
+      extraWritableRoots = gitObjectAccess.writableRoots;
     } catch {
       return {
         ok: false,
@@ -28493,6 +28530,10 @@ async function runRole(args) {
       let invocation = adapter.buildInvocation(roleSpec, {
         worktreePath: args.worktreePath,
         ...extraWritableRoots.length === 0 ? {} : { extraWritableRoots },
+        ...gitObjectAccess === void 0 ? {} : {
+          gitObjectDirectory: gitObjectAccess.privateObjectsDir,
+          gitAlternateObjectDirectories: gitObjectAccess.sharedObjectsDir
+        },
         runId: args.runId,
         tempHome,
         capabilityReport: report,
@@ -28518,7 +28559,13 @@ async function runRole(args) {
         os: args.ps.os,
         adapterAllowlist: invocation.requiredEnv,
         ...invocation.env === void 0 ? {} : { adapterValues: invocation.env },
-        specAdditions: definedEnvironment(args.env),
+        specAdditions: {
+          ...definedEnvironment(args.env),
+          ...gitObjectAccess === void 0 ? {} : {
+            GIT_OBJECT_DIRECTORY: gitObjectAccess.privateObjectsDir,
+            GIT_ALTERNATE_OBJECT_DIRECTORIES: gitObjectAccess.sharedObjectsDir
+          }
+        },
         tempHome
       });
       const exit = args.abortSignal?.aborted === true ? preCancelledExit2() : await supervise(args.ps, {
@@ -28602,10 +28649,38 @@ function gitFailure5(action, result) {
   const diagnostic = (result.stderr || result.stdout).trim().slice(0, 2e3);
   return new RuntimeError(`${action} failed${diagnostic ? `: ${diagnostic}` : ""}`);
 }
-async function checkedGit4(cwd, args) {
-  const result = await git(cwd, args);
+async function checkedGit4(cwd, args, options) {
+  const result = await git(cwd, args, options);
   if (result.exitCode !== 0) throw gitFailure5(`git ${args[0] ?? "command"}`, result);
   return result.stdout;
+}
+function privateObjectReadOptions(access4) {
+  return {
+    env: { GIT_ALTERNATE_OBJECT_DIRECTORIES: access4.privateObjectsDir }
+  };
+}
+async function importPromotedObjects(args) {
+  const privateObjects = privateObjectReadOptions(args.access);
+  const packPrefix = path12.join(args.access.sharedObjectsDir, "pack", "pack");
+  await checkedGit4(
+    args.checkoutPath,
+    ["pack-objects", "--revs", packPrefix],
+    {
+      ...privateObjects,
+      stdin: `${args.promotedCommit}
+^${args.baselineCommit}
+`
+    }
+  );
+  await checkedGit4(args.checkoutPath, ["cat-file", "-e", `${args.promotedCommit}^{commit}`]);
+  await checkedGit4(args.checkoutPath, ["rev-parse", `${args.promotedCommit}^{tree}`]);
+  await checkedGit4(args.checkoutPath, [
+    "rev-list",
+    "--objects",
+    args.promotedCommit,
+    "--not",
+    args.baselineCommit
+  ]);
 }
 function roleArgs(args) {
   const ps = args.deps.ps ?? getPlatformServices();
@@ -28617,6 +28692,7 @@ function roleArgs(args) {
     ps,
     registry: args.deps.registry,
     runId: args.runId,
+    ...args.gitObjectAccess === void 0 ? {} : { gitObjectAccess: args.gitObjectAccess },
     ...args.deps.env === void 0 ? {} : { env: args.deps.env },
     ...args.deps.abortSignal === void 0 ? {} : { abortSignal: args.deps.abortSignal }
   };
@@ -28772,7 +28848,8 @@ async function runFix(args) {
     pkg: args.pkg,
     worktreePath: args.worktreePath,
     deps: args.deps,
-    runId: args.runId
+    runId: args.runId,
+    gitObjectAccess: args.gitObjectAccess
   });
   const logName2 = `role-fixer-round${args.round}`;
   const initial = await runArchivedRole(runner, callArgs, args.store, logName2);
@@ -28807,18 +28884,23 @@ async function runFix(args) {
   };
 }
 async function validateFixProvenance(args) {
+  const privateObjects = privateObjectReadOptions(args.gitObjectAccess);
   const candidateObject = await git(args.worktreePath, [
     "cat-file",
     "-e",
     `${args.fix.candidateCommit}^{commit}`
-  ]);
+  ], privateObjects);
   if (candidateObject.exitCode !== 0) {
     return {
       failure: "producer-failure",
       reason: "fix phase reported a missing candidate commit"
     };
   }
-  const head = await git(args.worktreePath, ["rev-parse", "--verify", "HEAD^{commit}"]);
+  const head = await git(
+    args.worktreePath,
+    ["rev-parse", "--verify", "HEAD^{commit}"],
+    privateObjects
+  );
   if (head.exitCode !== 0 || head.stdout.trim() !== args.fix.candidateCommit) {
     return {
       failure: "producer-failure",
@@ -28830,7 +28912,7 @@ async function validateFixProvenance(args) {
     "--is-ancestor",
     args.previousCandidateCommit,
     args.fix.candidateCommit
-  ]);
+  ], privateObjects);
   if (candidateAncestry.exitCode !== 0) {
     return {
       failure: "sandbox-violation",
@@ -28843,7 +28925,7 @@ async function validateFixProvenance(args) {
       "cat-file",
       "-e",
       `${dispositionCommit}^{commit}`
-    ]);
+    ], privateObjects);
     if (object3.exitCode !== 0) {
       return {
         failure: "producer-failure",
@@ -28856,13 +28938,13 @@ async function validateFixProvenance(args) {
         "--is-ancestor",
         args.previousCandidateCommit,
         dispositionCommit
-      ]),
+      ], privateObjects),
       git(args.worktreePath, [
         "merge-base",
         "--is-ancestor",
         dispositionCommit,
         args.fix.candidateCommit
-      ])
+      ], privateObjects)
     ]);
     if (afterPrevious.exitCode !== 0 || beforeCandidate.exitCode !== 0) {
       return {
@@ -28995,13 +29077,14 @@ async function runPipeline(checkoutPath, spec, deps) {
     `${attempt.runId}-pipeline`,
     deps.ps ?? getPlatformServices()
   ).create(currentCandidateCommit);
+  let gitObjectAccess = null;
   let primaryError;
   try {
     for (let round = 1; round <= maxRounds; round += 1) {
       const diffText = await checkedGit4(candidateWorktree.path, [
         "diff",
         `${baselineCommit}..${currentCandidateCommit}`
-      ]);
+      ], gitObjectAccess === null ? void 0 : privateObjectReadOptions(gitObjectAccess));
       const pkg = {
         spec,
         baselineCommit,
@@ -29045,6 +29128,17 @@ async function runPipeline(checkoutPath, spec, deps) {
         rounds.push({ round, reviews, consolidated, fix: null, roleLogRefs: reviewRun.roleLogRefs });
         break;
       }
+      try {
+        gitObjectAccess ??= await resolveLinkedWorktreeWritableRoots(candidateWorktree.path);
+      } catch {
+        return failedResult(
+          attempt,
+          rounds,
+          currentCandidateCommit,
+          "fixer git object isolation could not be established",
+          "sandbox-violation"
+        );
+      }
       const fixRun = await runFix({
         spec,
         pkg: { ...pkg, findings: consolidated.findings },
@@ -29052,7 +29146,8 @@ async function runPipeline(checkoutPath, spec, deps) {
         deps,
         runId: attempt.runId,
         round,
-        store
+        store,
+        gitObjectAccess
       });
       if (!fixRun.ok) {
         return failedResult(
@@ -29068,7 +29163,8 @@ async function runPipeline(checkoutPath, spec, deps) {
       const provenanceFailure = await validateFixProvenance({
         worktreePath: candidateWorktree.path,
         previousCandidateCommit: currentCandidateCommit,
-        fix
+        fix,
+        gitObjectAccess
       });
       if (provenanceFailure !== null) {
         return failedResult(
@@ -29088,6 +29184,73 @@ async function runPipeline(checkoutPath, spec, deps) {
         roleLogRefs: [...reviewRun.roleLogRefs, ...fixRun.roleLogRefs]
       });
     }
+    if (currentCandidateCommit !== attempt.candidate.candidateCommitOid) {
+      if (gitObjectAccess === null) {
+        return failedResult(
+          attempt,
+          rounds,
+          currentCandidateCommit,
+          "fixer git object isolation state is missing during promotion",
+          "sandbox-violation"
+        );
+      }
+      let canonicalCommit;
+      try {
+        const privateObjects = privateObjectReadOptions(gitObjectAccess);
+        const finalTree = (await checkedGit4(
+          checkoutPath,
+          ["rev-parse", `${currentCandidateCommit}^{tree}`],
+          privateObjects
+        )).trim();
+        canonicalCommit = (await checkedGit4(checkoutPath, [
+          "commit-tree",
+          finalTree,
+          "-p",
+          baselineCommit,
+          "-m",
+          `candidate ${attempt.runId}`
+        ], privateObjects)).trim();
+        await importPromotedObjects({
+          checkoutPath,
+          baselineCommit,
+          promotedCommit: canonicalCommit,
+          access: gitObjectAccess
+        });
+      } catch {
+        return failedResult(
+          attempt,
+          rounds,
+          currentCandidateCommit,
+          "fixer objects could not be imported into the shared git object store",
+          "sandbox-violation"
+        );
+      }
+      await checkedGit4(checkoutPath, [
+        "update-ref",
+        attempt.candidate.anchorRef,
+        canonicalCommit,
+        attempt.candidate.candidateCommitOid
+      ]);
+      currentCandidateCommit = canonicalCommit;
+      const diffText = await checkedGit4(
+        checkoutPath,
+        ["diff", `${baselineCommit}..${canonicalCommit}`]
+      );
+      const candidate = await candidateArtifact({
+        worktreePath: checkoutPath,
+        baselineCommit,
+        candidateCommit: canonicalCommit,
+        anchorRef: attempt.candidate.anchorRef,
+        diffText
+      });
+      const manifest = await store.readManifest(attempt.runId);
+      if (manifest === null) throw new RuntimeError("run manifest is missing during promotion");
+      finalAttempt = { ...attempt, candidate };
+      await store.promoteTerminalArtifacts({
+        result: finalAttempt,
+        manifest: { ...manifest, candidateManifestHash: candidate.manifestHash }
+      });
+    }
   } catch (error2) {
     primaryError = error2;
     throw error2;
@@ -29101,45 +29264,6 @@ async function runPipeline(checkoutPath, spec, deps) {
         "pipeline rounds failed and their worktree could not be cleaned up"
       );
     }
-  }
-  if (currentCandidateCommit !== attempt.candidate.candidateCommitOid) {
-    const finalTree = (await checkedGit4(
-      checkoutPath,
-      ["rev-parse", `${currentCandidateCommit}^{tree}`]
-    )).trim();
-    const canonicalCommit = (await checkedGit4(checkoutPath, [
-      "commit-tree",
-      finalTree,
-      "-p",
-      baselineCommit,
-      "-m",
-      `candidate ${attempt.runId}`
-    ])).trim();
-    await checkedGit4(checkoutPath, [
-      "update-ref",
-      attempt.candidate.anchorRef,
-      canonicalCommit,
-      attempt.candidate.candidateCommitOid
-    ]);
-    currentCandidateCommit = canonicalCommit;
-    const diffText = await checkedGit4(
-      checkoutPath,
-      ["diff", `${baselineCommit}..${canonicalCommit}`]
-    );
-    const candidate = await candidateArtifact({
-      worktreePath: checkoutPath,
-      baselineCommit,
-      candidateCommit: canonicalCommit,
-      anchorRef: attempt.candidate.anchorRef,
-      diffText
-    });
-    const manifest = await store.readManifest(attempt.runId);
-    if (manifest === null) throw new RuntimeError("run manifest is missing during promotion");
-    finalAttempt = { ...attempt, candidate };
-    await store.promoteTerminalArtifacts({
-      result: finalAttempt,
-      manifest: { ...manifest, candidateManifestHash: candidate.manifestHash }
-    });
   }
   const verified = await verifyCandidate({
     checkoutPath,
@@ -29177,7 +29301,7 @@ async function runPipeline(checkoutPath, spec, deps) {
 }
 
 // src/protocol/spec-validator.ts
-import path12 from "node:path";
+import path13 from "node:path";
 var schemas2 = loadSchemas();
 function resolveMinEditTimeoutMs() {
   const raw = process.env.CLAUDE_ARCHITECT_MIN_EDIT_TIMEOUT_MS;
@@ -29204,8 +29328,8 @@ function validateSpec(input) {
   if (schemaValid) {
     const spec = input;
     for (const [index, command] of spec.verification.entries()) {
-      const normalizedCwd = path12.posix.normalize(command.cwd);
-      if (path12.isAbsolute(command.cwd) || normalizedCwd === ".." || normalizedCwd.startsWith("../")) {
+      const normalizedCwd = path13.posix.normalize(command.cwd);
+      if (path13.isAbsolute(command.cwd) || normalizedCwd === ".." || normalizedCwd.startsWith("../")) {
         return {
           ok: false,
           errors: [{
@@ -29546,7 +29670,7 @@ import {
   realpath as realpath6,
   rm as rm5
 } from "node:fs/promises";
-import path13 from "node:path";
+import path14 from "node:path";
 import nodeProcess4 from "node:process";
 var NO_FOLLOW3 = constants4.O_NOFOLLOW ?? 0;
 var MAX_STATE_FILE_BYTES = 8e6;
@@ -29575,7 +29699,7 @@ function validateRunId(runId) {
 async function stateRoot() {
   const configured = nodeProcess4.env.CLAUDE_PLUGIN_DATA ?? (nodeProcess4.env.NODE_ENV === "test" ? nodeProcess4.env.CLAUDE_ARCHITECT_STATE_DIR : void 0);
   if (configured === void 0) return null;
-  const root = path13.resolve(resolveStateDir());
+  const root = path14.resolve(resolveStateDir());
   try {
     const metadata = await lstat6(root);
     if (!isPlainDirectory(metadata)) {
@@ -29657,7 +29781,7 @@ function parseRunStart(text, expectedRunId) {
   }
   const record2 = value;
   validateRunId(record2.runId);
-  if (record2.runId !== expectedRunId || typeof record2.lockKey !== "string" || !/^[0-9a-f]{64}$/.test(record2.lockKey) || typeof record2.canonicalCommonDir !== "string" || !path13.isAbsolute(record2.canonicalCommonDir) || record2.pid !== null && (record2.pid === void 0 || !Number.isSafeInteger(record2.pid) || record2.pid <= 1) || record2.processToken !== void 0 && record2.processToken !== null && typeof record2.processToken !== "string" || typeof record2.startedAt !== "string" || !Number.isFinite(Date.parse(record2.startedAt))) {
+  if (record2.runId !== expectedRunId || typeof record2.lockKey !== "string" || !/^[0-9a-f]{64}$/.test(record2.lockKey) || typeof record2.canonicalCommonDir !== "string" || !path14.isAbsolute(record2.canonicalCommonDir) || record2.pid !== null && (record2.pid === void 0 || !Number.isSafeInteger(record2.pid) || record2.pid <= 1) || record2.processToken !== void 0 && record2.processToken !== null && typeof record2.processToken !== "string" || typeof record2.startedAt !== "string" || !Number.isFinite(Date.parse(record2.startedAt))) {
     throw new RuntimeError("run-start recovery record is malformed");
   }
   const expectedLockKey = createHash8("sha256").update(record2.canonicalCommonDir).digest("hex");
@@ -29697,7 +29821,7 @@ async function validateGitCommonDir(commonDir) {
   return canonical;
 }
 async function validateRepositoryRoot(repoRoot) {
-  if (!path13.isAbsolute(repoRoot)) {
+  if (!path14.isAbsolute(repoRoot)) {
     throw new RuntimeError("cleanup journal repository root is not absolute");
   }
   const canonical = await realpath6(repoRoot);
@@ -29780,7 +29904,7 @@ function cleanupOutcome(record2) {
 async function appendCleanupRecord(runsRoot, record2) {
   const identity = await plainDirectoryIdentity(runsRoot);
   if (identity === null) throw new RuntimeError("cleanup journal root disappeared");
-  const filename = path13.join(runsRoot, "cleanup.ndjson");
+  const filename = path14.join(runsRoot, "cleanup.ndjson");
   const handle = await open5(
     filename,
     constants4.O_WRONLY | constants4.O_CREAT | constants4.O_APPEND | NO_FOLLOW3,
@@ -29856,7 +29980,7 @@ async function commitCleanupRefs(record2) {
   await deleteExactRef(repoRoot, record2.backupRef, backupOid);
 }
 async function replayInterruptedPrunes(runsRoot) {
-  const text = await readCleanupJournal(path13.join(runsRoot, "cleanup.ndjson"));
+  const text = await readCleanupJournal(path14.join(runsRoot, "cleanup.ndjson"));
   if (text === null || text.trim() === "") return;
   const pending = /* @__PURE__ */ new Map();
   for (const line of text.trimEnd().split("\n")) {
@@ -29866,8 +29990,8 @@ async function replayInterruptedPrunes(runsRoot) {
     else pending.delete(record2.runId);
   }
   for (const record2 of [...pending.values()].sort((left, right) => left.runId.localeCompare(right.runId))) {
-    const runDirectory = path13.join(runsRoot, record2.runId);
-    const quarantinePath = path13.join(runsRoot, record2.quarantineName);
+    const runDirectory = path14.join(runsRoot, record2.runId);
+    const quarantinePath = path14.join(runsRoot, record2.quarantineName);
     const runIdentity = await plainDirectoryIdentity(runDirectory);
     const quarantineIdentity = await plainDirectoryIdentity(quarantinePath);
     if (runIdentity !== null && quarantineIdentity !== null) {
@@ -29915,7 +30039,7 @@ async function recoverRun(record2, root, ps, isProcessAlive, requestCooperativeT
     `baseline-${record2.runId}`,
     `verify-${record2.runId}`
   ]) {
-    const worktreePath = path13.join(root, "worktrees", managedId);
+    const worktreePath = path14.join(root, "worktrees", managedId);
     const worktreeIdentity = await plainDirectoryIdentity(worktreePath);
     if (worktreeIdentity !== null) {
       await new WorktreeManager(commonDir, managedId, ps).remove(worktreePath);
@@ -30000,7 +30124,7 @@ async function reclaimLocks(locksRoot, isProcessAlive, getProcessStartToken) {
   for (const entry of entries.sort((left, right) => left.name.localeCompare(right.name))) {
     const match = LOCK_NAME.exec(entry.name);
     if (match === null) continue;
-    const lockPath = path13.join(locksRoot, entry.name);
+    const lockPath = path14.join(locksRoot, entry.name);
     if (!entry.isFile() || entry.isSymbolicLink()) {
       throw new RuntimeError("checkout lock must be a regular file during recovery");
     }
@@ -30015,14 +30139,14 @@ async function reclaimLocks(locksRoot, isProcessAlive, getProcessStartToken) {
   }
 }
 async function lockIsOwnedByLiveProcess(locksRoot, lockKey, isProcessAlive, getProcessStartToken) {
-  const contents = await readBoundedRegularFile(path13.join(locksRoot, `${lockKey}.lock`));
+  const contents = await readBoundedRegularFile(path14.join(locksRoot, `${lockKey}.lock`));
   if (contents === null) return false;
   return lockOwnerIsLive(parseLockOwner(contents), isProcessAlive, getProcessStartToken);
 }
 async function recoverStaleRuns(dependencies = {}) {
   const root = await stateRoot();
   if (root === null) return { recovered: [] };
-  const runsRoot = path13.join(root, "runs");
+  const runsRoot = path14.join(root, "runs");
   const runsIdentity = await plainDirectoryIdentity(runsRoot);
   if (runsIdentity !== null) await replayInterruptedPrunes(runsRoot);
   const ps = dependencies.platformServices ?? getPlatformServices();
@@ -30030,14 +30154,14 @@ async function recoverStaleRuns(dependencies = {}) {
   const requestCooperativeTermination = dependencies.requestCooperativeTermination ?? defaultRequestCooperativeTermination;
   const delayMs = dependencies.delayMs ?? defaultDelayMs;
   const graceMs = dependencies.graceMs ?? 3e3;
-  const locksRoot = path13.join(root, "locks");
+  const locksRoot = path14.join(root, "locks");
   const stale = [];
   if (runsIdentity !== null) {
     const runEntries = await readdir2(runsRoot, { withFileTypes: true });
     for (const entry of runEntries.sort((left, right) => left.name.localeCompare(right.name))) {
       if (!entry.isDirectory() || entry.isSymbolicLink() || !SAFE_RUN_ID.test(entry.name)) continue;
-      const runDirectory = path13.join(runsRoot, entry.name);
-      const runStartText = await readBoundedRegularFile(path13.join(runDirectory, "run-start.json"));
+      const runDirectory = path14.join(runsRoot, entry.name);
+      const runStartText = await readBoundedRegularFile(path14.join(runDirectory, "run-start.json"));
       if (runStartText === null) continue;
       const record2 = parseRunStart(runStartText, entry.name);
       const result = await new ArtifactStore(entry.name).readResult(entry.name);

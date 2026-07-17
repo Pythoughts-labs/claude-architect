@@ -11,6 +11,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { git } from "../../src/git/git-exec.js";
+import { applyCandidateTree } from "../../src/integrate/controlled-integrator.js";
 import { getPlatformServices } from "../../src/platform/select-platform.js";
 import type {
   AttemptResult,
@@ -24,6 +25,7 @@ import {
   runPipeline,
   type PipelineDependencies,
 } from "../../src/pipeline/pipeline-runtime.js";
+import { resolveLinkedWorktreeWritableRoots } from "../../src/pipeline/git-writable-roots.js";
 import type { ReviewReport } from "../../src/pipeline/report-types.js";
 import type { RoleRunArgs, RoleRunResult } from "../../src/pipeline/role-runner.js";
 import { ArtifactStore } from "../../src/runtime/artifact-store.js";
@@ -42,8 +44,12 @@ async function temporaryDirectory(prefix: string): Promise<string> {
   return directory;
 }
 
-async function runGit(cwd: string, args: string[]): Promise<string> {
-  const result = await git(cwd, args);
+async function runGit(
+  cwd: string,
+  args: string[],
+  env?: Record<string, string>,
+): Promise<string> {
+  const result = await git(cwd, args, env === undefined ? undefined : { env });
   expect(result.exitCode, result.stderr).toBe(0);
   return result.stdout.trim();
 }
@@ -270,10 +276,17 @@ function roundReviews(
 }
 
 async function commitFix(args: RoleRunArgs, content: string): Promise<string> {
+  if (args.gitObjectAccess === undefined) {
+    throw new Error("fixer git object isolation is missing");
+  }
+  const env = {
+    GIT_OBJECT_DIRECTORY: args.gitObjectAccess.privateObjectsDir,
+    GIT_ALTERNATE_OBJECT_DIRECTORIES: args.gitObjectAccess.sharedObjectsDir,
+  };
   await writeFile(path.join(args.worktreePath, "a.txt"), content);
-  await runGit(args.worktreePath, ["add", "a.txt"]);
-  await runGit(args.worktreePath, ["commit", "-q", "-m", "fix"]);
-  return runGit(args.worktreePath, ["rev-parse", "HEAD"]);
+  await runGit(args.worktreePath, ["add", "a.txt"], env);
+  await runGit(args.worktreePath, ["commit", "-q", "-m", "fix"], env);
+  return runGit(args.worktreePath, ["rev-parse", "HEAD"], env);
 }
 
 beforeEach(async () => {
@@ -332,10 +345,12 @@ describe("runPipeline", () => {
 
   it("fixes a blocker and returns decision-ready after a clean re-review", async () => {
     const repo = await initRepo();
+    let privateObjectsDir = "";
     const roleRunner = roundReviews([
       { correctness: blocker, systems: approve },
       { correctness: approve, systems: approve },
     ], async args => {
+      privateObjectsDir = args.gitObjectAccess?.privateObjectsDir ?? "";
       const commit = await commitFix(args, "fixed\n");
       return success(fenced({
         reportVersion: "1",
@@ -358,6 +373,31 @@ describe("runPipeline", () => {
     expect(result.status).toBe("decision-ready");
     expect(result.rounds).toHaveLength(2);
     expect(result.rounds[0]?.roleLogRefs).toContain("logs/role-fixer-round1.log");
+    expect(privateObjectsDir).not.toBe("");
+    expect((await git(repo, [
+      "cat-file",
+      "-e",
+      `${result.finalCandidateCommit}^{commit}`,
+    ])).exitCode).toBe(0);
+    expect(await runGit(repo, ["show", `${result.finalCandidateCommit}:a.txt`])).toBe("fixed");
+    const promotedArtifact = result.attempt.candidate;
+    expect(promotedArtifact).not.toBeNull();
+    if (promotedArtifact === null) return;
+    const checkoutHead = await runGit(repo, ["rev-parse", "HEAD"]);
+    await writeFile(path.join(repo, "a.txt"), "base\n");
+    await runGit(repo, ["add", "a.txt"]);
+    await runGit(repo, [
+      "update-ref",
+      "HEAD",
+      promotedArtifact.baseCommitOid,
+      checkoutHead,
+    ]);
+    await expect(applyCandidateTree({
+      repoRoot: repo,
+      artifact: promotedArtifact,
+      expectedArtifactHash: promotedArtifact.manifestHash,
+    })).resolves.toMatchObject({ integration: "applied" });
+    await expect(readFile(path.join(repo, "a.txt"), "utf8")).resolves.toBe("fixed\n");
   });
 
   it("rejects a fixer report whose candidate does not match worktree HEAD", async () => {
@@ -398,9 +438,17 @@ describe("runPipeline", () => {
     const roleRunner = roundReviews([
       { correctness: blocker, systems: approve },
     ], async args => {
+      if (args.gitObjectAccess === undefined) {
+        throw new Error("fixer git object isolation is missing");
+      }
+      const env = {
+        GIT_OBJECT_DIRECTORY: args.gitObjectAccess.privateObjectsDir,
+        GIT_ALTERNATE_OBJECT_DIRECTORIES: args.gitObjectAccess.sharedObjectsDir,
+      };
       const baselineTree = await runGit(
         args.worktreePath,
         ["rev-parse", `${args.pkg.baselineCommit}^{tree}`],
+        env,
       );
       const sibling = await runGit(args.worktreePath, [
         "commit-tree",
@@ -409,13 +457,13 @@ describe("runPipeline", () => {
         args.pkg.baselineCommit,
         "-m",
         "discard reviewed candidate",
-      ]);
+      ], env);
       await runGit(args.worktreePath, [
         "update-ref",
         "HEAD",
         sibling,
         args.pkg.candidateCommit,
-      ]);
+      ], env);
       return success(fenced({
         reportVersion: "1",
         candidateCommit: sibling,
@@ -626,6 +674,27 @@ describe("runPipeline", () => {
     expect(result.verification?.pass).toBe(false);
     expect(result.verification?.evidence.failures).toContain("empty-verification");
     expect(result.gate.reasons).toContain("clean-room verification failed");
+  });
+
+  it("does not expose unimported private fixer objects after worktree cleanup", async () => {
+    const repo = await initRepo();
+    const linked = path.join(await temporaryDirectory("ca-private-objects-"), "linked");
+    await runGit(repo, ["worktree", "add", "--detach", "-q", linked, "HEAD"]);
+    const objectAccess = await resolveLinkedWorktreeWritableRoots(linked);
+    const env = {
+      GIT_OBJECT_DIRECTORY: objectAccess.privateObjectsDir,
+      GIT_ALTERNATE_OBJECT_DIRECTORIES: objectAccess.sharedObjectsDir,
+    };
+    await writeFile(path.join(linked, "private.txt"), "private only\n");
+    await runGit(linked, ["add", "private.txt"], env);
+    await runGit(linked, ["commit", "-q", "-m", "private object"], env);
+    const privateCommit = await runGit(linked, ["rev-parse", "HEAD"], env);
+
+    expect((await git(repo, ["cat-file", "-e", `${privateCommit}^{commit}`])).exitCode)
+      .not.toBe(0);
+    await runGit(repo, ["worktree", "remove", "--force", linked]);
+    expect((await git(repo, ["cat-file", "-e", `${privateCommit}^{commit}`])).exitCode)
+      .not.toBe(0);
   });
 });
 

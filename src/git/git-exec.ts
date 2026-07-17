@@ -8,6 +8,12 @@ export interface GitResult {
   truncated?: { stdout: boolean; stderr: boolean };
 }
 
+export interface GitExecOptions {
+  indexFile?: string;
+  env?: Record<string, string>;
+  stdin?: string;
+}
+
 const FILTER_KEY_PATTERN = "^filter\\..*\\.(clean|smudge|process|required)$";
 const LOCAL_DISCOVERY_PATTERN =
   "^(extensions\\.worktreeconfig|filter\\..*\\.(clean|smudge|process|required))$";
@@ -77,10 +83,17 @@ function filterNeutralizations(keys: string[]): { args?: string[]; error?: GitRe
   return { args };
 }
 
-export async function git(cwd: string, args: string[], indexFile?: string): Promise<GitResult> {
+export async function git(
+  cwd: string,
+  args: string[],
+  indexFileOrOptions?: string | GitExecOptions,
+): Promise<GitResult> {
   const platformServices = getPlatformServices();
   const executable = await platformServices.resolveExecutable({ name: "git" });
   const nullDevice = process.platform === "win32" ? "NUL" : "/dev/null";
+  const options = typeof indexFileOrOptions === "string"
+    ? { indexFile: indexFileOrOptions }
+    : indexFileOrOptions ?? {};
   const env: Record<string, string> = {
     PATH: process.env.PATH ?? "",
     GIT_CONFIG_GLOBAL: nullDevice,
@@ -97,7 +110,8 @@ export async function git(cwd: string, args: string[], indexFile?: string): Prom
     GIT_COMMITTER_EMAIL: "runtime@claude-architect.invalid",
     GIT_AUTHOR_DATE: "2000-01-01T00:00:00Z",
     GIT_COMMITTER_DATE: "2000-01-01T00:00:00Z",
-    ...(indexFile ? { GIT_INDEX_FILE: indexFile } : {}),
+    ...(options.indexFile ? { GIT_INDEX_FILE: options.indexFile } : {}),
+    ...options.env,
   };
   const hardeningArgs = [
     "-c", `core.hooksPath=${nullDevice}`,
@@ -153,6 +167,7 @@ export async function git(cwd: string, args: string[], indexFile?: string): Prom
     args: [...hardeningArgs, ...(neutralizations.args ?? []), ...args],
     cwd,
     env,
+    ...(options.stdin === undefined ? {} : { stdin: options.stdin }),
     timeoutMs: 60_000,
     maxOutputBytes: 8_000_000,
   }, {});

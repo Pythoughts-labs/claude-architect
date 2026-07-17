@@ -1,5 +1,5 @@
 import type { Stats } from "node:fs";
-import { lstat, readFile, realpath } from "node:fs/promises";
+import { lstat, mkdir, readFile, realpath } from "node:fs/promises";
 import path from "node:path";
 import { RuntimeError } from "../util/errors.js";
 
@@ -45,9 +45,16 @@ async function readStablePlainFile(filename: string, label: string): Promise<str
   return value;
 }
 
+export interface LinkedWorktreeGitAccess {
+  gitDir: string;
+  privateObjectsDir: string;
+  sharedObjectsDir: string;
+  writableRoots: string[];
+}
+
 export async function resolveLinkedWorktreeWritableRoots(
   worktreePath: string,
-): Promise<string[]> {
+): Promise<LinkedWorktreeGitAccess> {
   const dotGit = path.join(worktreePath, ".git");
   try {
     const pointer = await readStablePlainFile(dotGit, "linked worktree .git entry");
@@ -76,9 +83,23 @@ export async function resolveLinkedWorktreeWritableRoots(
       throw invalidWritableRoots("linked worktree private git directory escapes common git worktrees");
     }
 
-    const objectsDir = path.join(commonDir, "objects");
-    await requirePlainDirectory(objectsDir, "common git objects directory");
-    return [gitDir, objectsDir];
+    const sharedObjectsDir = await realpath(path.join(commonDir, "objects"));
+    await requirePlainDirectory(sharedObjectsDir, "common git objects directory");
+
+    const privateObjectsPath = path.join(gitDir, "private-objects");
+    await mkdir(privateObjectsPath, { recursive: true, mode: 0o700 });
+    await requirePlainDirectory(privateObjectsPath, "private git objects directory");
+    const privateObjectsDir = await realpath(privateObjectsPath);
+    if (!isContainedBy(gitDir, privateObjectsDir)) {
+      throw invalidWritableRoots("private git objects directory escapes linked worktree git directory");
+    }
+
+    return {
+      gitDir,
+      privateObjectsDir,
+      sharedObjectsDir,
+      writableRoots: [gitDir, privateObjectsDir],
+    };
   } catch (error) {
     if (error instanceof RuntimeError) throw error;
     throw invalidWritableRoots("linked worktree writable roots are invalid", error);

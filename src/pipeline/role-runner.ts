@@ -26,6 +26,7 @@ import {
   type RolePackage,
 } from "./role-prompts.js";
 import { resolveLinkedWorktreeWritableRoots } from "./git-writable-roots.js";
+import type { LinkedWorktreeGitAccess } from "./git-writable-roots.js";
 
 export interface RoleRunArgs {
   role: PipelineRole;
@@ -36,6 +37,7 @@ export interface RoleRunArgs {
   registry: ProducerRegistry;
   runId: string;
   env?: Record<string, string | undefined>;
+  gitObjectAccess?: LinkedWorktreeGitAccess;
   abortSignal?: AbortSignal;
 }
 
@@ -149,9 +151,11 @@ export async function runRole(args: RoleRunArgs): Promise<RoleRunResult> {
   const readOnly = READ_ONLY_ROLES.has(args.role);
   const fixer = args.role === "fixer";
   let extraWritableRoots: string[] = [];
+  let gitObjectAccess: LinkedWorktreeGitAccess | undefined;
   if (fixer) {
     try {
-      extraWritableRoots = await resolveLinkedWorktreeWritableRoots(args.worktreePath);
+      gitObjectAccess = await resolveLinkedWorktreeWritableRoots(args.worktreePath);
+      extraWritableRoots = gitObjectAccess.writableRoots;
     } catch {
       return {
         ok: false,
@@ -205,6 +209,12 @@ export async function runRole(args: RoleRunArgs): Promise<RoleRunResult> {
       let invocation = adapter.buildInvocation(roleSpec, {
         worktreePath: args.worktreePath,
         ...(extraWritableRoots.length === 0 ? {} : { extraWritableRoots }),
+        ...(gitObjectAccess === undefined
+          ? {}
+          : {
+            gitObjectDirectory: gitObjectAccess.privateObjectsDir,
+            gitAlternateObjectDirectories: gitObjectAccess.sharedObjectsDir,
+          }),
         runId: args.runId,
         tempHome,
         capabilityReport: report,
@@ -230,7 +240,15 @@ export async function runRole(args: RoleRunArgs): Promise<RoleRunResult> {
         os: args.ps.os,
         adapterAllowlist: invocation.requiredEnv,
         ...(invocation.env === undefined ? {} : { adapterValues: invocation.env }),
-        specAdditions: definedEnvironment(args.env),
+        specAdditions: {
+          ...definedEnvironment(args.env),
+          ...(gitObjectAccess === undefined
+            ? {}
+            : {
+              GIT_OBJECT_DIRECTORY: gitObjectAccess.privateObjectsDir,
+              GIT_ALTERNATE_OBJECT_DIRECTORIES: gitObjectAccess.sharedObjectsDir,
+            }),
+        },
         tempHome,
       });
       const exit = args.abortSignal?.aborted === true
