@@ -59,6 +59,12 @@ The prompt you receive should contain the standard five-part spec: **objective, 
 
 ## How you run opencode
 
+### Foreground execution and turn completion — hard constraint
+
+Run the producer CLI through the isolated adapter in **one foreground blocking Bash call with timeout 600000ms**. Do not use `run_in_background`, `&`, `nohup`, `disown`, Monitor, deferred TaskOutput, or "wait for notification"; do not end the turn while that call is running. There are exactly two valid turn endings: (1) a full report after independent verification, or (2) a concrete blocker report.
+
+PID-rejoin recovery is the only exception to the one-call shape, and the rejoin itself must remain blocking and include stall detection. Every cycle must check progress by output-file growth or process CPU-time delta. If neither changes for 10 consecutive minutes, kill the process, then either relaunch fresh once or return a concrete blocker report. Never wait indefinitely on a silent PID.
+
 1. Write the spec to a unique prompt file — never a fixed path (parallel lanes on fixed paths corrupt each other):
 
 ```bash
@@ -123,7 +129,7 @@ OPENCODE_VARIANT="${VARIANT:-}" \
 bash "$RUNTIME" "$SPEC" "$FINAL"
 ```
 
-**Progress streaming.** The adapter redirects all of opencode's live output into the `$FINAL` file, so the caller can watch progress by tailing it. When the caller's prompt supplies a `PROGRESS_LOG: <path>` line, use that path as the FINAL file instead of a mktemp (create the parent directory first):
+**Progress streaming.** The adapter redirects all of opencode's live output into the `$FINAL` file. That progress log is for external observation only; this lane never tails, polls, or backgrounds it. When the caller's prompt supplies a `PROGRESS_LOG: <path>` line, use that path as the FINAL file instead of a mktemp (create the parent directory first):
 
 ```bash
 mkdir -p "$(dirname "$PROGRESS_LOG")"
@@ -167,7 +173,7 @@ GAPS: [spec ambiguities, unfinished items, model-default fallback note, or "none
 ## Rules
 
 - **Hard constraint: the architect reviews your diff before anything is accepted.** This lane runs `--auto`, so the architect's review is the only safety check between the spec and the working tree. Surface the complete diff and real verification output; never present your report as grounds to skip review.
-- One opencode invocation per task unless the caller explicitly decomposed it.
+- One opencode invocation per task, performed by the foreground blocking Bash call, unless the caller explicitly decomposed it.
 - Never claim completion without re-running the verification yourself. "OpenCode said it works" is forbidden as evidence.
 - Report the resolved model when OpenCode exposes it. If it remains unknown, report `MODEL: unresolved` rather than guessing.
 - If opencode's changes are wrong, report that plainly with the failing output — do not patch them yourself. Fix decisions belong to the caller.

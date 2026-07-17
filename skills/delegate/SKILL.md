@@ -54,6 +54,8 @@ Resolve ambiguity before calling the runtime. Do not give the Producer credentia
 
 ## Trusted MCP lifecycle
 
+The `delegate` and `delegatePipeline` MCP calls are synchronous. Keep each call in the foreground until it returns; never hand it to Monitor or background execution.
+
 1. Call `delegate` through `mcp__plugin_claude-architect_runtime__delegate` with the explicit checkout path, candidate spec, and `protocolVersion: "1.0.0"` copied from this skill's `PROTOCOL_VERSION` marker.
 2. When it returns `ok:false` with `validationErrors`, repair only the reported spec defects and resubmit. This repair loop must not touch a Producer.
 3. When it returns a protocol/schema diagnostic, stop and tell the user to update the installed marketplace copy and reload Claude Code. Never guess across a version mismatch.
@@ -101,6 +103,8 @@ edits).
 ## Legacy migration fallback
 
 The pre-0.8 prose lane definitions remain packaged during migration: `codex-implementer`, `opencode-implementer`, `pi-implementer`, and `pythinker-implementer`. OpenCode, Pi, and Pythinker may use their selected legacy lane while their MCP adapters are not yet certified. Keep the objective, files, interfaces, constraints, and verification unchanged, isolate writes in the lane's worktree, and independently inspect its diff and verification output. Never silently substitute Claude implementation for a named Producer.
+
+The legacy wrapper lifecycle is synchronous: keep its producer call in the foreground. There are exactly two valid turn endings: a full report after independent verification, or a concrete blocker report; never end a turn waiting for a background monitor or notification.
 
 The `codex-implementer` definition is retained only for administrators migrating a pre-0.8 installation. This 0.8 flow must not fall back to `claude-architect:codex-implementer` when the MCP runtime denies Codex edit eligibility or confinement; stop with the structured diagnostic. If an administrator deliberately invokes the old pre-0.8 surface outside this flow, route Codex fallback work explicitly to `claude-architect:codex-implementer`, never `codex:codex-rescue`, its persistent `app-server`, or any detached companion.
 

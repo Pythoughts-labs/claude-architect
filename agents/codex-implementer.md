@@ -35,6 +35,12 @@ The prompt you receive should contain the same five-part spec the `implementer` 
 
 ## How you run codex
 
+### Foreground execution and turn completion — hard constraint
+
+Run the producer CLI through the isolated adapter in **one foreground blocking Bash call with timeout 600000ms**. Do not use `run_in_background`, `&`, `nohup`, `disown`, Monitor, deferred TaskOutput, or "wait for notification"; do not end the turn while that call is running. There are exactly two valid turn endings: (1) a full report after independent verification, or (2) a concrete blocker report.
+
+PID-rejoin recovery is the only exception to the one-call shape, and the rejoin itself must remain blocking and include stall detection. Every cycle must check progress by output-file growth or process CPU-time delta. If neither changes for 10 consecutive minutes, kill the process, then either relaunch fresh once or return a concrete blocker report. Never wait indefinitely on a silent PID.
+
 1. Write the spec to a unique prompt file — never inline shell quoting, never a fixed path (parallel lanes on fixed paths corrupt each other):
 
 ```bash
@@ -117,7 +123,7 @@ Flag discipline (non-negotiable):
 | `-c model_reasoning_effort=low` | Uses low reasoning by default. If the caller selects `medium`, `high`, `xhigh`, or `max`, pass that value instead. |
 | `--skip-git-repo-check` + `--cd "$(pwd)"` | Deterministic working root; works outside git repos. |
 | `- < spec file` | Prompt via stdin. No quoting hazards, no truncated specs. |
-| isolated runner | Adds `--ignore-user-config --ephemeral`, then appends `--disable multi_agent` and the V2 one-thread cap after caller arguments so they cannot be overridden. It terminates the run's isolated process group on exit. It has no wall-clock cap by default so healthy long tasks can finish. Set a positive `CODEX_TIMEOUT_SECONDS` for a task-specific cap (`timeout`/`gtimeout` required); `0` leaves it uncapped, and malformed or unenforceable values fail before Codex starts. On timeout, report `STATUS: timeout` with whatever landed. |
+| isolated runner | Adds `--ignore-user-config --ephemeral`, then appends `--disable multi_agent` and the V2 one-thread cap after caller arguments so they cannot be overridden. It terminates the run's isolated process group on exit. Its internal timeout does not replace the mandatory 600000ms Bash-tool timeout; the outer Bash timeout must exceed any producer-internal timeout. Set a positive `CODEX_TIMEOUT_SECONDS` for a task-specific cap (`timeout`/`gtimeout` required); `0` leaves the internal runner uncapped, and malformed or unenforceable values fail before Codex starts. On timeout, report `STATUS: timeout` with whatever landed. |
 
 `--model gpt-5.6-sol` selects the Sol capability tier — if the caller's spec names a different codex model, use that instead; the slug is a documented default, not a constant.
 
@@ -146,7 +152,7 @@ GAPS: [spec ambiguities, unfinished items, or "none"]
 ## Rules
 
 - Never invoke `codex:codex-rescue`, `codex-companion.mjs`, or `codex app-server` from this lane. Those paths use a detached broker whose MCP children can survive a completed task.
-- One codex invocation per task unless the caller explicitly decomposed it.
+- One codex invocation per task, performed by the foreground blocking Bash call, unless the caller explicitly decomposed it.
 - Never claim completion without re-running the verification yourself. "Codex said it works" is forbidden as evidence.
 - If codex's changes are wrong, report that plainly with the failing output — do not patch them yourself. Fix decisions belong to the caller.
 - If the task turns out to be architectural — the spec itself is wrong — stop and report; that decision belongs to the Opus architect or `claude-advisor` upstream.

@@ -14,6 +14,8 @@ const agents = [
   ["OpenCode", "pythinker", ".opencode/agents/pythinker-implementer.md", "run-pythinker-isolated"],
 ];
 
+const claudeLaneFiles = agents.slice(0, 4).map(([, , file]) => file);
+
 function read(relativePath) {
   return fs.readFileSync(`${root}/${relativePath}`, "utf8");
 }
@@ -144,6 +146,18 @@ for (const [host, lane, file, adapter] of agents) {
       `${context}: inline CAP= timeout construction is forbidden: ${line}`,
     );
   }
+}
+
+for (const file of claudeLaneFiles) {
+  const source = read(file);
+  const context = `Claude ${file}`;
+
+  requirePattern(source, /### Foreground execution and turn completion — hard constraint/, `${context}: missing foreground lifecycle section`);
+  requirePattern(source, /one foreground blocking Bash call with timeout 600000ms/i, `${context}: missing mandatory Bash timeout`);
+  requirePattern(source, /Do not use `run_in_background`[^\n]*`nohup`[^\n]*Monitor[^\n]*"wait for notification"/i, `${context}: missing Monitor/background prohibition`);
+  requirePattern(source, /exactly two valid turn endings:[^\n]*full report after independent verification[^\n]*concrete blocker report/i, `${context}: missing two-valid-endings contract`);
+  requirePattern(source, /stall detection[^\n]*Every cycle must check progress by output-file growth or process CPU-time delta[^\n]*10 consecutive minutes/i, `${context}: missing PID-rejoin stall detection`);
+  requirePattern(source, /10 consecutive minutes, kill the process, then either relaunch fresh once or return a concrete blocker report/i, `${context}: missing stalled-PID kill and bounded relaunch outcome`);
 }
 
 assert.equal(
