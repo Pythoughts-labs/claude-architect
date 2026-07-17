@@ -22575,11 +22575,78 @@ async function supervise(ps, req, opts) {
 }
 
 // src/git/git-exec.ts
+var FILTER_KEY_PATTERN = "^filter\\..*\\.(clean|smudge|process|required)$";
+var LOCAL_DISCOVERY_PATTERN = "^(extensions\\.worktreeconfig|filter\\..*\\.(clean|smudge|process|required))$";
+function toGitResult(exit) {
+  return {
+    stdout: exit.stdout,
+    stderr: exit.stderr,
+    exitCode: exit.exitCode,
+    truncated: { ...exit.truncated }
+  };
+}
+function parseLocalDiscovery(stdout) {
+  const filterKeys = [];
+  let worktreeConfigEnabled = false;
+  for (const record2 of stdout.split("\0")) {
+    if (record2.length === 0) continue;
+    const separator = record2.indexOf("\n");
+    const key = separator === -1 ? record2 : record2.slice(0, separator);
+    const value = separator === -1 ? "" : record2.slice(separator + 1).trim().toLowerCase();
+    if (key.toLowerCase() === "extensions.worktreeconfig") {
+      worktreeConfigEnabled = ["true", "yes", "on", "1"].includes(value);
+    } else {
+      filterKeys.push(key);
+    }
+  }
+  return { filterKeys, worktreeConfigEnabled };
+}
+function parseNameOnlyDiscovery(stdout) {
+  return stdout.split("\0").filter((key) => key.length > 0);
+}
+function filterNeutralizations(keys) {
+  const drivers = /* @__PURE__ */ new Set();
+  for (const key of keys) {
+    const match = /^filter\.(.*)\.(clean|smudge|process|required)$/i.exec(key);
+    if (match === null) continue;
+    const driver = match[1];
+    if (driver === void 0 || /[=.\n\0]/.test(driver)) {
+      return {
+        error: {
+          stdout: "",
+          stderr: "Refusing unsafe Git filter driver name\n",
+          exitCode: 2
+        }
+      };
+    }
+    drivers.add(driver);
+  }
+  const args = [];
+  for (const driver of drivers) {
+    args.push(
+      "-c",
+      `filter.${driver}.clean=`,
+      "-c",
+      `filter.${driver}.smudge=`,
+      "-c",
+      `filter.${driver}.process=`,
+      "-c",
+      `filter.${driver}.required=false`
+    );
+  }
+  return { args };
+}
 async function git(cwd, args, indexFile) {
   const platformServices = getPlatformServices();
   const executable = await platformServices.resolveExecutable({ name: "git" });
+  const nullDevice = process.platform === "win32" ? "NUL" : "/dev/null";
   const env = {
     PATH: process.env.PATH ?? "",
+    GIT_CONFIG_GLOBAL: nullDevice,
+    GIT_CONFIG_SYSTEM: nullDevice,
+    GIT_CONFIG_NOSYSTEM: "1",
+    GIT_ATTR_NOSYSTEM: "1",
+    GIT_OPTIONAL_LOCKS: "0",
     GIT_TERMINAL_PROMPT: "0",
     ...process.env.HOME ? { HOME: process.env.HOME } : {},
     ...process.env.XDG_CONFIG_HOME ? { XDG_CONFIG_HOME: process.env.XDG_CONFIG_HOME } : {},
@@ -22591,20 +22658,74 @@ async function git(cwd, args, indexFile) {
     GIT_COMMITTER_DATE: "2000-01-01T00:00:00Z",
     ...indexFile ? { GIT_INDEX_FILE: indexFile } : {}
   };
+  const hardeningArgs = [
+    "-c",
+    `core.hooksPath=${nullDevice}`,
+    "-c",
+    "core.fsmonitor=false",
+    "-c",
+    `core.attributesFile=${nullDevice}`,
+    "-c",
+    "core.autocrlf=false"
+  ];
+  let discoveredFilterKeys = [];
+  if (args[0] !== "init") {
+    const localDiscovery = await supervise(platformServices, {
+      executable,
+      args: [
+        ...hardeningArgs,
+        "config",
+        "--local",
+        "--includes",
+        "--null",
+        "--get-regexp",
+        LOCAL_DISCOVERY_PATTERN
+      ],
+      cwd,
+      env,
+      timeoutMs: 6e4,
+      maxOutputBytes: 8e6
+    }, {});
+    if (localDiscovery.exitCode !== 0 && !(localDiscovery.exitCode === 1 && localDiscovery.stdout === "")) {
+      return toGitResult(localDiscovery);
+    }
+    const local = parseLocalDiscovery(localDiscovery.stdout);
+    discoveredFilterKeys = local.filterKeys;
+    if (local.worktreeConfigEnabled) {
+      const worktreeDiscovery = await supervise(platformServices, {
+        executable,
+        args: [
+          ...hardeningArgs,
+          "config",
+          "--worktree",
+          "--includes",
+          "--name-only",
+          "--null",
+          "--get-regexp",
+          FILTER_KEY_PATTERN
+        ],
+        cwd,
+        env,
+        timeoutMs: 6e4,
+        maxOutputBytes: 8e6
+      }, {});
+      if (worktreeDiscovery.exitCode !== 0 && !(worktreeDiscovery.exitCode === 1 && worktreeDiscovery.stdout === "")) {
+        return toGitResult(worktreeDiscovery);
+      }
+      discoveredFilterKeys.push(...parseNameOnlyDiscovery(worktreeDiscovery.stdout));
+    }
+  }
+  const neutralizations = filterNeutralizations(discoveredFilterKeys);
+  if (neutralizations.error !== void 0) return neutralizations.error;
   const exit = await supervise(platformServices, {
     executable,
-    args: ["-c", "core.autocrlf=false", ...args],
+    args: [...hardeningArgs, ...neutralizations.args ?? [], ...args],
     cwd,
     env,
     timeoutMs: 6e4,
     maxOutputBytes: 8e6
   }, {});
-  return {
-    stdout: exit.stdout,
-    stderr: exit.stderr,
-    exitCode: exit.exitCode,
-    truncated: { ...exit.truncated }
-  };
+  return toGitResult(exit);
 }
 
 // src/platform/sandbox/backends.ts
@@ -22792,7 +22913,7 @@ var CodexAdapter = class {
         timeoutMs: VERSION_TIMEOUT_MS,
         maxOutputBytes: VERSION_OUTPUT_LIMIT
       }, {});
-      const version2 = result.spawnError === void 0 && result.exitCode === 0 ? parseVersion(result.stdout) : null;
+      const version2 = result.spawnError === void 0 && result.exitCode === 0 && result.signal === null && result.timedOut === false && result.cancelled === false ? parseVersion(result.stdout) : null;
       if (version2 === null) return unavailableReport(ctx, "probe-failed", executable);
       const writeConfinementBackend = selectCodexWriteConfinementBackend(ctx);
       const authState = this.hasAuthStore(resolveCodexStore(this.deps)) ? "authenticated" : "unauthenticated";
@@ -23441,12 +23562,14 @@ async function probeAll(ctx, producerRegistry = registry2) {
 
 // src/producers/producer-adapter.ts
 import { readFileSync } from "node:fs";
-function detectEnvironmentType() {
+function detectEnvironmentType(readProcVersion = () => readFileSync("/proc/version", "utf8")) {
   if (process.platform !== "linux") return "native";
   try {
-    return readFileSync("/proc/version", "utf8").toLowerCase().includes("microsoft") ? "wsl" : "native";
+    const version2 = readProcVersion().trim().toLowerCase();
+    if (version2.includes("microsoft")) return "wsl";
+    return /^linux version(?:\s|$)/.test(version2) ? "native" : "wsl";
   } catch {
-    return "native";
+    return "wsl";
   }
 }
 
@@ -23572,6 +23695,23 @@ function redactValues(obj) {
 }
 
 // src/mcp/doctor.ts
+var POSIX_HOME_PATH = /\/(?:Users|home)\/[^/\\\s"']+(?:\/[^/\\\s"']+)*/g;
+var WINDOWS_HOME_PATH = /[A-Za-z]:\\Users\\[^/\\\s"']+(?:\\[^/\\\s"']+)*/gi;
+function redactAbsoluteHomePaths(text) {
+  return redact(text).replace(WINDOWS_HOME_PATH, (match) => `[path]\\${match.split("\\").at(-1) ?? ""}`).replace(POSIX_HOME_PATH, (match) => `[path]/${match.split("/").at(-1) ?? ""}`);
+}
+function sanitizeDoctorValue(value) {
+  if (typeof value === "string") return redactAbsoluteHomePaths(value);
+  if (Array.isArray(value)) return value.map(sanitizeDoctorValue);
+  if (value === null || typeof value !== "object") return value;
+  return Object.fromEntries(Object.entries(value).map(([key, child]) => [
+    key,
+    sanitizeDoctorValue(child)
+  ]));
+}
+function sanitizeCapabilityReports(reports) {
+  return sanitizeDoctorValue(redactRecord(reports));
+}
 function nodeIsSupported(version2) {
   const major = Number.parseInt(version2.split(".", 1)[0] ?? "", 10);
   return Number.isInteger(major) && major >= 22;
@@ -23615,12 +23755,12 @@ async function doctor(deps = {}) {
   if (!git2.ok) issues.push("git-unavailable");
   let producers = [];
   try {
-    producers = await (deps.probeAll ?? probeAll)({
+    producers = sanitizeCapabilityReports(await (deps.probeAll ?? probeAll)({
       ps,
       os: ps.os,
       arch,
       environmentType
-    });
+    }));
     for (const producer of producers) {
       if (!producer.available && producer.reason !== null) {
         issues.push(redact(`producer:${producer.producerId}:${producer.reason}`));
@@ -24002,8 +24142,9 @@ function globMatches(pattern, candidate, caseInsensitive = false) {
   }
   return new RegExp(`${expression}$`, caseInsensitive ? "i" : void 0).test(candidate);
 }
-function isAllowed(pathname, writeAllowlist, forbiddenScope) {
-  return writeAllowlist.some((pattern) => globMatches(pattern, pathname)) && !forbiddenScope.some((pattern) => globMatches(pattern, pathname, true));
+function isAllowed(pathname, writeAllowlist, forbiddenScope, opaqueDirectory = false) {
+  const scopePaths = opaqueDirectory ? [pathname, `${pathname}/`] : [pathname];
+  return writeAllowlist.some((pattern) => scopePaths.some((candidate) => globMatches(pattern, candidate))) && !forbiddenScope.some((pattern) => scopePaths.some((candidate) => globMatches(pattern, candidate, true)));
 }
 async function recomputeManifest(args) {
   const [rawOutput, nameStatusOutput, treeOutput] = await Promise.all([
@@ -24099,10 +24240,15 @@ async function structuralVerify(args) {
   if (!artifactIdentityValid) {
     failures.add("artifact-divergence");
   }
-  if (manifest.changedPaths.some((change) => !isAllowed(change.path, args.writeAllowlist, args.forbiddenScope))) {
+  if (manifest.changedPaths.some((change) => !isAllowed(
+    change.path,
+    args.writeAllowlist,
+    args.forbiddenScope,
+    change.mode === "160000"
+  ))) {
     failures.add("out-of-scope-write");
   }
-  if (manifest.rawDiff.some((entry) => entry.oldMode === "120000" || entry.newMode === "120000")) {
+  if (manifest.rawDiff.some((entry) => [entry.oldMode, entry.newMode].some((mode) => mode === "120000" || mode === "160000"))) {
     failures.add("modified-symlink");
   }
   if (manifest.changedPaths.length === 0 || args.artifact.candidateTreeOid === baseTreeOid.trim()) {
@@ -24244,6 +24390,7 @@ import path4 from "node:path";
 var MAX_DIAGNOSTIC_LENGTH3 = 2e3;
 var WINDOWS_REMOVE_ATTEMPTS = 5;
 var WINDOWS_REMOVE_RETRY_DELAY_MS = 250;
+var SAFE_MANAGED_ID = /^[a-z0-9][a-z0-9._-]*$/;
 function delay2(milliseconds) {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
@@ -24259,6 +24406,9 @@ var WorktreeManager = class {
     this.dependencies = dependencies;
   }
   managedWorktreePath() {
+    if (!SAFE_MANAGED_ID.test(this.runId)) {
+      throw new RuntimeError("invalid worktree run id");
+    }
     const worktreesRoot = path4.resolve(resolveStateDir(), "worktrees");
     const worktreePath = path4.resolve(worktreesRoot, this.runId);
     if (worktreePath === worktreesRoot || !worktreePath.startsWith(`${worktreesRoot}${path4.sep}`)) {
@@ -24846,7 +24996,7 @@ function checkVersionCompat(skillProtocolVersion) {
 }
 
 // src/runtime/attempt-runtime.ts
-import { randomUUID as randomUUID4 } from "node:crypto";
+import { randomUUID as randomUUID2 } from "node:crypto";
 import { constants as constants3 } from "node:fs";
 import {
   access as access3,
@@ -24945,8 +25095,9 @@ function globMatches2(pattern, candidate, caseInsensitive = false) {
   }
   return new RegExp(`${expression}$`, caseInsensitive ? "i" : void 0).test(candidate);
 }
-function isAllowed2(pathname, writeAllowlist, forbiddenScope) {
-  return writeAllowlist.some((pattern) => globMatches2(pattern, pathname)) && !forbiddenScope.some((pattern) => globMatches2(pattern, pathname, true));
+function isAllowed2(pathname, writeAllowlist, forbiddenScope, opaqueDirectory = false) {
+  const scopePaths = opaqueDirectory ? [pathname, `${pathname}/`] : [pathname];
+  return writeAllowlist.some((pattern) => scopePaths.some((candidate) => globMatches2(pattern, candidate))) && !forbiddenScope.some((pattern) => scopePaths.some((candidate) => globMatches2(pattern, candidate, true)));
 }
 async function advisoryLstatScan(worktreePath, changedPaths) {
   const symlinkResults = await Promise.all(changedPaths.map(async (changedPath) => {
@@ -25051,7 +25202,20 @@ async function freezeCandidate(args) {
       args.baseCommitOid,
       candidateTreeOid
     ]));
-    if (rawDiff.some((entry) => entry.oldMode === "120000" || entry.newMode === "120000")) {
+    const frozenOutOfScope = rawDiff.filter((entry) => !isAllowed2(
+      entry.path,
+      args.writeAllowlist,
+      args.forbiddenScope,
+      entry.oldMode === "160000" || entry.newMode === "160000"
+    )).map((entry) => entry.path);
+    if (frozenOutOfScope.length > 0) {
+      return {
+        ok: false,
+        reason: "out-of-scope-write",
+        paths: frozenOutOfScope.slice(0, MAX_REJECT_PATHS)
+      };
+    }
+    if (rawDiff.some((entry) => [entry.oldMode, entry.newMode].some((mode) => mode === "120000" || mode === "160000"))) {
       return { ok: false, reason: "modified-symlink" };
     }
     const nameStatus = parseNameStatus2(await checkedGit2(args.repoRoot, [
@@ -25271,24 +25435,25 @@ function route(preferences, reports) {
       considered.push({ producerId, outcome: "authentication-required", detail: report.reason });
       return { producerId: null, reason: "authentication-required", considered };
     }
-    if (report.laneEligibility.edit === true) {
-      considered.push({ producerId, outcome: "selected", detail: null });
-      return { producerId, considered };
+    let ineligibleDetail = null;
+    if (report.available !== true) {
+      ineligibleDetail = report.reason ?? "available=false";
+    } else if (report.resolvedExecutable === null) {
+      ineligibleDetail = "resolvedExecutable=null";
+    } else if (report.laneEligibility.edit !== true) {
+      ineligibleDetail = report.reason ?? "laneEligibility.edit=false";
     }
-    considered.push({
-      producerId,
-      outcome: "ineligible",
-      detail: report.reason ?? "laneEligibility.edit=false"
-    });
+    if (ineligibleDetail !== null) {
+      considered.push({ producerId, outcome: "ineligible", detail: ineligibleDetail });
+      continue;
+    }
+    considered.push({ producerId, outcome: "selected", detail: null });
+    return { producerId, considered };
   }
   return { producerId: null, reason: "no-eligible-producer", considered };
 }
 
-// src/verify/baseline-verifier.ts
-import { randomUUID as randomUUID2 } from "node:crypto";
-
 // src/verify/project-verifier.ts
-import { randomUUID } from "node:crypto";
 import { realpath as realpath2 } from "node:fs/promises";
 import path8 from "node:path";
 
@@ -25316,8 +25481,9 @@ var WIN32_ESSENTIAL_ENV = [
   "LOCALAPPDATA",
   "Path"
 ];
-var SENSITIVE_ENV_NAME = /^(?:[A-Za-z][A-Za-z0-9]*_)*(?:TOKEN|SECRET|PASSWORD|KEY|CREDENTIAL)(?:_[A-Za-z0-9]+)*$/i;
+var SENSITIVE_ENV_NAME = /^(?:[A-Za-z][A-Za-z0-9]*_)*(?:TOKEN|SECRET|PASSWORD|KEY|CREDENTIAL|PAT|COOKIE|DSN)(?:_[A-Za-z0-9]+)*$/i;
 var COMMON_SENSITIVE_ENV_NAMES = /* @__PURE__ */ new Set([
+  "DATABASE_URL",
   "GOOGLE_APPLICATION_CREDENTIALS",
   "MYSQL_PWD",
   "PGPASSWORD",
@@ -25659,7 +25825,7 @@ async function executeCommand(args) {
   }
 }
 async function scanCommandMutations(args) {
-  const [status, currentHead] = await Promise.all([
+  const [status, currentHead, indexEntries] = await Promise.all([
     checkedGit3(args.worktreePath, [
       "status",
       "--porcelain=v2",
@@ -25668,9 +25834,12 @@ async function scanCommandMutations(args) {
       "--ignored=matching",
       "--ignore-submodules=none"
     ]),
-    checkedGit3(args.worktreePath, ["rev-parse", "--verify", "HEAD"])
+    checkedGit3(args.worktreePath, ["rev-parse", "--verify", "HEAD"]),
+    checkedGit3(args.worktreePath, ["ls-files", "-v", "-z"])
   ]);
-  const records = status.split("\0").filter((record2) => record2.length > 0 && !(args.dependencyLink === "inherited" && /^[?!] node_modules\/?$/.test(record2)));
+  const statusRecords = status.split("\0").filter((record2) => record2.length > 0 && !(args.dependencyLink === "inherited" && /^[?!] node_modules\/?$/.test(record2)));
+  const hiddenIndexRecords = indexEntries.split("\0").filter((record2) => /^(?:S|[a-z]) /.test(record2)).map((record2) => `index ${record2}`);
+  const records = [...statusRecords, ...hiddenIndexRecords];
   const disallowedRecords = args.allowedMutations === "ignored-paths" ? records.filter((record2) => !record2.startsWith("! ")) : records;
   const headChanged = currentHead.trim() !== args.expectedHeadCommitOid;
   return { mutated: disallowedRecords.length > 0 || headChanged, records: disallowedRecords, headChanged };
@@ -25694,8 +25863,13 @@ async function projectVerify(args) {
   const ps = args.ps ?? getPlatformServices();
   const arch = args.arch ?? process.arch;
   const now = args.now ?? Date.now;
-  const verificationId = args.verificationId?.() ?? randomUUID();
-  const manager = new WorktreeManager(args.repoRoot, `verify-${verificationId}`, ps);
+  const anchorPrefix = "refs/claude-architect/candidates/";
+  const artifactRunId = args.artifact.anchorRef.startsWith(anchorPrefix) ? args.artifact.anchorRef.slice(anchorPrefix.length) : args.artifact.candidateCommitOid;
+  const manager = new WorktreeManager(
+    args.repoRoot,
+    `verify-${args.runId ?? artifactRunId}`,
+    ps
+  );
   const materialized = await manager.create(args.artifact.candidateCommitOid);
   let primaryError;
   try {
@@ -25801,7 +25975,7 @@ async function verifyBaseline(args) {
   const now = args.now ?? Date.now;
   const manager = new WorktreeManager(
     args.repoRoot,
-    `baseline-${args.verificationId?.() ?? randomUUID2()}`,
+    `baseline-${args.runId ?? args.verificationId?.() ?? args.headCommitOid}`,
     ps
   );
   const materialized = await manager.create(args.headCommitOid);
@@ -25862,7 +26036,7 @@ async function verifyBaseline(args) {
 }
 
 // src/runtime/artifact-store.ts
-import { createHash as createHash6, randomUUID as randomUUID3 } from "node:crypto";
+import { createHash as createHash6, randomUUID } from "node:crypto";
 import { constants as constants2 } from "node:fs";
 import {
   link,
@@ -26442,7 +26616,7 @@ var ArtifactStore = class {
     const directory = await this.ensureArchiveDirectory(relativePath);
     const directoryIdentity = await ensurePlainDirectory(directory);
     const destination = path9.join(directory, path9.basename(relativePath));
-    const temporaryPath = path9.join(directory, `.${path9.basename(destination)}.${randomUUID3()}.tmp`);
+    const temporaryPath = path9.join(directory, `.${path9.basename(destination)}.${randomUUID()}.tmp`);
     let handle;
     let temporaryCreated = false;
     try {
@@ -26493,7 +26667,7 @@ var ArtifactStore = class {
     if (directory === null) throw new RuntimeError("run archive does not exist");
     const directoryIdentity = await ensurePlainDirectory(directory);
     const destination = path9.join(directory, relativePath);
-    const temporaryPath = path9.join(directory, `.${relativePath}.${randomUUID3()}.tmp`);
+    const temporaryPath = path9.join(directory, `.${relativePath}.${randomUUID()}.tmp`);
     const serialized = `${serializeJson(value, 2)}
 `;
     let handle;
@@ -26528,7 +26702,10 @@ var ArtifactStore = class {
   }
   async writePipelineArtifact(name, value) {
     validateComponent(name, "log name");
-    await this.writeJson(path9.posix.join("pipeline", `${name}.json`), value);
+    await this.writeJson(
+      path9.posix.join("pipeline", `${name}.json`),
+      redactRecord(value)
+    );
   }
   async readPipelineArtifact(runId, name) {
     validateComponent(runId, "run id");
@@ -26870,7 +27047,7 @@ var ArtifactStore = class {
     const removeEntry = async (entry, reason) => {
       if (attempted.has(entry.runId)) return;
       attempted.add(entry.runId);
-      const quarantineName = `.prune-${entry.runId}-${randomUUID3()}`;
+      const quarantineName = `.prune-${entry.runId}-${randomUUID()}`;
       const quarantinePath = path9.join(this.runsRoot, quarantineName);
       let prepared = null;
       let transaction = null;
@@ -27127,7 +27304,7 @@ async function writeRunStart(target, record2, create) {
   }
   const temporaryPath = path10.join(
     target.canonicalDirectory,
-    `.run-start.${randomUUID4()}.tmp`
+    `.run-start.${randomUUID2()}.tmp`
   );
   let created = false;
   let handle;
@@ -27297,7 +27474,7 @@ async function runAttempt(checkoutPath, spec, deps) {
   const producerRegistry = deps.producerRegistry ?? registry2;
   const now = deps.now ?? Date.now;
   const startedAtMs = now();
-  const runId = (deps.runId ?? randomUUID4)();
+  const runId = (deps.runId ?? randomUUID2)();
   const store = new ArtifactStore(runId);
   const repositoryInstructions = deps.repositoryInstructions ?? [];
   const packagedVerifier = deps.packagedVerifier ?? { version: "pending", content: "" };
@@ -27330,6 +27507,7 @@ async function runAttempt(checkoutPath, spec, deps) {
           headCommitOid: preconditions.baseCommitOid,
           commands: spec.verification,
           ps,
+          runId,
           ...deps.abortSignal === void 0 ? {} : { abortSignal: deps.abortSignal }
         });
       } catch (error2) {
@@ -29632,10 +29810,16 @@ async function recoverRun(record2, root, ps, isProcessAlive, requestCooperativeT
     "recovery",
     "startup recovery reclaimed unfinished run\n"
   );
-  const worktreePath = path13.join(root, "worktrees", record2.runId);
-  const worktreeIdentity = await plainDirectoryIdentity(worktreePath);
-  if (worktreeIdentity !== null) {
-    await new WorktreeManager(commonDir, record2.runId, ps).remove(worktreePath);
+  for (const managedId of [
+    record2.runId,
+    `baseline-${record2.runId}`,
+    `verify-${record2.runId}`
+  ]) {
+    const worktreePath = path13.join(root, "worktrees", managedId);
+    const worktreeIdentity = await plainDirectoryIdentity(worktreePath);
+    if (worktreeIdentity !== null) {
+      await new WorktreeManager(commonDir, managedId, ps).remove(worktreePath);
+    }
   }
   await removeStaleCandidateAnchor(commonDir, record2.runId);
   await store.writeResult({
