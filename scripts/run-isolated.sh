@@ -32,7 +32,7 @@ if [[ "$TIMEOUT_SECONDS" == 0 ]]; then
 elif [[ "$TIMEOUT_SECONDS" =~ ^[1-9][0-9]*$ ]]; then
   TIMEOUT_BIN=$(command -v gtimeout || command -v timeout || true)
   if [[ -n "$TIMEOUT_BIN" ]]; then
-    TIMEOUT_PREFIX=("$TIMEOUT_BIN" "$TIMEOUT_SECONDS")
+    TIMEOUT_PREFIX=("$TIMEOUT_BIN" --kill-after=2s "$TIMEOUT_SECONDS")
   else
     printf 'RUN_TIMEOUT_SECONDS=%s requires timeout or gtimeout\n' "$TIMEOUT_SECONDS" >&2
     exit 69
@@ -103,5 +103,8 @@ set -e
 
 terminate_process_group "$DELEGATED_PID"
 trap - EXIT INT TERM HUP
+if [[ "$STATUS" -eq 137 ]]; then
+  STATUS=124
+fi
 record_run || true
 exit "$STATUS"

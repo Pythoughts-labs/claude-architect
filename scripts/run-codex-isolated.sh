@@ -2,6 +2,63 @@
 
 set -euo pipefail
 
+config_key_is_unsafe() {
+  local key=${1%%=*}
+
+  while [[ "$key" == [[:space:]\"\']* ]]; do key=${key:1}; done
+  while [[ "$key" == *[[:space:]\"\'] ]]; do key=${key:0:${#key}-1}; done
+
+  case "$key" in
+    sandbox*|features*|approval*|ask_for_approval*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+reject_unsafe_args() {
+  local arg value
+  local -a argv=("$@")
+  local i
+
+  for ((i = 0; i < ${#argv[@]}; i++)); do
+    arg=${argv[$i]}
+    case "$arg" in
+      --sandbox|--sandbox=*|-s|-s=*|-s?*| \
+      --add-dir|--add-dir=*|--disable-sandbox|--disable-sandbox=*| \
+      --cd|--cd=*|-C|-C=*|-C?*| \
+      --ask-for-approval|--ask-for-approval=*|-a|-a=*|-a?*| \
+      --dangerously*|--full-auto|--full-auto=*|--yolo|--yolo=*| \
+      --enable|--enable=*)
+        printf 'ERROR: unsafe Codex option rejected: %s\n' "${arg%%=*}" >&2
+        return 65
+        ;;
+      -c|--config)
+        if ((i + 1 < ${#argv[@]})) && config_key_is_unsafe "${argv[$((i + 1))]}"; then
+          printf 'ERROR: unsafe Codex config key rejected\n' >&2
+          return 65
+        fi
+        i=$((i + 1))
+        ;;
+      -c=*|-c?*)
+        value=${arg#-c}
+        value=${value#=}
+        if config_key_is_unsafe "$value"; then
+          printf 'ERROR: unsafe Codex config key rejected\n' >&2
+          return 65
+        fi
+        ;;
+      --config=*)
+        value=${arg#--config=}
+        if config_key_is_unsafe "$value"; then
+          printf 'ERROR: unsafe Codex config key rejected\n' >&2
+          return 65
+        fi
+        ;;
+    esac
+  done
+}
+
+reject_unsafe_args "$@" || exit $?
+
 TIMEOUT_SECONDS=${CODEX_TIMEOUT_SECONDS:-600}
 TIMEOUT_IS_DEFAULT=$([[ -z "${CODEX_TIMEOUT_SECONDS:-}" ]] && echo 1 || echo 0)
 

@@ -1208,23 +1208,29 @@ describe("ArtifactStore", () => {
     const anchorRef = `refs/claude-architect/candidates/${runId}`;
     const backupRef = `refs/claude-architect/prune-backups/${runId}`;
     await git(repoRoot, ["update-ref", anchorRef, candidateCommitOid]);
-    await git(repoRoot, ["config", "core.hooksPath", ".git/hooks"]);
-    const hookPath = join(repoRoot, ".git", "hooks", "reference-transaction");
-    await writeFile(hookPath, `#!/bin/sh
-if [ "$1" = "prepared" ]; then
-  while read old new ref; do
-    case "$ref" in
-      refs/claude-architect/prune-backups/*)
-        case "$new" in
-          000000*) exit 1 ;;
-        esac
-        ;;
-    esac
-  done
-fi
-exit 0
+    // Runtime git() disables repository hooks (core.hooksPath=/dev/null), so a
+    // reference-transaction hook can no longer inject the deletion failure.
+    // Shim git on PATH to fail only the prune-backup deletion, passing every
+    // other invocation (including hardening discovery) through to real git.
+    const realGit = (await promisify(execFile)("/usr/bin/env", ["which", "git"]))
+      .stdout.trim().split("\n")[0]!;
+    const shimDir = join(repoRoot, "shim-bin");
+    await mkdir(shimDir);
+    await writeFile(join(shimDir, "git"), `#!/bin/sh
+for arg in "$@"; do
+  case "$arg" in
+    refs/claude-architect/prune-backups/*)
+      for prev in "$@"; do
+        [ "$prev" = "-d" ] && { echo "backup deletion blocked" >&2; exit 1; }
+      done
+      ;;
+  esac
+done
+exec ${JSON.stringify(realGit)} "$@"
 `);
-    await chmod(hookPath, 0o700);
+    await chmod(join(shimDir, "git"), 0o755);
+    const previousPath = process.env.PATH;
+    process.env.PATH = `${shimDir}:${previousPath ?? ""}`;
 
     const store = new ArtifactStore(runId);
     const result = sampleResult(runId);
@@ -1248,10 +1254,16 @@ exit 0
     const oldTime = new Date(Date.now() - 60_000);
     await utimes(store.runDirectory, oldTime, oldTime);
 
-    const pruned = await store.prune({
-      maxAgeMs: 1_000,
-      maxBytes: Number.MAX_SAFE_INTEGER,
-    });
+    let pruned;
+    try {
+      pruned = await store.prune({
+        maxAgeMs: 1_000,
+        maxBytes: Number.MAX_SAFE_INTEGER,
+      });
+    } finally {
+      if (previousPath === undefined) delete process.env.PATH;
+      else process.env.PATH = previousPath;
+    }
 
     expect(pruned.removed).toContain(runId);
     expect(pruned.retained.some(entry => entry.runId === runId)).toBe(false);
