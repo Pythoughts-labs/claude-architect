@@ -6,6 +6,46 @@ All notable changes to Claude Architect are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.17.0] - 2026-07-17
+
+Trust-hardening release from a six-agent dogfood scouting pass (Codex GPT-5.6
+Sol) that surfaced a large finding set across the runtime, pipeline, verifier,
+and protocol layers. Every fix in this release was itself driven through the
+`delegate`/`delegatePipeline` MCP lifecycle and independently verified.
+
+### Fixed
+
+- Candidate promotion: when a `delegatePipeline` fix round changes bytes, the
+  runtime now promotes the fixer's final tree into a canonical single-parent
+  candidate (re-frozen artifact, re-pointed anchor, re-archived result and
+  manifest via a bounded `ArtifactStore` promotion that fails closed after a
+  decision). Previously review, decision, and integration operated on the
+  pre-fix tree and silently dropped the reviewed fix.
+- Linked-worktree writable-root pointers are validated (plain-file `.git`,
+  realpath'd containment under the common gitdir's `worktrees/`, plain objects
+  directory); a tampered or malformed pointer makes the fixer fail closed with
+  `sandbox-violation` instead of crashing or running unconfined.
+- Dependency inheritance compares the full recognized lockfile set (not just the
+  first) and refuses to inherit on any divergence; the recorded `dependencyLink`
+  is surfaced in acceptance evidence.
+- Baseline verification threads cancellation (a cancelled baseline yields
+  `cancelled`, not `environment-defect`), detects command-induced worktree
+  mutations, and reserves `environment-defect` for a completed baseline report
+  with a failed command — operational errors now propagate as runtime errors.
+- The cross-process checkout lock is acquired before repository preconditions and
+  baseline verification (released on every path), and a verification command
+  `cwd` that is absolute or escapes the checkout is rejected as
+  `invalid-specification` up front.
+- The review pipeline requires a clean final review before decision-ready: a fix
+  applied on the final round without re-review now requires a human decision.
+
+### Known limitations
+
+- Fixer private object-store isolation and read-only dependency mounting (full
+  prevention of writes to the shared object DB / primary `node_modules`) are
+  deferred as a dedicated write-confinement change; lockfile-divergence skipping
+  reduces the dependency exposure in the interim.
+
 ## [0.16.0] - 2026-07-16
 
 Hardening release from a full-day dogfooding session that surfaced eleven

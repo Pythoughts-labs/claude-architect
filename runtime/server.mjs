@@ -3226,8 +3226,8 @@ var require_utils = __commonJS({
       }
       return ind;
     }
-    function removeDotSegments(path13) {
-      let input = path13;
+    function removeDotSegments(path14) {
+      let input = path14;
       const output = [];
       let nextSlash = -1;
       let len = 0;
@@ -3479,8 +3479,8 @@ var require_schemes = __commonJS({
         wsComponent.secure = void 0;
       }
       if (wsComponent.resourceName) {
-        const [path13, query] = wsComponent.resourceName.split("?");
-        wsComponent.path = path13 && path13 !== "/" ? path13 : void 0;
+        const [path14, query] = wsComponent.resourceName.split("?");
+        wsComponent.path = path14 && path14 !== "/" ? path14 : void 0;
         wsComponent.query = query;
         wsComponent.resourceName = void 0;
       }
@@ -8191,8 +8191,8 @@ function getErrorMap() {
 
 // node_modules/zod/v3/helpers/parseUtil.js
 var makeIssue = (params) => {
-  const { data, path: path13, errorMaps, issueData } = params;
-  const fullPath = [...path13, ...issueData.path || []];
+  const { data, path: path14, errorMaps, issueData } = params;
+  const fullPath = [...path14, ...issueData.path || []];
   const fullIssue = {
     ...issueData,
     path: fullPath
@@ -8308,11 +8308,11 @@ var errorUtil;
 
 // node_modules/zod/v3/types.js
 var ParseInputLazyPath = class {
-  constructor(parent, value, path13, key) {
+  constructor(parent, value, path14, key) {
     this._cachedPath = [];
     this.parent = parent;
     this.data = value;
-    this._path = path13;
+    this._path = path14;
     this._key = key;
   }
   get path() {
@@ -11950,10 +11950,10 @@ function assignProp(target, prop, value) {
     configurable: true
   });
 }
-function getElementAtPath(obj, path13) {
-  if (!path13)
+function getElementAtPath(obj, path14) {
+  if (!path14)
     return obj;
-  return path13.reduce((acc, key) => acc?.[key], obj);
+  return path14.reduce((acc, key) => acc?.[key], obj);
 }
 function promiseAllObject(promisesObj) {
   const keys = Object.keys(promisesObj);
@@ -12273,11 +12273,11 @@ function aborted(x, startIndex = 0) {
   }
   return false;
 }
-function prefixIssues(path13, issues) {
+function prefixIssues(path14, issues) {
   return issues.map((iss) => {
     var _a;
     (_a = iss).path ?? (_a.path = []);
-    iss.path.unshift(path13);
+    iss.path.unshift(path14);
     return iss;
   });
 }
@@ -21930,7 +21930,7 @@ var StdioServerTransport = class {
 var PROTOCOL_VERSION = "1.0.0";
 var DELEGATION_SPEC_VERSION = "1";
 var ATTEMPT_RESULT_VERSION = "1";
-var RUNTIME_VERSION = "0.16.0";
+var RUNTIME_VERSION = "0.17.0";
 
 // src/platform/posix-platform-services.ts
 import { spawn, execFile } from "node:child_process";
@@ -23732,7 +23732,7 @@ function gitChangedFiles(checkoutPath, deps = {}) {
 }
 
 // src/mcp/tools.ts
-import { createHash as createHash8 } from "node:crypto";
+import { createHash as createHash7 } from "node:crypto";
 
 // src/git/repo-preconditions.ts
 import { access, lstat, opendir, realpath } from "node:fs/promises";
@@ -24032,9 +24032,9 @@ async function recomputeManifest(args) {
   const rawDiff = parseRawDiff(rawOutput);
   const rawByPath = new Map(rawDiff.map((entry) => [entry.path, entry]));
   const treeByPath = parseTree(treeOutput);
-  const changedPaths = sortChangedPaths(parseNameStatus(nameStatusOutput).map(({ path: path13, status }) => {
-    const rawEntry = rawByPath.get(path13);
-    const treeEntry = treeByPath.get(path13);
+  const changedPaths = sortChangedPaths(parseNameStatus(nameStatusOutput).map(({ path: path14, status }) => {
+    const rawEntry = rawByPath.get(path14);
+    const treeEntry = treeByPath.get(path14);
     if (treeEntry === void 0 && status !== "D") {
       throw new RuntimeError("candidate tree is missing a changed path");
     }
@@ -24042,7 +24042,7 @@ async function recomputeManifest(args) {
       throw new RuntimeError("git diff-tree outputs disagree");
     }
     return {
-      path: path13,
+      path: path14,
       changeType: changeType(status),
       mode: treeEntry?.mode ?? rawEntry.oldMode,
       contentHash: treeEntry?.oid ?? null
@@ -24237,9 +24237,6 @@ async function applyCandidateTree(args) {
     }
   }
 }
-
-// src/pipeline/pipeline-runtime.ts
-import { createHash as createHash7 } from "node:crypto";
 
 // src/git/worktree-manager.ts
 import { mkdir } from "node:fs/promises";
@@ -25120,14 +25117,14 @@ function buildReadOnlySeatbeltPolicy(args) {
     allowNetwork: true
   };
 }
-function sbPath(path13) {
-  for (const character of path13) {
+function sbPath(path14) {
+  for (const character of path14) {
     const codePoint = character.codePointAt(0);
     if (codePoint !== void 0 && (codePoint < 32 || codePoint === 127)) {
-      throw new Error(`seatbelt: control character in path: ${JSON.stringify(path13)}`);
+      throw new Error(`seatbelt: control character in path: ${JSON.stringify(path14)}`);
     }
   }
-  return `"${path13.replace(/\\/gu, "\\\\").replace(/"/gu, '\\"')}"`;
+  return `"${path14.replace(/\\/gu, "\\\\").replace(/"/gu, '\\"')}"`;
 }
 function openCodeWritablePaths(invocation, policy) {
   if (policy.tempHome !== null || !invocation.requiredEnv.includes("OPENCODE_CONFIG_DIR")) return [];
@@ -25165,18 +25162,18 @@ function buildProfile(policy, additionalWritable) {
     "/private/tmp",
     "/dev",
     ...additionalWritable
-  ].filter((path13) => typeof path13 === "string" && path13.length > 0).flatMap((path13) => {
+  ].filter((path14) => typeof path14 === "string" && path14.length > 0).flatMap((path14) => {
     try {
-      return [path13, realpathSync(path13)];
+      return [path14, realpathSync(path14)];
     } catch {
-      return [path13];
+      return [path14];
     }
   }))];
   const lines = [
     "(version 1)",
     "(allow default)",
     "(deny file-write*)",
-    ...writable.map((path13) => `(allow file-write* (subpath ${sbPath(path13)}))`),
+    ...writable.map((path14) => `(allow file-write* (subpath ${sbPath(path14)}))`),
     '(allow file-write* (literal "/dev/null") (literal "/dev/tty"))'
   ];
   if (!policy.allowNetwork) lines.push("(deny network*)");
@@ -25447,20 +25444,24 @@ async function exists2(candidate) {
 async function linkPrimaryDependencies(primaryRepo, worktreePath) {
   const primaryModules = path7.join(primaryRepo, "node_modules");
   if (!await exists2(primaryModules)) return "none";
-  let selected;
-  for (const lockfile of LOCKFILES) {
-    if (await exists2(path7.join(primaryRepo, lockfile))) {
-      selected = lockfile;
-      break;
-    }
+  const [primaryLockfiles, worktreeLockfiles] = await Promise.all([
+    Promise.all(LOCKFILES.map((lockfile) => exists2(path7.join(primaryRepo, lockfile)))),
+    Promise.all(LOCKFILES.map((lockfile) => exists2(path7.join(worktreePath, lockfile))))
+  ]);
+  if (!primaryLockfiles.some(Boolean)) return "none";
+  if (primaryLockfiles.some((present, index) => present !== worktreeLockfiles[index])) {
+    return "skipped-lockfile-mismatch";
   }
-  if (selected === void 0) return "none";
   try {
-    const [primaryLock, worktreeLock] = await Promise.all([
-      readFile(path7.join(primaryRepo, selected)),
-      readFile(path7.join(worktreePath, selected))
-    ]);
-    if (!primaryLock.equals(worktreeLock)) return "skipped-lockfile-mismatch";
+    const comparisons = await Promise.all(LOCKFILES.map(async (lockfile, index) => {
+      if (!primaryLockfiles[index]) return true;
+      const [primaryLock, worktreeLock] = await Promise.all([
+        readFile(path7.join(primaryRepo, lockfile)),
+        readFile(path7.join(worktreePath, lockfile))
+      ]);
+      return primaryLock.equals(worktreeLock);
+    }));
+    if (comparisons.some((matches) => !matches)) return "skipped-lockfile-mismatch";
   } catch {
     return "skipped-lockfile-mismatch";
   }
@@ -25581,7 +25582,7 @@ async function executeCommand(args) {
       env: environment,
       timeoutMs: command.timeoutMs,
       maxOutputBytes: MAX_COMMAND_OUTPUT_BYTES
-    }, {});
+    }, args.abortSignal === void 0 ? {} : { onCancel: args.abortSignal });
   } catch (error2) {
     failureText = errorMessage(error2);
   }
@@ -25624,6 +25625,23 @@ async function executeCommand(args) {
   } finally {
     registration.dispose();
   }
+}
+async function scanCommandMutations(args) {
+  const [status, currentHead] = await Promise.all([
+    checkedGit3(args.worktreePath, [
+      "status",
+      "--porcelain=v2",
+      "-z",
+      "--untracked-files=all",
+      "--ignored=matching",
+      "--ignore-submodules=none"
+    ]),
+    checkedGit3(args.worktreePath, ["rev-parse", "--verify", "HEAD"])
+  ]);
+  const records = status.split("\0").filter((record2) => record2.length > 0 && !(args.dependencyLink === "inherited" && /^[?!] node_modules$/.test(record2)));
+  const disallowedRecords = args.allowedMutations === "ignored-paths" ? records.filter((record2) => !record2.startsWith("! ")) : records;
+  const headChanged = currentHead.trim() !== args.expectedHeadCommitOid;
+  return { mutated: disallowedRecords.length > 0 || headChanged, records: disallowedRecords, headChanged };
 }
 function skippedEvidence(command, reason) {
   const registration = registerSensitiveEnvironment(command.environment ?? {});
@@ -25697,20 +25715,13 @@ async function projectVerify(args) {
       commandEvidence.push(executed.evidence);
       outputLogs.push(...executed.outputLogs);
       if (executed.failed) failures.push(`command-failed:${executed.outcome.id}`);
-      const [status, currentHead] = await Promise.all([
-        checkedGit3(materialized.path, [
-          "status",
-          "--porcelain=v2",
-          "-z",
-          "--untracked-files=all",
-          "--ignored=matching",
-          "--ignore-submodules=none"
-        ]),
-        checkedGit3(materialized.path, ["rev-parse", "--verify", "HEAD"])
-      ]);
-      const records = status.split("\0").filter((record2) => record2.length > 0 && !(dependencyLink === "inherited" && /^[?!] node_modules$/.test(record2)));
-      const disallowedRecords = command.allowedMutations === "ignored-paths" ? records.filter((record2) => !record2.startsWith("! ")) : records;
-      if (disallowedRecords.length > 0 || currentHead.trim() !== args.artifact.candidateCommitOid) {
+      const mutation = await scanCommandMutations({
+        worktreePath: materialized.path,
+        expectedHeadCommitOid: args.artifact.candidateCommitOid,
+        dependencyLink,
+        ...command.allowedMutations === void 0 ? {} : { allowedMutations: command.allowedMutations }
+      });
+      if (mutation.mutated) {
         mutated = true;
         failures.push("verification-mutated");
         break;
@@ -25740,7 +25751,12 @@ async function projectVerify(args) {
 }
 
 // src/verify/baseline-verifier.ts
+function throwIfAborted(signal) {
+  if (!signal?.aborted) return;
+  throw new DOMException("Baseline verification was cancelled", "AbortError");
+}
 async function verifyBaseline(args) {
+  throwIfAborted(args.abortSignal);
   const ps = args.ps ?? getPlatformServices();
   const arch = args.arch ?? process.arch;
   const now = args.now ?? Date.now;
@@ -25755,6 +25771,7 @@ async function verifyBaseline(args) {
     const dependencyLink = await linkPrimaryDependencies(args.repoRoot, materialized.path);
     const commands = [];
     for (let index = 0; index < args.commands.length; index += 1) {
+      throwIfAborted(args.abortSignal);
       const command = args.commands[index];
       if (!appliesToPlatform(command, ps.os, arch).applies) {
         commands.push({ id: command.id, exitCode: null, ok: true });
@@ -25765,12 +25782,28 @@ async function verifyBaseline(args) {
         commands.push({ id: command.id, exitCode: null, ok: false });
         continue;
       }
-      const executed = await executeCommand({ command, index, cwd, ps, now });
+      const executed = await executeCommand({
+        command,
+        index,
+        cwd,
+        ps,
+        now,
+        ...args.abortSignal === void 0 ? {} : { abortSignal: args.abortSignal }
+      });
+      throwIfAborted(args.abortSignal);
+      const mutation = await scanCommandMutations({
+        worktreePath: materialized.path,
+        expectedHeadCommitOid: args.headCommitOid,
+        dependencyLink,
+        ...command.allowedMutations === void 0 ? {} : { allowedMutations: command.allowedMutations }
+      });
       commands.push({
         id: executed.outcome.id,
         exitCode: executed.outcome.exitCode,
-        ok: !executed.failed
+        ok: !executed.failed && !mutation.mutated,
+        ...mutation.mutated ? { mutation: { records: mutation.records, headChanged: mutation.headChanged } } : {}
       });
+      throwIfAborted(args.abortSignal);
     }
     return { baselineCommitOid: args.headCommitOid, commands, dependencyLink };
   } catch (error2) {
@@ -26457,6 +26490,22 @@ var ArtifactStore = class {
       throw new RuntimeError("run manifest id does not match artifact store");
     }
     await this.writeJson("manifest.json", sanitizeRunManifest(manifest));
+  }
+  async promoteTerminalArtifacts(args) {
+    if (args.result.runId !== this.runId) {
+      throw new RuntimeError("attempt result run id does not match artifact store");
+    }
+    if (args.manifest.runId !== this.runId) {
+      throw new RuntimeError("run manifest id does not match artifact store");
+    }
+    if (await this.readDecision(this.runId) !== null) {
+      throw new RuntimeError("terminal artifacts cannot be promoted after a decision");
+    }
+    const result = sanitizeAttemptResult(args.result);
+    verifyAttemptResult(result, this.runId);
+    const manifest = sanitizeRunManifest(args.manifest);
+    await this.replaceJson("result.json", result);
+    await this.replaceJson("manifest.json", manifest);
   }
   async readResult(runId) {
     validateComponent(runId, "run id");
@@ -27173,146 +27222,6 @@ async function runAttempt(checkoutPath, spec, deps) {
   const repositoryInstructions = deps.repositoryInstructions ?? [];
   const packagedVerifier = deps.packagedVerifier ?? { version: "pending", content: "" };
   const canonical = await ps.canonicalizePath(checkoutPath);
-  const preconditions = await checkPreconditions(canonical.canonical, {
-    writeAllowlist: spec.writeAllowlist
-  });
-  if (!preconditions.ok) {
-    const detailSuffix = preconditions.detail === void 0 ? "" : `: ${preconditions.detail.join(", ")}`;
-    throw new RuntimeError(
-      `repository precondition failed (${preconditions.reason})${detailSuffix}`,
-      { reason: preconditions.reason, detail: preconditions.detail ?? [] }
-    );
-  }
-  const executionMode = spec.executionMode;
-  let baselineEvidence = { baseline: "skipped \u2014 read-only spec" };
-  if (executionMode === "edit") {
-    reportPhase(deps, "verifying baseline");
-    let baseline;
-    try {
-      baseline = await (deps.baselineVerifier ?? verifyBaseline)({
-        repoRoot: canonical.canonical,
-        headCommitOid: preconditions.baseCommitOid,
-        commands: spec.verification,
-        ps
-      });
-    } catch (error2) {
-      const message = error2 instanceof Error ? error2.message : String(error2);
-      return archiveTerminal({
-        store,
-        spec,
-        runId,
-        startedAtMs,
-        now,
-        repoRoot: canonical.canonical,
-        baseCommitOid: preconditions.baseCommitOid,
-        signals: { "environment-defect": true },
-        report: null,
-        profile: null,
-        invocation: null,
-        environment: [],
-        temporaryHomeApplied: false,
-        producerSummary: null,
-        candidate: null,
-        commandOutcomes: [],
-        unresolvedIssues: ["baseline-verifier-error"],
-        evidence: { baseline: `error: ${redact(message)}` },
-        producerLog: producerLog(null),
-        repositoryInstructions,
-        packagedVerifier
-      });
-    }
-    baselineEvidence = { baseline };
-    const baselineFailed = baseline.commands.some((command) => !command.ok);
-    if (baselineFailed && spec.expectBaselineFailure !== true) {
-      return archiveTerminal({
-        store,
-        spec,
-        runId,
-        startedAtMs,
-        now,
-        repoRoot: canonical.canonical,
-        baseCommitOid: preconditions.baseCommitOid,
-        signals: { "environment-defect": true },
-        report: null,
-        profile: null,
-        invocation: null,
-        environment: [],
-        temporaryHomeApplied: false,
-        producerSummary: null,
-        candidate: null,
-        commandOutcomes: [],
-        unresolvedIssues: ["baseline-verification-failed"],
-        evidence: baselineEvidence,
-        producerLog: producerLog(null),
-        repositoryInstructions,
-        packagedVerifier
-      });
-    }
-  }
-  reportPhase(deps, "probing producers");
-  const reports = await probeAll({
-    ps,
-    os: ps.os,
-    arch: process.arch,
-    environmentType: detectEnvironmentType()
-  }, producerRegistry);
-  const routing = route(spec.producerPreferences, reports);
-  if (routing.producerId === null) {
-    const signals = routing.reason === "authentication-required" ? { "authentication-required": true } : { unavailable: true };
-    return archiveTerminal({
-      store,
-      spec,
-      runId,
-      startedAtMs,
-      now,
-      repoRoot: canonical.canonical,
-      baseCommitOid: preconditions.baseCommitOid,
-      signals,
-      report: null,
-      profile: null,
-      invocation: null,
-      environment: [],
-      temporaryHomeApplied: false,
-      producerSummary: null,
-      candidate: null,
-      commandOutcomes: [],
-      unresolvedIssues: [
-        routing.reason,
-        ...routing.considered.map((candidate) => `producer ${candidate.producerId}: ${candidate.outcome}${candidate.detail === null ? "" : ` (${candidate.detail})`}`)
-      ],
-      evidence: { ...baselineEvidence, routing: routing.reason, considered: routing.considered, reports },
-      producerLog: producerLog(null),
-      repositoryInstructions,
-      packagedVerifier
-    });
-  }
-  const adapter = producerRegistry.get(routing.producerId);
-  const report = reports.find((candidate) => candidate.producerId === routing.producerId) ?? null;
-  if (adapter === void 0 || report?.resolvedExecutable === null || report === null) {
-    return archiveTerminal({
-      store,
-      spec,
-      runId,
-      startedAtMs,
-      now,
-      repoRoot: canonical.canonical,
-      baseCommitOid: preconditions.baseCommitOid,
-      signals: { unavailable: true },
-      report,
-      profile: null,
-      invocation: null,
-      environment: [],
-      temporaryHomeApplied: false,
-      producerSummary: null,
-      candidate: null,
-      commandOutcomes: [],
-      unresolvedIssues: ["selected-producer-contract-invalid"],
-      evidence: { ...baselineEvidence, routing: "selected-producer-contract-invalid" },
-      producerLog: producerLog(null),
-      repositoryInstructions,
-      packagedVerifier
-    });
-  }
   let lock = null;
   let worktree = null;
   let tempHome = null;
@@ -27320,6 +27229,147 @@ async function runAttempt(checkoutPath, spec, deps) {
   let primaryError;
   try {
     lock = await ps.acquireCheckoutLock(canonical.canonical);
+    const preconditions = await checkPreconditions(canonical.canonical, {
+      writeAllowlist: spec.writeAllowlist
+    });
+    if (!preconditions.ok) {
+      const detailSuffix = preconditions.detail === void 0 ? "" : `: ${preconditions.detail.join(", ")}`;
+      throw new RuntimeError(
+        `repository precondition failed (${preconditions.reason})${detailSuffix}`,
+        { reason: preconditions.reason, detail: preconditions.detail ?? [] }
+      );
+    }
+    const executionMode = spec.executionMode;
+    let baselineEvidence = { baseline: "skipped \u2014 read-only spec" };
+    if (executionMode === "edit") {
+      reportPhase(deps, "verifying baseline");
+      let baseline;
+      try {
+        baseline = await (deps.baselineVerifier ?? verifyBaseline)({
+          repoRoot: canonical.canonical,
+          headCommitOid: preconditions.baseCommitOid,
+          commands: spec.verification,
+          ps,
+          ...deps.abortSignal === void 0 ? {} : { abortSignal: deps.abortSignal }
+        });
+      } catch (error2) {
+        if (!deps.abortSignal?.aborted) throw error2;
+        return archiveTerminal({
+          store,
+          spec,
+          runId,
+          startedAtMs,
+          now,
+          repoRoot: canonical.canonical,
+          baseCommitOid: preconditions.baseCommitOid,
+          signals: { cancelled: true },
+          report: null,
+          profile: null,
+          invocation: null,
+          environment: [],
+          temporaryHomeApplied: false,
+          producerSummary: null,
+          candidate: null,
+          commandOutcomes: [],
+          unresolvedIssues: ["cancelled"],
+          evidence: { baseline: "cancelled" },
+          producerLog: producerLog(null),
+          repositoryInstructions,
+          packagedVerifier
+        });
+      }
+      baselineEvidence = { baseline };
+      const baselineFailed = baseline.commands.some((command) => !command.ok);
+      if (baselineFailed && spec.expectBaselineFailure !== true) {
+        return archiveTerminal({
+          store,
+          spec,
+          runId,
+          startedAtMs,
+          now,
+          repoRoot: canonical.canonical,
+          baseCommitOid: preconditions.baseCommitOid,
+          signals: { "environment-defect": true },
+          report: null,
+          profile: null,
+          invocation: null,
+          environment: [],
+          temporaryHomeApplied: false,
+          producerSummary: null,
+          candidate: null,
+          commandOutcomes: [],
+          unresolvedIssues: ["baseline-verification-failed"],
+          evidence: baselineEvidence,
+          producerLog: producerLog(null),
+          repositoryInstructions,
+          packagedVerifier
+        });
+      }
+    }
+    reportPhase(deps, "probing producers");
+    const reports = await probeAll({
+      ps,
+      os: ps.os,
+      arch: process.arch,
+      environmentType: detectEnvironmentType()
+    }, producerRegistry);
+    const routing = route(spec.producerPreferences, reports);
+    if (routing.producerId === null) {
+      const signals2 = routing.reason === "authentication-required" ? { "authentication-required": true } : { unavailable: true };
+      return archiveTerminal({
+        store,
+        spec,
+        runId,
+        startedAtMs,
+        now,
+        repoRoot: canonical.canonical,
+        baseCommitOid: preconditions.baseCommitOid,
+        signals: signals2,
+        report: null,
+        profile: null,
+        invocation: null,
+        environment: [],
+        temporaryHomeApplied: false,
+        producerSummary: null,
+        candidate: null,
+        commandOutcomes: [],
+        unresolvedIssues: [
+          routing.reason,
+          ...routing.considered.map((candidate2) => `producer ${candidate2.producerId}: ${candidate2.outcome}${candidate2.detail === null ? "" : ` (${candidate2.detail})`}`)
+        ],
+        evidence: { ...baselineEvidence, routing: routing.reason, considered: routing.considered, reports },
+        producerLog: producerLog(null),
+        repositoryInstructions,
+        packagedVerifier
+      });
+    }
+    const adapter = producerRegistry.get(routing.producerId);
+    const report = reports.find((candidate2) => candidate2.producerId === routing.producerId) ?? null;
+    if (adapter === void 0 || report?.resolvedExecutable === null || report === null) {
+      return archiveTerminal({
+        store,
+        spec,
+        runId,
+        startedAtMs,
+        now,
+        repoRoot: canonical.canonical,
+        baseCommitOid: preconditions.baseCommitOid,
+        signals: { unavailable: true },
+        report,
+        profile: null,
+        invocation: null,
+        environment: [],
+        temporaryHomeApplied: false,
+        producerSummary: null,
+        candidate: null,
+        commandOutcomes: [],
+        unresolvedIssues: ["selected-producer-contract-invalid"],
+        evidence: { ...baselineEvidence, routing: "selected-producer-contract-invalid" },
+        producerLog: producerLog(null),
+        repositoryInstructions,
+        packagedVerifier
+      });
+    }
     const runStart = {
       runId,
       lockKey: lock.key,
@@ -27596,6 +27646,10 @@ function evaluateGates(input) {
   }
   if (!input.artifactsValid) reasons.push("missing or invalid artifact");
   if (input.baselineDrift) reasons.push("candidate no longer based on approved baseline");
+  if (!input.finalRoundReviewed) {
+    reasons.push("final fix was not re-reviewed");
+    requiresHumanDecision = true;
+  }
   if (input.roundsUsed > input.maxRounds) {
     reasons.push(`round cap exceeded (${input.roundsUsed} > ${input.maxRounds})`);
     requiresHumanDecision = true;
@@ -27753,22 +27807,75 @@ function buildRoleSpec(role, base, pkg) {
 }
 
 // src/pipeline/git-writable-roots.ts
-import { readFile as readFile2 } from "node:fs/promises";
+import { lstat as lstat5, readFile as readFile2, realpath as realpath5 } from "node:fs/promises";
 import path11 from "node:path";
+function invalidWritableRoots(message, cause) {
+  return new RuntimeError(message, {
+    classification: "sandbox-violation",
+    ...cause === void 0 ? {} : { cause }
+  });
+}
+async function requirePlainFile(filename, label) {
+  const stats = await lstat5(filename);
+  if (!stats.isFile() || stats.isSymbolicLink()) {
+    throw invalidWritableRoots(`${label} must be a plain regular file`);
+  }
+  return stats;
+}
+async function requirePlainDirectory(directory, label) {
+  const stats = await lstat5(directory);
+  if (!stats.isDirectory() || stats.isSymbolicLink()) {
+    throw invalidWritableRoots(`${label} must be a plain directory`);
+  }
+}
+function isContainedBy(parent, candidate) {
+  const relative = path11.relative(parent, candidate);
+  return relative !== "" && relative !== ".." && !relative.startsWith(`..${path11.sep}`) && !path11.isAbsolute(relative);
+}
+function sameFileIdentity(before, after) {
+  return before.dev === after.dev && before.ino === after.ino;
+}
+async function readStablePlainFile(filename, label) {
+  const before = await requirePlainFile(filename, label);
+  const value = await readFile2(filename, "utf8");
+  const after = await requirePlainFile(filename, label);
+  if (!sameFileIdentity(before, after)) {
+    throw invalidWritableRoots(`${label} changed while being read`);
+  }
+  return value;
+}
 async function resolveLinkedWorktreeWritableRoots(worktreePath) {
   const dotGit = path11.join(worktreePath, ".git");
-  let pointer;
   try {
-    pointer = await readFile2(dotGit, "utf8");
-  } catch {
-    return [];
+    const pointer = await readStablePlainFile(dotGit, "linked worktree .git entry");
+    const match = /^gitdir: (.+)\r?\n?$/.exec(pointer);
+    if (match === null) {
+      throw invalidWritableRoots("linked worktree .git pointer is malformed");
+    }
+    const gitDir = await realpath5(path11.resolve(worktreePath, match[1]));
+    await requirePlainDirectory(gitDir, "linked worktree private git directory");
+    const commonDirPointer = path11.join(gitDir, "commondir");
+    const commonDirValue = (await readStablePlainFile(
+      commonDirPointer,
+      "linked worktree commondir entry"
+    )).trim();
+    if (commonDirValue === "" || commonDirValue.includes("\0")) {
+      throw invalidWritableRoots("linked worktree commondir pointer is malformed");
+    }
+    const commonDir = await realpath5(path11.resolve(gitDir, commonDirValue));
+    await requirePlainDirectory(commonDir, "common git directory");
+    const worktreesDir = await realpath5(path11.join(commonDir, "worktrees"));
+    await requirePlainDirectory(worktreesDir, "common git worktrees directory");
+    if (!isContainedBy(worktreesDir, gitDir)) {
+      throw invalidWritableRoots("linked worktree private git directory escapes common git worktrees");
+    }
+    const objectsDir = path11.join(commonDir, "objects");
+    await requirePlainDirectory(objectsDir, "common git objects directory");
+    return [gitDir, objectsDir];
+  } catch (error2) {
+    if (error2 instanceof RuntimeError) throw error2;
+    throw invalidWritableRoots("linked worktree writable roots are invalid", error2);
   }
-  const match = /^gitdir: (.+)\r?\n?$/.exec(pointer);
-  if (match === null) return [];
-  const gitDir = path11.resolve(worktreePath, match[1]);
-  const commonDirValue = (await readFile2(path11.join(gitDir, "commondir"), "utf8")).trim();
-  const commonDir = path11.resolve(gitDir, commonDirValue);
-  return [gitDir, path11.join(commonDir, "objects")];
 }
 
 // src/pipeline/role-runner.ts
@@ -27857,7 +27964,19 @@ async function runRole(args) {
     };
   }
   const readOnly = READ_ONLY_ROLES.has(args.role);
-  const extraWritableRoots = args.role === "fixer" ? await resolveLinkedWorktreeWritableRoots(args.worktreePath) : [];
+  let extraWritableRoots = [];
+  if (args.role === "fixer") {
+    try {
+      extraWritableRoots = await resolveLinkedWorktreeWritableRoots(args.worktreePath);
+    } catch {
+      return {
+        ok: false,
+        rawOutput: "",
+        failure: "sandbox-violation",
+        producerId
+      };
+    }
+  }
   const nativeReadOnly = readOnly && selectSandboxBackend(report).backend?.kind === "producer-native";
   if (readOnly && !nativeReadOnly) {
     const osBackend = selectOsWriteConfinementBackend({
@@ -28058,54 +28177,8 @@ function globMatches3(pattern, candidate) {
   }
   return new RegExp(`${expression}$`).test(candidate);
 }
-function splitNul3(value) {
-  const fields = value.split("\0");
-  if (fields.at(-1) === "") fields.pop();
-  return fields;
-}
-function changeType3(status) {
-  if (status === "A") return "added";
-  if (status === "D") return "deleted";
-  return "modified";
-}
-async function changedPathsFor(worktreePath, baselineCommit, candidateCommit) {
-  const fields = splitNul3(await checkedGit4(worktreePath, [
-    "diff",
-    "--name-status",
-    "--no-renames",
-    "-z",
-    `${baselineCommit}..${candidateCommit}`
-  ]));
-  if (fields.length % 2 !== 0) {
-    throw new RuntimeError("git diff returned invalid name-status output");
-  }
-  const changes = [];
-  for (let index = 0; index < fields.length; index += 2) {
-    const status = fields[index];
-    const pathname = fields[index + 1];
-    if (status === void 0 || pathname === void 0) {
-      throw new RuntimeError("git diff returned an incomplete name-status record");
-    }
-    const sourceCommit = status === "D" ? baselineCommit : candidateCommit;
-    const entry = (await checkedGit4(worktreePath, ["ls-tree", sourceCommit, "--", pathname])).trim();
-    const match = /^(\d{6})\s+blob\s+([0-9a-f]+)\t/.exec(entry);
-    if (match === null) throw new RuntimeError(`git ls-tree omitted changed path: ${pathname}`);
-    changes.push({
-      path: pathname,
-      changeType: changeType3(status),
-      mode: match[1] ?? "",
-      contentHash: status === "D" ? null : match[2] ?? null
-    });
-  }
-  return changes.sort((left, right) => left.path.localeCompare(right.path));
-}
 async function candidateArtifact(args) {
-  const changedPaths = await changedPathsFor(
-    args.worktreePath,
-    args.baselineCommit,
-    args.candidateCommit
-  );
-  return {
+  const artifact = {
     baseCommitOid: args.baselineCommit,
     candidateTreeOid: (await checkedGit4(
       args.worktreePath,
@@ -28113,9 +28186,19 @@ async function candidateArtifact(args) {
     )).trim(),
     candidateCommitOid: args.candidateCommit,
     anchorRef: args.anchorRef,
-    manifestHash: createHash7("sha256").update(JSON.stringify(changedPaths)).digest("hex"),
-    changedPaths,
+    manifestHash: "",
+    changedPaths: [],
     patch: args.diffText
+  };
+  const canonical = await recomputeManifest({
+    worktreePath: args.worktreePath,
+    baseCommitOid: args.baselineCommit,
+    artifact
+  });
+  return {
+    ...artifact,
+    changedPaths: canonical.changedPaths,
+    manifestHash: canonical.manifestHash
   };
 }
 function detectWeakenedTests(diff) {
@@ -28313,6 +28396,7 @@ async function runPipeline(checkoutPath, spec, deps) {
   }
   const { reviewers, maxRounds } = resolveReviewConfig(spec);
   const store = new ArtifactStore(attempt.runId);
+  let finalAttempt = attempt;
   const rounds = [];
   const baselineCommit = attempt.candidate.baseCommitOid;
   let currentCandidateCommit = attempt.candidate.candidateCommitOid;
@@ -28426,11 +28510,50 @@ async function runPipeline(checkoutPath, spec, deps) {
       );
     }
   }
+  if (currentCandidateCommit !== attempt.candidate.candidateCommitOid) {
+    const finalTree = (await checkedGit4(
+      checkoutPath,
+      ["rev-parse", `${currentCandidateCommit}^{tree}`]
+    )).trim();
+    const canonicalCommit = (await checkedGit4(checkoutPath, [
+      "commit-tree",
+      finalTree,
+      "-p",
+      baselineCommit,
+      "-m",
+      `candidate ${attempt.runId}`
+    ])).trim();
+    await checkedGit4(checkoutPath, [
+      "update-ref",
+      attempt.candidate.anchorRef,
+      canonicalCommit,
+      attempt.candidate.candidateCommitOid
+    ]);
+    currentCandidateCommit = canonicalCommit;
+    const diffText = await checkedGit4(
+      checkoutPath,
+      ["diff", `${baselineCommit}..${canonicalCommit}`]
+    );
+    const candidate = await candidateArtifact({
+      worktreePath: checkoutPath,
+      baselineCommit,
+      candidateCommit: canonicalCommit,
+      anchorRef: attempt.candidate.anchorRef,
+      diffText
+    });
+    const manifest = await store.readManifest(attempt.runId);
+    if (manifest === null) throw new RuntimeError("run manifest is missing during promotion");
+    finalAttempt = { ...attempt, candidate };
+    await store.promoteTerminalArtifacts({
+      result: finalAttempt,
+      manifest: { ...manifest, candidateManifestHash: candidate.manifestHash }
+    });
+  }
   const verified = await verifyCandidate({
     checkoutPath,
     spec,
     deps,
-    attempt,
+    attempt: finalAttempt,
     baselineCommit,
     candidateCommit: currentCandidateCommit
   });
@@ -28442,13 +28565,14 @@ async function runPipeline(checkoutPath, spec, deps) {
     verification: verified.verification,
     roundsUsed: rounds.length,
     maxRounds,
+    finalRoundReviewed: (lastRound?.fix ?? null) === null,
     artifactsValid: true,
     baselineDrift: verified.baselineDrift
   });
   const result = {
     runId: attempt.runId,
     status: gate.decisionReady ? "decision-ready" : "human-decision-required",
-    attempt,
+    attempt: finalAttempt,
     rounds,
     verification: verified.verification,
     gate,
@@ -28459,6 +28583,7 @@ async function runPipeline(checkoutPath, spec, deps) {
 }
 
 // src/protocol/spec-validator.ts
+import path12 from "node:path";
 var schemas2 = loadSchemas();
 function resolveMinEditTimeoutMs() {
   const raw = process.env.CLAUDE_ARCHITECT_MIN_EDIT_TIMEOUT_MS;
@@ -28480,7 +28605,22 @@ function validateSpec(input) {
     };
   }
   const ok = schemas2.delegationSpec(input);
-  if (ok) return { ok: true, spec: input };
+  if (ok) {
+    const spec = input;
+    for (const [index, command] of spec.verification.entries()) {
+      const normalizedCwd = path12.posix.normalize(command.cwd);
+      if (path12.isAbsolute(command.cwd) || normalizedCwd === ".." || normalizedCwd.startsWith("../")) {
+        return {
+          ok: false,
+          errors: [{
+            path: `/verification/${index}/cwd`,
+            message: "must be a repository-relative path that does not escape the checkout"
+          }]
+        };
+      }
+    }
+    return { ok: true, spec };
+  }
   const errors = (schemas2.delegationSpec.errors ?? []).map((e) => {
     let message = e.message ?? "invalid";
     const allowed = e.params?.allowedValues;
@@ -28598,7 +28738,8 @@ var AcceptanceVerifier = class {
         project: {
           mutated: project.mutated,
           failures: [...project.failures],
-          commands: verificationPolicy.map(cloneCommandEvidence)
+          commands: verificationPolicy.map(cloneCommandEvidence),
+          dependencyLink: project.evidence.dependencyLink
         },
         verificationPolicy
       },
@@ -28679,7 +28820,7 @@ async function loadArchivedRun(runId, deps) {
   if (result.runId !== runId || manifest.runId !== runId) {
     throw runtimeError("archived run identity does not match", "archive-inconsistent");
   }
-  if (result.candidate !== null && (manifest.baseCommitOid !== result.candidate.baseCommitOid || manifest.candidateManifestHash !== result.candidate.manifestHash || result.candidate.manifestHash !== createHash8("sha256").update(JSON.stringify(result.candidate.changedPaths)).digest("hex"))) {
+  if (result.candidate !== null && (manifest.baseCommitOid !== result.candidate.baseCommitOid || manifest.candidateManifestHash !== result.candidate.manifestHash || result.candidate.manifestHash !== createHash7("sha256").update(JSON.stringify(result.candidate.changedPaths)).digest("hex"))) {
     throw runtimeError("archived candidate does not match its run manifest", "archive-inconsistent");
   }
   const canonical = await services2(deps).canonicalizePath(manifest.repoRoot);
@@ -28919,16 +29060,16 @@ async function handleIntegrateCandidate(runId, expectedArtifactHash, deps = {}) 
 }
 
 // src/runtime/recovery-manager.ts
-import { createHash as createHash9 } from "node:crypto";
+import { createHash as createHash8 } from "node:crypto";
 import { constants as constants4 } from "node:fs";
 import {
-  lstat as lstat5,
+  lstat as lstat6,
   open as open5,
   readdir as readdir2,
-  realpath as realpath5,
+  realpath as realpath6,
   rm as rm5
 } from "node:fs/promises";
-import path12 from "node:path";
+import path13 from "node:path";
 import nodeProcess4 from "node:process";
 var NO_FOLLOW3 = constants4.O_NOFOLLOW ?? 0;
 var MAX_STATE_FILE_BYTES = 8e6;
@@ -28957,13 +29098,13 @@ function validateRunId(runId) {
 async function stateRoot() {
   const configured = nodeProcess4.env.CLAUDE_PLUGIN_DATA ?? (nodeProcess4.env.NODE_ENV === "test" ? nodeProcess4.env.CLAUDE_ARCHITECT_STATE_DIR : void 0);
   if (configured === void 0) return null;
-  const root = path12.resolve(resolveStateDir());
+  const root = path13.resolve(resolveStateDir());
   try {
-    const metadata = await lstat5(root);
+    const metadata = await lstat6(root);
     if (!isPlainDirectory(metadata)) {
       throw new RuntimeError("plugin data directory must be a plain directory during recovery");
     }
-    await realpath5(root);
+    await realpath6(root);
     return root;
   } catch (error2) {
     if (isMissing2(error2)) return null;
@@ -29010,7 +29151,7 @@ async function readCleanupJournal(filename) {
 }
 async function plainDirectoryIdentity(directory) {
   try {
-    const metadata = await lstat5(directory);
+    const metadata = await lstat6(directory);
     if (!isPlainDirectory(metadata)) {
       throw new RuntimeError("recovery directory must not be a symbolic link");
     }
@@ -29021,7 +29162,7 @@ async function plainDirectoryIdentity(directory) {
   }
 }
 async function removePlainDirectory(directory, expected) {
-  const metadata = await lstat5(directory);
+  const metadata = await lstat6(directory);
   if (!isPlainDirectory(metadata) || !sameIdentity(metadata, expected)) {
     throw new RuntimeError("recovery directory identity changed before removal");
   }
@@ -29039,10 +29180,10 @@ function parseRunStart(text, expectedRunId) {
   }
   const record2 = value;
   validateRunId(record2.runId);
-  if (record2.runId !== expectedRunId || typeof record2.lockKey !== "string" || !/^[0-9a-f]{64}$/.test(record2.lockKey) || typeof record2.canonicalCommonDir !== "string" || !path12.isAbsolute(record2.canonicalCommonDir) || record2.pid !== null && (record2.pid === void 0 || !Number.isSafeInteger(record2.pid) || record2.pid <= 1) || record2.processToken !== void 0 && record2.processToken !== null && typeof record2.processToken !== "string" || typeof record2.startedAt !== "string" || !Number.isFinite(Date.parse(record2.startedAt))) {
+  if (record2.runId !== expectedRunId || typeof record2.lockKey !== "string" || !/^[0-9a-f]{64}$/.test(record2.lockKey) || typeof record2.canonicalCommonDir !== "string" || !path13.isAbsolute(record2.canonicalCommonDir) || record2.pid !== null && (record2.pid === void 0 || !Number.isSafeInteger(record2.pid) || record2.pid <= 1) || record2.processToken !== void 0 && record2.processToken !== null && typeof record2.processToken !== "string" || typeof record2.startedAt !== "string" || !Number.isFinite(Date.parse(record2.startedAt))) {
     throw new RuntimeError("run-start recovery record is malformed");
   }
-  const expectedLockKey = createHash9("sha256").update(record2.canonicalCommonDir).digest("hex");
+  const expectedLockKey = createHash8("sha256").update(record2.canonicalCommonDir).digest("hex");
   if (record2.lockKey !== expectedLockKey) {
     throw new RuntimeError("run-start lock key does not match its canonical common directory");
   }
@@ -29062,7 +29203,7 @@ function runGitError(action, result) {
   return new RuntimeError(`${action} failed${diagnostic ? `: ${diagnostic}` : ""}`);
 }
 async function validateGitCommonDir(commonDir) {
-  const canonical = await realpath5(commonDir);
+  const canonical = await realpath6(commonDir);
   if (canonical !== commonDir) {
     throw new RuntimeError("recorded Git common directory is no longer canonical");
   }
@@ -29072,23 +29213,23 @@ async function validateGitCommonDir(commonDir) {
     "--git-common-dir"
   ]);
   if (result.exitCode !== 0) throw runGitError("validate Git common directory", result);
-  const reported = await realpath5(result.stdout.trim());
+  const reported = await realpath6(result.stdout.trim());
   if (reported !== canonical) {
     throw new RuntimeError("recorded Git common directory no longer identifies the repository");
   }
   return canonical;
 }
 async function validateRepositoryRoot(repoRoot) {
-  if (!path12.isAbsolute(repoRoot)) {
+  if (!path13.isAbsolute(repoRoot)) {
     throw new RuntimeError("cleanup journal repository root is not absolute");
   }
-  const canonical = await realpath5(repoRoot);
+  const canonical = await realpath6(repoRoot);
   if (canonical !== repoRoot) {
     throw new RuntimeError("cleanup journal repository root is no longer canonical");
   }
   const result = await git(canonical, ["rev-parse", "--show-toplevel"]);
   if (result.exitCode !== 0) throw runGitError("validate cleanup repository", result);
-  if (await realpath5(result.stdout.trim()) !== canonical) {
+  if (await realpath6(result.stdout.trim()) !== canonical) {
     throw new RuntimeError("cleanup journal repository root is not the repository top level");
   }
   return canonical;
@@ -29162,7 +29303,7 @@ function cleanupOutcome(record2) {
 async function appendCleanupRecord(runsRoot, record2) {
   const identity = await plainDirectoryIdentity(runsRoot);
   if (identity === null) throw new RuntimeError("cleanup journal root disappeared");
-  const filename = path12.join(runsRoot, "cleanup.ndjson");
+  const filename = path13.join(runsRoot, "cleanup.ndjson");
   const handle = await open5(
     filename,
     constants4.O_WRONLY | constants4.O_CREAT | constants4.O_APPEND | NO_FOLLOW3,
@@ -29170,7 +29311,7 @@ async function appendCleanupRecord(runsRoot, record2) {
   );
   try {
     const metadata = await handle.stat();
-    const currentRoot2 = await lstat5(runsRoot);
+    const currentRoot2 = await lstat6(runsRoot);
     if (!metadata.isFile() || !isPlainDirectory(currentRoot2) || !sameIdentity(currentRoot2, identity)) {
       throw new RuntimeError("cleanup journal identity changed during recovery");
     }
@@ -29180,7 +29321,7 @@ async function appendCleanupRecord(runsRoot, record2) {
   } finally {
     await handle.close();
   }
-  const currentRoot = await lstat5(runsRoot);
+  const currentRoot = await lstat6(runsRoot);
   if (!isPlainDirectory(currentRoot) || !sameIdentity(currentRoot, identity)) {
     throw new RuntimeError("cleanup journal root changed after recovery append");
   }
@@ -29238,7 +29379,7 @@ async function commitCleanupRefs(record2) {
   await deleteExactRef(repoRoot, record2.backupRef, backupOid);
 }
 async function replayInterruptedPrunes(runsRoot) {
-  const text = await readCleanupJournal(path12.join(runsRoot, "cleanup.ndjson"));
+  const text = await readCleanupJournal(path13.join(runsRoot, "cleanup.ndjson"));
   if (text === null || text.trim() === "") return;
   const pending = /* @__PURE__ */ new Map();
   for (const line of text.trimEnd().split("\n")) {
@@ -29248,8 +29389,8 @@ async function replayInterruptedPrunes(runsRoot) {
     else pending.delete(record2.runId);
   }
   for (const record2 of [...pending.values()].sort((left, right) => left.runId.localeCompare(right.runId))) {
-    const runDirectory = path12.join(runsRoot, record2.runId);
-    const quarantinePath = path12.join(runsRoot, record2.quarantineName);
+    const runDirectory = path13.join(runsRoot, record2.runId);
+    const quarantinePath = path13.join(runsRoot, record2.quarantineName);
     const runIdentity = await plainDirectoryIdentity(runDirectory);
     const quarantineIdentity = await plainDirectoryIdentity(quarantinePath);
     if (runIdentity !== null && quarantineIdentity !== null) {
@@ -29292,7 +29433,7 @@ async function recoverRun(record2, root, ps, isProcessAlive, requestCooperativeT
     "recovery",
     "startup recovery reclaimed unfinished run\n"
   );
-  const worktreePath = path12.join(root, "worktrees", record2.runId);
+  const worktreePath = path13.join(root, "worktrees", record2.runId);
   const worktreeIdentity = await plainDirectoryIdentity(worktreePath);
   if (worktreeIdentity !== null) {
     await new WorktreeManager(commonDir, record2.runId, ps).remove(worktreePath);
@@ -29376,14 +29517,14 @@ async function reclaimLocks(locksRoot, isProcessAlive, getProcessStartToken) {
   for (const entry of entries.sort((left, right) => left.name.localeCompare(right.name))) {
     const match = LOCK_NAME.exec(entry.name);
     if (match === null) continue;
-    const lockPath = path12.join(locksRoot, entry.name);
+    const lockPath = path13.join(locksRoot, entry.name);
     if (!entry.isFile() || entry.isSymbolicLink()) {
       throw new RuntimeError("checkout lock must be a regular file during recovery");
     }
     const contents = await readBoundedRegularFile(lockPath);
     if (contents === null) continue;
     if (await lockOwnerIsLive(parseLockOwner(contents), isProcessAlive, getProcessStartToken)) continue;
-    const identity = await lstat5(lockPath);
+    const identity = await lstat6(lockPath);
     if (!identity.isFile() || identity.isSymbolicLink()) {
       throw new RuntimeError("checkout lock identity changed during recovery");
     }
@@ -29391,14 +29532,14 @@ async function reclaimLocks(locksRoot, isProcessAlive, getProcessStartToken) {
   }
 }
 async function lockIsOwnedByLiveProcess(locksRoot, lockKey, isProcessAlive, getProcessStartToken) {
-  const contents = await readBoundedRegularFile(path12.join(locksRoot, `${lockKey}.lock`));
+  const contents = await readBoundedRegularFile(path13.join(locksRoot, `${lockKey}.lock`));
   if (contents === null) return false;
   return lockOwnerIsLive(parseLockOwner(contents), isProcessAlive, getProcessStartToken);
 }
 async function recoverStaleRuns(dependencies = {}) {
   const root = await stateRoot();
   if (root === null) return { recovered: [] };
-  const runsRoot = path12.join(root, "runs");
+  const runsRoot = path13.join(root, "runs");
   const runsIdentity = await plainDirectoryIdentity(runsRoot);
   if (runsIdentity !== null) await replayInterruptedPrunes(runsRoot);
   const ps = dependencies.platformServices ?? getPlatformServices();
@@ -29406,14 +29547,14 @@ async function recoverStaleRuns(dependencies = {}) {
   const requestCooperativeTermination = dependencies.requestCooperativeTermination ?? defaultRequestCooperativeTermination;
   const delayMs = dependencies.delayMs ?? defaultDelayMs;
   const graceMs = dependencies.graceMs ?? 3e3;
-  const locksRoot = path12.join(root, "locks");
+  const locksRoot = path13.join(root, "locks");
   const stale = [];
   if (runsIdentity !== null) {
     const runEntries = await readdir2(runsRoot, { withFileTypes: true });
     for (const entry of runEntries.sort((left, right) => left.name.localeCompare(right.name))) {
       if (!entry.isDirectory() || entry.isSymbolicLink() || !SAFE_RUN_ID.test(entry.name)) continue;
-      const runDirectory = path12.join(runsRoot, entry.name);
-      const runStartText = await readBoundedRegularFile(path12.join(runDirectory, "run-start.json"));
+      const runDirectory = path13.join(runsRoot, entry.name);
+      const runStartText = await readBoundedRegularFile(path13.join(runDirectory, "run-start.json"));
       if (runStartText === null) continue;
       const record2 = parseRunStart(runStartText, entry.name);
       const result = await new ArtifactStore(entry.name).readResult(entry.name);
