@@ -180,6 +180,7 @@ export class AcceptanceVerifier {
           mutated: project.mutated,
           failures: [...project.failures],
           commands: verificationPolicy.map(cloneCommandEvidence),
+          dependencyLink: project.evidence.dependencyLink,
         },
         verificationPolicy,
       },

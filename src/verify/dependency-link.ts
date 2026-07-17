@@ -21,21 +21,25 @@ export async function linkPrimaryDependencies(
   const primaryModules = path.join(primaryRepo, "node_modules");
   if (!await exists(primaryModules)) return "none";
 
-  let selected: string | undefined;
-  for (const lockfile of LOCKFILES) {
-    if (await exists(path.join(primaryRepo, lockfile))) {
-      selected = lockfile;
-      break;
-    }
+  const [primaryLockfiles, worktreeLockfiles] = await Promise.all([
+    Promise.all(LOCKFILES.map(lockfile => exists(path.join(primaryRepo, lockfile)))),
+    Promise.all(LOCKFILES.map(lockfile => exists(path.join(worktreePath, lockfile)))),
+  ]);
+  if (!primaryLockfiles.some(Boolean)) return "none";
+  if (primaryLockfiles.some((present, index) => present !== worktreeLockfiles[index])) {
+    return "skipped-lockfile-mismatch";
   }
-  if (selected === undefined) return "none";
 
   try {
-    const [primaryLock, worktreeLock] = await Promise.all([
-      readFile(path.join(primaryRepo, selected)),
-      readFile(path.join(worktreePath, selected)),
-    ]);
-    if (!primaryLock.equals(worktreeLock)) return "skipped-lockfile-mismatch";
+    const comparisons = await Promise.all(LOCKFILES.map(async (lockfile, index) => {
+      if (!primaryLockfiles[index]) return true;
+      const [primaryLock, worktreeLock] = await Promise.all([
+        readFile(path.join(primaryRepo, lockfile)),
+        readFile(path.join(worktreePath, lockfile)),
+      ]);
+      return primaryLock.equals(worktreeLock);
+    }));
+    if (comparisons.some(matches => !matches)) return "skipped-lockfile-mismatch";
   } catch {
     return "skipped-lockfile-mismatch";
   }

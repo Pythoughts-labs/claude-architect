@@ -47,4 +47,37 @@ describe("linkPrimaryDependencies", () => {
     );
     await expect(access(path.join(paths.worktree, "node_modules"))).rejects.toMatchObject({ code: "ENOENT" });
   });
+
+  it("skips the link when a non-first lockfile differs", async () => {
+    const paths = await fixture();
+    await writeFile(path.join(paths.primary, "package-lock.json"), "{}\n");
+    await writeFile(path.join(paths.worktree, "package-lock.json"), "{}\n");
+    await writeFile(path.join(paths.primary, "pnpm-lock.yaml"), "primary\n");
+    await writeFile(path.join(paths.worktree, "pnpm-lock.yaml"), "candidate\n");
+
+    await expect(linkPrimaryDependencies(paths.primary, paths.worktree)).resolves.toBe(
+      "skipped-lockfile-mismatch",
+    );
+  });
+
+  it("skips the link when a lockfile is present on only one side", async () => {
+    const paths = await fixture();
+    await writeFile(path.join(paths.primary, "package-lock.json"), "{}\n");
+    await writeFile(path.join(paths.worktree, "package-lock.json"), "{}\n");
+    await writeFile(path.join(paths.worktree, "yarn.lock"), "candidate\n");
+
+    await expect(linkPrimaryDependencies(paths.primary, paths.worktree)).resolves.toBe(
+      "skipped-lockfile-mismatch",
+    );
+  });
+
+  it("links node_modules when all recognized lockfiles match", async () => {
+    const paths = await fixture();
+    for (const lockfile of ["package-lock.json", "bun.lockb", "pnpm-lock.yaml", "yarn.lock"]) {
+      await writeFile(path.join(paths.primary, lockfile), `${lockfile}\n`);
+      await writeFile(path.join(paths.worktree, lockfile), `${lockfile}\n`);
+    }
+
+    await expect(linkPrimaryDependencies(paths.primary, paths.worktree)).resolves.toBe("inherited");
+  });
 });

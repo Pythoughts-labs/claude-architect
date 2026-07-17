@@ -118,6 +118,7 @@ describe("AcceptanceVerifier", () => {
           requestedNetwork: "denied",
           skipped: false,
         }],
+        dependencyLink: "inherited",
       },
       outputLogs: [
         { name: "verification-0-stdout", text: "passed\n" },
@@ -139,7 +140,12 @@ describe("AcceptanceVerifier", () => {
       failures: [],
       evidence: {
         structural: { manifestHash: artifact.manifestHash, failures: [] },
-        project: { mutated: false, failures: [], commands: projectResult.evidence.commands },
+        project: {
+          mutated: false,
+          failures: [],
+          commands: projectResult.evidence.commands,
+          dependencyLink: "inherited",
+        },
         verificationPolicy: projectResult.evidence.commands,
       },
       commandOutcomes: [outcome],
@@ -152,11 +158,12 @@ describe("AcceptanceVerifier", () => {
       commands: spec.verification,
     }));
     const evidence = result.evidence as {
-      project: { commands: ProjectCommandEvidence[] };
+      project: { commands: ProjectCommandEvidence[]; dependencyLink: string };
       verificationPolicy: ProjectCommandEvidence[];
     };
     expect(evidence.project.commands).not.toBe(evidence.verificationPolicy);
     expect(evidence.project.commands[0]).not.toBe(evidence.verificationPolicy[0]);
+    expect(evidence.project.dependencyLink).toBe("inherited");
     evidence.project.commands[0]!.skipped = true;
     expect(evidence.verificationPolicy[0]!.skipped).toBe(false);
   });
@@ -171,7 +178,7 @@ describe("AcceptanceVerifier", () => {
       commandOutcomes: [outcome],
       mutated: true,
       failures: [],
-      evidence: { commands: [] },
+      evidence: { commands: [], dependencyLink: "none" },
       outputLogs: [
         { name: "verification-0-stdout", text: "" },
         { name: "verification-0-stderr", text: "" },
@@ -194,7 +201,7 @@ describe("AcceptanceVerifier", () => {
       commandOutcomes: [{ ...outcome, exitCode: 1 }],
       mutated: false,
       failures: [],
-      evidence: { commands: [] },
+      evidence: { commands: [], dependencyLink: "none" },
       outputLogs: [
         { name: "verification-0-stdout", text: "" },
         { name: "verification-0-stderr", text: "" },
@@ -217,7 +224,7 @@ describe("AcceptanceVerifier", () => {
       commandOutcomes: [],
       mutated: false,
       failures: [],
-      evidence: { commands: [] },
+      evidence: { commands: [], dependencyLink: "none" },
       outputLogs: [],
     }));
 
@@ -241,7 +248,7 @@ describe("AcceptanceVerifier", () => {
       commandOutcomes: [outcome, duplicate],
       mutated: false,
       failures: [],
-      evidence: { commands: [] },
+      evidence: { commands: [], dependencyLink: "none" },
       outputLogs: [
         { name: "verification-0-stdout", text: "" },
         { name: "verification-0-stderr", text: "" },
@@ -288,6 +295,7 @@ describe("AcceptanceVerifier", () => {
             skipReason: "platform-arch",
           },
         ],
+        dependencyLink: "none",
       },
       outputLogs: [
         { name: "verification-0-stdout", text: "" },
@@ -316,7 +324,7 @@ describe("AcceptanceVerifier", () => {
       commandOutcomes: [],
       mutated: false,
       failures: [],
-      evidence: { commands: [] },
+      evidence: { commands: [], dependencyLink: "none" },
       outputLogs: [],
     }));
 
@@ -336,7 +344,7 @@ describe("AcceptanceVerifier", () => {
       commandOutcomes: [{ ...outcome, stdoutRef: "logs/wrong.log" }],
       mutated: false,
       failures: [],
-      evidence: { commands: [] },
+      evidence: { commands: [], dependencyLink: "none" },
       outputLogs: [
         { name: "verification-0-stdout", text: "" },
         { name: "verification-0-stderr", text: "" },
@@ -359,7 +367,7 @@ describe("AcceptanceVerifier", () => {
       commandOutcomes: [outcome],
       mutated: false,
       failures: [],
-      evidence: { commands: [] },
+      evidence: { commands: [], dependencyLink: "none" },
       outputLogs: [
         { name: "verification-0-stdout", text: "" },
         { name: "verification-0-stderr", text: "" },
