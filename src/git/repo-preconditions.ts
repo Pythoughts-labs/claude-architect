@@ -1,6 +1,7 @@
 import { access, lstat, opendir, realpath } from "node:fs/promises";
 import path from "node:path";
 import { getPlatformServices } from "../platform/select-platform.js";
+import { canonicalizeForScope } from "../platform/windows-platform-services.js";
 import { git, type GitResult } from "./git-exec.js";
 
 export interface PreconditionOptions {
@@ -75,19 +76,56 @@ function patternOverlapsRepository(pattern: string, repositoryRoot: string): boo
   return overlaps(0, 0);
 }
 
-function submodulePaths(output: string): Set<string> {
+function indexPathsWithMode(output: string, mode: "120000" | "160000"): Set<string> {
   const paths = new Set<string>();
   for (const record of output.split("\0")) {
-    if (!record.startsWith("160000 ")) continue;
+    if (!record.startsWith(`${mode} `)) continue;
     const separator = record.indexOf("\t");
     if (separator !== -1) paths.add(record.slice(separator + 1).replace(/\\/g, "/"));
   }
   return paths;
 }
 
+function pathIsWithin(root: string, candidate: string): boolean {
+  if (getPlatformServices().os === "win32") {
+    return canonicalizeForScope(candidate, root);
+  }
+  const relative = path.relative(root, candidate);
+  return relative === "" || (
+    relative !== ".."
+    && !relative.startsWith(`..${path.sep}`)
+    && !path.isAbsolute(relative)
+  );
+}
+
+function hasCode(error: unknown, codes: readonly string[]): boolean {
+  return typeof error === "object" && error !== null && "code" in error
+    && codes.includes(String(error.code));
+}
+
+async function isSafeTrackedFileSymlink(
+  repositoryRoot: string,
+  symlinkPath: string,
+  relativePath: string,
+  trackedSymlinks: Set<string>,
+): Promise<boolean> {
+  if (!trackedSymlinks.has(relativePath)) return false;
+
+  try {
+    const target = await realpath(symlinkPath);
+    if (!pathIsWithin(repositoryRoot, target)) return false;
+    if (pathIsWithin(path.join(repositoryRoot, ".git"), target)) return false;
+    return (await lstat(target)).isFile();
+  } catch (error) {
+    if (hasCode(error, ["ENOENT", "ENOTDIR", "ELOOP"])) return false;
+    throw error;
+  }
+}
+
 async function findNestedRepositories(
   repositoryRoot: string,
   registeredSubmodules: Set<string>,
+  trackedSymlinks: Set<string>,
   writeAllowlist: string[],
 ): Promise<string[]> {
   const nested = [...registeredSubmodules].filter(submodulePath =>
@@ -121,7 +159,14 @@ async function findNestedRepositories(
       if (registeredSubmodules.has(relativeChild)) continue;
       if (!writeAllowlist.some(pattern => patternOverlapsRepository(pattern, relativeChild))) continue;
       if (entry.isSymbolicLink()) {
-        nested.push(relativeChild);
+        if (!await isSafeTrackedFileSymlink(
+          repositoryRoot,
+          child,
+          relativeChild,
+          trackedSymlinks,
+        )) {
+          nested.push(relativeChild);
+        }
         continue;
       }
       if (!entry.isDirectory()) continue;
@@ -199,11 +244,14 @@ export async function checkPreconditions(
   if (options.writeAllowlist !== undefined && options.writeAllowlist.length > 0) {
     const stagedEntries = await git(canonical, ["ls-files", "--stage", "-z"]);
     if (!succeeded(stagedEntries)) return { ok: false, reason: "git-command-failed" };
+    const registeredSubmodules = indexPathsWithMode(stagedEntries.stdout, "160000");
+    const trackedSymlinks = indexPathsWithMode(stagedEntries.stdout, "120000");
     let nestedRepositories: string[];
     try {
       nestedRepositories = await findNestedRepositories(
         canonical,
-        submodulePaths(stagedEntries.stdout),
+        registeredSubmodules,
+        trackedSymlinks,
         options.writeAllowlist,
       );
     } catch {

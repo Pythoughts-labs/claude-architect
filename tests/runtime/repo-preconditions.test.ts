@@ -277,6 +277,142 @@ describe("checkPreconditions", () => {
     })).resolves.toEqual({ ok: false, reason: "nested-repository", detail: ["linked"] });
   });
 
+  it.skipIf(process.platform === "win32")("accepts a tracked symlink to a contained regular file in primary and linked worktrees", async () => {
+    const directory = await initRepo();
+    await writeFile(join(directory, "CHANGELOG.md"), "release notes\n");
+    await mkdir(join(directory, "src", "package"), { recursive: true });
+    await symlink("../../CHANGELOG.md", join(directory, "src", "package", "CHANGELOG.md"), "file");
+    await runGit(directory, ["add", "CHANGELOG.md", "src/package/CHANGELOG.md"]);
+    await runGit(directory, ["commit", "-q", "-m", "add packaged changelog link"]);
+
+    await expect(checkPreconditions(directory, {
+      writeAllowlist: ["src/**"],
+    })).resolves.toMatchObject({ ok: true });
+
+    const base = await runGit(directory, ["rev-parse", "HEAD"]);
+    const linked = await temporaryDirectory("ca-symlink-linked-");
+    await rm(linked, { recursive: true, force: true });
+    await runGit(directory, ["worktree", "add", "--detach", "-q", linked, base]);
+    try {
+      await expect(checkPreconditions(linked, {
+        writeAllowlist: ["src/**"],
+      })).resolves.toMatchObject({ ok: true, baseCommitOid: base });
+    } finally {
+      await runGit(directory, ["worktree", "remove", "--force", linked]);
+    }
+  });
+
+  it.skipIf(process.platform === "win32")("rejects a tracked symlink to a contained directory", async () => {
+    const directory = await initRepo();
+    await mkdir(join(directory, "shared"));
+    await mkdir(join(directory, "src"));
+    await symlink("../shared", join(directory, "src", "shared"), "dir");
+    await runGit(directory, ["add", "src/shared"]);
+    await runGit(directory, ["commit", "-q", "-m", "add directory link"]);
+
+    await expect(checkPreconditions(directory, { writeAllowlist: ["src/**"] }))
+      .resolves.toEqual({ ok: false, reason: "nested-repository", detail: ["src/shared"] });
+  });
+
+  it.skipIf(process.platform === "win32")("rejects a tracked symlink to an external regular file", async () => {
+    const directory = await initRepo();
+    const external = await temporaryDirectory("ca-symlink-file-target-");
+    await writeFile(join(external, "outside.txt"), "outside\n");
+    await symlink(join(external, "outside.txt"), join(directory, "outside-link"), "file");
+    await runGit(directory, ["add", "outside-link"]);
+    await runGit(directory, ["commit", "-q", "-m", "add external file link"]);
+
+    await expect(checkPreconditions(directory, { writeAllowlist: ["outside-link"] }))
+      .resolves.toEqual({ ok: false, reason: "nested-repository", detail: ["outside-link"] });
+  });
+
+  it.skipIf(process.platform === "win32")("rejects a broken tracked symlink", async () => {
+    const directory = await initRepo();
+    await symlink("missing.txt", join(directory, "broken-link"), "file");
+    await runGit(directory, ["add", "broken-link"]);
+    await runGit(directory, ["commit", "-q", "-m", "add broken link"]);
+
+    await expect(checkPreconditions(directory, { writeAllowlist: ["broken-link"] }))
+      .resolves.toEqual({ ok: false, reason: "nested-repository", detail: ["broken-link"] });
+  });
+
+  it.skipIf(process.platform === "win32")("rejects a cyclic tracked symlink", async () => {
+    const directory = await initRepo();
+    await symlink("cyclic-link", join(directory, "cyclic-link"), "file");
+    await runGit(directory, ["add", "cyclic-link"]);
+    await runGit(directory, ["commit", "-q", "-m", "add cyclic link"]);
+
+    await expect(checkPreconditions(directory, { writeAllowlist: ["cyclic-link"] }))
+      .resolves.toEqual({ ok: false, reason: "nested-repository", detail: ["cyclic-link"] });
+  });
+
+  it.skipIf(process.platform === "win32")("rejects a tracked symlink with a non-directory target component", async () => {
+    const directory = await initRepo();
+    await symlink("a.txt/child", join(directory, "not-directory-link"), "file");
+    await runGit(directory, ["add", "not-directory-link"]);
+    await runGit(directory, ["commit", "-q", "-m", "add non-directory link"]);
+
+    await expect(checkPreconditions(directory, { writeAllowlist: ["not-directory-link"] }))
+      .resolves.toEqual({ ok: false, reason: "nested-repository", detail: ["not-directory-link"] });
+  });
+
+  it.skipIf(process.platform === "win32")("rejects an ignored untracked symlink to a contained regular file", async () => {
+    const directory = await initRepo();
+    await writeFile(join(directory, ".gitignore"), "ignored-link\n");
+    await writeFile(join(directory, "target.txt"), "target\n");
+    await runGit(directory, ["add", ".gitignore", "target.txt"]);
+    await runGit(directory, ["commit", "-q", "-m", "prepare ignored link"]);
+    await symlink("target.txt", join(directory, "ignored-link"), "file");
+
+    await expect(checkPreconditions(directory, { writeAllowlist: ["ignored-link"] }))
+      .resolves.toEqual({ ok: false, reason: "nested-repository", detail: ["ignored-link"] });
+  });
+
+  it.skipIf(process.platform === "win32")("rejects a tracked symlink to Git metadata", async () => {
+    const directory = await initRepo();
+    await symlink(".git/config", join(directory, "git-config-link"), "file");
+    await runGit(directory, ["add", "git-config-link"]);
+    await runGit(directory, ["commit", "-q", "-m", "add Git metadata link"]);
+
+    await expect(checkPreconditions(directory, { writeAllowlist: ["git-config-link"] }))
+      .resolves.toEqual({ ok: false, reason: "nested-repository", detail: ["git-config-link"] });
+  });
+
+  it.skipIf(process.platform === "win32")("rejects a tracked symlink to a linked worktree's .git file", async () => {
+    const directory = await initRepo();
+    const base = await runGit(directory, ["rev-parse", "HEAD"]);
+    const linked = await temporaryDirectory("ca-git-link-worktree-");
+    await rm(linked, { recursive: true, force: true });
+    await runGit(directory, ["worktree", "add", "--detach", "-q", linked, base]);
+    try {
+      await symlink(".git", join(linked, "git-link"), "file");
+      await runGit(linked, ["add", "git-link"]);
+      await runGit(linked, ["commit", "-q", "-m", "add git metadata link"]);
+
+      await expect(checkPreconditions(linked, { writeAllowlist: ["git-link"] }))
+        .resolves.toEqual({ ok: false, reason: "nested-repository", detail: ["git-link"] });
+    } finally {
+      await runGit(directory, ["worktree", "remove", "--force", linked]);
+    }
+  });
+
+  it.skipIf(process.platform === "win32")("fails closed when a tracked symlink target cannot be resolved", async () => {
+    const directory = await initRepo();
+    const external = await temporaryDirectory("ca-unreadable-symlink-target-");
+    await writeFile(join(external, "target.txt"), "target\n");
+    await symlink(join(external, "target.txt"), join(directory, "unreadable-link"), "file");
+    await runGit(directory, ["add", "unreadable-link"]);
+    await runGit(directory, ["commit", "-q", "-m", "add unreadable link"]);
+    await chmod(external, 0o000);
+
+    try {
+      await expect(checkPreconditions(directory, { writeAllowlist: ["unreadable-link"] }))
+        .resolves.toEqual({ ok: false, reason: "nested-repository-scan-failed" });
+    } finally {
+      await chmod(external, 0o700);
+    }
+  });
+
   it("streams nested-repository discovery with opendir", async () => {
     const directory = await initRepo();
 
