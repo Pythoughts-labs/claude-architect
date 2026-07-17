@@ -1,5 +1,6 @@
 node_modules/
 demo/
+.tmp/
 .DS_Store
 .pi-subagents/
 # pythinker — local agent state (do not commit)
