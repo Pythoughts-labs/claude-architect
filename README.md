@@ -18,7 +18,13 @@
   <img alt="license" src="https://img.shields.io/badge/license-MIT-3fb950?style=flat-square&labelColor=0b0e14">
 </p>
 
-Verified coding-agent delegation for Claude Code: isolate untrusted Producers, freeze their output, verify it independently, and leave acceptance to you.
+**Verified coding-agent delegation for Claude Code.** Claude stays the architect — it writes the spec, judges the evidence, and asks you to decide. The actual implementation runs on the coding CLI you choose (Codex, OpenCode, Pi, or Pythinker) inside an isolated Git worktree, and comes back as a frozen, hash-anchored candidate that is verified independently before a single byte can reach your checkout.
+
+In practice that means three guarantees the plugin enforces in host code, not in prompts:
+
+- **Isolation** — every Producer runs in a detached worktree with a sanitized environment, an explicit write allowlist, and OS sandboxing where certified. Out-of-scope changes are rejected at freeze time.
+- **Evidence over claims** — a Producer saying "tests pass" is never accepted; the runtime reruns your authorized verification commands in a clean worktree and records the real output.
+- **Human acceptance** — implementers cannot approve their own work. Review, decision, and hash-gated integration are separate steps, and integration stages the reviewed tree without committing it.
 
 ## Status
 
