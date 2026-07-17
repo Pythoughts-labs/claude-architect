@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/banner.svg?v=6" alt="Claude Architect: CLI coding-agent orchestration for Claude" width="880">
+</p>
+
 # Claude Architect
 
 Verified coding-agent delegation for Claude Code: isolate untrusted Producers, freeze their output, verify it independently, and leave acceptance to you.
