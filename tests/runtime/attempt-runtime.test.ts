@@ -292,6 +292,49 @@ describe("runAttempt", () => {
     expect(adapter.probeCalls).toBe(0);
   });
 
+  it("classifies cancellation during baseline as cancelled", async () => {
+    const repoRoot = await initRepo();
+    const controller = new AbortController();
+    const adapter = new FakeAdapter();
+
+    const result = await runAttempt(repoRoot, validSpec(), dependencies(adapter, "run-baseline-cancelled", {
+      abortSignal: controller.signal,
+      baselineVerifier: async () => {
+        controller.abort();
+        throw new DOMException("cancelled", "AbortError");
+      },
+    }));
+
+    expect(result.status).toBe("cancelled");
+    expect(result.failure).toBe("cancelled");
+    expect(adapter.probeCalls).toBe(0);
+  });
+
+  it("propagates an operational baseline verifier error", async () => {
+    const repoRoot = await initRepo();
+    const adapter = new FakeAdapter();
+
+    await expect(runAttempt(repoRoot, validSpec(), dependencies(adapter, "run-baseline-error", {
+      baselineVerifier: async () => { throw new Error("materialization failed"); },
+    }))).rejects.toThrow("materialization failed");
+    expect(adapter.probeCalls).toBe(0);
+  });
+
+  it("treats a mutating baseline command as an environment defect", async () => {
+    const repoRoot = await initRepo();
+    const spec = validSpec();
+    spec.verification[0]!.args = ["-e", "require('node:fs').writeFileSync('a.txt', 'formatted\\n')"];
+
+    const result = await runAttempt(repoRoot, spec, dependencies(
+      new FakeAdapter(),
+      "run-baseline-mutation",
+      { baselineVerifier: verifyBaseline },
+    ));
+
+    expect(result.failure).toBe("environment-defect");
+    expect(result.evidence).toMatchObject({ baseline: { commands: [{ ok: false, mutation: {} }] } });
+  });
+
   it("proceeds when an intentional baseline failure is expected", async () => {
     const repoRoot = await initRepo();
     const spec = validSpec();

@@ -180,6 +180,7 @@ export async function executeCommand(args: {
   cwd: string;
   ps: PlatformServices;
   now: () => number;
+  abortSignal?: AbortSignal;
 }): Promise<ExecutedCommand> {
   const { command, index, cwd, ps, now } = args;
   const registration = registerSensitiveEnvironment(command.environment ?? {});
@@ -203,7 +204,7 @@ export async function executeCommand(args: {
       env: environment,
       timeoutMs: command.timeoutMs,
       maxOutputBytes: MAX_COMMAND_OUTPUT_BYTES,
-    }, {});
+    }, args.abortSignal === undefined ? {} : { onCancel: args.abortSignal });
   } catch (error) {
     failureText = errorMessage(error);
   }
@@ -255,6 +256,33 @@ export async function executeCommand(args: {
   } finally {
     registration.dispose();
   }
+}
+
+export async function scanCommandMutations(args: {
+  worktreePath: string;
+  expectedHeadCommitOid: string;
+  dependencyLink: DependencyLink;
+  allowedMutations?: VerificationCommand["allowedMutations"];
+}): Promise<{ mutated: boolean; records: string[]; headChanged: boolean }> {
+  const [status, currentHead] = await Promise.all([
+    checkedGit(args.worktreePath, [
+      "status",
+      "--porcelain=v2",
+      "-z",
+      "--untracked-files=all",
+      "--ignored=matching",
+      "--ignore-submodules=none",
+    ]),
+    checkedGit(args.worktreePath, ["rev-parse", "--verify", "HEAD"]),
+  ]);
+  const records = status.split("\0").filter(record =>
+    record.length > 0
+    && !(args.dependencyLink === "inherited" && /^[?!] node_modules$/.test(record)));
+  const disallowedRecords = args.allowedMutations === "ignored-paths"
+    ? records.filter(record => !record.startsWith("! "))
+    : records;
+  const headChanged = currentHead.trim() !== args.expectedHeadCommitOid;
+  return { mutated: disallowedRecords.length > 0 || headChanged, records: disallowedRecords, headChanged };
 }
 
 function skippedEvidence(
@@ -337,27 +365,15 @@ export async function projectVerify(args: ProjectVerifyArgs): Promise<ProjectVer
       outputLogs.push(...executed.outputLogs);
       if (executed.failed) failures.push(`command-failed:${executed.outcome.id}`);
 
-      const [status, currentHead] = await Promise.all([
-        checkedGit(materialized.path, [
-          "status",
-          "--porcelain=v2",
-          "-z",
-          "--untracked-files=all",
-          "--ignored=matching",
-          "--ignore-submodules=none",
-        ]),
-        checkedGit(materialized.path, ["rev-parse", "--verify", "HEAD"]),
-      ]);
-      // The inherited node_modules symlink is Host-created, not a command
-      // mutation; gitignore's `node_modules/` dir pattern does not match a
-      // symlink, so it must be excluded here explicitly.
-      const records = status.split("\0").filter(record =>
-        record.length > 0
-        && !(dependencyLink === "inherited" && /^[?!] node_modules$/.test(record)));
-      const disallowedRecords = command.allowedMutations === "ignored-paths"
-        ? records.filter(record => !record.startsWith("! "))
-        : records;
-      if (disallowedRecords.length > 0 || currentHead.trim() !== args.artifact.candidateCommitOid) {
+      const mutation = await scanCommandMutations({
+        worktreePath: materialized.path,
+        expectedHeadCommitOid: args.artifact.candidateCommitOid,
+        dependencyLink,
+        ...(command.allowedMutations === undefined
+          ? {}
+          : { allowedMutations: command.allowedMutations }),
+      });
+      if (mutation.mutated) {
         mutated = true;
         failures.push("verification-mutated");
         break;

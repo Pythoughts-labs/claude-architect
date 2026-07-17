@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { access, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -61,5 +61,61 @@ describe("verifyBaseline", () => {
     const repo = await fixture();
     const report = await verifyBaseline({ ...repo, commands: [command(1)] });
     expect(report.commands).toEqual([{ id: "exit-1", exitCode: 1, ok: false }]);
+  });
+
+  it("does not run commands when already cancelled", async () => {
+    const repo = await fixture();
+    const marker = join(repo.repoRoot, "must-not-run.txt");
+    const controller = new AbortController();
+    controller.abort();
+
+    await expect(verifyBaseline({
+      ...repo,
+      commands: [command(0), {
+        ...command(0),
+        args: ["-e", `require('node:fs').writeFileSync(${JSON.stringify(marker)}, 'ran')`],
+      }],
+      abortSignal: controller.signal,
+    })).rejects.toMatchObject({ name: "AbortError" });
+    await expect(access(marker)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("marks a successful command that mutates a tracked file as not ok", async () => {
+    const repo = await fixture();
+    const report = await verifyBaseline({
+      ...repo,
+      commands: [{
+        ...command(0),
+        id: "formatter",
+        args: ["-e", "require('node:fs').writeFileSync('a.txt', 'formatted\\n')"],
+      }],
+    });
+
+    expect(report.commands).toEqual([{
+      id: "formatter",
+      exitCode: 0,
+      ok: false,
+      mutation: { records: [expect.stringContaining("a.txt")], headChanged: false },
+    }]);
+  });
+
+  it("cancels a running command and does not run remaining commands", async () => {
+    const repo = await fixture();
+    const marker = join(repo.repoRoot, "remaining-command.txt");
+    const controller = new AbortController();
+    const cancellation = setTimeout(() => controller.abort(), 50);
+    try {
+      await expect(verifyBaseline({
+        ...repo,
+        commands: [
+          { ...command(0), id: "long", args: ["-e", "setTimeout(() => {}, 60000)"] },
+          { ...command(0), id: "remaining", args: ["-e", `require('node:fs').writeFileSync(${JSON.stringify(marker)}, 'ran')`] },
+        ],
+        abortSignal: controller.signal,
+      })).rejects.toMatchObject({ name: "AbortError" });
+    } finally {
+      clearTimeout(cancellation);
+    }
+    await expect(access(marker)).rejects.toMatchObject({ code: "ENOENT" });
   });
 });

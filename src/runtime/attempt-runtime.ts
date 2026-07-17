@@ -511,20 +511,24 @@ export async function runAttempt(
         headCommitOid: preconditions.baseCommitOid,
         commands: spec.verification,
         ps,
+        ...(deps.abortSignal === undefined ? {} : { abortSignal: deps.abortSignal }),
       });
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
+      if (!deps.abortSignal?.aborted) throw error;
       return archiveTerminal({
         store, spec, runId, startedAtMs, now,
         repoRoot: canonical.canonical, baseCommitOid: preconditions.baseCommitOid,
-        signals: { "environment-defect": true }, report: null, profile: null, invocation: null,
+        signals: { cancelled: true }, report: null, profile: null, invocation: null,
         environment: [], temporaryHomeApplied: false, producerSummary: null,
-        candidate: null, commandOutcomes: [], unresolvedIssues: ["baseline-verifier-error"],
-        evidence: { baseline: `error: ${redact(message)}` }, producerLog: producerLog(null),
+        candidate: null, commandOutcomes: [], unresolvedIssues: ["cancelled"],
+        evidence: { baseline: "cancelled" }, producerLog: producerLog(null),
         repositoryInstructions, packagedVerifier,
       });
     }
     baselineEvidence = { baseline };
+    // Cancellation that fired while the baseline ran but let it return without
+    // throwing is honored by the existing pre-producer-spawn abort check, which
+    // archives run-start first; no separate early return is needed here.
     const baselineFailed = baseline.commands.some(command => !command.ok);
     if (baselineFailed && spec.expectBaselineFailure !== true) {
       return archiveTerminal({
