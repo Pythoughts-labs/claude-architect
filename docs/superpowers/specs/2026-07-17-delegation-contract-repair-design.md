@@ -19,14 +19,14 @@ The current source at v0.19.0 retains all four behaviors. The symlink failure is
 - Make the delegate skill an exact, usable description of the canonical schema.
 - Add typed reviewer-only focus guidance to the Delegation Spec.
 - Keep the exact clean-checkout identity invariant and document how to satisfy it.
-- Accept the common tracked-file symlink pattern without permitting directory aliases or repository escapes.
+- Accept the common tracked relative link to a direct contained regular file without permitting aliases or repository escapes.
 - Let the legacy Codex implementation lane write inside its current isolated worktree while retaining a least-privileged read-only mode.
 - Preserve caller-argument hardening, independent verification, and controlled integration.
 
 ## Non-Goals
 
 - No dirty-path exception or special case for `tasks/`.
-- No support for directory symlinks, junction aliases, external symlink targets, or broken links in write scope.
+- No support for absolute, symlink-chained, directory, junction, external, or broken links in write scope.
 - No caller-controlled raw Codex sandbox, cwd, additional-directory, or approval policy.
 - No new top-level read-only Delegation Spec execution mode.
 - No release or version bump in this change.
@@ -77,18 +77,19 @@ The nested-repository scan already receives `git ls-files --stage -z`. It will p
 When an allowlist-overlapping directory entry is a filesystem symlink, the scan accepts it only when all of these conditions hold:
 
 1. The path is tracked with Git mode `120000`.
-2. Resolving the link succeeds.
-3. The canonical target is contained by the canonical checkout root.
-4. The target is a regular file.
-5. The target is neither the checkout's `.git` entry nor a path below it.
+2. `readlink` reports a relative target; absolute targets are rejected.
+3. Resolving that relative target lexically from the link's parent stays inside the canonical checkout root and outside its `.git` entry.
+4. Canonical resolution succeeds.
+5. The lexical target and canonical target identify the same path: exact equality on POSIX and normalized case-insensitive equality on Windows.
+6. The direct canonical target is a regular file.
 
-The scanner checks the target once and never traverses it. A link to an internal regular file therefore cannot create recursive discovery. A link to the checkout root, `.git`, another directory, an external path, a missing path, or a cycle remains rejected.
+The scanner checks the direct canonical target once and never traverses or enqueues it. The common `src/package/CHANGELOG.md -> ../../CHANGELOG.md` link remains accepted. Absolute links and relative links that resolve through an intermediate or final symlink are rejected even when their final target is a regular file inside the caller checkout. A link to the checkout root, `.git`, another directory, an external path, a missing path, or a cycle also remains rejected.
 
-Containment uses normal path-boundary comparison on POSIX and case-insensitive normalized comparison on Windows. When Git materializes a symlink blob as an ordinary file because `core.symlinks=false`, the existing ordinary-file behavior remains unchanged.
+Containment uses normal path-boundary comparison on POSIX and case-insensitive normalized comparison on Windows. Direct-target identity is exact on POSIX and normalized case-insensitive on Windows. When Git materializes a symlink blob as an ordinary file because `core.symlinks=false`, the existing ordinary-file behavior remains unchanged.
 
-Unsafe symlinks retain the existing `nested-repository` result so this repair does not expand the external failure vocabulary. Unexpected filesystem errors retain `nested-repository-scan-failed` and fail closed.
+Unsafe symlinks retain the existing `nested-repository` result so this repair does not expand the external failure vocabulary. Resolution-time `ENOENT`, `ENOTDIR`, and `ELOOP` errors remain unsafe-link rejections. Unexpected filesystem errors and identity or race failures after a successful `realpath` retain `nested-repository-scan-failed` and fail closed.
 
-The authoritative candidate checks remain unchanged: a Producer cannot use an accepted link to mutate an out-of-allowlist tracked target and still pass structural verification.
+Accepted links are therefore relocation-invariant across the caller, baseline, Producer, and verifier worktrees. The authoritative candidate checks remain unchanged: a Producer cannot use an accepted link to mutate an out-of-allowlist tracked target and still pass structural verification.
 
 ## Legacy Codex Wrapper
 
@@ -117,11 +118,12 @@ Tests are added failing-first at the narrowest public seams:
 - Reviewer prompt tests prove focus reaches both reviewer roles but not fixer or verifier prompts.
 - Skill contract tests pin `args`, network tokens, timeout bounds, producer preference and override shapes, reviewer focus, and clean-checkout guidance.
 - Real-Git precondition tests accept a tracked link to an internal regular file in a primary checkout and a linked worktree.
-- Real-Git precondition tests continue rejecting external links, internal directory links, broken links, and untracked or ignored links in write scope.
+- Real-Git precondition tests reject absolute links and relative links chained through another symlink, as well as external links, internal directory links, broken links, and untracked or ignored links in write scope.
+- A real-runtime baseline test proves preflight rejects an absolute in-checkout link before a Host verification command can mutate the caller checkout or probe a Producer.
 - Fake-Codex tests pin default read-only mode, explicit edit mode, physical cwd injection, invalid mode rejection, and continued denial of raw security overrides.
 - Lane contract tests pin `--lane-mode edit` and the absence of contradictory raw sandbox/cwd arguments in both implementer definitions.
 
-Source changes under `src/` require regeneration of `runtime/server.mjs`. The change also updates `CHANGELOG.md` under Unreleased and records the dogfood regressions in `scratchpad.md`.
+Source changes under `src/` require regeneration of `runtime/server.mjs`. The change also updates `CHANGELOG.md` under Unreleased. `scratchpad.md` remains local-only and untracked.
 
 ## Verification
 

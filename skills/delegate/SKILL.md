@@ -51,7 +51,7 @@ Construct a candidate spec with every required field:
 - At least one verification command must mechanically cover each criterion.
 - Order verification commands exactly as the Host must execute them. When linting/formatting and type checking both apply, all lint and format gates must precede the final type-check gate, and verification formatters must use a non-mutating check mode (for example, `--check`); formatting rewrites belong in the Producer attempt before candidate freeze.
 - The final type-check must cover ALL touched typed files, including every added or modified test file; never scope it only to `src/` when tests or other typed paths may change.
-- Keep observable outcomes in `successCriteria`. Put reviewer-only, non-commandable concerns in `review.focus`; no undocumented review keys are accepted.
+- Keep observable outcomes in `successCriteria`. Put reviewer-only, non-commandable concerns in `review.focus`; when present, `review.focus` must be a non-empty array of non-empty strings. No undocumented review keys are accepted.
 - Prefer explicit test file paths in verification args; directory args can resolve differently between the Producer sandbox and clean-room verification.
 
 **Verification preflight:** The runtime runs every verification command against clean HEAD in a disposable worktree before dispatch. Repair the spec if a command cannot start. A baseline failure unrelated to the task is an environment defect the architect repairs centrally before dispatching; set `expectBaselineFailure: true` only on the individual verification command that intentionally reproduces the bug.

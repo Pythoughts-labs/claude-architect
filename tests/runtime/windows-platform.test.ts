@@ -22,6 +22,17 @@ describe("canonicalizeForScope (pure, all OSes)", () => {
   it("rejects sibling prefixes that are not path boundaries", () => {
     expect(canonicalizeForScope("C:\\Repo2\\a.ts", "c:\\repo")).toBe(false);
   });
+
+  it("supports reciprocal checks for normalized case-insensitive path identity", () => {
+    const sameLeft = "C:\\Repo\\SRC\\a.ts";
+    const sameRight = "c:\\repo\\src\\a.ts";
+    expect(canonicalizeForScope(sameLeft, sameRight)
+      && canonicalizeForScope(sameRight, sameLeft)).toBe(true);
+
+    const descendant = "C:\\Repo\\src\\nested\\a.ts";
+    expect(canonicalizeForScope(descendant, sameRight)
+      && canonicalizeForScope(sameRight, descendant)).toBe(false);
+  });
 });
 
 describe("acquireWxFileLock (shared, all OSes)", () => {

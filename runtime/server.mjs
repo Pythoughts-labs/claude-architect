@@ -23910,7 +23910,7 @@ function gitChangedFiles(checkoutPath, deps = {}) {
 import { createHash as createHash7 } from "node:crypto";
 
 // src/git/repo-preconditions.ts
-import { access, lstat, opendir, realpath } from "node:fs/promises";
+import { access, lstat, opendir, readlink, realpath } from "node:fs/promises";
 import path3 from "node:path";
 var MAX_DETAIL_ENTRIES = 20;
 function boundedDetail(lines) {
@@ -23979,11 +23979,28 @@ function pathIsWithin(root, candidate) {
   const relative = path3.relative(root, candidate);
   return relative === "" || relative !== ".." && !relative.startsWith(`..${path3.sep}`) && !path3.isAbsolute(relative);
 }
+function pathsIdentifySameLocation(left, right) {
+  if (getPlatformServices().os === "win32") {
+    return canonicalizeForScope(left, right) && canonicalizeForScope(right, left);
+  }
+  return left === right;
+}
 function hasCode(error2, codes) {
   return typeof error2 === "object" && error2 !== null && "code" in error2 && codes.includes(String(error2.code));
 }
 async function isSafeTrackedFileSymlink(repositoryRoot, symlinkPath, relativePath, trackedSymlinks) {
   if (!trackedSymlinks.has(relativePath)) return false;
+  let linkTarget;
+  try {
+    linkTarget = await readlink(symlinkPath);
+  } catch (error2) {
+    if (hasCode(error2, ["ENOENT", "ENOTDIR", "ELOOP"])) return false;
+    throw error2;
+  }
+  if (path3.isAbsolute(linkTarget)) return false;
+  const lexicalTarget = path3.resolve(path3.dirname(symlinkPath), linkTarget);
+  if (!pathIsWithin(repositoryRoot, lexicalTarget)) return false;
+  if (pathIsWithin(path3.join(repositoryRoot, ".git"), lexicalTarget)) return false;
   let target;
   try {
     target = await realpath(symlinkPath);
@@ -23991,6 +24008,7 @@ async function isSafeTrackedFileSymlink(repositoryRoot, symlinkPath, relativePat
     if (hasCode(error2, ["ENOENT", "ENOTDIR", "ELOOP"])) return false;
     throw error2;
   }
+  if (!pathsIdentifySameLocation(lexicalTarget, target)) return false;
   if (!pathIsWithin(repositoryRoot, target)) return false;
   if (pathIsWithin(path3.join(repositoryRoot, ".git"), target)) return false;
   return (await lstat(target)).isFile();

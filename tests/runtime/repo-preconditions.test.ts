@@ -312,6 +312,31 @@ describe("checkPreconditions", () => {
     }
   });
 
+  it.skipIf(process.platform === "win32")("rejects a tracked absolute symlink to a regular file in the same checkout", async () => {
+    const directory = await initRepo();
+    const target = join(directory, "target.txt");
+    await writeFile(target, "target\n");
+    await symlink(target, join(directory, "absolute-link"), "file");
+    await runGit(directory, ["add", "absolute-link", "target.txt"]);
+    await runGit(directory, ["commit", "-q", "-m", "add absolute file link"]);
+
+    await expect(checkPreconditions(directory, { writeAllowlist: ["absolute-link"] }))
+      .resolves.toEqual({ ok: false, reason: "nested-repository", detail: ["absolute-link"] });
+  });
+
+  it.skipIf(process.platform === "win32")("rejects a tracked relative symlink that resolves through an absolute symlink", async () => {
+    const directory = await initRepo();
+    const target = join(directory, "target.txt");
+    await writeFile(target, "target\n");
+    await symlink(target, join(directory, "absolute-link"), "file");
+    await symlink("absolute-link", join(directory, "outer-link"), "file");
+    await runGit(directory, ["add", "absolute-link", "outer-link", "target.txt"]);
+    await runGit(directory, ["commit", "-q", "-m", "add chained file links"]);
+
+    await expect(checkPreconditions(directory, { writeAllowlist: ["outer-link"] }))
+      .resolves.toEqual({ ok: false, reason: "nested-repository", detail: ["outer-link"] });
+  });
+
   it.skipIf(process.platform === "win32")("rejects a tracked symlink to a contained directory", async () => {
     const directory = await initRepo();
     await mkdir(join(directory, "shared"));
@@ -423,18 +448,20 @@ describe("checkPreconditions", () => {
 
   it.skipIf(process.platform === "win32")("fails closed when a tracked symlink target cannot be resolved", async () => {
     const directory = await initRepo();
-    const external = await temporaryDirectory("ca-unreadable-symlink-target-");
-    await writeFile(join(external, "target.txt"), "target\n");
-    await symlink(join(external, "target.txt"), join(directory, "unreadable-link"), "file");
-    await runGit(directory, ["add", "unreadable-link"]);
+    const targetDirectory = join(directory, "unreadable-target");
+    await mkdir(targetDirectory);
+    await writeFile(join(targetDirectory, "target.txt"), "target\n");
+    await writeFile(join(directory, ".gitignore"), "unreadable-target/\n");
+    await symlink("unreadable-target/target.txt", join(directory, "unreadable-link"), "file");
+    await runGit(directory, ["add", ".gitignore", "unreadable-link"]);
     await runGit(directory, ["commit", "-q", "-m", "add unreadable link"]);
-    await chmod(external, 0o000);
+    await chmod(targetDirectory, 0o000);
 
     try {
       await expect(checkPreconditions(directory, { writeAllowlist: ["unreadable-link"] }))
         .resolves.toEqual({ ok: false, reason: "nested-repository-scan-failed" });
     } finally {
-      await chmod(external, 0o700);
+      await chmod(targetDirectory, 0o700);
     }
   });
 

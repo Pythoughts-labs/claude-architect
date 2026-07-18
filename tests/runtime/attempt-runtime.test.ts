@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { access, mkdtemp, readFile, readdir, realpath, rm, writeFile } from "node:fs/promises";
+import { access, mkdtemp, readFile, readdir, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -382,6 +382,40 @@ describe("runAttempt", () => {
 
     expect(result.failure).toBe("environment-defect");
     expect(result.evidence).toMatchObject({ baseline: { commands: [{ ok: false, mutation: {} }] } });
+  });
+
+  it.skipIf(process.platform === "win32")("rejects an absolute in-checkout link before a Host verification command can write through it", async () => {
+    const repoRoot = await initRepo();
+    const target = join(repoRoot, "target.txt");
+    const original = "original\n";
+    await writeFile(target, original);
+    await symlink(target, join(repoRoot, "absolute-link"), "file");
+    await runGit(repoRoot, ["add", "absolute-link", "target.txt"]);
+    await runGit(repoRoot, ["commit", "-q", "-m", "add absolute file link"]);
+    const spec = validSpec();
+    spec.writeAllowlist = ["absolute-link"];
+    spec.verification[0] = {
+      ...spec.verification[0]!,
+      executable: process.execPath,
+      args: ["-e", "require('node:fs').writeFileSync('absolute-link', 'mutated\\n')"],
+    };
+    const adapter = new FakeAdapter();
+    let thrown: unknown;
+
+    try {
+      await runAttempt(repoRoot, spec, dependencies(adapter, "run-absolute-link-precondition", {
+        baselineVerifier: verifyBaseline,
+      }));
+    } catch (error) {
+      thrown = error;
+    }
+
+    expect.soft(thrown).toMatchObject({
+      message: "repository precondition failed (nested-repository): absolute-link",
+      detail: { reason: "nested-repository", detail: ["absolute-link"] },
+    });
+    expect.soft(await readFile(target, "utf8")).toBe(original);
+    expect(adapter.probeCalls).toBe(0);
   });
 
   it("proceeds when an intentional baseline failure is expected", async () => {

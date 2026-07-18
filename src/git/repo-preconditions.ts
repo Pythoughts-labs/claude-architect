@@ -1,4 +1,4 @@
-import { access, lstat, opendir, realpath } from "node:fs/promises";
+import { access, lstat, opendir, readlink, realpath } from "node:fs/promises";
 import path from "node:path";
 import { getPlatformServices } from "../platform/select-platform.js";
 import { canonicalizeForScope } from "../platform/windows-platform-services.js";
@@ -98,6 +98,13 @@ function pathIsWithin(root: string, candidate: string): boolean {
   );
 }
 
+function pathsIdentifySameLocation(left: string, right: string): boolean {
+  if (getPlatformServices().os === "win32") {
+    return canonicalizeForScope(left, right) && canonicalizeForScope(right, left);
+  }
+  return left === right;
+}
+
 function hasCode(error: unknown, codes: readonly string[]): boolean {
   return typeof error === "object" && error !== null && "code" in error
     && codes.includes(String(error.code));
@@ -111,6 +118,19 @@ async function isSafeTrackedFileSymlink(
 ): Promise<boolean> {
   if (!trackedSymlinks.has(relativePath)) return false;
 
+  let linkTarget: string;
+  try {
+    linkTarget = await readlink(symlinkPath);
+  } catch (error) {
+    if (hasCode(error, ["ENOENT", "ENOTDIR", "ELOOP"])) return false;
+    throw error;
+  }
+  if (path.isAbsolute(linkTarget)) return false;
+
+  const lexicalTarget = path.resolve(path.dirname(symlinkPath), linkTarget);
+  if (!pathIsWithin(repositoryRoot, lexicalTarget)) return false;
+  if (pathIsWithin(path.join(repositoryRoot, ".git"), lexicalTarget)) return false;
+
   let target: string;
   try {
     target = await realpath(symlinkPath);
@@ -119,6 +139,7 @@ async function isSafeTrackedFileSymlink(
     throw error;
   }
 
+  if (!pathsIdentifySameLocation(lexicalTarget, target)) return false;
   if (!pathIsWithin(repositoryRoot, target)) return false;
   if (pathIsWithin(path.join(repositoryRoot, ".git"), target)) return false;
   return (await lstat(target)).isFile();

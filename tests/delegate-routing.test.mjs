@@ -33,7 +33,7 @@ assert.match(skill, /command `timeoutMs` must be 1\.\.1800000/u);
 assert.match(skill, /attempt `timeoutMs` must be 600000\.\.1800000/u);
 assert.match(skill, /`producerPreferences` is an ordered array of Producer id strings/u);
 assert.match(skill, /`producerOverrides: \{ model\?, reasoningEffort\? \}`/u);
-assert.match(skill, /`review\.focus`/u);
+assert.match(skill, /when present, `review\.focus` must be a non-empty array of non-empty strings/u);
 assert.match(skill, /tracked or unignored changes must be committed before delegation/u);
 
 console.log("PASS: unspecified delegations require an explicit CLI selection.");
