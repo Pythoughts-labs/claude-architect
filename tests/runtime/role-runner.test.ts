@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
+import { lstat, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Readable } from "node:stream";
@@ -21,6 +21,7 @@ import type {
   ProducerInvocation,
 } from "../../src/producers/producer-adapter.js";
 import { ProducerRegistry } from "../../src/producers/producer-registry.js";
+import type { RunStartContext } from "../../src/runtime/run-start.js";
 
 const REVIEW_OUTPUT = [
   "```json",
@@ -162,6 +163,7 @@ const temporaryPaths: string[] = [];
 let previousNodeEnvironment: string | undefined;
 let previousSeatbeltStates: Array<"certified" | "tested" | "unsupported"> | undefined;
 let worktreePath = "";
+let runStartTarget: RunStartContext["target"];
 
 async function temporaryDirectory(prefix: string): Promise<string> {
   const directory = await mkdtemp(join(tmpdir(), prefix));
@@ -190,7 +192,7 @@ function platformServices(adapter: FakeAdapter): PlatformServices {
     async requestCooperativeCancellation() {},
     async terminateProcessTree() {},
     async getProcessStartToken() {
-      return null;
+      return `token-${adapter.spawnCount}`;
     },
     async terminateProcessTreeByPid() {},
     async acquireCheckoutLock() {
@@ -241,6 +243,7 @@ function makePackage(spec: DelegationSpec): RolePackage {
 
 function argsWith(adapter: FakeAdapter, role: PipelineRole): RoleRunArgs {
   const baseSpec = makeSpec();
+  const runId = `role-${role}`;
   return {
     role,
     baseSpec,
@@ -248,7 +251,18 @@ function argsWith(adapter: FakeAdapter, role: PipelineRole): RoleRunArgs {
     worktreePath,
     ps: platformServices(adapter),
     registry: new ProducerRegistry([adapter]),
-    runId: `role-${role}`,
+    runId,
+    runStart: {
+      target: runStartTarget,
+      record: {
+        runId,
+        lockKey: "a".repeat(64),
+        canonicalCommonDir: worktreePath,
+        pid: null,
+        processToken: null,
+        startedAt: "2026-07-18T12:00:00.000Z",
+      },
+    },
     env: {},
   };
 }
@@ -262,10 +276,24 @@ async function configureFixerGitRoots(): Promise<void> {
   await writeFile(join(gitDir, "commondir"), "../..\n");
 }
 
+async function readRunStart(): Promise<{ pid: number; processToken: string }> {
+  return JSON.parse(await readFile(
+    join(runStartTarget.canonicalDirectory, "run-start.json"),
+    "utf8",
+  )) as { pid: number; processToken: string };
+}
+
 beforeEach(async () => {
   previousNodeEnvironment = process.env.NODE_ENV;
   process.env.NODE_ENV = "test";
   worktreePath = await temporaryDirectory("ca-role-worktree-");
+  const runStartDirectory = await realpath(await temporaryDirectory("ca-role-run-start-"));
+  const metadata = await lstat(runStartDirectory);
+  runStartTarget = {
+    publicDirectory: runStartDirectory,
+    canonicalDirectory: runStartDirectory,
+    identity: { dev: metadata.dev, ino: metadata.ino },
+  };
 
   const seatbelt = SANDBOX_BACKENDS.find(backend => backend.id === "macos-seatbelt");
   if (seatbelt === undefined) throw new Error("macOS Seatbelt test backend is missing");
@@ -354,6 +382,10 @@ describe("runRole", () => {
     expect(result.failure).toBe("producer-failure");
     expect(adapter.spawnCount).toBe(2);
     expect(adapter.invocationCount).toBe(2);
+    await expect(readRunStart()).resolves.toMatchObject({
+      pid: 42,
+      processToken: "token-2",
+    });
   });
 
   it("passes linked-worktree git metadata roots to the fixer", async () => {
@@ -394,8 +426,14 @@ describe("runRole", () => {
     const result = await runRole(argsWith(adapter, "fixer"));
 
     expect(result.ok).toBe(true);
-    expect(adapter.spawnedCommands).toEqual(["/usr/bin/sandbox-exec"]);
-    const profile = adapter.spawnedArgs[0]?.[1] ?? "";
+    expect(adapter.spawnedCommands).toEqual([process.execPath]);
+    expect(adapter.spawnedArgs[0]?.slice(1, 4)).toEqual([
+      String(process.pid),
+      "--",
+      "/usr/bin/sandbox-exec",
+    ]);
+    expect(adapter.spawnedArgs[0]?.[0]).toMatch(/runtime[/\\]watchdog\.mjs$/);
+    const profile = adapter.spawnedArgs[0]?.[5] ?? "";
     expect(profile).toContain(worktreePath);
     for (const writableRoot of adapter.extraWritableRootRequests[0] ?? []) {
       expect(profile).toContain(writableRoot);
@@ -416,6 +454,16 @@ describe("runRole", () => {
 
       expect(result.ok).toBe(true);
       expect(adapter.spawnedCommands).toEqual([process.execPath]);
+      expect(adapter.spawnedArgs[0]?.slice(1)).toEqual([
+        String(process.pid),
+        "--",
+        process.execPath,
+      ]);
+      expect(adapter.spawnedArgs[0]?.[0]).toMatch(/runtime[/\\]watchdog\.mjs$/);
+      await expect(readRunStart()).resolves.toMatchObject({
+        pid: 42,
+        processToken: "token-1",
+      });
     } finally {
       codex.platforms.pop();
     }

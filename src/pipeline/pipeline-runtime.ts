@@ -20,6 +20,7 @@ import {
   type AttemptRuntimeDependencies,
 } from "../runtime/attempt-runtime.js";
 import { ArtifactStore } from "../runtime/artifact-store.js";
+import type { RunStartContext } from "../runtime/run-start.js";
 import { RuntimeError } from "../util/errors.js";
 import { AcceptanceVerifier } from "../verify/acceptance-verifier.js";
 import {
@@ -165,6 +166,7 @@ function roleArgs(args: {
   worktreePath: string;
   deps: PipelineDependencies;
   runId: string;
+  runStart?: RunStartContext;
   gitObjectAccess?: LinkedWorktreeGitAccess;
 }): RoleRunArgs {
   const ps = args.deps.ps ?? getPlatformServices();
@@ -176,6 +178,7 @@ function roleArgs(args: {
     ps,
     registry: args.deps.registry,
     runId: args.runId,
+    ...(args.runStart === undefined ? {} : { runStart: args.runStart }),
     ...(args.gitObjectAccess === undefined ? {} : { gitObjectAccess: args.gitObjectAccess }),
     ...(args.deps.env === undefined ? {} : { env: args.deps.env }),
     ...(args.deps.abortSignal === undefined ? {} : { abortSignal: args.deps.abortSignal }),
@@ -370,6 +373,7 @@ async function runFix(args: {
   round: number;
   store: ArtifactStore;
   gitObjectAccess: LinkedWorktreeGitAccess;
+  runStart?: RunStartContext;
 }): Promise<FixRunResult> {
   const runner = args.deps.roleRunner ?? defaultRunRole;
   const callArgs = roleArgs({
@@ -379,6 +383,7 @@ async function runFix(args: {
     worktreePath: args.worktreePath,
     deps: args.deps,
     runId: args.runId,
+    ...(args.runStart === undefined ? {} : { runStart: args.runStart }),
     gitObjectAccess: args.gitObjectAccess,
   });
   const logName = `role-fixer-round${args.round}`;
@@ -625,7 +630,15 @@ export async function runPipeline(
   deps: PipelineDependencies,
 ): Promise<PipelineResult> {
   const runAttemptFn = deps.runAttempt ?? defaultRunAttempt;
-  const attempt = await runAttemptFn(checkoutPath, spec, deps);
+  let runStart: RunStartContext | undefined;
+  const inheritedOnRunStart = deps.onRunStart;
+  const attempt = await runAttemptFn(checkoutPath, spec, {
+    ...deps,
+    onRunStart(context) {
+      runStart = context;
+      inheritedOnRunStart?.(context);
+    },
+  });
   if (attempt.status !== "verified-candidate" || attempt.candidate === null) {
     return failedResult(
       attempt,
@@ -721,6 +734,7 @@ export async function runPipeline(
         round,
         store,
         gitObjectAccess,
+        ...(runStart === undefined ? {} : { runStart }),
       });
       if (!fixRun.ok) {
         return failedResult(

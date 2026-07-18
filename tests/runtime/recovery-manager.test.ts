@@ -127,6 +127,14 @@ describe("recoverStaleRuns", () => {
       repo.directory,
       `verify-${runId}`,
     ).create(repo.head);
+    const pipelineWorktree = await new WorktreeManager(
+      repo.directory,
+      `${runId}-pipeline`,
+    ).create(repo.head);
+    const pipelineVerifyWorktree = await new WorktreeManager(
+      repo.directory,
+      `${runId}-verify`,
+    ).create(repo.head);
     const unmanagedParent = await temporaryDirectory("ca-recovery-unmanaged-");
     const unmanagedWorktree = path.join(unmanagedParent, "external-worktree");
     await runGit(repo.directory, ["worktree", "add", "--detach", unmanagedWorktree, repo.head]);
@@ -151,6 +159,8 @@ describe("recoverStaleRuns", () => {
     await expectMissing(worktree.path);
     await expectMissing(baselineWorktree.path);
     await expectMissing(verifyWorktree.path);
+    await expectMissing(pipelineWorktree.path);
+    await expectMissing(pipelineVerifyWorktree.path);
     await expect(access(unmanagedWorktree)).resolves.toBeUndefined();
     await expectMissing(lockPath);
     expect((await git(repo.directory, ["rev-parse", "--verify", "--quiet", anchorRef])).exitCode)
@@ -353,6 +363,10 @@ describe("recoverStaleRuns", () => {
     const repo = await initRepo();
     const runId = "run-live-orphan-forced";
     const store = await createUnfinishedRun(runId, repo.commonDir, 4242, "darwin:start");
+    const pipelineWorktree = await new WorktreeManager(
+      repo.directory,
+      `${runId}-pipeline`,
+    ).create(repo.head);
     const events: string[] = [];
 
     await expect(recoverStaleRuns({
@@ -367,6 +381,7 @@ describe("recoverStaleRuns", () => {
     })).resolves.toEqual({ recovered: [runId] });
 
     expect(events).toEqual(["cooperative", "delay:3000", "forced"]);
+    await expectMissing(pipelineWorktree.path);
     await expect(store.readResult(runId)).resolves.toMatchObject({
       evidence: { recovery: "startup-stale-run", escalation: "forced" },
     });

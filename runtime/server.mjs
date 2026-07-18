@@ -25187,18 +25187,8 @@ function checkVersionCompat(skillProtocolVersion) {
 }
 
 // src/runtime/attempt-runtime.ts
-import { randomUUID as randomUUID3 } from "node:crypto";
-import { constants as constants3 } from "node:fs";
-import {
-  access as access3,
-  lstat as lstat4,
-  open as open4,
-  realpath as realpath4,
-  rename as rename2,
-  rm as rm4
-} from "node:fs/promises";
-import path10 from "node:path";
-import { fileURLToPath as fileURLToPath2 } from "node:url";
+import { randomUUID as randomUUID4 } from "node:crypto";
+import { rm as rm5 } from "node:fs/promises";
 
 // src/git/candidate-tree.ts
 import { createHash as createHash4 } from "node:crypto";
@@ -27433,79 +27423,20 @@ async function collectReproducibilityInputs(repoRoot, baseCommitOid, dependencie
   return { repositoryInstructions, packagedVerifier };
 }
 
-// src/runtime/attempt-runtime.ts
-var MAX_PRODUCER_OUTPUT_BYTES = 1e6;
+// src/runtime/run-start.ts
+import { randomUUID as randomUUID3 } from "node:crypto";
+import { constants as constants3 } from "node:fs";
+import {
+  access as access3,
+  lstat as lstat4,
+  open as open4,
+  realpath as realpath4,
+  rename as rename2,
+  rm as rm4
+} from "node:fs/promises";
+import path10 from "node:path";
+import { fileURLToPath as fileURLToPath2 } from "node:url";
 var NO_FOLLOW2 = constants3.O_NOFOLLOW ?? 0;
-function reportPhase(deps, phase) {
-  try {
-    deps.onPhase?.(phase);
-  } catch {
-  }
-}
-function hasEnvironmentMarker(environment) {
-  return environment.CLAUDE_ARCHITECT_DELEGATED !== void 0;
-}
-function hasFailureSignal(signals) {
-  return Object.values(signals).some(Boolean);
-}
-function statusForFailure(failure2) {
-  if (failure2 === null) return "verified-candidate";
-  if (failure2 === "unavailable" || failure2 === "authentication-required") return "unavailable";
-  if (failure2 === "cancelled") return "cancelled";
-  return "failed";
-}
-function summaryForFailure(failure2) {
-  switch (failure2) {
-    case null:
-      return "candidate produced and independently verified";
-    case "unavailable":
-      return "no eligible producer is available";
-    case "authentication-required":
-      return "producer authentication is required";
-    case "spawn-failure":
-      return "producer process could not be started";
-    case "cancelled":
-      return "delegation attempt was cancelled";
-    case "timeout":
-      return "producer process exceeded the attempt timeout";
-    case "sandbox-violation":
-      return "producer changes violated the authorized write boundary";
-    case "invalid-output":
-      return "producer output did not match the adapter contract";
-    case "producer-failure":
-      return "producer process reported failure";
-    case "verification-failure":
-      return "candidate did not pass independent verification";
-    case "invalid-specification":
-      return "delegation specification is invalid";
-    case "environment-defect":
-      return "clean repository baseline did not pass verification";
-  }
-}
-function producerLog(exit) {
-  if (exit === null) return "No producer process was started.\n";
-  return [
-    "[stdout]",
-    exit.stdout,
-    "[stderr]",
-    exit.stderr,
-    ""
-  ].join("\n");
-}
-function preCancelledExit() {
-  return {
-    exitCode: null,
-    signal: null,
-    timedOut: false,
-    cancelled: true,
-    stdout: "",
-    stderr: "",
-    truncated: { stdout: false, stderr: false }
-  };
-}
-function shouldUseTemporaryHome(profile) {
-  return profile.isolationState === "controlled-config-supported" || profile.isolationState === "controlled-config-with-copied-credentials";
-}
 function errorCode3(error2) {
   return error2.code;
 }
@@ -27524,6 +27455,24 @@ async function resolveWatchdogPath() {
     }
   }
   throw lastError;
+}
+async function parentDeathWatchdogInvocation(executable, args) {
+  return {
+    executable: {
+      kind: "native",
+      command: process.execPath,
+      prefixArgs: [],
+      resolvedFrom: "runtime-watchdog"
+    },
+    args: [
+      await resolveWatchdogPath(),
+      String(process.pid),
+      "--",
+      executable.command,
+      ...executable.prefixArgs,
+      ...args
+    ]
+  };
 }
 function assertDirectoryIdentity2(target) {
   return Promise.all([
@@ -27608,9 +27557,9 @@ async function initializeRunStart(store, record2) {
     identity: { dev: metadata.dev, ino: metadata.ino }
   };
   await writeRunStart(target, record2, true);
-  return target;
+  return { target, record: record2 };
 }
-function withRunStartPidRecording(ps, target, record2) {
+function withRunStartPidRecording(ps, context) {
   return {
     os: ps.os,
     resolveExecutable: (request) => ps.resolveExecutable(request),
@@ -27619,7 +27568,11 @@ function withRunStartPidRecording(ps, target, record2) {
       if (process3.pid > 1) {
         try {
           const processToken = await ps.getProcessStartToken(process3.pid).catch(() => null);
-          await writeRunStart(target, { ...record2, pid: process3.pid, processToken }, false);
+          await writeRunStart(
+            context.target,
+            { ...context.record, pid: process3.pid, processToken },
+            false
+          );
         } catch (error2) {
           await ps.terminateProcessTree(process3).catch(() => {
           });
@@ -27636,6 +27589,79 @@ function withRunStartPidRecording(ps, target, record2) {
     createSecureTempDirectory: () => ps.createSecureTempDirectory(),
     canonicalizePath: (input) => ps.canonicalizePath(input)
   };
+}
+
+// src/runtime/attempt-runtime.ts
+var MAX_PRODUCER_OUTPUT_BYTES = 1e6;
+function reportPhase(deps, phase) {
+  try {
+    deps.onPhase?.(phase);
+  } catch {
+  }
+}
+function hasEnvironmentMarker(environment) {
+  return environment.CLAUDE_ARCHITECT_DELEGATED !== void 0;
+}
+function hasFailureSignal(signals) {
+  return Object.values(signals).some(Boolean);
+}
+function statusForFailure(failure2) {
+  if (failure2 === null) return "verified-candidate";
+  if (failure2 === "unavailable" || failure2 === "authentication-required") return "unavailable";
+  if (failure2 === "cancelled") return "cancelled";
+  return "failed";
+}
+function summaryForFailure(failure2) {
+  switch (failure2) {
+    case null:
+      return "candidate produced and independently verified";
+    case "unavailable":
+      return "no eligible producer is available";
+    case "authentication-required":
+      return "producer authentication is required";
+    case "spawn-failure":
+      return "producer process could not be started";
+    case "cancelled":
+      return "delegation attempt was cancelled";
+    case "timeout":
+      return "producer process exceeded the attempt timeout";
+    case "sandbox-violation":
+      return "producer changes violated the authorized write boundary";
+    case "invalid-output":
+      return "producer output did not match the adapter contract";
+    case "producer-failure":
+      return "producer process reported failure";
+    case "verification-failure":
+      return "candidate did not pass independent verification";
+    case "invalid-specification":
+      return "delegation specification is invalid";
+    case "environment-defect":
+      return "clean repository baseline did not pass verification";
+  }
+}
+function producerLog(exit) {
+  if (exit === null) return "No producer process was started.\n";
+  return [
+    "[stdout]",
+    exit.stdout,
+    "[stderr]",
+    exit.stderr,
+    ""
+  ].join("\n");
+}
+function preCancelledExit() {
+  return {
+    exitCode: null,
+    signal: null,
+    timedOut: false,
+    cancelled: true,
+    stdout: "",
+    stderr: "",
+    truncated: { stdout: false, stderr: false }
+  };
+}
+function shouldUseTemporaryHome(profile) {
+  return profile.isolationState === "controlled-config-supported" || profile.isolationState === "controlled-config-with-copied-credentials";
 }
 async function archiveTerminal(context) {
   const verificationSecretRegistrations = [];
@@ -27720,7 +27746,7 @@ async function cleanupAttemptResources(args) {
   }
   if (args.tempHome !== null) {
     try {
-      await rm4(args.tempHome, { recursive: true, force: true });
+      await rm5(args.tempHome, { recursive: true, force: true });
     } catch (error2) {
       failures.push(error2);
     }
@@ -27740,7 +27766,7 @@ async function runAttempt(checkoutPath, spec, deps) {
   const producerRegistry = deps.producerRegistry ?? registry2;
   const now = deps.now ?? Date.now;
   const startedAtMs = now();
-  const runId = (deps.runId ?? randomUUID3)();
+  const runId = (deps.runId ?? randomUUID4)();
   const store = new ArtifactStore(runId);
   const canonical = await ps.canonicalizePath(checkoutPath);
   let lock = null;
@@ -27906,7 +27932,8 @@ async function runAttempt(checkoutPath, spec, deps) {
       processToken: null,
       startedAt: new Date(startedAtMs).toISOString()
     };
-    const runStartTarget = await initializeRunStart(store, runStart);
+    const runStartContext = await initializeRunStart(store, runStart);
+    deps.onRunStart?.(runStartContext);
     worktree = await new WorktreeManager(canonical.canonical, runId, ps).create(
       preconditions.baseCommitOid
     );
@@ -27962,25 +27989,15 @@ async function runAttempt(checkoutPath, spec, deps) {
       ...invocation.env === void 0 ? {} : { adapterValues: invocation.env },
       ...tempHome === null ? {} : { tempHome }
     });
-    const recordingServices = withRunStartPidRecording(ps, runStartTarget, runStart);
-    const watchdogExecutable = {
-      kind: "native",
-      command: process.execPath,
-      prefixArgs: [],
-      resolvedFrom: "runtime-watchdog"
-    };
-    const watchdogArgs = [
-      await resolveWatchdogPath(),
-      String(process.pid),
-      "--",
-      invocation.executable.command,
-      ...invocation.executable.prefixArgs,
-      ...invocation.args
-    ];
+    const recordingServices = withRunStartPidRecording(ps, runStartContext);
+    const watchdog = await parentDeathWatchdogInvocation(
+      invocation.executable,
+      invocation.args
+    );
     reportPhase(deps, "producer running");
     const exit = deps.abortSignal?.aborted === true ? preCancelledExit() : await supervise(recordingServices, {
-      executable: watchdogExecutable,
-      args: watchdogArgs,
+      executable: watchdog.executable,
+      args: watchdog.args,
       cwd: worktree.path,
       env: builtEnvironment.env,
       timeoutMs: spec.timeoutMs,
@@ -28307,7 +28324,7 @@ function evaluateGates(input) {
 }
 
 // src/pipeline/role-runner.ts
-import { rm as rm5 } from "node:fs/promises";
+import { rm as rm6 } from "node:fs/promises";
 
 // src/pipeline/role-prompts.ts
 import { readFileSync as readFileSync2 } from "node:fs";
@@ -28597,7 +28614,7 @@ async function cleanupProcessAttempt(tempHome, builtEnvironment) {
   }
   if (tempHome !== null) {
     try {
-      await rm5(tempHome, { recursive: true, force: true });
+      await rm6(tempHome, { recursive: true, force: true });
     } catch (error2) {
       failures.push(error2);
     }
@@ -28676,6 +28693,15 @@ async function runRole(args) {
       };
     }
   }
+  const runStart = args.runStart;
+  if (fixer && runStart === void 0) {
+    return {
+      ok: false,
+      rawOutput: "",
+      failure: "spawn-failure",
+      producerId
+    };
+  }
   for (let attempt = 1; attempt <= 2; attempt += 1) {
     let tempHome = null;
     let builtEnvironment = null;
@@ -28723,9 +28749,11 @@ async function runRole(args) {
         },
         tempHome
       });
-      const exit = args.abortSignal?.aborted === true ? preCancelledExit2() : await supervise(args.ps, {
-        executable: invocation.executable,
-        args: invocation.args,
+      const supervisedInvocation = fixer ? await parentDeathWatchdogInvocation(invocation.executable, invocation.args) : { executable: invocation.executable, args: invocation.args };
+      const processServices = fixer && runStart !== void 0 ? withRunStartPidRecording(args.ps, runStart) : args.ps;
+      const exit = args.abortSignal?.aborted === true ? preCancelledExit2() : await supervise(processServices, {
+        executable: supervisedInvocation.executable,
+        args: supervisedInvocation.args,
         cwd: args.worktreePath,
         env: builtEnvironment.env,
         timeoutMs: roleSpec.timeoutMs,
@@ -28847,6 +28875,7 @@ function roleArgs(args) {
     ps,
     registry: args.deps.registry,
     runId: args.runId,
+    ...args.runStart === void 0 ? {} : { runStart: args.runStart },
     ...args.gitObjectAccess === void 0 ? {} : { gitObjectAccess: args.gitObjectAccess },
     ...args.deps.env === void 0 ? {} : { env: args.deps.env },
     ...args.deps.abortSignal === void 0 ? {} : { abortSignal: args.deps.abortSignal }
@@ -29004,6 +29033,7 @@ async function runFix(args) {
     worktreePath: args.worktreePath,
     deps: args.deps,
     runId: args.runId,
+    ...args.runStart === void 0 ? {} : { runStart: args.runStart },
     gitObjectAccess: args.gitObjectAccess
   });
   const logName2 = `role-fixer-round${args.round}`;
@@ -29212,7 +29242,15 @@ async function verifyCandidate(args) {
 }
 async function runPipeline(checkoutPath, spec, deps) {
   const runAttemptFn = deps.runAttempt ?? runAttempt;
-  const attempt = await runAttemptFn(checkoutPath, spec, deps);
+  let runStart;
+  const inheritedOnRunStart = deps.onRunStart;
+  const attempt = await runAttemptFn(checkoutPath, spec, {
+    ...deps,
+    onRunStart(context) {
+      runStart = context;
+      inheritedOnRunStart?.(context);
+    }
+  });
   if (attempt.status !== "verified-candidate" || attempt.candidate === null) {
     return failedResult(
       attempt,
@@ -29302,7 +29340,8 @@ async function runPipeline(checkoutPath, spec, deps) {
         runId: attempt.runId,
         round,
         store,
-        gitObjectAccess
+        gitObjectAccess,
+        ...runStart === void 0 ? {} : { runStart }
       });
       if (!fixRun.ok) {
         return failedResult(
@@ -29823,7 +29862,7 @@ import {
   open as open5,
   readdir as readdir2,
   realpath as realpath6,
-  rm as rm6
+  rm as rm7
 } from "node:fs/promises";
 import path14 from "node:path";
 import nodeProcess4 from "node:process";
@@ -29922,7 +29961,7 @@ async function removePlainDirectory(directory, expected) {
   if (!isPlainDirectory(metadata) || !sameIdentity(metadata, expected)) {
     throw new RuntimeError("recovery directory identity changed before removal");
   }
-  await rm6(directory, { recursive: true, force: false });
+  await rm7(directory, { recursive: true, force: false });
 }
 function parseRunStart(text, expectedRunId) {
   let value;
@@ -30192,7 +30231,9 @@ async function recoverRun(record2, root, ps, isProcessAlive, requestCooperativeT
   for (const managedId of [
     record2.runId,
     `baseline-${record2.runId}`,
-    `verify-${record2.runId}`
+    `verify-${record2.runId}`,
+    `${record2.runId}-pipeline`,
+    `${record2.runId}-verify`
   ]) {
     const worktreePath = path14.join(root, "worktrees", managedId);
     const worktreeIdentity = await plainDirectoryIdentity(worktreePath);
@@ -30290,7 +30331,7 @@ async function reclaimLocks(locksRoot, isProcessAlive, getProcessStartToken) {
     if (!identity.isFile() || identity.isSymbolicLink()) {
       throw new RuntimeError("checkout lock identity changed during recovery");
     }
-    await rm6(lockPath, { force: false });
+    await rm7(lockPath, { force: false });
   }
 }
 async function lockIsOwnedByLiveProcess(locksRoot, lockKey, isProcessAlive, getProcessStartToken) {

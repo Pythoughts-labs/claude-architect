@@ -21,6 +21,11 @@ import { route } from "../producers/routing-policy.js";
 import { buildEnvironment } from "../runtime/environment-policy.js";
 import { redact } from "../runtime/redaction.js";
 import {
+  parentDeathWatchdogInvocation,
+  type RunStartContext,
+  withRunStartPidRecording,
+} from "../runtime/run-start.js";
+import {
   buildRoleSpec,
   type PipelineRole,
   type RolePackage,
@@ -36,6 +41,7 @@ export interface RoleRunArgs {
   ps: PlatformServices;
   registry: ProducerRegistry;
   runId: string;
+  runStart?: RunStartContext;
   env?: Record<string, string | undefined>;
   gitObjectAccess?: LinkedWorktreeGitAccess;
   abortSignal?: AbortSignal;
@@ -199,6 +205,15 @@ export async function runRole(args: RoleRunArgs): Promise<RoleRunResult> {
       };
     }
   }
+  const runStart = args.runStart;
+  if (fixer && runStart === undefined) {
+    return {
+      ok: false,
+      rawOutput: "",
+      failure: "spawn-failure",
+      producerId,
+    };
+  }
 
   for (let attempt = 1; attempt <= 2; attempt += 1) {
     let tempHome: string | null = null;
@@ -251,11 +266,17 @@ export async function runRole(args: RoleRunArgs): Promise<RoleRunResult> {
         },
         tempHome,
       });
+      const supervisedInvocation = fixer
+        ? await parentDeathWatchdogInvocation(invocation.executable, invocation.args)
+        : { executable: invocation.executable, args: invocation.args };
+      const processServices = fixer && runStart !== undefined
+        ? withRunStartPidRecording(args.ps, runStart)
+        : args.ps;
       const exit = args.abortSignal?.aborted === true
         ? preCancelledExit()
-        : await supervise(args.ps, {
-          executable: invocation.executable,
-          args: invocation.args,
+        : await supervise(processServices, {
+          executable: supervisedInvocation.executable,
+          args: supervisedInvocation.args,
           cwd: args.worktreePath,
           env: builtEnvironment.env,
           timeoutMs: roleSpec.timeoutMs,

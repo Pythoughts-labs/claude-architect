@@ -516,6 +516,8 @@ async function recoverRun(
     record.runId,
     `baseline-${record.runId}`,
     `verify-${record.runId}`,
+    `${record.runId}-pipeline`,
+    `${record.runId}-verify`,
   ]) {
     const worktreePath = path.join(root, "worktrees", managedId);
     const worktreeIdentity = await plainDirectoryIdentity(worktreePath);
