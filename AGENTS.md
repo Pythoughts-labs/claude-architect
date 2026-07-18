@@ -11,6 +11,7 @@ Claude Architect is a cross-platform Claude Code plugin for verified delegation 
 3. Contract and adversarial tests in `tests/`.
 4. The delegation workflow in `skills/delegate/SKILL.md` and role definitions in `agents/`.
 5. Plugin manifests in `.claude-plugin/` and user-facing documentation.
+6.- Always use MCP  codebase-memory-mcp to retrive info for mem in this project as this index of codebase  mcp: codebase-memory-mcp
 
 When prose conflicts with executable contracts, fix the prose or explicitly migrate the contract; do not silently make them disagree.
 
