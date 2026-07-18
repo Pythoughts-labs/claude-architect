@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["reportVersion", "candidateCommit", "status", "summary"],
+  "properties": {
+    "reportVersion": { "const": "1" },
+    "candidateCommit": { "type": "string", "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$" },
+    "status": { "enum": ["complete", "continue", "blocked"] },
+    "summary": { "type": "string", "minLength": 1, "maxLength": 4000 },
+    "nextSteps": { "type": "string", "maxLength": 4000 },
+    "blockers": { "type": "string", "maxLength": 4000 }
+  }
+}

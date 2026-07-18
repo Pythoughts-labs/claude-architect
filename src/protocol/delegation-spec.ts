@@ -21,9 +21,17 @@ export interface ReviewConfig {
   focus?: string[];
 }
 
+export interface ImplementationConfig {
+  maxIncrements: number;
+}
+
 export const DEFAULT_REVIEW_CONFIG: ReviewConfig = {
   reviewers: ["correctness", "systems"],
   maxRounds: 2,
+};
+
+export const DEFAULT_IMPLEMENTATION_CONFIG: ImplementationConfig = {
+  maxIncrements: 1,
 };
 
 export interface DelegationSpec {
@@ -40,10 +48,15 @@ export interface DelegationSpec {
   producerOverrides?: { model?: string; reasoningEffort?: string };
   expectedOutput: "candidate-patch";         // P0 canonical output
   review?: ReviewConfig;
+  implementation?: ImplementationConfig;
 }
 
 export function resolveReviewConfig(spec: DelegationSpec): ReviewConfig {
   return spec.review ?? DEFAULT_REVIEW_CONFIG;
+}
+
+export function resolveImplementationConfig(spec: DelegationSpec): ImplementationConfig {
+  return spec.implementation ?? DEFAULT_IMPLEMENTATION_CONFIG;
 }
 
 export const RUNTIME_MAX_TIMEOUT_MS = 1_800_000; // 30 min hard ceiling

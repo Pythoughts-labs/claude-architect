@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
 import { validateSpec } from "../../src/protocol/spec-validator.js";
-import { resolveReviewConfig } from "../../src/protocol/delegation-spec.js";
+import {
+  resolveImplementationConfig,
+  resolveReviewConfig,
+} from "../../src/protocol/delegation-spec.js";
 
 // makeValidSpec() = copy the minimal valid spec literal used by the existing
 // validateSpec tests in tests/runtime/spec-validator.test.ts (all required fields).
@@ -64,5 +67,48 @@ describe("delegation spec review block", () => {
       reviewers: ["correctness", "systems"],
       maxRounds: 2,
     });
+  });
+});
+
+describe("delegation spec implementation block", () => {
+  it("preserves a spec without an implementation block byte-for-byte", () => {
+    const spec = makeValidSpec();
+    const originalBytes = JSON.stringify(spec);
+    const result = validateSpec(spec);
+
+    expect(result).toEqual({ ok: true, spec });
+    if (!result.ok) return;
+    expect(JSON.stringify(result.spec)).toBe(originalBytes);
+  });
+
+  it.each([1, 2, 3, 4, 5, 6, 7, 8])(
+    "accepts maxIncrements %i",
+    maxIncrements => {
+      expect(validateSpec({
+        ...makeValidSpec(),
+        implementation: { maxIncrements },
+      }).ok).toBe(true);
+    },
+  );
+
+  it.each([
+    { maxIncrements: 0 },
+    { maxIncrements: 9 },
+    { maxIncrements: 2.5 },
+    { maxIncrements: "2" },
+    { maxIncrements: 2, unexpected: true },
+    {},
+  ])("rejects an invalid implementation block: %j", implementation => {
+    expect(validateSpec({ ...makeValidSpec(), implementation }).ok).toBe(false);
+  });
+
+  it("resolveImplementationConfig applies the default and spec value", () => {
+    expect(resolveImplementationConfig(makeValidSpec() as never)).toEqual({
+      maxIncrements: 1,
+    });
+    expect(resolveImplementationConfig({
+      ...makeValidSpec(),
+      implementation: { maxIncrements: 4 },
+    } as never)).toEqual({ maxIncrements: 4 });
   });
 });

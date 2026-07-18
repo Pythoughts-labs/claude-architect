@@ -3,6 +3,7 @@ import specSchema from "../../runtime/schemas/delegation-spec.v1.json" with { ty
 import resultSchema from "../../runtime/schemas/attempt-result.v1.json" with { type: "json" };
 import reviewSchema from "../../runtime/schemas/review-report.v1.json" with { type: "json" };
 import fixSchema from "../../runtime/schemas/fix-report.v1.json" with { type: "json" };
+import incrementSchema from "../../runtime/schemas/increment-report.v1.json" with { type: "json" };
 import verificationSchema from "../../runtime/schemas/verification-report.v1.json" with { type: "json" };
 
 import { PROTOCOL_VERSION } from "./versions.js";
@@ -12,6 +13,7 @@ export interface CompiledSchemas {
   attemptResult: ValidateFunction;
   reviewReport: ValidateFunction;
   fixReport: ValidateFunction;
+  incrementReport: ValidateFunction;
   verificationReport: ValidateFunction;
 }
 
@@ -22,6 +24,7 @@ export function loadSchemas(): CompiledSchemas {
     attemptResult: ajv.compile(resultSchema as object),
     reviewReport: ajv.compile(reviewSchema as object),
     fixReport: ajv.compile(fixSchema as object),
+    incrementReport: ajv.compile(incrementSchema as object),
     verificationReport: ajv.compile(verificationSchema as object),
   };
 }

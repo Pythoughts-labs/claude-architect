@@ -45,6 +45,15 @@ export interface FixReport {
   dispositions: Disposition[];
 }
 
+export interface IncrementReport {
+  reportVersion: "1";
+  candidateCommit: string;
+  status: "complete" | "continue" | "blocked";
+  summary: string;
+  nextSteps?: string;
+  blockers?: string;
+}
+
 export interface VerificationReport {
   reportVersion: "1";
   pass: boolean;

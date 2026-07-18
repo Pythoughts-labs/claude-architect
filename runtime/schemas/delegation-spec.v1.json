@@ -196,6 +196,20 @@
           }
         }
       }
+    },
+    "implementation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "maxIncrements"
+      ],
+      "properties": {
+        "maxIncrements": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 8
+        }
+      }
     }
   },
   "allOf": [

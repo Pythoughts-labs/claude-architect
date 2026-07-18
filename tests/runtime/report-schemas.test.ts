@@ -37,12 +37,43 @@ const validVerification = {
   scopeViolations: [],
 };
 
+const validIncrement = {
+  reportVersion: "1",
+  candidateCommit: "a".repeat(40),
+  status: "complete",
+  summary: "Implementation is complete.",
+};
+
 describe("pipeline report schemas", () => {
   it("accepts valid reports", () => {
     const s = loadSchemas();
     expect(s.reviewReport(validReview)).toBe(true);
     expect(s.fixReport(validFix)).toBe(true);
     expect(s.verificationReport(validVerification)).toBe(true);
+    expect(s.incrementReport(validIncrement)).toBe(true);
+  });
+
+  it.each(["complete", "continue", "blocked"])(
+    "accepts increment status %s",
+    status => {
+      const s = loadSchemas();
+      expect(s.incrementReport({ ...validIncrement, status })).toBe(true);
+    },
+  );
+
+  it("rejects invalid increment reports", () => {
+    const s = loadSchemas();
+    const { status, ...missingStatus } = validIncrement;
+    expect(s.incrementReport(missingStatus)).toBe(false);
+    expect(s.incrementReport({
+      ...validIncrement,
+      candidateCommit: "not-a-commit",
+    })).toBe(false);
+    expect(s.incrementReport({
+      ...validIncrement,
+      summary: "x".repeat(4001),
+    })).toBe(false);
+    expect(s.incrementReport({ ...validIncrement, extra: true })).toBe(false);
   });
 
   it("accepts SHA-1 and SHA-256 commit object ids", () => {

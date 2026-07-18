@@ -24832,6 +24832,20 @@ var delegation_spec_v1_default = {
           }
         }
       }
+    },
+    implementation: {
+      type: "object",
+      additionalProperties: false,
+      required: [
+        "maxIncrements"
+      ],
+      properties: {
+        maxIncrements: {
+          type: "integer",
+          minimum: 1,
+          maximum: 8
+        }
+      }
     }
   },
   allOf: [
@@ -25136,6 +25150,22 @@ var fix_report_v1_default = {
   }
 };
 
+// runtime/schemas/increment-report.v1.json
+var increment_report_v1_default = {
+  $schema: "https://json-schema.org/draft/2020-12/schema",
+  type: "object",
+  additionalProperties: false,
+  required: ["reportVersion", "candidateCommit", "status", "summary"],
+  properties: {
+    reportVersion: { const: "1" },
+    candidateCommit: { type: "string", pattern: "^(?:[0-9a-f]{40}|[0-9a-f]{64})$" },
+    status: { enum: ["complete", "continue", "blocked"] },
+    summary: { type: "string", minLength: 1, maxLength: 4e3 },
+    nextSteps: { type: "string", maxLength: 4e3 },
+    blockers: { type: "string", maxLength: 4e3 }
+  }
+};
+
 // runtime/schemas/verification-report.v1.json
 var verification_report_v1_default = {
   $schema: "https://json-schema.org/draft/2020-12/schema",
@@ -25173,6 +25203,7 @@ function loadSchemas() {
     attemptResult: ajv.compile(attempt_result_v1_default),
     reviewReport: ajv.compile(review_report_v1_default),
     fixReport: ajv.compile(fix_report_v1_default),
+    incrementReport: ajv.compile(increment_report_v1_default),
     verificationReport: ajv.compile(verification_report_v1_default)
   };
 }
