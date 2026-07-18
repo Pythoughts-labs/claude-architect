@@ -4,6 +4,13 @@
 # Bypass (emergencies only): git push --no-verify
 set -euo pipefail
 
+# Git exports GIT_DIR (and related vars) to hooks. From a linked worktree these
+# are absolute paths, so any gate test that spawns git inside a temporary
+# fixture directory would operate on THIS repository instead of its fixture
+# (observed: fixture commits and config written into the real repo). Scrub them
+# so the gates run exactly as they do from a clean shell.
+unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY GIT_COMMON_DIR GIT_PREFIX
+
 echo "[pre-push] typecheck"
 npx tsc --noEmit
 
