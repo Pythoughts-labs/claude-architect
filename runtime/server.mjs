@@ -23729,6 +23729,92 @@ function redactValues(obj) {
   return redactValue(obj, false);
 }
 
+// src/verify/dependency-link.ts
+import { execFile as execFile3 } from "node:child_process";
+import { access, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir as tmpdir4 } from "node:os";
+import path3 from "node:path";
+import { promisify } from "node:util";
+var execFileAsync = promisify(execFile3);
+var LOCKFILES = ["package-lock.json", "bun.lockb", "pnpm-lock.yaml", "yarn.lock"];
+var COPY_TIMEOUT_MS = 12e4;
+function cowClone(platform, source, target) {
+  if (platform === "darwin") {
+    return { args: ["-Rc", source, target], strategy: "clonefile" };
+  }
+  if (platform === "linux") {
+    return { args: ["-a", "--reflink=always", source, target], strategy: "reflink" };
+  }
+  return null;
+}
+async function exists(candidate) {
+  try {
+    await access(candidate);
+    return true;
+  } catch {
+    return false;
+  }
+}
+async function probeCowSupport(dependencies = {}) {
+  const platform = dependencies.platform ?? process.platform;
+  if (platform !== "darwin" && platform !== "linux") {
+    return { cowSupported: false, strategy: "unsupported" };
+  }
+  const probeRoot = await mkdtemp(path3.join(tmpdir4(), "ca-cow-probe-"));
+  try {
+    const source = path3.join(probeRoot, "source");
+    const target = path3.join(probeRoot, "target");
+    const clone2 = cowClone(platform, source, target);
+    if (clone2 === null) return { cowSupported: false, strategy: "unsupported" };
+    await mkdir(source);
+    await writeFile(path3.join(source, "sentinel"), "probe\n");
+    try {
+      await (dependencies.execFile ?? execFileAsync)("cp", clone2.args, { timeout: COPY_TIMEOUT_MS });
+      return { cowSupported: true, strategy: clone2.strategy };
+    } catch {
+      return { cowSupported: false, strategy: clone2.strategy };
+    }
+  } finally {
+    await rm(probeRoot, { recursive: true, force: true });
+  }
+}
+async function linkPrimaryDependencies(primaryRepo, worktreePath, dependencies = {}) {
+  const primaryModules = path3.join(primaryRepo, "node_modules");
+  if (!await exists(primaryModules)) return "none";
+  const [primaryLockfiles, worktreeLockfiles] = await Promise.all([
+    Promise.all(LOCKFILES.map((lockfile) => exists(path3.join(primaryRepo, lockfile)))),
+    Promise.all(LOCKFILES.map((lockfile) => exists(path3.join(worktreePath, lockfile))))
+  ]);
+  if (!primaryLockfiles.some(Boolean)) return "none";
+  if (primaryLockfiles.some((present, index) => present !== worktreeLockfiles[index])) {
+    return "skipped-lockfile-mismatch";
+  }
+  try {
+    const comparisons = await Promise.all(LOCKFILES.map(async (lockfile, index) => {
+      if (!primaryLockfiles[index]) return true;
+      const [primaryLock, worktreeLock] = await Promise.all([
+        readFile(path3.join(primaryRepo, lockfile)),
+        readFile(path3.join(worktreePath, lockfile))
+      ]);
+      return primaryLock.equals(worktreeLock);
+    }));
+    if (comparisons.some((matches) => !matches)) return "skipped-lockfile-mismatch";
+  } catch {
+    return "skipped-lockfile-mismatch";
+  }
+  const targetModules = path3.join(worktreePath, "node_modules");
+  const platform = dependencies.platform ?? process.platform;
+  const clone2 = cowClone(platform, primaryModules, targetModules);
+  if (clone2 === null) return "skipped-cow-unsupported";
+  try {
+    await (dependencies.execFile ?? execFileAsync)("cp", clone2.args, { timeout: COPY_TIMEOUT_MS });
+    return "inherited";
+  } catch {
+    await rm(targetModules, { recursive: true, force: true });
+    return "skipped-cow-unsupported";
+  }
+}
+
 // src/mcp/doctor.ts
 var POSIX_HOME_PATH = /\/(?:Users|home)\/[^/\\\s"']+(?:\/[^/\\\s"']+)*/g;
 var WINDOWS_HOME_PATH = /[A-Za-z]:\\Users\\[^/\\\s"']+(?:\\[^/\\\s"']+)*/gi;
@@ -23788,6 +23874,13 @@ async function doctor(deps = {}) {
   } catch {
   }
   if (!git2.ok) issues.push("git-unavailable");
+  let dependencyClone;
+  try {
+    dependencyClone = await (deps.probeCowSupport ?? probeCowSupport)();
+  } catch {
+    dependencyClone = { cowSupported: false, strategy: "unsupported" };
+    issues.push("dependency-clone-probe-failed");
+  }
   let producers = [];
   try {
     producers = sanitizeCapabilityReports(await (deps.probeAll ?? probeAll)({
@@ -23809,6 +23902,7 @@ async function doctor(deps = {}) {
     git: git2,
     producers,
     sandboxBackends,
+    dependencyClone,
     runtimeVersion: RUNTIME_VERSION,
     schemaVersion: DELEGATION_SPEC_VERSION,
     protocolVersion: PROTOCOL_VERSION,
@@ -23910,8 +24004,8 @@ function gitChangedFiles(checkoutPath, deps = {}) {
 import { createHash as createHash7 } from "node:crypto";
 
 // src/git/repo-preconditions.ts
-import { access, lstat, opendir, readlink, realpath } from "node:fs/promises";
-import path3 from "node:path";
+import { access as access2, lstat, opendir, readlink, realpath } from "node:fs/promises";
+import path4 from "node:path";
 var MAX_DETAIL_ENTRIES = 20;
 function boundedDetail(lines) {
   if (lines.length <= MAX_DETAIL_ENTRIES) return lines;
@@ -23930,9 +24024,9 @@ var MAX_NESTED_REPOSITORY_SCAN_ENTRIES = 1e4;
 function succeeded(result) {
   return result.exitCode === 0;
 }
-async function exists(filePath) {
+async function exists2(filePath) {
   try {
-    await access(filePath);
+    await access2(filePath);
     return true;
   } catch (error2) {
     if (typeof error2 === "object" && error2 !== null && "code" in error2 && error2.code === "ENOENT") {
@@ -23968,7 +24062,7 @@ function indexPathsWithMode(output, mode) {
   for (const record2 of output.split("\0")) {
     if (!record2.startsWith(`${mode} `)) continue;
     const separator = record2.indexOf("	");
-    if (separator !== -1) paths.add(record2.slice(separator + 1).split(path3.sep).join("/"));
+    if (separator !== -1) paths.add(record2.slice(separator + 1).split(path4.sep).join("/"));
   }
   return paths;
 }
@@ -23976,8 +24070,8 @@ function pathIsWithin(root, candidate) {
   if (getPlatformServices().os === "win32") {
     return canonicalizeForScope(candidate, root);
   }
-  const relative = path3.relative(root, candidate);
-  return relative === "" || relative !== ".." && !relative.startsWith(`..${path3.sep}`) && !path3.isAbsolute(relative);
+  const relative = path4.relative(root, candidate);
+  return relative === "" || relative !== ".." && !relative.startsWith(`..${path4.sep}`) && !path4.isAbsolute(relative);
 }
 function pathsIdentifySameLocation(left, right) {
   if (getPlatformServices().os === "win32") {
@@ -23997,10 +24091,10 @@ async function isSafeTrackedFileSymlink(repositoryRoot, symlinkPath, relativePat
     if (hasCode(error2, ["ENOENT", "ENOTDIR", "ELOOP"])) return false;
     throw error2;
   }
-  if (path3.isAbsolute(linkTarget)) return false;
-  const lexicalTarget = path3.resolve(path3.dirname(symlinkPath), linkTarget);
+  if (path4.isAbsolute(linkTarget)) return false;
+  const lexicalTarget = path4.resolve(path4.dirname(symlinkPath), linkTarget);
   if (!pathIsWithin(repositoryRoot, lexicalTarget)) return false;
-  if (pathIsWithin(path3.join(repositoryRoot, ".git"), lexicalTarget)) return false;
+  if (pathIsWithin(path4.join(repositoryRoot, ".git"), lexicalTarget)) return false;
   let target;
   try {
     target = await realpath(symlinkPath);
@@ -24010,7 +24104,7 @@ async function isSafeTrackedFileSymlink(repositoryRoot, symlinkPath, relativePat
   }
   if (!pathsIdentifySameLocation(lexicalTarget, target)) return false;
   if (!pathIsWithin(repositoryRoot, target)) return false;
-  if (pathIsWithin(path3.join(repositoryRoot, ".git"), target)) return false;
+  if (pathIsWithin(path4.join(repositoryRoot, ".git"), target)) return false;
   return (await lstat(target)).isFile();
 }
 async function findNestedRepositories(repositoryRoot, registeredSubmodules, trackedSymlinks, writeAllowlist) {
@@ -24021,7 +24115,7 @@ async function findNestedRepositories(repositoryRoot, registeredSubmodules, trac
     const directory = pendingDirectories.pop();
     if (directory.relativePath !== "") {
       try {
-        await lstat(path3.join(directory.path, ".git"));
+        await lstat(path4.join(directory.path, ".git"));
         nested.push(directory.relativePath);
         continue;
       } catch (error2) {
@@ -24036,8 +24130,8 @@ async function findNestedRepositories(repositoryRoot, registeredSubmodules, trac
         throw new Error("nested repository scan entry budget exceeded");
       }
       if (entry.name === ".git") continue;
-      const child = path3.join(directory.path, entry.name);
-      const relativeChild = path3.relative(repositoryRoot, child).split(path3.sep).join("/");
+      const child = path4.join(directory.path, entry.name);
+      const relativeChild = path4.relative(repositoryRoot, child).split(path4.sep).join("/");
       if (registeredSubmodules.has(relativeChild)) continue;
       if (!writeAllowlist.some((pattern) => patternOverlapsRepository(pattern, relativeChild))) continue;
       if (entry.isSymbolicLink()) {
@@ -24072,7 +24166,7 @@ async function checkPreconditions(repoRoot, options = {}) {
   if (!succeeded(gitDirectoryResult)) return { ok: false, reason: "git-command-failed" };
   const gitDirectory = gitDirectoryResult.stdout.trim();
   try {
-    if ((await Promise.all(IN_PROGRESS_PATHS.map((relative) => exists(path3.join(gitDirectory, relative))))).some(Boolean)) {
+    if ((await Promise.all(IN_PROGRESS_PATHS.map((relative) => exists2(path4.join(gitDirectory, relative))))).some(Boolean)) {
       return { ok: false, reason: "in-progress-operation" };
     }
   } catch {
@@ -24474,8 +24568,8 @@ async function applyCandidateTree(args) {
 import path12 from "node:path";
 
 // src/git/worktree-manager.ts
-import { mkdir } from "node:fs/promises";
-import path4 from "node:path";
+import { mkdir as mkdir2 } from "node:fs/promises";
+import path5 from "node:path";
 var MAX_DIAGNOSTIC_LENGTH3 = 2e3;
 var WINDOWS_REMOVE_ATTEMPTS = 5;
 var WINDOWS_REMOVE_RETRY_DELAY_MS = 250;
@@ -24498,16 +24592,16 @@ var WorktreeManager = class {
     if (!SAFE_MANAGED_ID.test(this.runId)) {
       throw new RuntimeError("invalid worktree run id");
     }
-    const worktreesRoot = path4.resolve(resolveStateDir(), "worktrees");
-    const worktreePath = path4.resolve(worktreesRoot, this.runId);
-    if (worktreePath === worktreesRoot || !worktreePath.startsWith(`${worktreesRoot}${path4.sep}`)) {
+    const worktreesRoot = path5.resolve(resolveStateDir(), "worktrees");
+    const worktreePath = path5.resolve(worktreesRoot, this.runId);
+    if (worktreePath === worktreesRoot || !worktreePath.startsWith(`${worktreesRoot}${path5.sep}`)) {
       throw new RuntimeError("invalid worktree run id");
     }
     return { worktreesRoot, worktreePath };
   }
   async create(baseCommitOid) {
     const { worktreesRoot, worktreePath } = this.managedWorktreePath();
-    await mkdir(worktreesRoot, { recursive: true });
+    await mkdir2(worktreesRoot, { recursive: true });
     const result = await (this.dependencies.git ?? git)(
       this.repoRoot,
       ["worktree", "add", "--detach", worktreePath, baseCommitOid]
@@ -25108,9 +25202,9 @@ import { fileURLToPath as fileURLToPath2 } from "node:url";
 
 // src/git/candidate-tree.ts
 import { createHash as createHash4 } from "node:crypto";
-import { lstat as lstat2, mkdtemp, rm } from "node:fs/promises";
-import { tmpdir as tmpdir4 } from "node:os";
-import path5 from "node:path";
+import { lstat as lstat2, mkdtemp as mkdtemp2, rm as rm2 } from "node:fs/promises";
+import { tmpdir as tmpdir5 } from "node:os";
+import path6 from "node:path";
 var MAX_DIAGNOSTIC_LENGTH4 = 2e3;
 var MAX_REJECT_PATHS = 25;
 var BINARY_PATCH_PAYLOAD_MARKER = "[[BINARY_PATCH_PAYLOAD_OMITTED]]";
@@ -25205,7 +25299,7 @@ function isAllowed2(pathname, writeAllowlist, forbiddenScope, opaqueDirectory = 
 async function advisoryLstatScan(worktreePath, changedPaths) {
   const symlinkResults = await Promise.all(changedPaths.map(async (changedPath) => {
     try {
-      return (await lstat2(path5.resolve(worktreePath, changedPath))).isSymbolicLink();
+      return (await lstat2(path6.resolve(worktreePath, changedPath))).isSymbolicLink();
     } catch (error2) {
       if (error2.code === "ENOENT") return false;
       throw error2;
@@ -25281,8 +25375,8 @@ async function freezeCandidate(args) {
   if (await advisoryLstatScan(args.worktreePath, inventory.changedPaths)) {
     return { ok: false, reason: "modified-symlink" };
   }
-  const indexDirectory = await mkdtemp(path5.join(tmpdir4(), "claude-architect-index-"));
-  const indexFile = path5.join(indexDirectory, "index");
+  const indexDirectory = await mkdtemp2(path6.join(tmpdir5(), "claude-architect-index-"));
+  const indexFile = path6.join(indexDirectory, "index");
   try {
     await checkedGit2(args.worktreePath, ["read-tree", args.baseCommitOid], indexFile);
     if (inventory.changedPaths.length > 0) {
@@ -25388,7 +25482,7 @@ async function freezeCandidate(args) {
       }
     };
   } finally {
-    await rm(indexDirectory, { recursive: true, force: true });
+    await rm2(indexDirectory, { recursive: true, force: true });
   }
 }
 
@@ -25564,7 +25658,7 @@ import { realpath as realpath2 } from "node:fs/promises";
 import path8 from "node:path";
 
 // src/runtime/environment-policy.ts
-import path6 from "node:path";
+import path7 from "node:path";
 var POSIX_ESSENTIAL_ENV = [
   "HOME",
   "PATH",
@@ -25679,14 +25773,14 @@ function buildEnvironment(args) {
           env,
           provenance,
           "APPDATA",
-          path6.win32.join(args.tempHome, "AppData", "Roaming"),
+          path7.win32.join(args.tempHome, "AppData", "Roaming"),
           "platform"
         );
         setEnvironmentValue(
           env,
           provenance,
           "LOCALAPPDATA",
-          path6.win32.join(args.tempHome, "AppData", "Local"),
+          path7.win32.join(args.tempHome, "AppData", "Local"),
           "platform"
         );
       } else {
@@ -25730,59 +25824,6 @@ function buildEnvironment(args) {
   } catch (error2) {
     hostSecretRegistration.dispose();
     throw error2;
-  }
-}
-
-// src/verify/dependency-link.ts
-import { execFile as execFile3 } from "node:child_process";
-import { access as access2, readFile, rm as rm2 } from "node:fs/promises";
-import path7 from "node:path";
-import { promisify } from "node:util";
-var execFileAsync = promisify(execFile3);
-var LOCKFILES = ["package-lock.json", "bun.lockb", "pnpm-lock.yaml", "yarn.lock"];
-var COPY_TIMEOUT_MS = 12e4;
-async function exists2(candidate) {
-  try {
-    await access2(candidate);
-    return true;
-  } catch {
-    return false;
-  }
-}
-async function linkPrimaryDependencies(primaryRepo, worktreePath, dependencies = {}) {
-  const primaryModules = path7.join(primaryRepo, "node_modules");
-  if (!await exists2(primaryModules)) return "none";
-  const [primaryLockfiles, worktreeLockfiles] = await Promise.all([
-    Promise.all(LOCKFILES.map((lockfile) => exists2(path7.join(primaryRepo, lockfile)))),
-    Promise.all(LOCKFILES.map((lockfile) => exists2(path7.join(worktreePath, lockfile))))
-  ]);
-  if (!primaryLockfiles.some(Boolean)) return "none";
-  if (primaryLockfiles.some((present, index) => present !== worktreeLockfiles[index])) {
-    return "skipped-lockfile-mismatch";
-  }
-  try {
-    const comparisons = await Promise.all(LOCKFILES.map(async (lockfile, index) => {
-      if (!primaryLockfiles[index]) return true;
-      const [primaryLock, worktreeLock] = await Promise.all([
-        readFile(path7.join(primaryRepo, lockfile)),
-        readFile(path7.join(worktreePath, lockfile))
-      ]);
-      return primaryLock.equals(worktreeLock);
-    }));
-    if (comparisons.some((matches) => !matches)) return "skipped-lockfile-mismatch";
-  } catch {
-    return "skipped-lockfile-mismatch";
-  }
-  const targetModules = path7.join(worktreePath, "node_modules");
-  const platform = dependencies.platform ?? process.platform;
-  const copyArgs = platform === "darwin" ? ["-Rc", primaryModules, targetModules] : platform === "linux" ? ["-a", "--reflink=always", primaryModules, targetModules] : null;
-  if (copyArgs === null) return "skipped-cow-unsupported";
-  try {
-    await (dependencies.execFile ?? execFileAsync)("cp", copyArgs, { timeout: COPY_TIMEOUT_MS });
-    return "inherited";
-  } catch {
-    await rm2(targetModules, { recursive: true, force: true });
-    return "skipped-cow-unsupported";
   }
 }
 
@@ -26163,7 +26204,7 @@ import { constants as constants2 } from "node:fs";
 import {
   link,
   lstat as lstat3,
-  mkdir as mkdir2,
+  mkdir as mkdir3,
   open as open3,
   opendir as opendir2,
   readdir,
@@ -26404,7 +26445,7 @@ function isWithin(root, candidate) {
 async function ensurePlainDirectory(directory) {
   let created = false;
   try {
-    await mkdir2(directory, { mode: 448 });
+    await mkdir3(directory, { mode: 448 });
     created = true;
   } catch (error2) {
     if (!isAlreadyPresent(error2)) throw error2;
@@ -28423,7 +28464,7 @@ function buildRoleSpec(role, base, pkg) {
 }
 
 // src/pipeline/git-writable-roots.ts
-import { lstat as lstat5, mkdir as mkdir3, readFile as readFile3, realpath as realpath5 } from "node:fs/promises";
+import { lstat as lstat5, mkdir as mkdir4, readFile as readFile3, realpath as realpath5 } from "node:fs/promises";
 import path11 from "node:path";
 function invalidWritableRoots(message, cause) {
   return new RuntimeError(message, {
@@ -28488,7 +28529,7 @@ async function resolveLinkedWorktreeWritableRoots(worktreePath) {
     const sharedObjectsDir = await realpath5(path11.join(commonDir, "objects"));
     await requirePlainDirectory(sharedObjectsDir, "common git objects directory");
     const privateObjectsPath = path11.join(gitDir, "private-objects");
-    await mkdir3(privateObjectsPath, { recursive: true, mode: 448 });
+    await mkdir4(privateObjectsPath, { recursive: true, mode: 448 });
     await requirePlainDirectory(privateObjectsPath, "private git objects directory");
     const privateObjectsDir = await realpath5(privateObjectsPath);
     if (!isContainedBy(gitDir, privateObjectsDir)) {

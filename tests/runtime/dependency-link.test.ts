@@ -2,7 +2,10 @@ import { access, lstat, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { linkPrimaryDependencies } from "../../src/verify/dependency-link.js";
+import {
+  linkPrimaryDependencies,
+  probeCowSupport,
+} from "../../src/verify/dependency-link.js";
 
 const temporaryPaths: string[] = [];
 
@@ -20,6 +23,51 @@ async function fixture(): Promise<{ primary: string; worktree: string }> {
 afterEach(async () => {
   await Promise.all(temporaryPaths.splice(0).map(candidate =>
     rm(candidate, { recursive: true, force: true })));
+});
+
+describe("probeCowSupport", () => {
+  it.skipIf(process.platform !== "darwin" && process.platform !== "linux")(
+    "reports whether the host supports the platform CoW strategy",
+    async () => {
+      const result = await probeCowSupport();
+      const strategy = process.platform === "darwin" ? "clonefile" : "reflink";
+      if (!result.cowSupported) {
+        expect(result).toEqual({ cowSupported: false, strategy });
+        return;
+      }
+      expect(result).toEqual({ cowSupported: true, strategy });
+    },
+  );
+
+  it("reports a forced clone failure and removes the probe directory", async () => {
+    let probeRoot: string | undefined;
+
+    await expect(probeCowSupport({
+      platform: "linux",
+      execFile: async (file, args) => {
+        expect(file).toBe("cp");
+        expect(args.slice(0, 2)).toEqual(["-a", "--reflink=always"]);
+        probeRoot = path.dirname(args.at(-1)!);
+        throw new Error("forced cp failure");
+      },
+    })).resolves.toEqual({ cowSupported: false, strategy: "reflink" });
+
+    expect(probeRoot).toBeDefined();
+    await expect(access(probeRoot!)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("reports unsupported without invoking cp on Windows", async () => {
+    let invoked = false;
+
+    await expect(probeCowSupport({
+      platform: "win32",
+      execFile: async () => {
+        invoked = true;
+        throw new Error("must not run");
+      },
+    })).resolves.toEqual({ cowSupported: false, strategy: "unsupported" });
+    expect(invoked).toBe(false);
+  });
 });
 
 describe("linkPrimaryDependencies", () => {

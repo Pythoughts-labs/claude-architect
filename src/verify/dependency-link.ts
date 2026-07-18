@@ -1,5 +1,6 @@
 import { execFile } from "node:child_process";
-import { access, readFile, rm } from "node:fs/promises";
+import { access, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 
@@ -11,13 +12,35 @@ export type DependencyLink =
 
 const execFileAsync = promisify(execFile);
 
+type DependencyExecFile = (
+  file: string,
+  args: readonly string[],
+  options: { timeout: number },
+) => Promise<unknown>;
+
 export interface DependencyLinkDependencies {
-  execFile?: typeof execFileAsync;
+  execFile?: DependencyExecFile;
   platform?: NodeJS.Platform;
 }
 
 const LOCKFILES = ["package-lock.json", "bun.lockb", "pnpm-lock.yaml", "yarn.lock"] as const;
 const COPY_TIMEOUT_MS = 120_000;
+
+type CowStrategy = "clonefile" | "reflink" | "unsupported";
+
+function cowClone(
+  platform: NodeJS.Platform,
+  source: string,
+  target: string,
+): { args: string[]; strategy: Exclude<CowStrategy, "unsupported"> } | null {
+  if (platform === "darwin") {
+    return { args: ["-Rc", source, target], strategy: "clonefile" };
+  }
+  if (platform === "linux") {
+    return { args: ["-a", "--reflink=always", source, target], strategy: "reflink" };
+  }
+  return null;
+}
 
 async function exists(candidate: string): Promise<boolean> {
   try {
@@ -25,6 +48,33 @@ async function exists(candidate: string): Promise<boolean> {
     return true;
   } catch {
     return false;
+  }
+}
+
+export async function probeCowSupport(
+  dependencies: DependencyLinkDependencies = {},
+): Promise<{ cowSupported: boolean; strategy: CowStrategy }> {
+  const platform = dependencies.platform ?? process.platform;
+  if (platform !== "darwin" && platform !== "linux") {
+    return { cowSupported: false, strategy: "unsupported" };
+  }
+  const probeRoot = await mkdtemp(path.join(tmpdir(), "ca-cow-probe-"));
+  try {
+    const source = path.join(probeRoot, "source");
+    const target = path.join(probeRoot, "target");
+    const clone = cowClone(platform, source, target);
+    if (clone === null) return { cowSupported: false, strategy: "unsupported" };
+
+    await mkdir(source);
+    await writeFile(path.join(source, "sentinel"), "probe\n");
+    try {
+      await (dependencies.execFile ?? execFileAsync)("cp", clone.args, { timeout: COPY_TIMEOUT_MS });
+      return { cowSupported: true, strategy: clone.strategy };
+    } catch {
+      return { cowSupported: false, strategy: clone.strategy };
+    }
+  } finally {
+    await rm(probeRoot, { recursive: true, force: true });
   }
 }
 
@@ -61,15 +111,11 @@ export async function linkPrimaryDependencies(
 
   const targetModules = path.join(worktreePath, "node_modules");
   const platform = dependencies.platform ?? process.platform;
-  const copyArgs = platform === "darwin"
-    ? ["-Rc", primaryModules, targetModules]
-    : platform === "linux"
-      ? ["-a", "--reflink=always", primaryModules, targetModules]
-      : null;
-  if (copyArgs === null) return "skipped-cow-unsupported";
+  const clone = cowClone(platform, primaryModules, targetModules);
+  if (clone === null) return "skipped-cow-unsupported";
 
   try {
-    await (dependencies.execFile ?? execFileAsync)("cp", copyArgs, { timeout: COPY_TIMEOUT_MS });
+    await (dependencies.execFile ?? execFileAsync)("cp", clone.args, { timeout: COPY_TIMEOUT_MS });
     return "inherited";
   } catch {
     await rm(targetModules, { recursive: true, force: true });

@@ -14,6 +14,7 @@ import {
   RUNTIME_VERSION,
 } from "../protocol/versions.js";
 import { redact, redactRecord } from "../runtime/redaction.js";
+import { probeCowSupport } from "../verify/dependency-link.js";
 
 const POSIX_HOME_PATH = /\/(?:Users|home)\/[^/\\\s"']+(?:\/[^/\\\s"']+)*/g;
 const WINDOWS_HOME_PATH = /[A-Za-z]:\\Users\\[^/\\\s"']+(?:\\[^/\\\s"']+)*/gi;
@@ -47,6 +48,7 @@ export interface DoctorResult {
     kind: string;
     state: "certified" | "tested" | "unsupported";
   }>;
+  dependencyClone: { cowSupported: boolean; strategy: string };
   runtimeVersion: string;
   schemaVersion: string;
   protocolVersion: string;
@@ -57,6 +59,7 @@ export interface DoctorDependencies {
   ps?: PlatformServices;
   git?: typeof runGit;
   probeAll?: typeof probeProducers;
+  probeCowSupport?: typeof probeCowSupport;
   env?: NodeJS.ProcessEnv;
   nodeVersion?: string;
   arch?: string;
@@ -115,6 +118,14 @@ export async function doctor(deps: DoctorDependencies = {}): Promise<DoctorResul
   }
   if (!git.ok) issues.push("git-unavailable");
 
+  let dependencyClone: DoctorResult["dependencyClone"];
+  try {
+    dependencyClone = await (deps.probeCowSupport ?? probeCowSupport)();
+  } catch {
+    dependencyClone = { cowSupported: false, strategy: "unsupported" };
+    issues.push("dependency-clone-probe-failed");
+  }
+
   let producers: CapabilityReport[] = [];
   try {
     producers = sanitizeCapabilityReports(await (deps.probeAll ?? probeProducers)({
@@ -137,6 +148,7 @@ export async function doctor(deps: DoctorDependencies = {}): Promise<DoctorResul
     git,
     producers,
     sandboxBackends,
+    dependencyClone,
     runtimeVersion: RUNTIME_VERSION,
     schemaVersion: DELEGATION_SPEC_VERSION,
     protocolVersion: PROTOCOL_VERSION,

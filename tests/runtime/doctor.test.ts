@@ -20,6 +20,7 @@ function platform(os: "darwin" | "win32"): PlatformServices {
     async spawnSupervised() { throw new Error("unexpected spawn"); },
     async requestCooperativeCancellation() { throw new Error("unexpected cancellation"); },
     async terminateProcessTree() { throw new Error("unexpected termination"); },
+    async getProcessStartToken() { throw new Error("unexpected process token"); },
     async terminateProcessTreeByPid() { throw new Error("unexpected termination"); },
     async acquireCheckoutLock() { throw new Error("unexpected lock"); },
     async createSecureTempDirectory() { throw new Error("unexpected temp directory"); },
@@ -63,6 +64,7 @@ describe("doctor", () => {
         expect(context).toMatchObject({ ps, os: "darwin", arch: "arm64" });
         return [codexReport("darwin")];
       },
+      probeCowSupport: async () => ({ cowSupported: true, strategy: "clonefile" }),
     });
 
     expect(result).toEqual({
@@ -78,11 +80,31 @@ describe("doctor", () => {
         kind: "os",
         state: "certified",
       }],
+      dependencyClone: { cowSupported: true, strategy: "clonefile" },
       runtimeVersion: RUNTIME_VERSION,
       schemaVersion: DELEGATION_SPEC_VERSION,
       protocolVersion: PROTOCOL_VERSION,
       issues: [],
     });
+  });
+
+  it("reports a redacted issue when the dependency clone probe fails", async () => {
+    const result = await doctor({
+      ps: platform("darwin"),
+      env: { CLAUDE_PLUGIN_DATA: "/plugin-data" },
+      nodeVersion: "22.17.0",
+      git: async () => ({ stdout: "git version 2.49.0\n", stderr: "", exitCode: 0 }),
+      probeAll: async () => [],
+      probeCowSupport: async () => {
+        throw new Error("probe failed under /Users/alice/private");
+      },
+    });
+
+    expect(result.dependencyClone).toEqual({ cowSupported: false, strategy: "unsupported" });
+    expect(result.issues).toContain("dependency-clone-probe-failed");
+    const serialized = JSON.stringify(result);
+    expect(serialized).not.toContain("probe failed");
+    expect(serialized).not.toContain("/Users/alice/private");
   });
 
   it("reports environment diagnostics on Windows without rejecting the platform", async () => {
