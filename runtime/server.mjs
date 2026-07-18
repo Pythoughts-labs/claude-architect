@@ -28845,11 +28845,17 @@ async function runRole(args) {
 }
 
 // src/pipeline/structured-output.ts
-var FENCE = /```json\s*([\s\S]*?)```/g;
+var FENCE = /^```json[ \t]*\r?\n([\s\S]*?)\r?\n```[ \t]*$/gm;
 function extractJson(raw) {
-  let last = null;
-  for (const match of raw.matchAll(FENCE)) last = (match[1] ?? "").trim();
-  const candidate = last ?? raw.trim();
+  for (const match of [...raw.matchAll(FENCE)].reverse()) {
+    const candidate2 = (match[1] ?? "").trim();
+    try {
+      JSON.parse(candidate2);
+      return candidate2;
+    } catch {
+    }
+  }
+  const candidate = raw.trim();
   try {
     JSON.parse(candidate);
     return candidate;

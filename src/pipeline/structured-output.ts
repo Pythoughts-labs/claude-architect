@@ -4,12 +4,19 @@ export type ParseOutcome<T> =
   | { ok: true; value: T; repaired: boolean }
   | { ok: false; error: string };
 
-const FENCE = /```json\s*([\s\S]*?)```/g;
+const FENCE = /^```json[ \t]*\r?\n([\s\S]*?)\r?\n```[ \t]*$/gm;
 
 export function extractJson(raw: string): string | null {
-  let last: string | null = null;
-  for (const match of raw.matchAll(FENCE)) last = (match[1] ?? "").trim();
-  const candidate = last ?? raw.trim();
+  for (const match of [...raw.matchAll(FENCE)].reverse()) {
+    const candidate = (match[1] ?? "").trim();
+    try {
+      JSON.parse(candidate);
+      return candidate;
+    } catch {
+      // Try an earlier fenced block.
+    }
+  }
+  const candidate = raw.trim();
   try {
     JSON.parse(candidate);
     return candidate;

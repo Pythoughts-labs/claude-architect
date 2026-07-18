@@ -13,6 +13,33 @@ describe("extractJson", () => {
     const raw = "Here is my report:\n```json\n" + JSON.stringify(good) + "\n```\nDone.";
     expect(JSON.parse(extractJson(raw)!)).toEqual(good);
   });
+
+  it("ignores fence markers embedded in JSON string values", () => {
+    const report = { evidence: "renders it between \"```json\" and \"```\"" };
+    const raw = "```json\n" + JSON.stringify(report) + "\n```";
+    expect(JSON.parse(extractJson(raw)!)).toEqual(report);
+  });
+
+  it("prefers the last parseable fenced block", () => {
+    const first = { evidence: "quotes \"```json\" and \"```\" markers" };
+    const last = { evidence: "later report" };
+    const raw = [
+      "```json",
+      JSON.stringify(first),
+      "```",
+      "intervening chatter",
+      "```json",
+      JSON.stringify(last),
+      "```",
+    ].join("\n");
+    expect(JSON.parse(extractJson(raw)!)).toEqual(last);
+  });
+
+  it("extracts a fenced json block with CRLF line endings", () => {
+    const raw = "```json\r\n" + JSON.stringify(good) + "\r\n```";
+    expect(JSON.parse(extractJson(raw)!)).toEqual(good);
+  });
+
   it("accepts bare JSON", () => {
     expect(JSON.parse(extractJson(JSON.stringify(good))!)).toEqual(good);
   });
