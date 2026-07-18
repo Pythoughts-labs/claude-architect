@@ -25,8 +25,13 @@ When prose conflicts with executable contracts, fix the prose or explicitly migr
 - Only the human can accept a candidate. Agents may recommend a decision but cannot make it for the human.
 - Workflow state, decisions, evidence, and recovery data are durable across process failure.
 - The final review covers the whole candidate branch, including cumulative interactions across attempts—not only the latest patch.
+- When making technical decisions, do not give much weight to development cost. Instead, prefer quality, simplicity, robustness, scalability, and long term maintainability.
+- Apply that same high standard to engineering excellence: lint, test failures, and test flakiness.
+   If you see one, even if it is not caused by what you are working on right now, still get it fixed.
+
 
 ## Code discovery
+
 
 This repository is indexed in the codebase-memory MCP server (project `Users-panda-Projects-active-claude-architect`). For any code exploration, use its graph tools first — `search_graph` to find symbols, `get_code_snippet` for exact symbol source, `trace_path` for call chains, `search_code` for graph-augmented text search, `get_architecture` for structure — before falling back to grep/glob/manual file reads. If the index is stale after large changes, re-run `index_repository`.
 
