@@ -12,7 +12,7 @@ for (const lane of ["codex-implementer", "opencode-implementer", "pi-implementer
   assert.ok(skill.includes(`\`${lane}\``), `delegate question must offer ${lane}`);
 }
 
-assert.match(skill, /GPT-5\.6 Sol at `low` reasoning by default \(supported overrides: `medium`, `high`, `xhigh`, `max`\)/);
+assert.match(skill, /GPT-5\.6 Sol at `low` reasoning by default \(supported overrides: `medium`, `high`, `xhigh`, `max`, `ultra`\)/);
 assert.match(skill, /model-specific `--variant`/);
 assert.match(skill, /`--thinking off\|minimal\|low\|medium\|high\|xhigh\|max`/);
 assert.match(skill, /`--thinking-effort off\|minimal\|low\|medium\|high\|xhigh\|max`/);
