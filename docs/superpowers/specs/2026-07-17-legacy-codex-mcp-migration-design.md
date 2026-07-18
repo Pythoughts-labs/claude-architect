@@ -155,7 +155,7 @@ OPENCODE_DISABLE_PROJECT_CONFIG=1
 OPENCODE_DISABLE_EXTERNAL_SKILLS=1
 OPENCODE_DISABLE_CLAUDE_CODE=1
 OPENCODE_DISABLE_DEFAULT_PLUGINS=1
-OPENCODE_CONFIG_DIR=<immutable-profile-config>
+OPENCODE_CONFIG_DIR=<profile-opencode-config>
 HOME=<profile-home>
 XDG_CONFIG_HOME=<profile-xdg-config>
 XDG_DATA_HOME=<profile-xdg-data>
@@ -246,6 +246,7 @@ profile.json                 bound project and profile identity
 current.json                 atomically activated immutable release
 launcher.mjs                 stable Node-compatible fixed launcher
 releases/<version>/<hash>/   immutable runtime, gateway, config, prompt, manifests
+opencode-config/             protected active JSONC plus OpenCode-generated metadata
 architect-data/              MCP run archives/worktrees/locks
 opencode-data/               profile auth and OpenCode session data
 home/ xdg-config/ xdg-cache/ xdg-state/ tmp/
@@ -256,6 +257,15 @@ All roots are external to the repository and installed release, created with
 restrictive permissions, and rejected when symlinked or type/identity changed.
 The project receives no new file, local exclude, Git config, index entry, or
 metadata on a new install or any launch.
+
+OpenCode may write `.gitignore`, package manifests/locks, and dependency files
+inside `OPENCODE_CONFIG_DIR`, so that directory is not part of the immutable
+release. The release contains the expected protected `opencode.jsonc` bytes and
+hash. The active config directory may contain only that protected file and
+explicitly recognized OpenCode-generated metadata. Any `tool(s)`, `plugin(s)`,
+`agent(s)`, `skill(s)`, `command(s)`, instruction file, symlink, special file,
+or unknown executable content blocks launch. The protected JSONC is rehashed
+before every operation.
 
 ## Immutable release hashing
 
@@ -269,7 +279,7 @@ so release naming must avoid a circular hash:
 3. Derive `releases/<version>/<deploymentHash>/` and render exact final bytes.
 4. Build a canonical install-manifest body containing deployment hash, final
    path, every rendered byte hash/mode, bound project identity, executable
-   identities, and config/prompt/gateway policy.
+   identities, expected active-config hash, and prompt/gateway policy.
 5. `installManifestHash` is SHA-256 of that body before adding only its own
    field.
 
@@ -325,8 +335,10 @@ Order:
 6. Back up and remove only release-owned legacy project files; verify project
    status is now clean.
 7. Publish immutable release and stable launcher by atomic replacement.
-8. Atomically replace `current.json` last as activation.
-9. Mark complete, fsync, remove owned backups/stage, and release the same lock.
+8. Atomically replace the protected active JSONC with the rendered release
+   bytes; preserve only recognized OpenCode-generated metadata.
+9. Atomically replace `current.json` last as activation.
+10. Mark complete, fsync, remove owned backups/stage, and release the same lock.
 
 Every durable manifest, journal, launcher, current pointer, and ownership
 transition uses same-directory regular temp bytes, file fsync, identity
