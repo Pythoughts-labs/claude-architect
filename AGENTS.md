@@ -26,6 +26,10 @@ When prose conflicts with executable contracts, fix the prose or explicitly migr
 - Workflow state, decisions, evidence, and recovery data are durable across process failure.
 - The final review covers the whole candidate branch, including cumulative interactions across attempts—not only the latest patch.
 
+## Code discovery
+
+This repository is indexed in the codebase-memory MCP server (project `Users-panda-Projects-active-claude-architect`). For any code exploration, use its graph tools first — `search_graph` to find symbols, `get_code_snippet` for exact symbol source, `trace_path` for call chains, `search_code` for graph-augmented text search, `get_architecture` for structure — before falling back to grep/glob/manual file reads. If the index is stale after large changes, re-run `index_repository`.
+
 ## Before making changes
 
 - Read the relevant schema, implementation, tests, skill text, and recent Git history before editing.
