@@ -21,17 +21,21 @@ import type {
 import type { DelegationSpec } from "../../src/protocol/delegation-spec.js";
 import { ProducerRegistry } from "../../src/producers/producer-registry.js";
 import {
+  composeProgressNotes,
   detectWeakenedTests,
   runPipeline,
   type PipelineDependencies,
 } from "../../src/pipeline/pipeline-runtime.js";
 import { resolveLinkedWorktreeWritableRoots } from "../../src/pipeline/git-writable-roots.js";
-import type { ReviewReport } from "../../src/pipeline/report-types.js";
+import type { IncrementReport, ReviewReport } from "../../src/pipeline/report-types.js";
 import type { RoleRunArgs, RoleRunResult } from "../../src/pipeline/role-runner.js";
 import { ArtifactStore } from "../../src/runtime/artifact-store.js";
 import { buildRunManifest } from "../../src/runtime/run-manifest.js";
 import type { AcceptanceVerifierLike } from "../../src/runtime/attempt-runtime.js";
-import { clearRegisteredSecrets } from "../../src/runtime/redaction.js";
+import {
+  clearRegisteredSecrets,
+  registerSecretValue,
+} from "../../src/runtime/redaction.js";
 
 const temporaryPaths: string[] = [];
 let previousPluginData: string | undefined;
@@ -289,6 +293,48 @@ async function commitFix(args: RoleRunArgs, content: string): Promise<string> {
   return runGit(args.worktreePath, ["rev-parse", "HEAD"], env);
 }
 
+function implementationSpec(maxIncrements: number): DelegationSpec {
+  const spec = validSpec({ reviewers: ["correctness"], maxRounds: 1 });
+  spec.implementation = { maxIncrements };
+  return spec;
+}
+
+function incrementRoleRunner(
+  implementer: (args: RoleRunArgs, call: number) => Promise<RoleRunResult>,
+): (args: RoleRunArgs) => Promise<RoleRunResult> {
+  let implementerCalls = 0;
+  return async args => {
+    if (args.role === "implementer") {
+      implementerCalls += 1;
+      return implementer(args, implementerCalls);
+    }
+    if (args.role === "reviewer-correctness") return success(fenced(approve));
+    throw new Error(`unexpected role ${args.role}`);
+  };
+}
+
+async function commitIncrement(
+  args: RoleRunArgs,
+  content: string,
+  allowEmpty = false,
+): Promise<string> {
+  if (args.gitObjectAccess === undefined) {
+    throw new Error("implementer git object isolation is missing");
+  }
+  const env = {
+    GIT_OBJECT_DIRECTORY: args.gitObjectAccess.privateObjectsDir,
+    GIT_ALTERNATE_OBJECT_DIRECTORIES: args.gitObjectAccess.sharedObjectsDir,
+  };
+  if (allowEmpty) {
+    await runGit(args.worktreePath, ["commit", "--allow-empty", "-q", "-m", "increment"], env);
+  } else {
+    await writeFile(path.join(args.worktreePath, "a.txt"), content);
+    await runGit(args.worktreePath, ["add", "a.txt"], env);
+    await runGit(args.worktreePath, ["commit", "-q", "-m", "increment"], env);
+  }
+  return runGit(args.worktreePath, ["rev-parse", "HEAD"], env);
+}
+
 beforeEach(async () => {
   previousPluginData = process.env.CLAUDE_PLUGIN_DATA;
   previousNodeEnvironment = process.env.NODE_ENV;
@@ -311,7 +357,297 @@ afterEach(async () => {
     rm(entry, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })));
 });
 
+describe("composeProgressNotes", () => {
+  it("renders only the provided report deterministically and redacts secrets", () => {
+    registerSecretValue("increment-secret-value");
+    const earlier: IncrementReport = {
+      reportVersion: "1",
+      candidateCommit: "a".repeat(40),
+      status: "continue",
+      summary: "increment two marker increment-secret-value",
+      nextSteps: "continue increment two",
+    };
+    const latest: IncrementReport = {
+      reportVersion: "1",
+      candidateCommit: "b".repeat(40),
+      status: "continue",
+      summary: "increment three marker",
+      nextSteps: "continue increment three",
+    };
+
+    const first = composeProgressNotes(earlier);
+    const second = composeProgressNotes(latest);
+
+    expect(first).not.toContain("increment-secret-value");
+    expect(first).toContain("[s]");
+    expect(second).not.toContain("increment two marker");
+    expect(second).toContain("increment three marker");
+    expect(composeProgressNotes(latest)).toBe(second);
+  });
+
+  it("caps schema-valid summary and next steps at 8000 characters", () => {
+    const notes = composeProgressNotes({
+      reportVersion: "1",
+      candidateCommit: "c".repeat(40),
+      status: "continue",
+      summary: "a".repeat(4_000),
+      nextSteps: "b".repeat(4_000),
+    });
+
+    expect(notes).toHaveLength(8_000);
+    expect(notes).toMatch(/\[progress notes truncated\]$/);
+  });
+});
+
 describe("runPipeline", () => {
+  it("runs a completed increment, redacts and archives it, then reviews its diff", async () => {
+    const repo = await initRepo();
+    registerSecretValue("increment-secret-value");
+    let reviewedDiff = "";
+    const roleRunner = incrementRoleRunner(async args => {
+      const commit = await commitIncrement(args, "increment complete\n");
+      return success(fenced({
+        reportVersion: "1",
+        candidateCommit: commit,
+        status: "complete",
+        summary: "completed with increment-secret-value",
+      }));
+    });
+    const observingRunner = async (args: RoleRunArgs): Promise<RoleRunResult> => {
+      if (args.role === "reviewer-correctness") reviewedDiff = args.pkg.candidateDiff;
+      return roleRunner(args);
+    };
+
+    const result = await runPipeline(
+      repo,
+      implementationSpec(3),
+      dependencies({ runId: "pipeline-increment-complete", roleRunner: observingRunner }),
+    );
+
+    expect(result.status).toBe("decision-ready");
+    expect(result.increments).toHaveLength(1);
+    expect(result.increments[0]).toMatchObject({
+      increment: 2,
+      report: { status: "complete", summary: "completed with [s]" },
+      roleLogRefs: ["logs/role-implementer-increment2.log"],
+    });
+    expect(reviewedDiff).toContain("increment complete");
+    const store = new ArtifactStore("pipeline-increment-complete");
+    await expect(store.readPipelineArtifact("pipeline-increment-complete", "increment-2"))
+      .resolves.toMatchObject({ status: "complete", summary: "completed with [s]" });
+  }, { timeout: 120_000 });
+
+  it("exhausts the increment budget after continued real progress and still reviews", async () => {
+    const repo = await initRepo();
+    let reviewerCalls = 0;
+    const scripted = incrementRoleRunner(async (args, call) => {
+      const commit = await commitIncrement(args, `increment ${call}\n`);
+      return success(fenced({
+        reportVersion: "1",
+        candidateCommit: commit,
+        status: "continue",
+        summary: `increment ${call}`,
+        nextSteps: "continue",
+      }));
+    });
+    const roleRunner = async (args: RoleRunArgs): Promise<RoleRunResult> => {
+      if (args.role === "reviewer-correctness") reviewerCalls += 1;
+      return scripted(args);
+    };
+
+    const result = await runPipeline(
+      repo,
+      implementationSpec(3),
+      dependencies({ runId: "pipeline-increment-budget", roleRunner }),
+    );
+
+    expect(result.increments).toHaveLength(2);
+    expect(result.increments.map(entry => entry.increment)).toEqual([2, 3]);
+    expect(reviewerCalls).toBe(1);
+  }, { timeout: 120_000 });
+
+  it("stops incrementing when blocked and still reviews", async () => {
+    const repo = await initRepo();
+    let reviewerCalls = 0;
+    const scripted = incrementRoleRunner(async args => success(fenced({
+      reportVersion: "1",
+      candidateCommit: args.pkg.candidateCommit,
+      status: "blocked",
+      summary: "blocked by unavailable input",
+      blockers: "input unavailable",
+    })));
+    const roleRunner = async (args: RoleRunArgs): Promise<RoleRunResult> => {
+      if (args.role === "reviewer-correctness") reviewerCalls += 1;
+      return scripted(args);
+    };
+
+    const result = await runPipeline(
+      repo,
+      implementationSpec(4),
+      dependencies({ runId: "pipeline-increment-blocked", roleRunner }),
+    );
+
+    expect(result.increments).toHaveLength(1);
+    expect(result.increments[0]?.report.status).toBe("blocked");
+    expect(reviewerCalls).toBe(1);
+  }, { timeout: 120_000 });
+
+  it("treats an allow-empty continuing increment as stalled", async () => {
+    const repo = await initRepo();
+    const roleRunner = incrementRoleRunner(async (args, call) => {
+      const commit = await commitIncrement(
+        args,
+        call === 1 ? "real progress\n" : "",
+        call === 2,
+      );
+      return success(fenced({
+        reportVersion: "1",
+        candidateCommit: commit,
+        status: "continue",
+        summary: `increment ${call}`,
+        nextSteps: "continue",
+      }));
+    });
+
+    const result = await runPipeline(
+      repo,
+      implementationSpec(3),
+      dependencies({ runId: "pipeline-increment-stalled", roleRunner }),
+    );
+
+    expect(result.increments).toHaveLength(2);
+    expect(result.increments.map(entry => entry.increment)).toEqual([2, 3]);
+    const store = new ArtifactStore("pipeline-increment-stalled");
+    await expect(store.readPipelineArtifact("pipeline-increment-stalled", "increment-2"))
+      .resolves.toMatchObject({ summary: "increment 1" });
+    await expect(store.readPipelineArtifact("pipeline-increment-stalled", "increment-3"))
+      .resolves.toMatchObject({ summary: "increment 2" });
+  }, { timeout: 120_000 });
+
+  it("preserves completed increments when a later implementer role fails", async () => {
+    const repo = await initRepo();
+    const roleRunner = incrementRoleRunner(async (args, call) => {
+      if (call === 2) {
+        return {
+          ok: false,
+          rawOutput: "",
+          failure: "timeout",
+          producerId: "stub",
+        };
+      }
+      const commit = await commitIncrement(args, "first increment\n");
+      return success(fenced({
+        reportVersion: "1",
+        candidateCommit: commit,
+        status: "continue",
+        summary: "first increment",
+        nextSteps: "continue",
+      }));
+    });
+
+    const result = await runPipeline(
+      repo,
+      implementationSpec(3),
+      dependencies({ runId: "pipeline-increment-role-failure", roleRunner }),
+    );
+
+    expect(result.status).toBe("failed");
+    expect(result.failure).toBe("timeout");
+    expect(result.increments).toHaveLength(1);
+    expect(result.gate.reasons[0]).toContain("logs/role-implementer-increment3.log");
+  }, { timeout: 120_000 });
+
+  it("fails invalid increment output after one archived repair", async () => {
+    const repo = await initRepo();
+    const roleRunner = incrementRoleRunner(async (_args, call) =>
+      success(call === 1 ? "not json" : "still not json"));
+
+    const result = await runPipeline(
+      repo,
+      implementationSpec(2),
+      dependencies({ runId: "pipeline-increment-invalid", roleRunner }),
+    );
+
+    expect(result.status).toBe("failed");
+    expect(result.failure).toBe("invalid-output");
+    expect(result.increments).toEqual([]);
+    expect(result.gate.reasons[0]).toContain("logs/role-implementer-increment2.log");
+    const store = new ArtifactStore("pipeline-increment-invalid");
+    await expect(readFile(
+      path.join(store.runDirectory, "logs", "role-implementer-increment2-repair.log"),
+      "utf8",
+    )).resolves.toBe("still not json");
+  }, { timeout: 120_000 });
+
+  it("fails closed when an increment leaves the worktree dirty", async () => {
+    const repo = await initRepo();
+    const roleRunner = incrementRoleRunner(async args => {
+      const commit = await commitIncrement(args, "committed increment\n");
+      await writeFile(path.join(args.worktreePath, "dirty.txt"), "uncommitted\n");
+      return success(fenced({
+        reportVersion: "1",
+        candidateCommit: commit,
+        status: "complete",
+        summary: "complete",
+      }));
+    });
+
+    const result = await runPipeline(
+      repo,
+      implementationSpec(2),
+      dependencies({ runId: "pipeline-increment-dirty", roleRunner }),
+    );
+
+    expect(result.status).toBe("failed");
+    expect(result.failure).toBe("sandbox-violation");
+    expect(result.increments).toEqual([]);
+  }, { timeout: 120_000 });
+
+  it("passes only the immediately previous increment as progress", async () => {
+    const repo = await initRepo();
+    let incrementFourProgress = "";
+    const roleRunner = incrementRoleRunner(async (args, call) => {
+      if (call === 3) incrementFourProgress = args.pkg.progress ?? "";
+      const commit = await commitIncrement(args, `progress ${call}\n`);
+      return success(fenced({
+        reportVersion: "1",
+        candidateCommit: commit,
+        status: "continue",
+        summary: call === 1 ? "INCREMENT_TWO_MARKER" : `increment ${call + 1}`,
+        nextSteps: call === 2 ? "INCREMENT_THREE_MARKER" : "continue",
+      }));
+    });
+
+    const result = await runPipeline(
+      repo,
+      implementationSpec(4),
+      dependencies({ runId: "pipeline-increment-progress", roleRunner }),
+    );
+
+    expect(result.increments).toHaveLength(3);
+    expect(incrementFourProgress).toContain("INCREMENT_THREE_MARKER");
+    expect(incrementFourProgress).not.toContain("INCREMENT_TWO_MARKER");
+  }, { timeout: 120_000 });
+
+  it("does not invoke an implementer without an implementation block", async () => {
+    const repo = await initRepo();
+    const roles: string[] = [];
+    const roleRunner = async (args: RoleRunArgs): Promise<RoleRunResult> => {
+      roles.push(args.role);
+      if (args.role === "reviewer-correctness") return success(fenced(approve));
+      throw new Error(`unexpected role ${args.role}`);
+    };
+
+    const result = await runPipeline(
+      repo,
+      validSpec({ reviewers: ["correctness"], maxRounds: 1 }),
+      dependencies({ runId: "pipeline-no-increments", roleRunner }),
+    );
+
+    expect(result.increments).toEqual([]);
+    expect(roles).toEqual(["reviewer-correctness"]);
+  }, { timeout: 120_000 });
+
   it("returns decision-ready after a clean review round without fixing", async () => {
     const repo = await initRepo();
     const roleRunner = roundReviews(

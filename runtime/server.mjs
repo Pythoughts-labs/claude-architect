@@ -22541,8 +22541,14 @@ var DEFAULT_REVIEW_CONFIG = {
   reviewers: ["correctness", "systems"],
   maxRounds: 2
 };
+var DEFAULT_IMPLEMENTATION_CONFIG = {
+  maxIncrements: 1
+};
 function resolveReviewConfig(spec) {
   return spec.review ?? DEFAULT_REVIEW_CONFIG;
+}
+function resolveImplementationConfig(spec) {
+  return spec.implementation ?? DEFAULT_IMPLEMENTATION_CONFIG;
 }
 var RUNTIME_MAX_TIMEOUT_MS = 18e5;
 var RUNTIME_MIN_EDIT_TIMEOUT_MS = 6e5;
@@ -28947,11 +28953,55 @@ async function runArchivedRole(runner, args, store, logName2) {
   const logRef2 = await store.writeLog(logName2, output);
   return { result, logRef: logRef2 };
 }
-function failedResult(attempt, rounds, finalCandidateCommit, reason, failure2 = "producer-failure") {
+async function runStructuredRole(args) {
+  const runner = args.deps.roleRunner ?? runRole;
+  const callArgs = roleArgs({
+    role: args.role,
+    spec: args.spec,
+    pkg: args.pkg,
+    worktreePath: args.worktreePath,
+    deps: args.deps,
+    runId: args.runId,
+    ...args.runStart === void 0 ? {} : { runStart: args.runStart },
+    ...args.gitObjectAccess === void 0 ? {} : { gitObjectAccess: args.gitObjectAccess }
+  });
+  const initial = await runArchivedRole(runner, callArgs, args.store, args.logName);
+  const roleLogRefs = [initial.logRef];
+  if (!initial.result.ok) {
+    return {
+      ok: false,
+      failure: initial.result.failure ?? "producer-failure",
+      failedRoleLogRef: initial.logRef,
+      roleLogRefs
+    };
+  }
+  const outcome = await parseStructuredReport(
+    initial.result.rawOutput,
+    args.schema,
+    async (validationErrors) => {
+      const repair = await runArchivedRole(
+        runner,
+        callArgs,
+        args.store,
+        `${args.logName}-repair`
+      );
+      roleLogRefs.push(repair.logRef);
+      return repair.result.ok ? repair.result.rawOutput : "";
+    }
+  );
+  return outcome.ok ? { ok: true, report: outcome.value, roleLogRefs } : {
+    ok: false,
+    failure: "invalid-output",
+    failedRoleLogRef: initial.logRef,
+    roleLogRefs
+  };
+}
+function failedResult(attempt, rounds, finalCandidateCommit, reason, failure2 = "producer-failure", increments = []) {
   return {
     runId: attempt.runId,
     status: "failed",
     attempt,
+    increments,
     rounds,
     verification: null,
     gate: {
@@ -28962,6 +29012,23 @@ function failedResult(attempt, rounds, finalCandidateCommit, reason, failure2 = 
     finalCandidateCommit,
     failure: failure2
   };
+}
+var MAX_PROGRESS_NOTES_LENGTH = 8e3;
+var PROGRESS_TRUNCATION_NOTE = "\n\n[progress notes truncated]";
+function composeProgressNotes(previous) {
+  const summary = "producerSummary" in previous ? previous.producerSummary ?? previous.summary : previous.summary;
+  const nextSteps = "nextSteps" in previous ? previous.nextSteps : void 0;
+  const rendered = redact([
+    `Summary:
+${summary}`,
+    ...nextSteps === void 0 ? [] : [`Next steps:
+${nextSteps}`]
+  ].join("\n\n"));
+  if (rendered.length <= MAX_PROGRESS_NOTES_LENGTH) return rendered;
+  return `${rendered.slice(
+    0,
+    MAX_PROGRESS_NOTES_LENGTH - PROGRESS_TRUNCATION_NOTE.length
+  )}${PROGRESS_TRUNCATION_NOTE}`;
 }
 function testEvidence(attempt) {
   return JSON.stringify(attempt.executedVerification.map((outcome) => ({
@@ -29037,41 +29104,23 @@ function detectWeakenedTests(diff) {
   return { testsDeleted, testsSkipped };
 }
 async function runReviews(args) {
-  const runner = args.deps.roleRunner ?? runRole;
   const outcomes = await Promise.all(args.reviewers.map(async (reviewer) => {
     const role = `reviewer-${reviewer}`;
-    const callArgs = roleArgs({
+    const outcome = await runStructuredRole({
       role,
+      schema: schemas.reviewReport,
+      logName: `role-${role}-round${args.round}`,
       spec: args.spec,
       pkg: args.pkg,
       worktreePath: args.worktreePath,
       deps: args.deps,
-      runId: args.runId
+      runId: args.runId,
+      store: args.store
     });
-    const logName2 = `role-${role}-round${args.round}`;
-    const initial = await runArchivedRole(runner, callArgs, args.store, logName2);
-    const roleLogRefs2 = [initial.logRef];
-    if (!initial.result.ok) {
-      return { review: null, initialLogRef: initial.logRef, roleLogRefs: roleLogRefs2 };
-    }
-    const outcome = await parseStructuredReport(
-      initial.result.rawOutput,
-      schemas.reviewReport,
-      async (validationErrors) => {
-        const repair = await runArchivedRole(
-          runner,
-          callArgs,
-          args.store,
-          `${logName2}-repair`
-        );
-        roleLogRefs2.push(repair.logRef);
-        return repair.result.ok ? repair.result.rawOutput : "";
-      }
-    );
     return {
-      review: outcome.ok ? { reviewer, report: outcome.value } : null,
-      initialLogRef: initial.logRef,
-      roleLogRefs: roleLogRefs2
+      review: outcome.ok ? { reviewer, report: outcome.report } : null,
+      initialLogRef: outcome.ok ? null : outcome.failedRoleLogRef,
+      roleLogRefs: outcome.roleLogRefs
     };
   }));
   const roleLogRefs = outcomes.flatMap((outcome) => outcome.roleLogRefs);
@@ -29080,52 +29129,41 @@ async function runReviews(args) {
     return { ok: true, reviews, roleLogRefs };
   }
   const failed = outcomes.find((outcome) => outcome.review === null);
-  if (failed === void 0) throw new Error("unreachable invalid review state");
+  if (failed?.initialLogRef === null || failed === void 0) {
+    throw new Error("unreachable invalid review state");
+  }
   return { ok: false, failedRoleLogRef: failed.initialLogRef, roleLogRefs };
 }
 async function runFix(args) {
-  const runner = args.deps.roleRunner ?? runRole;
-  const callArgs = roleArgs({
+  const outcome = await runStructuredRole({
     role: "fixer",
+    schema: schemas.fixReport,
+    logName: `role-fixer-round${args.round}`,
     spec: args.spec,
     pkg: args.pkg,
     worktreePath: args.worktreePath,
     deps: args.deps,
     runId: args.runId,
+    store: args.store,
     ...args.runStart === void 0 ? {} : { runStart: args.runStart },
     gitObjectAccess: args.gitObjectAccess
   });
-  const logName2 = `role-fixer-round${args.round}`;
-  const initial = await runArchivedRole(runner, callArgs, args.store, logName2);
-  const roleLogRefs = [initial.logRef];
-  if (!initial.result.ok) {
-    return {
-      ok: false,
-      failure: initial.result.failure ?? "producer-failure",
-      failedRoleLogRef: initial.logRef,
-      roleLogRefs
-    };
-  }
-  const outcome = await parseStructuredReport(
-    initial.result.rawOutput,
-    schemas.fixReport,
-    async (validationErrors) => {
-      const repair = await runArchivedRole(
-        runner,
-        callArgs,
-        args.store,
-        `${logName2}-repair`
-      );
-      roleLogRefs.push(repair.logRef);
-      return repair.result.ok ? repair.result.rawOutput : "";
-    }
-  );
-  return outcome.ok ? { ok: true, fix: outcome.value, roleLogRefs } : {
-    ok: false,
-    failure: "invalid-output",
-    failedRoleLogRef: initial.logRef,
-    roleLogRefs
-  };
+  return outcome.ok ? { ok: true, fix: outcome.report, roleLogRefs: outcome.roleLogRefs } : outcome;
+}
+async function runIncrement(args) {
+  return runStructuredRole({
+    role: "implementer",
+    schema: schemas.incrementReport,
+    logName: `role-implementer-increment${args.increment}`,
+    spec: args.spec,
+    pkg: args.pkg,
+    worktreePath: args.worktreePath,
+    deps: args.deps,
+    runId: args.runId,
+    store: args.store,
+    ...args.runStart === void 0 ? {} : { runStart: args.runStart },
+    gitObjectAccess: args.gitObjectAccess
+  });
 }
 async function validateCandidateProvenance(args) {
   const privateObjects = privateObjectReadOptions(args.gitObjectAccess);
@@ -29347,11 +29385,14 @@ async function runPipeline(checkoutPath, spec, deps) {
     );
   }
   const { reviewers, maxRounds } = resolveReviewConfig(spec);
+  const { maxIncrements } = resolveImplementationConfig(spec);
   const store = new ArtifactStore(attempt.runId);
   let finalAttempt = attempt;
+  const increments = [];
   const rounds = [];
   const baselineCommit = attempt.candidate.baseCommitOid;
   let currentCandidateCommit = attempt.candidate.candidateCommitOid;
+  const frozenTestEvidence = testEvidence(attempt);
   const candidateWorktree = await new WorktreeManager(
     checkoutPath,
     `${attempt.runId}-pipeline`,
@@ -29360,6 +29401,125 @@ async function runPipeline(checkoutPath, spec, deps) {
   let gitObjectAccess = null;
   let primaryError;
   try {
+    if (maxIncrements > 1) {
+      try {
+        gitObjectAccess = await resolveLinkedWorktreeWritableRoots(candidateWorktree.path);
+      } catch {
+        return failedResult(
+          attempt,
+          rounds,
+          currentCandidateCommit,
+          "increment git object isolation could not be established",
+          "sandbox-violation",
+          increments
+        );
+      }
+      try {
+        for (let increment = 2; increment <= maxIncrements; increment += 1) {
+          const previousCandidateCommit = currentCandidateCommit;
+          const diffText = await checkedGit4(candidateWorktree.path, [
+            "diff",
+            `${baselineCommit}..${currentCandidateCommit}`
+          ], privateObjectReadOptions(gitObjectAccess));
+          const incrementRun = await runIncrement({
+            spec,
+            pkg: {
+              spec,
+              baselineCommit,
+              candidateCommit: currentCandidateCommit,
+              candidateDiff: diffText,
+              testEvidence: frozenTestEvidence,
+              progress: composeProgressNotes(increments.at(-1)?.report ?? attempt)
+            },
+            worktreePath: candidateWorktree.path,
+            deps,
+            runId: attempt.runId,
+            increment,
+            store,
+            gitObjectAccess,
+            ...runStart === void 0 ? {} : { runStart }
+          });
+          if (!incrementRun.ok) {
+            return failedResult(
+              attempt,
+              rounds,
+              currentCandidateCommit,
+              `increment phase did not produce valid structured output (see ${incrementRun.failedRoleLogRef})`,
+              incrementRun.failure,
+              increments
+            );
+          }
+          const report = redactRecord(incrementRun.report);
+          await store.writePipelineArtifact(`increment-${increment}`, report);
+          const provenanceFailure = await validateCandidateProvenance({
+            worktreePath: candidateWorktree.path,
+            previousCandidateCommit,
+            candidateCommit: report.candidateCommit,
+            gitObjectAccess
+          });
+          if (provenanceFailure !== null) {
+            return failedResult(
+              attempt,
+              rounds,
+              currentCandidateCommit,
+              provenanceFailure.reason,
+              provenanceFailure.failure,
+              increments
+            );
+          }
+          const privateObjects = privateObjectReadOptions(gitObjectAccess);
+          const [previousTree, candidateTree] = await Promise.all([
+            checkedGit4(
+              candidateWorktree.path,
+              ["rev-parse", `${previousCandidateCommit}^{tree}`],
+              privateObjects
+            ),
+            checkedGit4(
+              candidateWorktree.path,
+              ["rev-parse", `${report.candidateCommit}^{tree}`],
+              privateObjects
+            )
+          ]);
+          const progressed = previousTree.trim() !== candidateTree.trim();
+          if (report.candidateCommit !== previousCandidateCommit) {
+            try {
+              await importPromotedObjects({
+                checkoutPath,
+                baselineCommit: previousCandidateCommit,
+                promotedCommit: report.candidateCommit,
+                access: gitObjectAccess
+              });
+            } catch {
+              return failedResult(
+                attempt,
+                rounds,
+                currentCandidateCommit,
+                "increment objects could not be imported into the shared git object store",
+                "sandbox-violation",
+                increments
+              );
+            }
+          }
+          currentCandidateCommit = report.candidateCommit;
+          increments.push({
+            increment,
+            report,
+            roleLogRefs: incrementRun.roleLogRefs
+          });
+          if (report.status === "complete" || report.status === "blocked") break;
+          if (!progressed) break;
+        }
+      } catch {
+        return failedResult(
+          attempt,
+          rounds,
+          currentCandidateCommit,
+          "increment phase failed unexpectedly",
+          "producer-failure",
+          increments
+        );
+      }
+    }
     for (let round = 1; round <= maxRounds; round += 1) {
       const diffText = await checkedGit4(candidateWorktree.path, [
         "diff",
@@ -29370,7 +29530,7 @@ async function runPipeline(checkoutPath, spec, deps) {
         baselineCommit,
         candidateCommit: currentCandidateCommit,
         candidateDiff: diffText,
-        testEvidence: testEvidence(attempt)
+        testEvidence: frozenTestEvidence
       };
       const reviewRun = await runReviews({
         reviewers,
@@ -29387,7 +29547,9 @@ async function runPipeline(checkoutPath, spec, deps) {
           attempt,
           rounds,
           currentCandidateCommit,
-          `review phase did not produce valid structured output (see ${reviewRun.failedRoleLogRef})`
+          `review phase did not produce valid structured output (see ${reviewRun.failedRoleLogRef})`,
+          "producer-failure",
+          increments
         );
       }
       const reviews = reviewRun.reviews.map((review) => ({
@@ -29416,7 +29578,8 @@ async function runPipeline(checkoutPath, spec, deps) {
           rounds,
           currentCandidateCommit,
           "fixer git object isolation could not be established",
-          "sandbox-violation"
+          "sandbox-violation",
+          increments
         );
       }
       const fixRun = await runFix({
@@ -29436,7 +29599,8 @@ async function runPipeline(checkoutPath, spec, deps) {
           rounds,
           currentCandidateCommit,
           `fix phase did not produce valid structured output (see ${fixRun.failedRoleLogRef})`,
-          fixRun.failure
+          fixRun.failure,
+          increments
         );
       }
       const { fix } = fixRun;
@@ -29453,7 +29617,8 @@ async function runPipeline(checkoutPath, spec, deps) {
           rounds,
           currentCandidateCommit,
           provenanceFailure.reason,
-          provenanceFailure.failure
+          provenanceFailure.failure,
+          increments
         );
       }
       currentCandidateCommit = fix.candidateCommit;
@@ -29472,7 +29637,8 @@ async function runPipeline(checkoutPath, spec, deps) {
           rounds,
           currentCandidateCommit,
           "fixer git object isolation state is missing during promotion",
-          "sandbox-violation"
+          "sandbox-violation",
+          increments
         );
       }
       let canonicalCommit;
@@ -29503,7 +29669,8 @@ async function runPipeline(checkoutPath, spec, deps) {
           rounds,
           currentCandidateCommit,
           "fixer objects could not be imported into the shared git object store",
-          "sandbox-violation"
+          "sandbox-violation",
+          increments
         );
       }
       await checkedGit4(checkoutPath, [
@@ -29571,6 +29738,7 @@ async function runPipeline(checkoutPath, spec, deps) {
     runId: attempt.runId,
     status: gate.decisionReady ? "decision-ready" : "human-decision-required",
     attempt: finalAttempt,
+    increments,
     rounds,
     verification: verified.verification,
     gate,
