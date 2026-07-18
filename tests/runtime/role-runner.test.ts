@@ -419,6 +419,52 @@ describe("runRole", () => {
     });
   });
 
+  it("passes linked-worktree git metadata roots to the implementer", async () => {
+    await configureFixerGitRoots();
+    const gitDir = join(worktreePath, ".git");
+    const resolvedGitFile = await readFile(gitDir, "utf8");
+    const linkedGitDir = resolvedGitFile.trim().slice("gitdir: ".length);
+    const commonDir = join(linkedGitDir, "..", "..");
+    const adapter = new FakeAdapter();
+
+    await runRole(argsWith(adapter, "implementer"));
+
+    expect(adapter.extraWritableRootRequests).toEqual([[
+      await realpath(linkedGitDir),
+      join(await realpath(linkedGitDir), "private-objects"),
+    ]]);
+    expect(adapter.gitObjectDirectoryRequests).toEqual([
+      join(await realpath(linkedGitDir), "private-objects"),
+    ]);
+    expect(adapter.gitAlternateDirectoryRequests).toEqual([
+      join(await realpath(commonDir), "objects"),
+    ]);
+    expect(adapter.spawnedEnvs[0]).toMatchObject({
+      GIT_OBJECT_DIRECTORY: join(await realpath(linkedGitDir), "private-objects"),
+      GIT_ALTERNATE_OBJECT_DIRECTORIES: join(await realpath(commonDir), "objects"),
+    });
+  });
+
+  it("does not grant reviewer roles git object access", async () => {
+    for (const role of ["reviewer-correctness", "reviewer-systems"] as const) {
+      const adapter = new FakeAdapter();
+      const args = argsWith(adapter, role);
+      args.gitObjectAccess = {
+        gitDir: "/private/git-dir",
+        privateObjectsDir: "/private/increment-objects",
+        sharedObjectsDir: "/shared/objects",
+        writableRoots: ["/private/increment-objects"],
+      };
+
+      await runRole(args);
+
+      expect(adapter.gitObjectDirectoryRequests).toEqual([undefined]);
+      expect(adapter.gitAlternateDirectoryRequests).toEqual([undefined]);
+      expect(adapter.spawnedEnvs[0]).not.toHaveProperty("GIT_OBJECT_DIRECTORY");
+      expect(adapter.spawnedEnvs[0]).not.toHaveProperty("GIT_ALTERNATE_OBJECT_DIRECTORIES");
+    }
+  });
+
   it.skipIf(process.platform === "win32")("wraps an OS-confined fixer with write-enabled Seatbelt roots", async () => {
     await configureFixerGitRoots();
     const adapter = new FakeAdapter({ writeConfinementBackend: "macos-seatbelt" });
@@ -438,6 +484,31 @@ describe("runRole", () => {
     for (const writableRoot of adapter.extraWritableRootRequests[0] ?? []) {
       expect(profile).toContain(writableRoot);
     }
+  });
+
+  it.skipIf(process.platform === "win32")("wraps an OS-confined implementer with write-enabled Seatbelt roots", async () => {
+    await configureFixerGitRoots();
+    const adapter = new FakeAdapter({ writeConfinementBackend: "macos-seatbelt" });
+
+    const result = await runRole(argsWith(adapter, "implementer"));
+
+    expect(result.ok).toBe(true);
+    expect(adapter.spawnedCommands).toEqual([process.execPath]);
+    expect(adapter.spawnedArgs[0]?.slice(1, 4)).toEqual([
+      String(process.pid),
+      "--",
+      "/usr/bin/sandbox-exec",
+    ]);
+    expect(adapter.spawnedArgs[0]?.[0]).toMatch(/runtime[/\\]watchdog\.mjs$/);
+    const profile = adapter.spawnedArgs[0]?.[5] ?? "";
+    expect(profile).toContain(worktreePath);
+    for (const writableRoot of adapter.extraWritableRootRequests[0] ?? []) {
+      expect(profile).toContain(writableRoot);
+    }
+    await expect(readRunStart()).resolves.toMatchObject({
+      pid: 42,
+      processToken: "token-1",
+    });
   });
 
   it("keeps a producer-native fixer unwrapped", async () => {
@@ -469,11 +540,56 @@ describe("runRole", () => {
     }
   });
 
+  it("keeps a producer-native implementer unwrapped", async () => {
+    const codex = SANDBOX_BACKENDS.find(backend => backend.id === "codex-native-sandbox");
+    if (codex === undefined) throw new Error("codex-native-sandbox backend is missing");
+    const platforms = codex.platforms as Array<(typeof codex.platforms)[number]>;
+    platforms.push({ os: "darwin", environmentType: "native", state: "tested" });
+    try {
+      await configureFixerGitRoots();
+      const adapter = new FakeAdapter({
+        writeConfinementBackend: "codex-native-sandbox",
+      });
+
+      const result = await runRole(argsWith(adapter, "implementer"));
+
+      expect(result.ok).toBe(true);
+      expect(adapter.spawnedCommands).toEqual([process.execPath]);
+      expect(adapter.spawnedArgs[0]?.slice(1)).toEqual([
+        String(process.pid),
+        "--",
+        process.execPath,
+      ]);
+      expect(adapter.spawnedArgs[0]?.[0]).toMatch(/runtime[/\\]watchdog\.mjs$/);
+      await expect(readRunStart()).resolves.toMatchObject({
+        pid: 42,
+        processToken: "token-1",
+      });
+    } finally {
+      platforms.pop();
+    }
+  });
+
   it("fails closed before invoking a fixer with no confinement backend", async () => {
     await configureFixerGitRoots();
     const adapter = new FakeAdapter({ writeConfinementBackend: null });
 
     const result = await runRole(argsWith(adapter, "fixer"));
+
+    expect(result).toMatchObject({
+      ok: false,
+      failure: "sandbox-violation",
+      producerId: "fake",
+    });
+    expect(adapter.invocationCount).toBe(0);
+    expect(adapter.spawnCount).toBe(0);
+  });
+
+  it("fails closed before invoking an implementer with no confinement backend", async () => {
+    await configureFixerGitRoots();
+    const adapter = new FakeAdapter({ writeConfinementBackend: null });
+
+    const result = await runRole(argsWith(adapter, "implementer"));
 
     expect(result).toMatchObject({
       ok: false,
@@ -493,6 +609,39 @@ describe("runRole", () => {
       ok: false,
       rawOutput: "",
       failure: "sandbox-violation",
+      producerId: "fake",
+    });
+    expect(adapter.invocationCount).toBe(0);
+    expect(adapter.spawnCount).toBe(0);
+  });
+
+  it("fails closed when implementer writable-root validation fails", async () => {
+    const adapter = new FakeAdapter();
+
+    const result = await runRole(argsWith(adapter, "implementer"));
+
+    expect(result).toMatchObject({
+      ok: false,
+      rawOutput: "",
+      failure: "sandbox-violation",
+      producerId: "fake",
+    });
+    expect(adapter.invocationCount).toBe(0);
+    expect(adapter.spawnCount).toBe(0);
+  });
+
+  it("requires run-start recording for implementer writers", async () => {
+    await configureFixerGitRoots();
+    const adapter = new FakeAdapter();
+    const args = argsWith(adapter, "implementer");
+    delete args.runStart;
+
+    const result = await runRole(args);
+
+    expect(result).toMatchObject({
+      ok: false,
+      rawOutput: "",
+      failure: "spawn-failure",
       producerId: "fake",
     });
     expect(adapter.invocationCount).toBe(0);

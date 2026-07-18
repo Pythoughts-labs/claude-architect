@@ -26,6 +26,14 @@ const pkg: RolePackage = {
   testEvidence: "unit: exit 0",
 };
 
+const roles = [
+  "reviewer-correctness",
+  "reviewer-systems",
+  "implementer",
+  "fixer",
+  "verifier",
+] as const;
+
 describe("renderRolePrompt", () => {
   it("reviewer prompt includes spec, diff, evidence, and the output schema", () => {
     const prompt = renderRolePrompt("reviewer-correctness", pkg);
@@ -43,6 +51,42 @@ describe("renderRolePrompt", () => {
     expect(prompt).toContain("F-001");
     expect(prompt).toContain("rejected_with_evidence");
     expect(prompt).toContain("exactly one disposition per finding");
+  });
+  it("isolates implementer progress from every other role prompt", () => {
+    const progress = "DISTINCTIVE-IMPLEMENTER-PROGRESS-SENTINEL";
+    const prompts = Object.fromEntries(roles.map(role => [
+      role,
+      renderRolePrompt(role, { ...pkg, progress }),
+    ]));
+
+    for (const role of ["reviewer-correctness", "reviewer-systems", "fixer", "verifier"] as const) {
+      expect(prompts[role]).not.toContain(progress);
+    }
+    expect(prompts.implementer).toContain([
+      "<<<BEGIN UNTRUSTED DATA: progress-notes>>>",
+      progress,
+      "<<<END UNTRUSTED DATA: progress-notes>>>",
+    ].join("\n"));
+  });
+  it("implementer prompt defines the isolated writer contract", () => {
+    const prompt = renderRolePrompt("implementer", pkg);
+    expect(prompt).toContain("## Progress notes from prior increment");
+    expect(prompt).toContain("<<<BEGIN UNTRUSTED DATA: progress-notes>>>\n(none)\n");
+    expect(prompt).toContain("export const LIMIT = 10;");
+    expect(prompt).toContain("unit: exit 0");
+    expect(prompt).toContain('"nextSteps"');
+    expect(prompt).toContain("ONLY within the authorized write allowlist");
+    expect(prompt).toContain("commit your work with git");
+    expect(prompt).toContain("Do not perform final verification");
+    expect(prompt).toContain("Do not delegate to other agents or expand scope");
+    expect(prompt).toContain('Claim status "complete" ONLY when every success criterion is met');
+    expect(prompt).toContain("Never delete, weaken, or skip existing tests");
+  });
+  it("tells both reviewers which artifacts are authoritative", () => {
+    const sentence = "The host-supplied candidate diff and the on-disk file tree are the authoritative review artifacts; the worktree HEAD may not be resolvable through git commands.";
+    for (const role of ["reviewer-correctness", "reviewer-systems"] as const) {
+      expect(renderRolePrompt(role, pkg)).toContain(sentence);
+    }
   });
   it("reviewer prompts never leak between roles: no findings in reviewer packages", () => {
     const prompt = renderRolePrompt("reviewer-systems", pkg);
@@ -124,5 +168,27 @@ describe("buildRoleSpec", () => {
     const roleSpec = buildRoleSpec("fixer", spec, pkg);
     expect(roleSpec.writeAllowlist).toEqual(["src/api/**"]);
     expect(roleSpec.forbiddenScope).toEqual(["src/auth/**"]);
+  });
+  it("implementer inherits the base scope", () => {
+    const roleSpec = buildRoleSpec("implementer", spec, pkg);
+    expect(roleSpec.writeAllowlist).toEqual(["src/api/**"]);
+    expect(roleSpec.forbiddenScope).toEqual(["src/auth/**"]);
+  });
+  it("strips loop configuration from every producer-facing role spec", () => {
+    const base = { ...spec, implementation: { maxIncrements: 3 } };
+    const rolePackage = { ...pkg, spec: base };
+
+    for (const role of roles) {
+      const roleSpec = buildRoleSpec(role, base, rolePackage);
+      expect(roleSpec).not.toHaveProperty("review");
+      expect(roleSpec).not.toHaveProperty("implementation");
+      if (role === "fixer" || role === "implementer") {
+        expect(roleSpec.writeAllowlist).toEqual(base.writeAllowlist);
+        expect(roleSpec.forbiddenScope).toEqual(base.forbiddenScope);
+      } else {
+        expect(roleSpec.writeAllowlist).toEqual([]);
+        expect(roleSpec.forbiddenScope).toEqual(["**/*"]);
+      }
+    }
   });
 });

@@ -155,10 +155,10 @@ export async function runRole(args: RoleRunArgs): Promise<RoleRunResult> {
   }
 
   const readOnly = READ_ONLY_ROLES.has(args.role);
-  const fixer = args.role === "fixer";
+  const writer = args.role === "fixer" || args.role === "implementer";
   let extraWritableRoots: string[] = [];
   let gitObjectAccess: LinkedWorktreeGitAccess | undefined;
-  if (fixer) {
+  if (writer) {
     try {
       gitObjectAccess = await resolveLinkedWorktreeWritableRoots(args.worktreePath);
       extraWritableRoots = gitObjectAccess.writableRoots;
@@ -177,11 +177,11 @@ export async function runRole(args: RoleRunArgs): Promise<RoleRunResult> {
   // Seatbelt wrap, so that path's availability is a host property.
   const nativeReadOnly = readOnly
     && selectSandboxBackend(report).backend?.kind === "producer-native";
-  const fixerBackend = fixer ? selectSandboxBackend(report).backend : null;
-  const seatbeltFixer = fixerBackend?.kind === "os"
-    && fixerBackend.id === "macos-seatbelt";
-  if (fixer && (fixerBackend === null
-    || (fixerBackend.kind === "os" && !seatbeltFixer))) {
+  const writerBackend = writer ? selectSandboxBackend(report).backend : null;
+  const seatbeltWriter = writerBackend?.kind === "os"
+    && writerBackend.id === "macos-seatbelt";
+  if (writer && (writerBackend === null
+    || (writerBackend.kind === "os" && !seatbeltWriter))) {
     return {
       ok: false,
       rawOutput: "",
@@ -206,7 +206,7 @@ export async function runRole(args: RoleRunArgs): Promise<RoleRunResult> {
     }
   }
   const runStart = args.runStart;
-  if (fixer && runStart === undefined) {
+  if (writer && runStart === undefined) {
     return {
       ok: false,
       rawOutput: "",
@@ -241,7 +241,7 @@ export async function runRole(args: RoleRunArgs): Promise<RoleRunResult> {
           invocation,
           buildReadOnlySeatbeltPolicy({ tempHome }),
         );
-      } else if (seatbeltFixer) {
+      } else if (seatbeltWriter) {
         invocation = wrapInvocationWithSeatbelt(
           invocation,
           buildWriteSeatbeltPolicy({
@@ -266,10 +266,10 @@ export async function runRole(args: RoleRunArgs): Promise<RoleRunResult> {
         },
         tempHome,
       });
-      const supervisedInvocation = fixer
+      const supervisedInvocation = writer
         ? await parentDeathWatchdogInvocation(invocation.executable, invocation.args)
         : { executable: invocation.executable, args: invocation.args };
-      const processServices = fixer && runStart !== undefined
+      const processServices = writer && runStart !== undefined
         ? withRunStartPidRecording(args.ps, runStart)
         : args.ps;
       const exit = args.abortSignal?.aborted === true

@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import type { DelegationSpec } from "../protocol/delegation-spec.js";
 import type { Finding } from "./report-types.js";
 
-export type PipelineRole = "reviewer-correctness" | "reviewer-systems" | "fixer" | "verifier";
+export type PipelineRole = "reviewer-correctness" | "reviewer-systems" | "implementer" | "fixer" | "verifier";
 
 export interface RolePackage {
   spec: DelegationSpec;
@@ -11,6 +11,7 @@ export interface RolePackage {
   candidateCommit: string;
   candidateDiff: string;
   testEvidence: string;
+  progress?: string;
   findings?: Finding[];
 }
 
@@ -33,6 +34,7 @@ function readSchemaText(name: string): string {
 }
 
 const REVIEW_SCHEMA = readSchemaText("review-report.v1.json");
+const INCREMENT_SCHEMA = readSchemaText("increment-report.v1.json");
 const FIX_SCHEMA = readSchemaText("fix-report.v1.json");
 const VERIFY_SCHEMA = readSchemaText("verification-report.v1.json");
 
@@ -85,6 +87,8 @@ minor = should fix, does not block; nit = style only, never blocks.
 Every finding needs: exact location (path:line), a falsifiable claim, evidence,
 a reproduction, the required outcome, and your confidence (0..1).`;
 
+// Load-bearing prompt-isolation firewall: reviewer/fixer/verifier prompts must never contain
+// implementer progress or loop state. This boundary is pinned by a contract test.
 function commonSections(pkg: RolePackage): string {
   return [
     "## Delegation spec",
@@ -113,6 +117,9 @@ function reviewerPrompt(rubric: string, pkg: RolePackage): string {
     "You are an untrusted, READ-ONLY code reviewer in a fresh session. You cannot edit files;",
     "the sandbox denies writes. Do not attempt to fix anything. Do not delegate to other agents.",
     "Judge ONLY the candidate diff against the delegation spec below.",
+    // Reviewers cannot access the private git object directory holding increment commits, so git
+    // lookups can fail; the host supplies the candidate diff as the review artifact instead.
+    "The host-supplied candidate diff and the on-disk file tree are the authoritative review artifacts; the worktree HEAD may not be resolvable through git commands.",
     commonSections(pkg),
     ...(focusSection === null ? [] : [focusSection]),
     rubric,
@@ -130,6 +137,22 @@ export function renderRolePrompt(role: PipelineRole, pkg: RolePackage): string {
       return reviewerPrompt(CORRECTNESS_RUBRIC, pkg);
     case "reviewer-systems":
       return reviewerPrompt(SYSTEMS_RUBRIC, pkg);
+    case "implementer":
+      return [
+        "You are an untrusted implementer in a fresh session working in the candidate worktree.",
+        "Continue toward the objective. You may edit ONLY within the authorized write allowlist and commit your work with git.",
+        "Do not perform final verification — a separate clean-room verifier will. Do not delegate to other agents or expand scope.",
+        commonSections(pkg),
+        "## Progress notes from prior increment",
+        untrustedBlock("progress-notes", pkg.progress ?? "(none)"),
+        "Claim status \"complete\" ONLY when every success criterion is met and the spec's verification passes locally.",
+        "Claim status \"continue\" with concrete nextSteps when more work remains.",
+        "Claim status \"blocked\" with blockers when unable to proceed.",
+        "Never delete, weaken, or skip existing tests.",
+        "## Output",
+        "Reply with ONLY a fenced ```json block matching this schema:",
+        "```json", INCREMENT_SCHEMA, "```",
+      ].join("\n\n");
     case "fixer":
       return [
         "You are an untrusted fixer in a fresh session working in the candidate worktree.",
@@ -161,8 +184,8 @@ export function renderRolePrompt(role: PipelineRole, pkg: RolePackage): string {
 }
 
 export function buildRoleSpec(role: PipelineRole, base: DelegationSpec, pkg: RolePackage): DelegationSpec {
-  const readOnly = role !== "fixer";
-  const { review: _stripped, ...rest } = base;
+  const readOnly = role !== "fixer" && role !== "implementer";
+  const { review: _review, implementation: _implementation, ...rest } = base;
   return {
     ...rest,
     objective: `[pipeline role: ${role}] ${base.objective}`,

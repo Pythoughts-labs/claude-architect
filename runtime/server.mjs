@@ -28375,6 +28375,7 @@ function readSchemaText(name) {
   throw lastError;
 }
 var REVIEW_SCHEMA = readSchemaText("review-report.v1.json");
+var INCREMENT_SCHEMA = readSchemaText("increment-report.v1.json");
 var FIX_SCHEMA = readSchemaText("fix-report.v1.json");
 var VERIFY_SCHEMA = readSchemaText("verification-report.v1.json");
 var UNTRUSTED_SECTION_CHAR_CAP = 2e5;
@@ -28448,6 +28449,9 @@ function reviewerPrompt(rubric, pkg) {
     "You are an untrusted, READ-ONLY code reviewer in a fresh session. You cannot edit files;",
     "the sandbox denies writes. Do not attempt to fix anything. Do not delegate to other agents.",
     "Judge ONLY the candidate diff against the delegation spec below.",
+    // Reviewers cannot access the private git object directory holding increment commits, so git
+    // lookups can fail; the host supplies the candidate diff as the review artifact instead.
+    "The host-supplied candidate diff and the on-disk file tree are the authoritative review artifacts; the worktree HEAD may not be resolvable through git commands.",
     commonSections(pkg),
     ...focusSection === null ? [] : [focusSection],
     rubric,
@@ -28466,6 +28470,24 @@ function renderRolePrompt(role, pkg) {
       return reviewerPrompt(CORRECTNESS_RUBRIC, pkg);
     case "reviewer-systems":
       return reviewerPrompt(SYSTEMS_RUBRIC, pkg);
+    case "implementer":
+      return [
+        "You are an untrusted implementer in a fresh session working in the candidate worktree.",
+        "Continue toward the objective. You may edit ONLY within the authorized write allowlist and commit your work with git.",
+        "Do not perform final verification \u2014 a separate clean-room verifier will. Do not delegate to other agents or expand scope.",
+        commonSections(pkg),
+        "## Progress notes from prior increment",
+        untrustedBlock("progress-notes", pkg.progress ?? "(none)"),
+        `Claim status "complete" ONLY when every success criterion is met and the spec's verification passes locally.`,
+        'Claim status "continue" with concrete nextSteps when more work remains.',
+        'Claim status "blocked" with blockers when unable to proceed.',
+        "Never delete, weaken, or skip existing tests.",
+        "## Output",
+        "Reply with ONLY a fenced ```json block matching this schema:",
+        "```json",
+        INCREMENT_SCHEMA,
+        "```"
+      ].join("\n\n");
     case "fixer":
       return [
         "You are an untrusted fixer in a fresh session working in the candidate worktree.",
@@ -28500,8 +28522,8 @@ function renderRolePrompt(role, pkg) {
   }
 }
 function buildRoleSpec(role, base, pkg) {
-  const readOnly = role !== "fixer";
-  const { review: _stripped, ...rest } = base;
+  const readOnly = role !== "fixer" && role !== "implementer";
+  const { review: _review, implementation: _implementation, ...rest } = base;
   return {
     ...rest,
     objective: `[pipeline role: ${role}] ${base.objective}`,
@@ -28681,10 +28703,10 @@ async function runRole(args) {
     };
   }
   const readOnly = READ_ONLY_ROLES.has(args.role);
-  const fixer = args.role === "fixer";
+  const writer = args.role === "fixer" || args.role === "implementer";
   let extraWritableRoots = [];
   let gitObjectAccess;
-  if (fixer) {
+  if (writer) {
     try {
       gitObjectAccess = await resolveLinkedWorktreeWritableRoots(args.worktreePath);
       extraWritableRoots = gitObjectAccess.writableRoots;
@@ -28698,9 +28720,9 @@ async function runRole(args) {
     }
   }
   const nativeReadOnly = readOnly && selectSandboxBackend(report).backend?.kind === "producer-native";
-  const fixerBackend = fixer ? selectSandboxBackend(report).backend : null;
-  const seatbeltFixer = fixerBackend?.kind === "os" && fixerBackend.id === "macos-seatbelt";
-  if (fixer && (fixerBackend === null || fixerBackend.kind === "os" && !seatbeltFixer)) {
+  const writerBackend = writer ? selectSandboxBackend(report).backend : null;
+  const seatbeltWriter = writerBackend?.kind === "os" && writerBackend.id === "macos-seatbelt";
+  if (writer && (writerBackend === null || writerBackend.kind === "os" && !seatbeltWriter)) {
     return {
       ok: false,
       rawOutput: "",
@@ -28725,7 +28747,7 @@ async function runRole(args) {
     }
   }
   const runStart = args.runStart;
-  if (fixer && runStart === void 0) {
+  if (writer && runStart === void 0) {
     return {
       ok: false,
       rawOutput: "",
@@ -28757,7 +28779,7 @@ async function runRole(args) {
           invocation,
           buildReadOnlySeatbeltPolicy({ tempHome })
         );
-      } else if (seatbeltFixer) {
+      } else if (seatbeltWriter) {
         invocation = wrapInvocationWithSeatbelt(
           invocation,
           buildWriteSeatbeltPolicy({
@@ -28780,8 +28802,8 @@ async function runRole(args) {
         },
         tempHome
       });
-      const supervisedInvocation = fixer ? await parentDeathWatchdogInvocation(invocation.executable, invocation.args) : { executable: invocation.executable, args: invocation.args };
-      const processServices = fixer && runStart !== void 0 ? withRunStartPidRecording(args.ps, runStart) : args.ps;
+      const supervisedInvocation = writer ? await parentDeathWatchdogInvocation(invocation.executable, invocation.args) : { executable: invocation.executable, args: invocation.args };
+      const processServices = writer && runStart !== void 0 ? withRunStartPidRecording(args.ps, runStart) : args.ps;
       const exit = args.abortSignal?.aborted === true ? preCancelledExit2() : await supervise(processServices, {
         executable: supervisedInvocation.executable,
         args: supervisedInvocation.args,
