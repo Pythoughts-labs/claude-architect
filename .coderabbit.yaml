@@ -1,0 +1,191 @@
+# CodeRabbit configuration for claude-architect
+# Schema: https://docs.coderabbit.ai/getting-started/yaml-configuration
+# yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
+
+language: "en-US"
+
+tone_instructions: >-
+  Act as a strict staff engineer reviewing a security-critical delegation
+  runtime. Be direct and concise. Prioritize trust-invariant violations,
+  fail-open behavior, and cross-platform (macOS/Linux/Windows) correctness
+  over style nits.
+
+reviews:
+  profile: "assertive"
+  request_changes_workflow: true
+  high_level_summary: true
+  poem: false
+  review_status: true
+  collapse_walkthrough: true
+  sequence_diagrams: false
+  assess_linked_issues: true
+  related_issues: true
+  related_prs: true
+  suggested_labels: true
+  suggested_reviewers: false
+
+  auto_review:
+    enabled: true
+    drafts: false
+    base_branches:
+      - "main"
+
+  # Generated/packaged output and lockfiles are not hand-written — do not review.
+  path_filters:
+    - "!runtime/**"
+    - "!node_modules/**"
+    - "!package-lock.json"
+    - "!**/*.min.js"
+    - "!**/fixtures/**"
+
+  path_instructions:
+    - path: "src/protocol/**"
+      instructions: >-
+        This directory plus schemas/ defines versioned public contracts.
+        Flag any change that is not additive-compatible, any schema change not
+        accompanied by matching TypeScript types, validators, fixtures,
+        contract tests, and skill protocol markers, and any silent acceptance
+        of unknown semantics. Breaking changes must bump the protocol/spec
+        version and emit an explicit mismatch diagnostic.
+
+    - path: "schemas/**"
+      instructions: >-
+        Treat JSON schemas as public versioned APIs. Verify every field change
+        is reflected in TypeScript types, runtime validators, fixtures, and
+        contract tests. Prefer additive changes; breaking changes require a
+        version increment and explicit mismatch diagnostics.
+
+    - path: "src/git/**"
+      instructions: >-
+        Git safety layer. Flag any destructive operation (reset --hard,
+        clean -fdx, forced checkout, force-push, history rewriting), any path
+        that could discard user changes, missing expected-old-head/base guards
+        on integration, and symlink or worktree escape risks. Commands must
+        use executable-plus-argv arrays, never interpolated shell strings.
+
+    - path: "src/integrate/**"
+      instructions: >-
+        Integration must only apply accepted, hash-matched artifacts under
+        repository locks. Flag missing revalidation of artifact hash, anchor,
+        tree, status, or worktree before success is reported, and any path
+        that reports success after a failed guard.
+
+    - path: "src/mcp/**"
+      instructions: >-
+        Trusted orchestration surface. All external inputs must be validated
+        against canonical schemas before use. Handlers must stay thin.
+        Flag any handler that grants acceptance authority to an agent — only
+        the human may accept a candidate. Verify redaction of secrets,
+        prompts, and sensitive argv from tool output.
+
+    - path: "src/producers/**"
+      instructions: >-
+        Producers are untrusted. Flag executable selection outside explicit
+        allowlists, environments passed without sanitization, credentials
+        leaking into delegated contexts, nested delegation, and any fallback
+        from a failed confinement or capability probe to a less isolated
+        path — failed probes must make the lane unavailable (fail closed).
+
+    - path: "src/platform/**"
+      instructions: >-
+        Cross-platform process supervision and confinement. Check macOS,
+        Linux, and Windows behavior explicitly. Flag incomplete process-tree
+        termination on cancel/timeout, unsupported-platform paths that do not
+        fail closed, and platform-specific assumptions (path separators,
+        signals, /proc availability).
+
+    - path: "src/runtime/**"
+      instructions: >-
+        Attempt lifecycle, artifacts, state, recovery, redaction, manifests.
+        Flag state that would not survive process failure, cleanup failures
+        that erase the primary outcome, unredacted secrets/tokens/PII in
+        bounded logs, and any place a Producer self-report is treated as
+        evidence.
+
+    - path: "src/verify/**"
+      instructions: >-
+        Independent verification. Verification must be objective, recorded,
+        and rerunnable. Flag any reliance on Producer claims, any mocked
+        component whose security property the check claims to prove, and any
+        verification result that is not durable.
+
+    - path: "src/pipeline/**"
+      instructions: >-
+        Fresh-context implementation/review/repair coordination. Flag
+        implementers reviewing or accepting their own work, shared context
+        between implementer and reviewer, attempts not starting in a fresh
+        isolated worktree, and reviews scoped to the latest patch instead of
+        the whole candidate branch.
+
+    - path: "tests/**"
+      instructions: >-
+        Require the narrowest test that fails without the change. Flag mocks
+        of the component whose security property is being proven, missing
+        unhappy-path/fail-closed coverage, and tests weakened or skipped to
+        pass. Adversarial tests (path traversal, env, process, redaction,
+        races) must not be diluted.
+
+    - path: "scripts/**"
+      instructions: >-
+        Shell scripts gate releases and pushes. Flag unquoted variables,
+        missing set -euo pipefail, destructive git commands, and any change
+        that could let a release proceed with mismatched versions across
+        .claude-plugin/plugin.json, marketplace.json, README badge, and
+        CHANGELOG.md. Marketplace releases advance the minor version only.
+
+    - path: ".claude-plugin/**"
+      instructions: >-
+        Plugin packaging. The manifest exists only at
+        .claude-plugin/plugin.json (no duplicate root manifest). Runtime
+        references must resolve through ${CLAUDE_PLUGIN_ROOT}, never absolute
+        or user-specific paths. Version surfaces must stay synchronized.
+
+    - path: "{skills,agents}/**"
+      instructions: >-
+        Prose here must agree with executable contracts in schemas/ and
+        src/protocol/. Flag drift between skill/agent text and actual runtime
+        behavior, and any wording that weakens trust invariants (e.g.
+        implying agents can accept candidates).
+
+    - path: "**/*.md"
+      instructions: >-
+        Keep examples executable and version surfaces consistent. Flag stale
+        commands, undocumented behavior changes that affect trust guarantees,
+        and CHANGELOG omissions for release-visible changes.
+
+  # Local checks already run tsc + vitest via .githooks/pre-push; keep
+  # CodeRabbit linters focused on what CI does not duplicate.
+  tools:
+    gitleaks:
+      enabled: true
+    shellcheck:
+      enabled: true
+    actionlint:
+      enabled: true
+    yamllint:
+      enabled: true
+    markdownlint:
+      enabled: true
+    biome:
+      enabled: false
+    eslint:
+      enabled: false
+
+  finishing_touches:
+    docstrings:
+      enabled: false
+    unit_tests:
+      enabled: false
+
+chat:
+  auto_reply: true
+
+knowledge_base:
+  opt_out: false
+  learnings:
+    scope: "local"
+  code_guidelines:
+    enabled: true
+    filePatterns:
+      - "AGENTS.md"
+      - "CLAUDE.md"
