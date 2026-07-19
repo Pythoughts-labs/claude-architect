@@ -1558,7 +1558,7 @@ export async function recoverStaleRuns(
       ? new Set<string>()
       : (await readRecoveryQuarantineJournal(runsRoot)).runIds;
 
-    const stale: RunStartRecord[] = [];
+    const stale: Array<{ record: RunStartRecord; runStartText: string }> = [];
     const recovered: string[] = [];
     const quarantined: string[] = [];
     if (runsIdentity !== null) {
@@ -1662,7 +1662,7 @@ export async function recoverStaleRuns(
             isProcessAlive,
             pid => ps.getProcessStartToken(pid),
           )) continue;
-          stale.push(record);
+          stale.push({ record, runStartText });
         } catch (error) {
           await quarantineRun(runsRoot, entry.name, error);
           quarantined.push(entry.name);
@@ -1670,7 +1670,7 @@ export async function recoverStaleRuns(
       }
     }
 
-    for (const record of stale) {
+    for (const { record, runStartText } of stale) {
       const checkoutLock = await acquireOwnedLock(
         path.join(locksRoot, `${record.lockKey}.lock`),
         ownerContents,
@@ -1680,16 +1680,33 @@ export async function recoverStaleRuns(
       if (checkoutLock === null) continue;
       let recoveryError: unknown;
       let recoveryFailed = false;
+      let becameTerminal = false;
       try {
-        await recoverRun(
-          record,
-          root,
-          ps,
-          isProcessAlive,
-          requestCooperativeTermination,
-          delayMs,
-          graceMs,
+        const lockedRunStartText = await readBoundedRegularFile(
+          path.join(runsRoot, record.runId, "run-start.json"),
         );
+        if (lockedRunStartText === null) {
+          throw new RuntimeError("run-start recovery record disappeared before stale recovery");
+        }
+        const lockedRecord = parseRunStart(lockedRunStartText, record.runId);
+        if (lockedRunStartText !== runStartText) {
+          throw new RuntimeError("run-start recovery record changed before stale recovery");
+        }
+        const lockedResult = await new ArtifactStore(record.runId).readResult(record.runId);
+        if (lockedResult !== null) {
+          validateTerminalResult(lockedResult, record.runId);
+          becameTerminal = true;
+        } else {
+          await recoverRun(
+            lockedRecord,
+            root,
+            ps,
+            isProcessAlive,
+            requestCooperativeTermination,
+            delayMs,
+            graceMs,
+          );
+        }
       } catch (error) {
         recoveryError = error;
         recoveryFailed = true;
@@ -1709,6 +1726,7 @@ export async function recoverStaleRuns(
         quarantined.push(record.runId);
         continue;
       }
+      if (becameTerminal) continue;
       recovered.push(record.runId);
     }
     await reclaimLocks(

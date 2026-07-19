@@ -397,6 +397,72 @@ describe("recoverStaleRuns", () => {
       .resolves.toBe(JSON.stringify(replacementOwner));
   });
 
+  it("preserves a terminal result published after the stale scan", async () => {
+    const repo = await initRepo();
+    const runId = "run-terminal-after-stale-scan";
+    const store = await createUnfinishedRun(runId, repo.commonDir, null);
+    const worktree = await new WorktreeManager(repo.directory, runId).create(repo.head);
+    const anchorRef = `refs/claude-architect/candidates/${runId}`;
+    await runGit(repo.directory, ["update-ref", anchorRef, repo.head]);
+    const lockKey = createHash("sha256").update(repo.commonDir).digest("hex");
+    const checkoutLockPath = path.join(
+      process.env.CLAUDE_PLUGIN_DATA!,
+      "locks",
+      `${lockKey}.lock`,
+    );
+    const checkoutOwner = { pid: 9701, processToken: "darwin:stale-checkout" };
+    await mkdir(path.dirname(checkoutLockPath), { recursive: true });
+    await writeFile(checkoutLockPath, JSON.stringify(checkoutOwner));
+    let publishedResult: Buffer | undefined;
+    let ownerProbes = 0;
+
+    const result = await recoverStaleRuns({
+      platformServices: {
+        os: "darwin",
+        async getProcessStartToken(pid) {
+          if (pid === checkoutOwner.pid) {
+            ownerProbes += 1;
+            if (publishedResult === undefined) {
+              await store.writeResult({
+                resultVersion: "1",
+                runId,
+                status: "failed",
+                failure: "producer-failure",
+                summary: "producer completed while recovery waited for the checkout lock",
+                producerSummary: null,
+                candidate: null,
+                requestedVerification: [],
+                executedVerification: [],
+                unresolvedIssues: [],
+                evidence: {},
+                logsRef: "logs/producer.log",
+                producerId: null,
+                producerVersion: null,
+                producerModel: null,
+                durationMs: 1,
+                sessionId: null,
+              });
+              publishedResult = await readFile(path.join(store.runDirectory, "result.json"));
+            }
+            return "darwin:replacement-checkout";
+          }
+          return "darwin:self";
+        },
+        async terminateProcessTreeByPid() {},
+      },
+      isProcessAlive: pid => pid === checkoutOwner.pid,
+    });
+
+    expect(result).toEqual({ recovered: [], quarantined: [] });
+    expect(ownerProbes).toBeGreaterThanOrEqual(2);
+    expect(publishedResult).toBeDefined();
+    await expect(readFile(path.join(store.runDirectory, "result.json")))
+      .resolves.toEqual(publishedResult);
+    await expect(access(worktree.path)).resolves.toBeUndefined();
+    expect(await runGit(repo.directory, ["rev-parse", anchorRef])).toBe(repo.head);
+    await expectMissing(checkoutLockPath);
+  }, { timeout: 120_000 });
+
   it.each([
     {
       ownerDescription: "a live matching-token owner",
