@@ -747,6 +747,10 @@ export async function runPipeline(
   deps: PipelineDependencies,
 ): Promise<PipelineResult> {
   const runAttemptFn = deps.runAttempt ?? defaultRunAttempt;
+  const notePhase = (phase: string): void => {
+    // Best-effort progress; must never affect pipeline control flow.
+    try { deps.onPhase?.(phase); } catch { /* progress reporting is advisory */ }
+  };
   let runStart: RunStartContext | undefined;
   const inheritedOnRunStart = deps.onRunStart;
   const attempt = await runAttemptFn(checkoutPath, spec, {
@@ -804,6 +808,7 @@ export async function runPipeline(
 
       try {
         for (let increment = 2; increment <= maxIncrements; increment += 1) {
+          notePhase(`increment ${increment}/${maxIncrements}`);
           const previousCandidateCommit = currentCandidateCommit;
           const diffText = await checkedGit(candidateWorktree.path, [
             "diff",
@@ -924,6 +929,7 @@ export async function runPipeline(
     }
 
     for (let round = 1; round <= maxRounds; round += 1) {
+      notePhase(`review round ${round}/${maxRounds}`);
       const diffText = await checkedGit(candidateWorktree.path, [
         "diff",
         `${baselineCommit}..${currentCandidateCommit}`,
@@ -989,6 +995,7 @@ export async function runPipeline(
         );
       }
 
+      notePhase(`round ${round}: applying fixes`);
       const fixRun = await runFix({
         spec,
         pkg: { ...pkg, findings: consolidated.findings },
@@ -1122,6 +1129,7 @@ export async function runPipeline(
     }
   }
 
+  notePhase("final verification");
   const verified = await verifyCandidate({
     checkoutPath,
     spec,
@@ -1133,6 +1141,7 @@ export async function runPipeline(
   });
   await store.writePipelineArtifact("verification", verified.verification);
   const lastRound = rounds.at(-1);
+  notePhase("evaluating gate");
   const gate = evaluateGates({
     findings: lastRound?.consolidated.findings ?? [],
     dispositions: lastRound?.fix?.dispositions ?? [],

@@ -24777,6 +24777,55 @@ var delegation_spec_v1_default = {
       },
       minItems: 1
     },
+    slices: {
+      type: "array",
+      minItems: 1,
+      items: {
+        type: "object",
+        additionalProperties: false,
+        required: [
+          "objective",
+          "context",
+          "writeAllowlist",
+          "forbiddenScope",
+          "successCriteria",
+          "verification"
+        ],
+        properties: {
+          objective: {
+            type: "string",
+            minLength: 1
+          },
+          context: {
+            type: "string"
+          },
+          writeAllowlist: {
+            type: "array",
+            items: {
+              type: "string"
+            },
+            minItems: 1
+          },
+          forbiddenScope: {
+            type: "array",
+            items: {
+              type: "string"
+            }
+          },
+          successCriteria: {
+            type: "array",
+            items: {
+              type: "string",
+              minLength: 1
+            },
+            minItems: 1
+          },
+          verification: {
+            $ref: "#/properties/verification"
+          }
+        }
+      }
+    },
     executionMode: {
       const: "edit"
     },
@@ -24836,6 +24885,9 @@ var delegation_spec_v1_default = {
             type: "string",
             minLength: 1
           }
+        },
+        perSlice: {
+          type: "boolean"
         }
       }
     },
@@ -29408,6 +29460,12 @@ async function verifyCandidate(args) {
 }
 async function runPipeline(checkoutPath, spec, deps) {
   const runAttemptFn = deps.runAttempt ?? runAttempt;
+  const notePhase = (phase) => {
+    try {
+      deps.onPhase?.(phase);
+    } catch {
+    }
+  };
   let runStart;
   const inheritedOnRunStart = deps.onRunStart;
   const attempt = await runAttemptFn(checkoutPath, spec, {
@@ -29459,6 +29517,7 @@ async function runPipeline(checkoutPath, spec, deps) {
       }
       try {
         for (let increment = 2; increment <= maxIncrements; increment += 1) {
+          notePhase(`increment ${increment}/${maxIncrements}`);
           const previousCandidateCommit = currentCandidateCommit;
           const diffText = await checkedGit4(candidateWorktree.path, [
             "diff",
@@ -29575,6 +29634,7 @@ async function runPipeline(checkoutPath, spec, deps) {
       }
     }
     for (let round = 1; round <= maxRounds; round += 1) {
+      notePhase(`review round ${round}/${maxRounds}`);
       const diffText = await checkedGit4(candidateWorktree.path, [
         "diff",
         `${baselineCommit}..${currentCandidateCommit}`
@@ -29636,6 +29696,7 @@ async function runPipeline(checkoutPath, spec, deps) {
           increments
         );
       }
+      notePhase(`round ${round}: applying fixes`);
       const fixRun = await runFix({
         spec,
         pkg: { ...pkg, findings: consolidated.findings },
@@ -29767,6 +29828,7 @@ async function runPipeline(checkoutPath, spec, deps) {
       );
     }
   }
+  notePhase("final verification");
   const verified = await verifyCandidate({
     checkoutPath,
     spec,
@@ -29778,6 +29840,7 @@ async function runPipeline(checkoutPath, spec, deps) {
   });
   await store.writePipelineArtifact("verification", verified.verification);
   const lastRound = rounds.at(-1);
+  notePhase("evaluating gate");
   const gate = evaluateGates({
     findings: lastRound?.consolidated.findings ?? [],
     dispositions: lastRound?.fix?.dispositions ?? [],
@@ -30871,7 +30934,7 @@ async function start(dependencies = {}) {
         lastPhase = message;
         emit2(message);
       };
-      const heartbeat = onProgress === void 0 ? void 0 : setInterval(() => emit2(lastPhase), 15e3);
+      const heartbeat = onProgress === void 0 ? void 0 : setInterval(() => emit2(lastPhase), 8e3);
       try {
         return toolOutput(await handleDelegate(
           checkoutPath,
@@ -30914,7 +30977,7 @@ async function start(dependencies = {}) {
         lastPhase = message;
         emit2(message);
       };
-      const heartbeat = onProgress === void 0 ? void 0 : setInterval(() => emit2(lastPhase), 15e3);
+      const heartbeat = onProgress === void 0 ? void 0 : setInterval(() => emit2(lastPhase), 8e3);
       try {
         return toolOutput(await handleDelegatePipeline(
           checkoutPath,

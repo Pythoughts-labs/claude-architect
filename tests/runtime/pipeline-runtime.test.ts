@@ -1053,6 +1053,58 @@ describe("runPipeline", () => {
     await expect(readFile(path.join(repo, "a.txt"), "utf8")).resolves.toBe("fixed\n");
   });
 
+  it("emits ordered pipeline-stage progress phases across review and fix rounds", async () => {
+    const repo = await initRepo();
+    const roleRunner = roundReviews([
+      { correctness: blocker, systems: approve },
+      { correctness: approve, systems: approve },
+    ], async args => {
+      const commit = await commitFix(args, "fixed\n");
+      return success(fenced({
+        reportVersion: "1",
+        candidateCommit: commit,
+        dispositions: [{
+          findingId: "F-001",
+          disposition: "fixed",
+          evidence: "Committed the requested correction.",
+          commit,
+        }],
+      }));
+    });
+
+    const phases: string[] = [];
+    const result = await runPipeline(repo, validSpec(), {
+      ...dependencies({ runId: "pipeline-phases", roleRunner }),
+      onPhase: phase => phases.push(phase),
+    });
+
+    expect(result.status).toBe("decision-ready");
+    expect(phases).toEqual([
+      "review round 1/2",
+      "round 1: applying fixes",
+      "review round 2/2",
+      "final verification",
+      "evaluating gate",
+    ]);
+  });
+
+  it("never lets a throwing progress callback affect pipeline control flow", async () => {
+    const repo = await initRepo();
+    const roleRunner = roundReviews([
+      { correctness: approve, systems: approve },
+    ], async () => {
+      throw new Error("fixer must not run after a clean first round");
+    });
+
+    const result = await runPipeline(repo, validSpec(), {
+      ...dependencies({ runId: "pipeline-phase-throw", roleRunner }),
+      onPhase: () => { throw new Error("progress sink boom"); },
+    });
+
+    expect(result.status).toBe("decision-ready");
+    expect(result.rounds).toHaveLength(1);
+  });
+
   it.each([
     {
       state: "tracked-file modification",

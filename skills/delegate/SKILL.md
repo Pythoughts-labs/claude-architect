@@ -115,6 +115,35 @@ edits).
 4. The pipeline never merges and never waives findings; you and the human
    remain the only decision-makers.
 
+## Monitoring a backgrounded delegation
+
+`delegate` and `delegatePipeline` are synchronous, but the host auto-backgrounds
+a long call (after roughly 120s) and then surfaces only a generic "1 MCP task
+still running" line; the in-band progress phases stop being visible there. A
+producer alone almost always runs longer than the background threshold, so most
+of a real delegation happens after the collapse. When a call backgrounds, do not
+go silent — report a real status line by reading the run's durable artifacts.
+
+Correlate the run without guessing:
+
+1. Before dispatch, snapshot the run directories under the state dir
+   (`CLAUDE_PLUGIN_DATA/runs` on a host; `CLAUDE_ARCHITECT_STATE_DIR`/tmp under
+   tests). Reading these directories is read-only observation only.
+2. After the call backgrounds, take the newly appeared directory whose
+   `run-start.json` `canonicalCommonDir` equals this checkout's `.git` and that
+   has no `result.json` yet. If more than one new matching directory appears —
+   another session may be delegating against the same repository — report the
+   ambiguity and do not assume which run is yours.
+3. Read `runs/<runId>/pipeline/<name>.json` for the latest stage: `round-N-…`,
+   `verification`, then `pipeline-result`. No pipeline artifact yet means the
+   implement attempt (baseline or producer) is still running. `result.json`
+   appearing means the run finished.
+
+After backgrounding the host returns control once; emit a single status line
+then. Continuous status requires scheduled wakeups (about 75s apart, each a full
+turn) — only do this when the human explicitly asks for live status, tell them it
+costs a turn per update, and never poll tighter than the round cadence.
+
 ## Legacy migration fallback
 
 The pre-0.8 prose lane definitions remain packaged during migration: `codex-implementer`, `opencode-implementer`, `pi-implementer`, and `pythinker-implementer`. OpenCode, Pi, and Pythinker may use their selected legacy lane while their MCP adapters are not yet certified. Keep the objective, files, interfaces, constraints, and verification unchanged, isolate writes in the lane's worktree, and independently inspect its diff and verification output. Never silently substitute Claude implementation for a named Producer.

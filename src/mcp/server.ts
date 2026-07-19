@@ -185,7 +185,7 @@ export async function start(dependencies: ServerDependencies = {}): Promise<void
       };
       const heartbeat = onProgress === undefined
         ? undefined
-        : setInterval(() => emit(lastPhase), 15_000);
+        : setInterval(() => emit(lastPhase), 8_000);
       try {
         return toolOutput(await handleDelegate(
           checkoutPath,
@@ -229,7 +229,7 @@ export async function start(dependencies: ServerDependencies = {}): Promise<void
       };
       const heartbeat = onProgress === undefined
         ? undefined
-        : setInterval(() => emit(lastPhase), 15_000);
+        : setInterval(() => emit(lastPhase), 8_000);
       try {
         return toolOutput(await handleDelegatePipeline(
           checkoutPath,
