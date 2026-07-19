@@ -32053,6 +32053,10 @@ async function truncateCleanupTornTail(filename) {
     }
     const text = await handle.readFile({ encoding: "utf8" });
     if (text === "" || text.endsWith("\n")) return;
+    const settled = await handle.stat();
+    if (Buffer.byteLength(text, "utf8") !== metadata.size || settled.size !== metadata.size || settled.mtimeMs !== metadata.mtimeMs || settled.ctimeMs !== metadata.ctimeMs) {
+      throw new RuntimeError("cleanup journal changed during torn-tail repair");
+    }
     const finalNewline = text.lastIndexOf("\n");
     const completePrefix = finalNewline === -1 ? "" : text.slice(0, finalNewline + 1);
     await handle.truncate(Buffer.byteLength(completePrefix, "utf8"));
@@ -32687,7 +32691,6 @@ async function recoverStaleRuns(dependencies = {}) {
     const runsRoot = path14.join(root, "runs");
     const runsIdentity = await plainDirectoryIdentity(runsRoot);
     if (runsIdentity !== null) await replayInterruptedPrunes(runsRoot, ps);
-    const deferredPruneRunIds = /* @__PURE__ */ new Set();
     const journaledQuarantines = runsIdentity === null ? /* @__PURE__ */ new Set() : (await readRecoveryQuarantineJournal(runsRoot)).runIds;
     const stale = [];
     const recovered = [];
@@ -32703,7 +32706,6 @@ async function recoverStaleRuns(dependencies = {}) {
           }
           continue;
         }
-        if (deferredPruneRunIds.has(entry.name)) continue;
         if (!entry.isDirectory() || entry.isSymbolicLink() || !SAFE_RUN_ID.test(entry.name)) continue;
         try {
           const runDirectory = path14.join(runsRoot, entry.name);

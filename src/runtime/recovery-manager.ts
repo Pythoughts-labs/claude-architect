@@ -1204,6 +1204,17 @@ async function truncateCleanupTornTail(filename: string): Promise<void> {
     }
     const text = await handle.readFile({ encoding: "utf8" });
     if (text === "" || text.endsWith("\n")) return;
+    // A concurrent live prune may append+fsync a fresh intent between the reader's
+    // scan and this truncate. Re-validate that we read exactly the stat'd bytes and
+    // that the journal has not grown or changed since, and fail closed rather than
+    // truncate away a durably-journaled intent (matches the reader's stability gate).
+    const settled = await handle.stat();
+    if (Buffer.byteLength(text, "utf8") !== metadata.size
+      || settled.size !== metadata.size
+      || settled.mtimeMs !== metadata.mtimeMs
+      || settled.ctimeMs !== metadata.ctimeMs) {
+      throw new RuntimeError("cleanup journal changed during torn-tail repair");
+    }
     const finalNewline = text.lastIndexOf("\n");
     const completePrefix = finalNewline === -1 ? "" : text.slice(0, finalNewline + 1);
     await handle.truncate(Buffer.byteLength(completePrefix, "utf8"));
@@ -1983,7 +1994,6 @@ export async function recoverStaleRuns(
     // The reconciler completes interrupted prunes under a per-repo checkout lease
     // rather than deferring them, so no run is skipped for a pending prune.
     if (runsIdentity !== null) await replayInterruptedPrunes(runsRoot, ps);
-    const deferredPruneRunIds = new Set<string>();
     const journaledQuarantines = runsIdentity === null
       ? new Set<string>()
       : (await readRecoveryQuarantineJournal(runsRoot)).runIds;
@@ -2002,7 +2012,6 @@ export async function recoverStaleRuns(
           }
           continue;
         }
-        if (deferredPruneRunIds.has(entry.name)) continue;
         if (!entry.isDirectory() || entry.isSymbolicLink() || !SAFE_RUN_ID.test(entry.name)) continue;
         try {
           const runDirectory = path.join(runsRoot, entry.name);
