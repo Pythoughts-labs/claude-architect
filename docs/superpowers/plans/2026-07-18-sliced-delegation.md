@@ -8,6 +8,44 @@
 
 **Tech Stack:** TypeScript (Node ESM, `.js` import specifiers), Ajv JSON Schema, Vitest, git worktrees via `WorktreeManager`.
 
+## STATUS (2026-07-18) — engine complete (T1–T5), T6–T8 pending
+
+Built by dogfooding the delegate pipeline (Codex, high effort). Each task independently reviewed/verified; full Vitest suite green after each.
+
+| Task | Status | Commit |
+|---|---|---|
+| T1 Slice type + `slices`/`perSlice` fields + `resolveSlices` | ✅ done | `2485af3` |
+| T2 JSON schema `slices` + `review.perSlice` | ✅ done | `3f85b24` |
+| T3 Slice validation (allowlist-subset + cwd-escape) | ✅ done | `8bd267c` |
+| T4 Deterministic wayfinder `routeSlice` | ✅ done | `ac15a0f` |
+| T5 Pure git-free orchestrator `runSlicePhase` | ✅ done | `156df05` |
+| T6 Wire into `runPipeline` (real `runSlice` + partial-halt) | ⛔ blocked | — |
+| T7 MCP surface + protocol bump `1.2.0`→`1.3.0` | pending | — |
+| T8 Skill prose + docs + version sync | pending | — |
+
+**T5 was redesigned from the original plan below:** it is now a *pure, git-free* orchestrator taking an injected `runSlice(slice, index, base, attempt) => Promise<SliceAttempt>` callback and composing `routeSlice`; fully unit-tested. All git coupling moved to T6. See `src/pipeline/slice-runner.ts` for the real exported shape (`PipelineSlice`, `SliceAttempt`, `SlicePhaseDeps`, `SlicePhaseResult`, `runSlicePhase`).
+
+**T6 was blocked** by a concurrent session continuously editing the same `pipeline-runtime.ts` (guaranteed conflict) and leaving the shared checkout dirty. Resume when that file is stable.
+
+### Corrected T6 design (supersedes the stale Task 6 section below)
+
+`runPipeline` unconditionally runs one full-spec initial attempt, then increments, then rounds. Slicing must **replace the initial-attempt + increment model** (it does not "insert before the rounds"):
+
+1. When `resolveSlices(spec).length > 0`, run the initial `runAttemptFn` with a **slice-1-scoped spec** (objective/context/writeAllowlist/forbiddenScope/successCriteria/verification of slice 1; drop `slices`). That establishes runId/store/anchor and freezes slice 1 anchored on HEAD baseline.
+2. Verify slice 1 via `verifyCandidate({ spec: slice1Spec, baselineCommit, candidateCommit: slice1Commit })` → `VerificationReport`; route via `routeSlice`. Slice-1 repair = re-run `runAttemptFn` (re-anchors on HEAD) up to `maxRounds`.
+3. Slices 2..N via `runSlicePhase(slices.slice(1), slice1Commit, deps)` where the real `runSlice`:
+   - runs the implementer with the slice-scoped spec anchored on the prior frozen commit in the **candidate worktree** using the increment machinery (`runIncrement` + `validateCandidateProvenance` + `importPromotedObjects`), **no `progress` note** (no-context);
+   - runs `verifyCandidate({ spec: sliceSpec, baselineCommit: base, candidateCommit: frozen })` — note `baselineCommit` is the *prior slice's* commit so scope-checks see only this slice's diff against its own `writeAllowlist`;
+   - returns `{ candidateCommit: frozen, verification }`.
+   - `onSlice` durability hook writes `store.writePipelineArtifact(\`slice-${index}\`, pipelineSlice)`.
+4. On `haltedSliceIndex !== null`: return `status: "human-decision-required"` with the **partial** composed candidate (`finalCandidateCommit` = last advanced slice), the populated `slices`, `haltedSliceIndex`, and halt reasons. Do not enter the review rounds.
+5. All advanced → set `currentCandidateCommit = slicePhase.finalCandidateCommit` and fall through to the existing rounds → `verifyCandidate(full spec)` → `evaluateGates` tail unchanged (whole-branch final review).
+
+`PipelineResult` gains `slices: PipelineSlice[]` (default `[]`) and `haltedSliceIndex: number | null` (default `null`); update the interface, `failedResult` (add a param), and the single terminal-result construction. Non-sliced path stays byte-identical. Integration test: model on the git harness in `tests/runtime/pipeline-runtime.test.ts` (`dependencies({runId, roleRunner, edit})`, `incrementRoleRunner`, `fakeAttempt`).
+
+**Dogfood bugs found** (regression-test ideas in `scratchpad.md`): leaked repo lock survives because owner is the long-lived MCP server; vitest only collects `tests/runtime/**` (tests elsewhere silently "pass by absence"); false-positive blocking review misreads line numbers and forces a redundant fix round; `reviewCandidate` returns the structural manifest, not the `candidateManifestHash` integration needs; `doctor` reports `issues:[]` while a checkout lock is held.
+
+
 ## Global Constraints
 
 - Spec source of truth precedence: `runtime/schemas/` + `src/protocol/` first, then `src/`, then `tests/`. Update schema, TS types, validators, fixtures, contract tests, protocol marker, and docs together.
