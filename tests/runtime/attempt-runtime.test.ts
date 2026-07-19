@@ -853,7 +853,11 @@ describe("runAttempt", () => {
   it("salvages a bounded worktree snapshot when a timeout discards producer work", async () => {
     const repoRoot = await initRepo();
     const spec = validSpec();
-    spec.timeoutMs = 100;
+    // Windows CI Node cold-start can exceed a 100ms cap before the producer's
+    // synchronous salvage write lands, leaving an empty worktree to snapshot.
+    // Give it ample time to write; the 60s sleep keeps the process alive so the
+    // timeout still fires and the discarded work is what gets salvaged.
+    spec.timeoutMs = 5_000;
 
     const result = await runAttempt(
       repoRoot,
