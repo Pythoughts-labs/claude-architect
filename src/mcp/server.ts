@@ -54,6 +54,8 @@ export const delegatePipelineOutput = z.object({
     verification: z.record(z.string(), z.unknown()).nullable(),
     gate: z.record(z.string(), z.unknown()),
     finalCandidateCommit: z.string(),
+    slices: z.array(z.record(z.string(), z.unknown())),
+    haltedSliceIndex: z.number().nullable(),
   }).optional(),
   validationErrors: z.array(z.object({ path: z.string(), message: z.string() })).optional(),
   diagnostic: z.string().optional(),

@@ -5,6 +5,8 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { freezeCandidate } from "../../src/git/candidate-tree.js";
 import { git } from "../../src/git/git-exec.js";
 import { applyCandidateTree } from "../../src/integrate/controlled-integrator.js";
+import type { CheckoutLock, PlatformServices } from "../../src/platform/platform-services.js";
+import { getPlatformServices } from "../../src/platform/select-platform.js";
 import type { CandidateArtifact } from "../../src/protocol/attempt-result.js";
 
 const temporaryPaths: string[] = [];
@@ -126,6 +128,236 @@ describe("applyCandidateTree", () => {
     const anchor = await git(f.repoRoot, ["show-ref", "--verify", artifact.anchorRef]);
     expect(anchor.exitCode).not.toBe(0);
   });
+
+  it("acquires and releases one identity-bound lease for standalone integration", async () => {
+    const f = await fixture();
+    await writeFile(path.join(f.worktreePath, "a.txt"), "candidate\n");
+    const artifact = await freeze(f, "standalone-lock-ownership");
+    const platformServices = getPlatformServices();
+    let held = false;
+    let acquireCalls = 0;
+    let releaseCalls = 0;
+    let applyObserved = false;
+    const ps = Object.assign(Object.create(platformServices), {
+      async acquireCheckoutLock(checkout: string): Promise<CheckoutLock> {
+        acquireCalls += 1;
+        const lock = await platformServices.acquireCheckoutLock(checkout);
+        held = true;
+        return {
+          ...lock,
+          async release() {
+            expect(held).toBe(true);
+            releaseCalls += 1;
+            await lock.release();
+            held = false;
+          },
+        };
+      },
+    }) as PlatformServices;
+    integrationHooks.beforeReadTree = async () => {
+      expect(held).toBe(true);
+      applyObserved = true;
+    };
+
+    const result = await applyCandidateTree({
+      repoRoot: f.repoRoot,
+      artifact,
+      expectedArtifactHash: artifact.manifestHash,
+      platformServices: ps,
+    });
+
+    expect(result.integration).toBe("applied");
+    expect(acquireCalls).toBe(1);
+    expect(releaseCalls).toBe(1);
+    expect(applyObserved).toBe(true);
+    expect(held).toBe(false);
+  });
+
+  it("borrows the exact lease through preconditions, apply, postconditions, and anchor deletion", async () => {
+    const f = await fixture();
+    await writeFile(path.join(f.worktreePath, "a.txt"), "candidate\n");
+    const artifact = await freeze(f, "borrowed-lock-lifecycle");
+    const platformServices = getPlatformServices();
+    const ownerLock = await platformServices.acquireCheckoutLock(f.repoRoot);
+    let held = true;
+    let canonicalizeCalls = 0;
+    let nestedAcquireCalls = 0;
+    let borrowedReleaseCalls = 0;
+    const borrowedCheckoutLock: CheckoutLock = {
+      ...ownerLock,
+      async release() {
+        borrowedReleaseCalls += 1;
+        held = false;
+        await ownerLock.release();
+      },
+    };
+    const ps = Object.assign(Object.create(platformServices), {
+      async canonicalizePath(input: string) {
+        expect(held).toBe(true);
+        canonicalizeCalls += 1;
+        return platformServices.canonicalizePath(input);
+      },
+      async acquireCheckoutLock(): Promise<CheckoutLock> {
+        nestedAcquireCalls += 1;
+        throw new Error("borrowed integration acquired a nested checkout lease");
+      },
+    }) as PlatformServices;
+    const stages: string[] = [];
+    integrationHooks.beforeReadTree = async () => {
+      expect(held).toBe(true);
+      stages.push("apply");
+    };
+    integrationHooks.afterWorktreeDiff = async () => {
+      expect(held).toBe(true);
+      stages.push("post-apply");
+    };
+    integrationHooks.beforeAnchorDelete = async () => {
+      expect(held).toBe(true);
+      stages.push("anchor-delete");
+    };
+
+    try {
+      const result = await applyCandidateTree({
+        repoRoot: f.repoRoot,
+        artifact,
+        expectedArtifactHash: artifact.manifestHash,
+        borrowedCheckoutLock,
+        platformServices: ps,
+      });
+
+      expect(result.integration).toBe("applied");
+      expect(held).toBe(true);
+      expect(canonicalizeCalls).toBe(1);
+      expect(nestedAcquireCalls).toBe(0);
+      expect(borrowedReleaseCalls).toBe(0);
+      expect(stages).toEqual(["apply", "post-apply", "anchor-delete"]);
+    } finally {
+      if (held) {
+        held = false;
+        await ownerLock.release();
+      }
+    }
+  }, { timeout: 10_000 });
+
+  it("rejects a borrowed lease for another repository before integration preconditions", async () => {
+    const f = await fixture();
+    await writeFile(path.join(f.worktreePath, "a.txt"), "candidate\n");
+    const artifact = await freeze(f, "borrowed-lock-mismatch");
+    const platformServices = getPlatformServices();
+    const canonical = await platformServices.canonicalizePath(f.repoRoot);
+    let canonicalizeCalls = 0;
+    let acquireCalls = 0;
+    let releaseCalls = 0;
+    const ps = Object.assign(Object.create(platformServices), {
+      async canonicalizePath(input: string) {
+        canonicalizeCalls += 1;
+        return platformServices.canonicalizePath(input);
+      },
+      async acquireCheckoutLock(): Promise<CheckoutLock> {
+        acquireCalls += 1;
+        throw new Error("borrowed integration acquired a nested checkout lease");
+      },
+    }) as PlatformServices;
+    const borrowedCheckoutLock: CheckoutLock = {
+      key: "wrong-repository-lock",
+      repositoryIdentity: `${canonical.gitCommonDir ?? canonical.canonical}-other-repository`,
+      async release() { releaseCalls += 1; },
+    };
+    let thrown: unknown;
+
+    try {
+      await applyCandidateTree({
+        repoRoot: f.repoRoot,
+        artifact,
+        expectedArtifactHash: artifact.manifestHash,
+        borrowedCheckoutLock,
+        platformServices: ps,
+      });
+    } catch (error) {
+      thrown = error;
+    }
+
+    expect.soft(thrown).toMatchObject({
+      message: "borrowed checkout lease repository identity mismatch",
+    });
+    expect.soft(canonicalizeCalls).toBe(1);
+    expect.soft(acquireCalls).toBe(0);
+    expect.soft(releaseCalls).toBe(0);
+    await expect(readFile(path.join(f.repoRoot, "a.txt"), "utf8")).resolves.toBe("base\n");
+    await expect(runGit(f.repoRoot, ["rev-parse", artifact.anchorRef])).resolves.toBe(
+      artifact.candidateCommitOid,
+    );
+  });
+
+  it.each(["aborted", "conflicted", "thrown"] as const)(
+    "leaves borrowed lease ownership with the caller on a %s path",
+    async outcome => {
+      const f = await fixture();
+      await writeFile(path.join(f.worktreePath, "a.txt"), "candidate\n");
+      const artifact = await freeze(f, `borrowed-lock-${outcome}`);
+      const platformServices = getPlatformServices();
+      const canonical = await platformServices.canonicalizePath(f.repoRoot);
+      let held = true;
+      let canonicalizeCalls = 0;
+      let acquireCalls = 0;
+      let releaseCalls = 0;
+      const ps = Object.assign(Object.create(platformServices), {
+        async canonicalizePath(input: string) {
+          expect(held).toBe(true);
+          canonicalizeCalls += 1;
+          return platformServices.canonicalizePath(input);
+        },
+        async acquireCheckoutLock(): Promise<CheckoutLock> {
+          acquireCalls += 1;
+          throw new Error("borrowed integration acquired a nested checkout lease");
+        },
+      }) as PlatformServices;
+      const borrowedCheckoutLock: CheckoutLock = {
+        key: `borrowed-${outcome}`,
+        repositoryIdentity: canonical.gitCommonDir ?? canonical.canonical,
+        async release() {
+          releaseCalls += 1;
+          held = false;
+        },
+      };
+      if (outcome === "conflicted") {
+        integrationHooks.beforeReadTree = async () => {
+          expect(held).toBe(true);
+          await writeFile(path.join(f.repoRoot, "a.txt"), "racing edit\n");
+        };
+      } else if (outcome === "thrown") {
+        integrationHooks.beforeReadTree = async () => {
+          expect(held).toBe(true);
+          throw new Error("integration hook failed");
+        };
+      }
+
+      const applying = applyCandidateTree({
+        repoRoot: f.repoRoot,
+        artifact,
+        expectedArtifactHash: outcome === "aborted" ? "f".repeat(64) : artifact.manifestHash,
+        borrowedCheckoutLock,
+        platformServices: ps,
+      });
+      if (outcome === "aborted") {
+        await expect(applying).resolves.toEqual({
+          integration: "aborted",
+          detail: "artifact-hash-mismatch",
+        });
+      } else if (outcome === "conflicted") {
+        await expect(applying).resolves.toEqual({
+          integration: "conflicted",
+          detail: "candidate-apply-conflict",
+        });
+      } else {
+        await expect(applying).rejects.toThrow("integration hook failed");
+      }
+      expect.soft(canonicalizeCalls).toBe(1);
+      expect.soft(acquireCalls).toBe(0);
+      expect.soft(releaseCalls).toBe(0);
+      expect.soft(held).toBe(true);
+    },
+  );
 
   it("materializes LF bytes exactly when repository autocrlf is enabled", async () => {
     const f = await fixture();

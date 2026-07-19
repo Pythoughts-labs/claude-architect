@@ -29,7 +29,7 @@ export async function acquireWxFileLock(
   key: string,
   timeoutMessage?: string,
   ownerToken: string | null = null,
-): Promise<CheckoutLock> {
+): Promise<Omit<CheckoutLock, "repositoryIdentity">> {
   const lockDirectory = path.join(resolveStateDir(), "locks");
   const lockPath = path.join(lockDirectory, `${key}.lock`);
   await fs.mkdir(lockDirectory, { recursive: true });
@@ -181,9 +181,11 @@ export class PosixPlatformServices implements PlatformServices {
 
   async acquireCheckoutLock(checkout: string): Promise<CheckoutLock> {
     const { canonical, gitCommonDir: commonDir } = await this.canonicalizePath(checkout);
-    const key = createHash("sha256").update(commonDir ?? canonical).digest("hex");
+    const repositoryIdentity = commonDir ?? canonical;
+    const key = createHash("sha256").update(repositoryIdentity).digest("hex");
     const ownerToken = await this.getProcessStartToken(nodeProcess.pid);
-    return acquireWxFileLock(key, `checkout is locked: ${checkout}`, ownerToken);
+    const lock = await acquireWxFileLock(key, `checkout is locked: ${checkout}`, ownerToken);
+    return { ...lock, repositoryIdentity };
   }
 
   async createSecureTempDirectory(): Promise<string> {

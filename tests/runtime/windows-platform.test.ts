@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { acquireWxFileLock } from "../../src/platform/posix-platform-services.js";
 import {
@@ -42,6 +42,27 @@ describe("acquireWxFileLock (shared, all OSes)", () => {
     await first.release();
     const second = await acquireWxFileLock(key);
     await second.release();
+  });
+});
+
+describe("WindowsPlatformServices checkout lock contract", () => {
+  it("returns the canonical repository identity used to derive its lock key", async () => {
+    const repositoryIdentity = `C:\\repo\\.git-${randomUUID()}`;
+    const ps = Object.assign(new WindowsPlatformServices(), {
+      async canonicalizePath(input: string) {
+        return { input, canonical: "C:\\repo", gitCommonDir: repositoryIdentity };
+      },
+      async getProcessStartToken() { return null; },
+    });
+
+    const lock = await ps.acquireCheckoutLock("C:\\repo");
+
+    try {
+      expect(lock.repositoryIdentity).toBe(repositoryIdentity);
+      expect(lock.key).toBe(createHash("sha256").update(repositoryIdentity).digest("hex"));
+    } finally {
+      await lock.release();
+    }
   });
 });
 

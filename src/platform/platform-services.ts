@@ -34,7 +34,11 @@ export interface SupervisedExit {
   truncated: { stdout: boolean; stderr: boolean };
   spawnError?: unknown;             // set when the child emitted 'error' before start (→ spawn-failure)
 }
-export interface CheckoutLock { key: string; release(): Promise<void>; }
+export interface CheckoutLock {
+  key: string;
+  readonly repositoryIdentity: string;
+  release(): Promise<void>;
+}
 export interface CanonicalPath { input: string; canonical: string; gitCommonDir: string | null; }
 
 export interface PlatformServices {

@@ -21927,10 +21927,10 @@ var StdioServerTransport = class {
 };
 
 // src/protocol/versions.ts
-var PROTOCOL_VERSION = "1.2.0";
+var PROTOCOL_VERSION = "1.3.0";
 var DELEGATION_SPEC_VERSION = "1";
 var ATTEMPT_RESULT_VERSION = "1";
-var RUNTIME_VERSION = "0.20.0";
+var RUNTIME_VERSION = "0.21.0";
 
 // src/platform/posix-platform-services.ts
 import { spawn, execFile } from "node:child_process";
@@ -22186,9 +22186,11 @@ var PosixPlatformServices = class {
   }
   async acquireCheckoutLock(checkout) {
     const { canonical, gitCommonDir: commonDir } = await this.canonicalizePath(checkout);
-    const key = createHash("sha256").update(commonDir ?? canonical).digest("hex");
+    const repositoryIdentity = commonDir ?? canonical;
+    const key = createHash("sha256").update(repositoryIdentity).digest("hex");
     const ownerToken = await this.getProcessStartToken(nodeProcess2.pid);
-    return acquireWxFileLock(key, `checkout is locked: ${checkout}`, ownerToken);
+    const lock = await acquireWxFileLock(key, `checkout is locked: ${checkout}`, ownerToken);
+    return { ...lock, repositoryIdentity };
   }
   async createSecureTempDirectory() {
     return fs.mkdtemp(path.join(tmpdir2(), "claude-architect-"));
@@ -22510,9 +22512,11 @@ var WindowsPlatformServices = class {
   }
   async acquireCheckoutLock(checkout) {
     const { canonical, gitCommonDir: commonDir } = await this.canonicalizePath(checkout);
-    const key = createHash2("sha256").update(commonDir ?? canonical).digest("hex");
+    const repositoryIdentity = commonDir ?? canonical;
+    const key = createHash2("sha256").update(repositoryIdentity).digest("hex");
     const ownerToken = await this.getProcessStartToken(nodeProcess3.pid);
-    return acquireWxFileLock(key, `checkout is locked: ${checkout}`, ownerToken);
+    const lock = await acquireWxFileLock(key, `checkout is locked: ${checkout}`, ownerToken);
+    return { ...lock, repositoryIdentity };
   }
   async createSecureTempDirectory() {
     return fs2.mkdtemp(path2.join(tmpdir3(), "claude-architect-"));
@@ -22549,6 +22553,9 @@ function resolveReviewConfig(spec) {
 }
 function resolveImplementationConfig(spec) {
   return spec.implementation ?? DEFAULT_IMPLEMENTATION_CONFIG;
+}
+function resolveSlices(spec) {
+  return spec.slices ?? [];
 }
 var RUNTIME_MAX_TIMEOUT_MS = 18e5;
 var RUNTIME_MIN_EDIT_TIMEOUT_MS = 6e5;
@@ -24479,15 +24486,23 @@ function statusMatchesArtifact(output, changedPaths) {
   return changedPaths.every((change) => actual.get(change.path) === (change.changeType === "added" ? "A" : change.changeType === "deleted" ? "D" : "M"));
 }
 async function applyCandidateTree(args) {
-  const ps = getPlatformServices();
-  const { canonical } = await ps.canonicalizePath(args.repoRoot);
-  const lock = await ps.acquireCheckoutLock(canonical);
+  const ps = args.platformServices ?? getPlatformServices();
+  const canonicalPath = await ps.canonicalizePath(args.repoRoot);
+  const { canonical } = canonicalPath;
+  const repositoryIdentity = canonicalPath.gitCommonDir ?? canonicalPath.canonical;
+  let ownedLock = null;
+  const lock = args.borrowedCheckoutLock ?? await ps.acquireCheckoutLock(canonical);
+  if (args.borrowedCheckoutLock === void 0) ownedLock = lock;
   const terminal = { result: null };
   const finish = (result) => {
     terminal.result = result;
     return result;
   };
   try {
+    if (lock.repositoryIdentity !== repositoryIdentity) {
+      const ownership = ownedLock === null ? "borrowed" : "owned";
+      throw new RuntimeError(`${ownership} checkout lease repository identity mismatch`);
+    }
     const preconditions = await checkPreconditions(canonical);
     if (!preconditions.ok) return finish(aborted2(`precondition-failed:${preconditions.reason}`));
     if (preconditions.baseCommitOid !== args.artifact.baseCommitOid) {
@@ -24570,11 +24585,13 @@ async function applyCandidateTree(args) {
     }
     return finish({ integration: "applied", detail: "candidate tree applied" });
   } finally {
-    try {
-      await lock.release();
-    } catch (error2) {
-      if (terminal.result === null) throw error2;
-      terminal.result.detail = `${terminal.result.detail}; checkout lock release failed`;
+    if (ownedLock !== null) {
+      try {
+        await ownedLock.release();
+      } catch (error2) {
+        if (terminal.result === null) throw error2;
+        terminal.result.detail = `${terminal.result.detail}; checkout lock release failed`;
+      }
     }
   }
 }
@@ -26052,9 +26069,10 @@ async function projectVerify(args) {
   const now = args.now ?? Date.now;
   const anchorPrefix = "refs/claude-architect/candidates/";
   const artifactRunId = args.artifact.anchorRef.startsWith(anchorPrefix) ? args.artifact.anchorRef.slice(anchorPrefix.length) : args.artifact.candidateCommitOid;
+  const verificationId = args.runId ?? args.verificationId?.() ?? artifactRunId;
   const manager = new WorktreeManager(
     args.repoRoot,
-    `verify-${args.runId ?? artifactRunId}`,
+    `verify-${verificationId}`,
     ps
   );
   const materialized = await manager.create(args.artifact.candidateCommitOid);
@@ -27059,7 +27077,7 @@ var ArtifactStore = class {
     }
   }
   async writePipelineActiveMarker(marker) {
-    if (typeof marker !== "object" || marker === null || !Number.isSafeInteger(marker.pid) || marker.pid <= 1 || marker.processToken !== null && typeof marker.processToken !== "string" || typeof marker.startedAt !== "string" || !Number.isFinite(Date.parse(marker.startedAt))) {
+    if (typeof marker !== "object" || marker === null || !Number.isSafeInteger(marker.pid) || marker.pid <= 1 || marker.processToken !== null && typeof marker.processToken !== "string" || typeof marker.startedAt !== "string" || !Number.isFinite(Date.parse(marker.startedAt)) || typeof marker.sliced !== "boolean") {
       throw new RuntimeError("pipeline-active marker is invalid");
     }
     await this.replaceJson("pipeline-active.json", marker);
@@ -27074,10 +27092,13 @@ var ArtifactStore = class {
         path9.join(validated.path, "pipeline-active.json"),
         validated.identity
       ));
-      if (typeof value !== "object" || value === null || typeof value.pid !== "number" || !Number.isSafeInteger(value.pid) || value.pid <= 1 || value.processToken !== null && typeof value.processToken !== "string" || typeof value.startedAt !== "string" || !Number.isFinite(Date.parse(value.startedAt))) {
+      if (typeof value !== "object" || value === null || typeof value.pid !== "number" || !Number.isSafeInteger(value.pid) || value.pid <= 1 || value.processToken !== null && typeof value.processToken !== "string" || typeof value.startedAt !== "string" || !Number.isFinite(Date.parse(value.startedAt)) || value.sliced !== void 0 && typeof value.sliced !== "boolean") {
         throw new RuntimeError("archived pipeline-active marker is malformed");
       }
-      return value;
+      return {
+        ...value,
+        sliced: value.sliced ?? false
+      };
     } catch (error2) {
       if (isMissing(error2)) return null;
       throw error2;
@@ -27113,11 +27134,11 @@ var ArtifactStore = class {
     }));
     return entries.filter((entry) => entry !== null).sort(compareEntries);
   }
-  async prepareCandidateAnchorCleanup(runId, result) {
+  async prepareCandidateAnchorCleanup(runId, result, manifest, canonicalRepoRoot) {
     if (result.candidate === null) {
       return {
         outcome: "not-applicable",
-        repoRoot: null,
+        repoRoot: canonicalRepoRoot,
         anchorRef: null,
         backupRef: null,
         candidateCommitOid: null
@@ -27131,14 +27152,9 @@ var ArtifactStore = class {
     if (!/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(candidate.candidateCommitOid)) {
       throw new RuntimeError("archived candidate commit oid is invalid");
     }
-    const manifest = await this.readManifest(runId);
-    if (manifest === null) {
-      throw new RuntimeError("cannot remove candidate anchor without archived repository root");
-    }
     if (manifest.baseCommitOid !== candidate.baseCommitOid || manifest.candidateManifestHash !== candidate.manifestHash) {
       throw new RuntimeError("archived candidate does not match its run manifest");
     }
-    const canonicalRepoRoot = await realpath3(manifest.repoRoot);
     const repositoryTopLevel = await git(canonicalRepoRoot, ["rev-parse", "--show-toplevel"]);
     if (repositoryTopLevel.exitCode !== 0 || await realpath3(repositoryTopLevel.stdout.trim()) !== canonicalRepoRoot) {
       throw new RuntimeError("archived repository root is not a canonical repository root");
@@ -27280,7 +27296,7 @@ var ArtifactStore = class {
       await assertDirectoryIdentity(this.runsRoot, runsRootIdentity);
     });
   }
-  async prune(policy) {
+  async prune(policy, dependencies = {}) {
     validatePruneLimit(policy.maxAgeMs, "maxAgeMs");
     validatePruneLimit(policy.maxBytes, "maxBytes");
     const entries = await this.entries();
@@ -27297,13 +27313,54 @@ var ArtifactStore = class {
       let transaction = null;
       let runsRootIdentity = null;
       let archiveRemovalCommitted = false;
+      let lease = null;
       try {
+        if (await this.readPipelineActiveMarker(entry.runId) !== null) {
+          retained.push({ runId: entry.runId, reason: "active-run" });
+          return;
+        }
+        const initialManifest = await this.readManifest(entry.runId);
+        if (initialManifest === null) {
+          retained.push({ runId: entry.runId, reason: "incomplete-run" });
+          return;
+        }
+        const initialResult = await this.readResult(entry.runId);
+        if (initialResult === null) {
+          retained.push({ runId: entry.runId, reason: "incomplete-run" });
+          return;
+        }
+        const platformServices = dependencies.platformServices ?? getPlatformServices();
+        const canonical = await platformServices.canonicalizePath(initialManifest.repoRoot);
+        const repositoryIdentity = canonical.gitCommonDir ?? canonical.canonical;
+        lease = await platformServices.acquireCheckoutLock(canonical.canonical);
+        if (lease.repositoryIdentity !== repositoryIdentity) {
+          throw new RuntimeError("checkout lease repository identity changed before pruning");
+        }
+        await assertDirectoryIdentity(entry.directory, entry.identity);
+        const currentManifest = await this.readManifest(entry.runId);
+        if (currentManifest === null || serializeJson(currentManifest) !== serializeJson(initialManifest)) {
+          retained.push({ runId: entry.runId, reason: "run identity changed while waiting" });
+          return;
+        }
+        if (await this.readPipelineActiveMarker(entry.runId) !== null) {
+          retained.push({ runId: entry.runId, reason: "active-run" });
+          return;
+        }
         const result = await this.readResult(entry.runId);
         if (result === null) {
           retained.push({ runId: entry.runId, reason: "incomplete-run" });
           return;
         }
-        prepared = await this.prepareCandidateAnchorCleanup(entry.runId, result);
+        if (serializeJson(result) !== serializeJson(initialResult)) {
+          retained.push({ runId: entry.runId, reason: "terminal authority changed while waiting" });
+          return;
+        }
+        prepared = await this.prepareCandidateAnchorCleanup(
+          entry.runId,
+          result,
+          currentManifest,
+          canonical.canonical
+        );
         await this.appendCleanupRecord({
           event: "prune-cleanup-intent",
           runId: entry.runId,
@@ -27396,6 +27453,18 @@ var ArtifactStore = class {
             runId: entry.runId,
             reason: redact(`${primary}${rollback}`)
           });
+        }
+      } finally {
+        if (lease !== null) {
+          try {
+            await lease.release();
+          } catch (error2) {
+            const reason2 = redact(error2 instanceof Error ? error2.message : String(error2));
+            retained.push({
+              runId: entry.runId,
+              reason: archiveRemovalCommitted ? `archive removed; checkout lease release failed: ${reason2}` : reason2
+            });
+          }
         }
       }
     };
@@ -27863,13 +27932,22 @@ async function runAttempt(checkoutPath, spec, deps) {
   const runId = (deps.runId ?? randomUUID4)();
   const store = new ArtifactStore(runId);
   const canonical = await ps.canonicalizePath(checkoutPath);
-  let lock = null;
+  const repositoryIdentity = canonical.gitCommonDir ?? canonical.canonical;
+  let lock = deps.borrowedCheckoutLease ?? null;
+  let ownedLock = null;
   let worktree = null;
   let tempHome = null;
   let builtEnvironment = null;
   let primaryError;
   try {
-    lock = await ps.acquireCheckoutLock(canonical.canonical);
+    if (lock === null) {
+      ownedLock = await ps.acquireCheckoutLock(canonical.canonical);
+      lock = ownedLock;
+    }
+    if (lock.repositoryIdentity !== repositoryIdentity) {
+      const ownership = ownedLock === null ? "borrowed" : "owned";
+      throw new RuntimeError(`${ownership} checkout lease repository identity mismatch`);
+    }
     const preconditions = await checkPreconditions(canonical.canonical, {
       writeAllowlist: spec.writeAllowlist
     });
@@ -28027,7 +28105,7 @@ async function runAttempt(checkoutPath, spec, deps) {
       startedAt: new Date(startedAtMs).toISOString()
     };
     const runStartContext = await initializeRunStart(store, runStart);
-    deps.onRunStart?.(runStartContext);
+    await deps.onRunStart?.(runStartContext);
     worktree = await new WorktreeManager(canonical.canonical, runId, ps).create(
       preconditions.baseCommitOid
     );
@@ -28203,7 +28281,7 @@ async function runAttempt(checkoutPath, spec, deps) {
       builtEnvironment,
       worktree,
       tempHome,
-      lock
+      lock: ownedLock
     });
     if (primaryError === void 0 && cleanupError !== null) throw cleanupError;
   }
@@ -28429,6 +28507,124 @@ function evaluateGates(input) {
     requiresHumanDecision = true;
   }
   return { decisionReady: reasons.length === 0, requiresHumanDecision, reasons };
+}
+
+// src/pipeline/wayfinder.ts
+function routeSlice(input) {
+  if (input.hardBlocker) {
+    return { route: "halt", reasons: ["unrecoverable blocker"] };
+  }
+  const reasons = [];
+  const { verification } = input;
+  if (verification === null) {
+    return { route: "halt", reasons: ["verification report missing (fail closed)"] };
+  }
+  if (!verification.pass) {
+    reasons.push("slice verification failed");
+  }
+  if (verification.testsDeleted > 0) {
+    reasons.push(`${verification.testsDeleted} test(s) deleted`);
+  }
+  if (verification.testsSkipped > 0) {
+    reasons.push(`${verification.testsSkipped} test(s) newly skipped`);
+  }
+  if (!verification.workspaceClean) {
+    reasons.push("verify worktree dirty after checks");
+  }
+  if (verification.scopeViolations.length > 0) {
+    reasons.push(`out-of-scope diff: ${verification.scopeViolations.join(", ")}`);
+  }
+  if (input.perSliceReview !== null && input.perSliceReview.findings.some(
+    (finding) => finding.severity === "blocker" || finding.severity === "major"
+  )) {
+    reasons.push("per-slice review found blocking findings");
+  }
+  if (reasons.length === 0) {
+    return { route: "advance", reasons };
+  }
+  if (input.roundsUsed < input.maxRounds) {
+    return { route: "repair", reasons };
+  }
+  return { route: "halt", reasons };
+}
+
+// src/pipeline/slice-runner.ts
+async function runSlicePhase(slices, startCommit, deps) {
+  let currentCommit = startCommit;
+  const results = [];
+  for (const [offset, slice] of slices.entries()) {
+    const index = offset + 1;
+    let roundsUsed = 0;
+    const attempts = [];
+    while (true) {
+      const sourceAttempt = index === 1 && roundsUsed === 0 && deps.initialAttempt !== void 0 ? deps.initialAttempt : await deps.runSlice(slice, index, currentCommit, roundsUsed);
+      const attempt = structuredClone(sourceAttempt);
+      const perSliceReview = attempt.perSliceReview ?? null;
+      const route2 = routeSlice({
+        verification: attempt.verification,
+        perSliceReview,
+        roundsUsed,
+        maxRounds: deps.maxRounds,
+        hardBlocker: attempt.hardBlocker ?? false
+      });
+      const evidence = {
+        sliceIndex: index,
+        attempt: roundsUsed,
+        candidateCommit: attempt.candidateCommit,
+        verification: attempt.verification,
+        perSliceReview,
+        route: route2.route,
+        reasons: [...route2.reasons],
+        roleLogRefs: [...attempt.roleLogRefs ?? []]
+      };
+      if (deps.onAttempt) {
+        await deps.onAttempt(structuredClone(evidence));
+      }
+      attempts.push(evidence);
+      const pipelineSlice = {
+        index,
+        objective: slice.objective,
+        route: route2.route,
+        candidateCommit: attempt.candidateCommit,
+        roundsUsed,
+        verification: attempt.verification,
+        perSliceReview,
+        reasons: [...route2.reasons],
+        attempts: attempts.map((entry) => ({
+          ...entry,
+          reasons: [...entry.reasons],
+          roleLogRefs: [...entry.roleLogRefs]
+        })),
+        roleLogRefs: attempts.flatMap((entry) => entry.roleLogRefs)
+      };
+      if (route2.route === "advance") {
+        results.push(pipelineSlice);
+        if (deps.onSlice) {
+          await deps.onSlice(structuredClone(pipelineSlice));
+        }
+        currentCommit = attempt.candidateCommit;
+        break;
+      }
+      if (route2.route === "repair") {
+        roundsUsed += 1;
+        continue;
+      }
+      results.push(pipelineSlice);
+      if (deps.onSlice) {
+        await deps.onSlice(structuredClone(pipelineSlice));
+      }
+      return {
+        slices: results,
+        finalCandidateCommit: currentCommit,
+        haltedSliceIndex: index
+      };
+    }
+  }
+  return {
+    slices: results,
+    finalCandidateCommit: currentCommit,
+    haltedSliceIndex: null
+  };
 }
 
 // src/pipeline/role-runner.ts
@@ -28964,6 +29160,13 @@ var IGNORED_STRUCTURAL_FAILURES = /* @__PURE__ */ new Set([
   "artifact-divergence",
   "base-changed"
 ]);
+var CANDIDATE_REF_PREFIX2 = "refs/claude-architect/candidates/";
+var SLICE_REF_PREFIX = "refs/claude-architect/slices/";
+function scopeSpecToSlice(spec, slice) {
+  const scoped = structuredClone({ ...spec, ...slice });
+  delete scoped.slices;
+  return scoped;
+}
 function gitFailure5(action, result) {
   const diagnostic = (result.stderr || result.stdout).trim().slice(0, 2e3);
   return new RuntimeError(`${action} failed${diagnostic ? `: ${diagnostic}` : ""}`);
@@ -28972,6 +29175,39 @@ async function checkedGit4(cwd, args, options) {
   const result = await git(cwd, args, options);
   if (result.exitCode !== 0) throw gitFailure5(`git ${args[0] ?? "command"}`, result);
   return result.stdout;
+}
+function temporarySliceRef(runId, index, attempt) {
+  return `${SLICE_REF_PREFIX}${runId}/slice-${index}-attempt-${attempt}`;
+}
+async function createTemporarySliceRef(checkoutPath, temporaryRef) {
+  const result = await git(checkoutPath, [
+    "update-ref",
+    "--no-deref",
+    temporaryRef.ref,
+    temporaryRef.oid,
+    "0".repeat(temporaryRef.oid.length)
+  ]);
+  if (result.exitCode !== 0) throw gitFailure5("create temporary slice ref", result);
+}
+async function cleanupTemporarySliceRefs(checkoutPath, temporaryRefs) {
+  const errors = [];
+  for (const temporaryRef of [...temporaryRefs].reverse()) {
+    try {
+      const result = await git(checkoutPath, [
+        "update-ref",
+        "--no-deref",
+        "-d",
+        temporaryRef.ref,
+        temporaryRef.oid
+      ]);
+      if (result.exitCode !== 0) {
+        errors.push(gitFailure5("delete temporary slice ref", result));
+      }
+    } catch (error2) {
+      errors.push(error2);
+    }
+  }
+  return errors;
 }
 function privateObjectReadOptions(access4) {
   return {
@@ -29067,12 +29303,14 @@ async function runStructuredRole(args) {
     roleLogRefs
   };
 }
-function failedResult(attempt, rounds, finalCandidateCommit, reason, failure2 = "producer-failure", increments = []) {
+function failedResult(attempt, rounds, finalCandidateCommit, reason, failure2 = "producer-failure", increments = [], slices = [], haltedSliceIndex = null) {
   return {
     runId: attempt.runId,
     status: "failed",
     attempt,
     increments,
+    slices,
+    haltedSliceIndex,
     rounds,
     verification: null,
     gate: {
@@ -29107,6 +29345,147 @@ function testEvidence(attempt) {
     exitCode: outcome.exitCode,
     timedOut: outcome.timedOut
   })));
+}
+function attemptLogRefs(attempt) {
+  return [.../* @__PURE__ */ new Set([
+    attempt.logsRef,
+    ...attempt.executedVerification.flatMap((outcome) => [outcome.stdoutRef, outcome.stderrRef])
+  ])];
+}
+function verificationTestEvidence(verification) {
+  return {
+    pass: verification.pass,
+    commandResults: verification.commandResults.map((command) => ({ ...command })),
+    workspaceClean: verification.workspaceClean,
+    testsDeleted: verification.testsDeleted,
+    testsSkipped: verification.testsSkipped,
+    scopeViolations: [...verification.scopeViolations]
+  };
+}
+function sliceTestEvidence(slices) {
+  return JSON.stringify(slices.map((slice) => ({
+    sliceIndex: slice.index,
+    verification: slice.verification === null ? null : verificationTestEvidence(slice.verification),
+    attempts: slice.attempts.map((attempt) => ({
+      attempt: attempt.attempt,
+      verification: attempt.verification === null ? null : verificationTestEvidence(attempt.verification)
+    }))
+  })));
+}
+var SliceExecutionError = class extends RuntimeError {
+  constructor(message, failure2) {
+    super(message);
+    this.failure = failure2;
+    this.name = "SliceExecutionError";
+  }
+};
+var SlicedFailureArchiveError = class extends RuntimeError {
+  constructor(cause) {
+    super(cause instanceof Error ? cause.message : "sliced failure archival failed");
+    this.cause = cause;
+    this.name = "SlicedFailureArchiveError";
+  }
+};
+function findSliceExecutionError(error2) {
+  if (error2 instanceof SliceExecutionError) return error2;
+  if (!(error2 instanceof AggregateError)) return null;
+  for (const nested of error2.errors) {
+    const found = findSliceExecutionError(nested);
+    if (found !== null) return found;
+  }
+  return null;
+}
+function containsSlicedFailureArchiveError(error2) {
+  if (error2 instanceof SlicedFailureArchiveError) return true;
+  if (!(error2 instanceof AggregateError)) return false;
+  return error2.errors.some(containsSlicedFailureArchiveError);
+}
+function failedAttemptStatus(failure2) {
+  if (failure2 === "unavailable" || failure2 === "authentication-required") return "unavailable";
+  if (failure2 === "cancelled") return "cancelled";
+  return "failed";
+}
+async function archiveSlicedFailure(args) {
+  try {
+    const manifest = await args.store.readManifest(args.attempt.runId);
+    if (manifest === null) {
+      throw new RuntimeError("run manifest is missing while archiving sliced failure");
+    }
+    const retainCandidate = args.failure === "verification-failure";
+    if (!retainCandidate && args.attempt.candidate !== null) {
+      const candidate = args.attempt.candidate;
+      const expectedRef = `${CANDIDATE_REF_PREFIX2}${args.attempt.runId}`;
+      if (candidate.anchorRef !== expectedRef) {
+        throw new RuntimeError("sliced candidate anchor does not match run id");
+      }
+      const deleted = await git(args.checkoutPath, [
+        "update-ref",
+        "--no-deref",
+        "-d",
+        candidate.anchorRef,
+        candidate.candidateCommitOid
+      ]);
+      if (deleted.exitCode !== 0) throw gitFailure5("delete sliced candidate anchor", deleted);
+    }
+    const failedAttempt = {
+      ...args.attempt,
+      status: failedAttemptStatus(args.failure),
+      failure: args.failure,
+      summary: args.reason,
+      candidate: retainCandidate ? args.attempt.candidate : null,
+      unresolvedIssues: [...args.attempt.unresolvedIssues, args.reason],
+      evidence: {
+        ...args.attempt.evidence,
+        pipelineFailure: { failure: args.failure, reason: args.reason }
+      }
+    };
+    await args.store.promoteTerminalArtifacts({ result: failedAttempt, manifest });
+    return failedAttempt;
+  } catch (error2) {
+    if (error2 instanceof SlicedFailureArchiveError) throw error2;
+    throw new SlicedFailureArchiveError(error2);
+  }
+}
+async function archiveSliceExecutionError(args) {
+  const sliceError = findSliceExecutionError(args.error);
+  if (sliceError === null) throw args.error;
+  try {
+    return {
+      sliceError,
+      failedAttempt: await archiveSlicedFailure({
+        checkoutPath: args.checkoutPath,
+        attempt: args.attempt,
+        failure: sliceError.failure,
+        reason: sliceError.message,
+        store: args.store
+      })
+    };
+  } catch (archiveError) {
+    throw new AggregateError(
+      [args.error, archiveError],
+      "sliced pipeline failed and its attempt result could not be archived"
+    );
+  }
+}
+async function withManagedWorktree(args) {
+  const worktree = await args.manager.create(args.commit);
+  let primaryError;
+  try {
+    return await args.run(worktree.path);
+  } catch (error2) {
+    primaryError = error2;
+    throw error2;
+  } finally {
+    try {
+      await worktree.cleanup();
+    } catch (cleanupError) {
+      if (primaryError === void 0) throw cleanupError;
+      throw new AggregateError(
+        [primaryError, cleanupError],
+        args.cleanupFailureMessage
+      );
+    }
+  }
 }
 function escapeRegex4(character) {
   return /[\\^$.*+?()[\]{}|]/.test(character) ? `\\${character}` : character;
@@ -29158,6 +29537,60 @@ async function candidateArtifact(args) {
     manifestHash: canonical.manifestHash
   };
 }
+async function promoteFinalCandidate(args) {
+  let canonicalCommit;
+  try {
+    const objectReadOptions = args.privateObjectAccess === void 0 ? void 0 : privateObjectReadOptions(args.privateObjectAccess);
+    const finalTree = (await checkedGit4(
+      args.checkoutPath,
+      ["rev-parse", `${args.candidateCommit}^{tree}`],
+      objectReadOptions
+    )).trim();
+    canonicalCommit = (await checkedGit4(args.checkoutPath, [
+      "commit-tree",
+      finalTree,
+      "-p",
+      args.baselineCommit,
+      "-m",
+      `candidate ${args.attempt.runId}`
+    ], objectReadOptions)).trim();
+    if (args.privateObjectAccess !== void 0) {
+      await importPromotedObjects({
+        checkoutPath: args.checkoutPath,
+        baselineCommit: args.baselineCommit,
+        promotedCommit: canonicalCommit,
+        access: args.privateObjectAccess
+      });
+    }
+  } catch {
+    return null;
+  }
+  await checkedGit4(args.checkoutPath, [
+    "update-ref",
+    args.initialCandidate.anchorRef,
+    canonicalCommit,
+    args.initialCandidate.candidateCommitOid
+  ]);
+  const diffText = await checkedGit4(
+    args.checkoutPath,
+    ["diff", `${args.baselineCommit}..${canonicalCommit}`]
+  );
+  const candidate = await candidateArtifact({
+    worktreePath: args.checkoutPath,
+    baselineCommit: args.baselineCommit,
+    candidateCommit: canonicalCommit,
+    anchorRef: args.initialCandidate.anchorRef,
+    diffText
+  });
+  const manifest = await args.store.readManifest(args.attempt.runId);
+  if (manifest === null) throw new RuntimeError("run manifest is missing during promotion");
+  const finalAttempt = { ...args.attempt, candidate };
+  await args.store.promoteTerminalArtifacts({
+    result: finalAttempt,
+    manifest: { ...manifest, candidateManifestHash: candidate.manifestHash }
+  });
+  return { attempt: finalAttempt, candidateCommit: canonicalCommit };
+}
 function detectWeakenedTests(diff) {
   let testsDeleted = 0;
   let testsSkipped = 0;
@@ -29175,12 +29608,13 @@ function detectWeakenedTests(diff) {
   return { testsDeleted, testsSkipped };
 }
 async function runReviews(args) {
+  const logNameNamespace = args.logNameNamespace === void 0 ? "" : `${args.logNameNamespace}-`;
   const outcomes = await Promise.all(args.reviewers.map(async (reviewer) => {
     const role = `reviewer-${reviewer}`;
     const outcome = await runStructuredRole({
       role,
       schema: schemas.reviewReport,
-      logName: `role-${role}-round${args.round}`,
+      logName: `role-${role}-${logNameNamespace}round${args.round}`,
       spec: args.spec,
       pkg: args.pkg,
       worktreePath: args.worktreePath,
@@ -29205,6 +29639,54 @@ async function runReviews(args) {
   }
   return { ok: false, failedRoleLogRef: failed.initialLogRef, roleLogRefs };
 }
+async function runSliceReview(args) {
+  const ps = args.deps.ps ?? getPlatformServices();
+  return withManagedWorktree({
+    manager: new WorktreeManager(
+      args.checkoutPath,
+      `${args.runId}-${args.namespace}-review`,
+      ps
+    ),
+    commit: args.candidateCommit,
+    cleanupFailureMessage: "slice review failed and its worktree could not be cleaned up",
+    run: async (worktreePath) => {
+      const diffText = await checkedGit4(worktreePath, [
+        "diff",
+        `${args.baselineCommit}..${args.candidateCommit}`
+      ]);
+      const reviewRun = await runReviews({
+        reviewers: args.reviewers,
+        spec: args.spec,
+        pkg: {
+          spec: args.spec,
+          baselineCommit: args.baselineCommit,
+          candidateCommit: args.candidateCommit,
+          candidateDiff: diffText,
+          testEvidence: JSON.stringify(verificationTestEvidence(args.verification))
+        },
+        worktreePath,
+        deps: args.deps,
+        runId: args.runId,
+        round: 1,
+        store: args.store,
+        logNameNamespace: args.namespace
+      });
+      if (!reviewRun.ok) {
+        throw new SliceExecutionError(
+          `slice review did not produce valid structured output (see ${reviewRun.failedRoleLogRef})`,
+          "producer-failure"
+        );
+      }
+      return {
+        review: consolidate(reviewRun.reviews.map((review) => ({
+          reviewer: review.reviewer,
+          report: review.report
+        }))),
+        roleLogRefs: reviewRun.roleLogRefs
+      };
+    }
+  });
+}
 async function runFix(args) {
   const outcome = await runStructuredRole({
     role: "fixer",
@@ -29222,10 +29704,11 @@ async function runFix(args) {
   return outcome.ok ? { ok: true, fix: outcome.report, roleLogRefs: outcome.roleLogRefs } : outcome;
 }
 async function runIncrement(args) {
+  const logNameNamespace = args.logNameNamespace === void 0 ? "" : `${args.logNameNamespace}-`;
   return runStructuredRole({
     role: "implementer",
     schema: schemas.incrementReport,
-    logName: `role-implementer-increment${args.increment}`,
+    logName: `role-implementer-${logNameNamespace}increment${args.increment}`,
     spec: args.spec,
     pkg: args.pkg,
     worktreePath: args.worktreePath,
@@ -29237,6 +29720,7 @@ async function runIncrement(args) {
   });
 }
 async function validateCandidateProvenance(args) {
+  const phaseLabel = args.phaseLabel ?? "fix phase";
   const privateObjects = privateObjectReadOptions(args.gitObjectAccess);
   const candidateObject = await git(args.worktreePath, [
     "cat-file",
@@ -29246,7 +29730,7 @@ async function validateCandidateProvenance(args) {
   if (candidateObject.exitCode !== 0) {
     return {
       failure: "producer-failure",
-      reason: "fix phase reported a missing candidate commit"
+      reason: `${phaseLabel} reported a missing candidate commit`
     };
   }
   const head = await git(
@@ -29257,7 +29741,7 @@ async function validateCandidateProvenance(args) {
   if (head.exitCode !== 0 || head.stdout.trim() !== args.candidateCommit) {
     return {
       failure: "producer-failure",
-      reason: "fix phase reported a candidate commit that does not match its worktree HEAD"
+      reason: `${phaseLabel} reported a candidate commit that does not match its worktree HEAD`
     };
   }
   const candidateAncestry = await git(args.worktreePath, [
@@ -29269,7 +29753,7 @@ async function validateCandidateProvenance(args) {
   if (candidateAncestry.exitCode !== 0) {
     return {
       failure: "sandbox-violation",
-      reason: "fix phase candidate commit is not descended from the reviewed candidate"
+      reason: `${phaseLabel} candidate commit is not descended from the reviewed candidate`
     };
   }
   const worktreeStatus = await git(args.worktreePath, [
@@ -29280,13 +29764,13 @@ async function validateCandidateProvenance(args) {
   if (worktreeStatus.exitCode !== 0) {
     return {
       failure: "sandbox-violation",
-      reason: "fix phase candidate worktree cleanliness could not be verified"
+      reason: `${phaseLabel} candidate worktree cleanliness could not be verified`
     };
   }
   if (worktreeStatus.stdout.length > 0) {
     return {
       failure: "sandbox-violation",
-      reason: "fix phase candidate worktree contains uncommitted state"
+      reason: `${phaseLabel} candidate worktree contains uncommitted state`
     };
   }
   return null;
@@ -29338,9 +29822,10 @@ async function validateFixProvenance(args) {
 }
 async function verifyCandidate(args) {
   const ps = args.deps.ps ?? getPlatformServices();
+  const namespace = args.namespace === void 0 ? "" : `${args.namespace}-`;
   const manager = new WorktreeManager(
     args.checkoutPath,
-    `${args.attempt.runId}-verify`,
+    `${args.attempt.runId}-${namespace}verify`,
     ps
   );
   const fresh = await manager.create(args.candidateCommit);
@@ -29385,8 +29870,8 @@ async function verifyCandidate(args) {
       spec: args.spec,
       ps,
       artifactStore: args.store,
-      verificationId: () => `${args.attempt.runId}-pipeline`,
-      logNamePrefix: "pipeline-verification"
+      verificationId: () => `${args.attempt.runId}-${namespace}pipeline`,
+      logNamePrefix: `${namespace}pipeline-verification`
     });
     const changedPaths = nameOnly.split("\n").map((line) => line.trim()).filter(Boolean);
     const scopeViolations = changedPaths.filter((pathname) => !args.spec.writeAllowlist.some((pattern) => globMatches3(pattern, pathname)) || args.spec.forbiddenScope.some((pattern) => globMatches3(pattern, pathname)));
@@ -29437,7 +29922,45 @@ async function verifyCandidate(args) {
   }
 }
 async function runPipeline(checkoutPath, spec, deps) {
+  const ps = deps.ps ?? getPlatformServices();
+  const canonical = await ps.canonicalizePath(checkoutPath);
+  const lock = await ps.acquireCheckoutLock(canonical.canonical);
+  let primaryError;
+  let hasPrimaryError = false;
+  try {
+    return await runPipelineWithLease(
+      checkoutPath,
+      spec,
+      deps,
+      ps,
+      lock
+    );
+  } catch (error2) {
+    primaryError = error2;
+    hasPrimaryError = true;
+    throw error2;
+  } finally {
+    try {
+      await lock.release();
+    } catch (releaseError) {
+      if (!hasPrimaryError) throw releaseError;
+      throw new AggregateError(
+        [primaryError, releaseError],
+        "pipeline failed and its checkout lease could not be released"
+      );
+    }
+  }
+}
+async function runPipelineWithLease(checkoutPath, spec, deps, ps, borrowedCheckoutLease) {
   const runAttemptFn = deps.runAttempt ?? runAttempt;
+  const slices = resolveSlices(spec);
+  const initialSpec = slices.length === 0 ? spec : scopeSpecToSlice(spec, slices[0]);
+  const activeOwner = {
+    pid: process.pid,
+    processToken: await ps.getProcessStartToken(process.pid).catch(() => null),
+    startedAt: (/* @__PURE__ */ new Date()).toISOString(),
+    sliced: slices.length > 0
+  };
   const notePhase = (phase) => {
     try {
       deps.onPhase?.(phase);
@@ -29445,15 +29968,23 @@ async function runPipeline(checkoutPath, spec, deps) {
     }
   };
   let runStart;
+  let slicedMarkerEstablished = false;
   const inheritedOnRunStart = deps.onRunStart;
-  const attempt = await runAttemptFn(checkoutPath, spec, {
+  const attempt = await runAttemptFn(checkoutPath, initialSpec, {
     ...deps,
-    onRunStart(context) {
+    borrowedCheckoutLease,
+    async onRunStart(context) {
       runStart = context;
-      inheritedOnRunStart?.(context);
+      if (slices.length > 0) {
+        await new ArtifactStore(context.record.runId).writePipelineActiveMarker(activeOwner);
+        slicedMarkerEstablished = true;
+      }
+      await inheritedOnRunStart?.(context);
     }
   });
+  const store = new ArtifactStore(attempt.runId);
   if (attempt.status !== "verified-candidate" || attempt.candidate === null) {
+    if (slicedMarkerEstablished) await store.clearPipelineActiveMarker();
     return failedResult(
       attempt,
       [],
@@ -29462,28 +29993,362 @@ async function runPipeline(checkoutPath, spec, deps) {
       attempt.failure ?? "producer-failure"
     );
   }
-  const store = new ArtifactStore(attempt.runId);
-  const ps = deps.ps ?? getPlatformServices();
-  const activeOwner = {
-    pid: process.pid,
-    processToken: await ps.getProcessStartToken(process.pid).catch(() => null),
-    startedAt: (/* @__PURE__ */ new Date()).toISOString()
-  };
-  await store.writePipelineActiveMarker(activeOwner);
+  if (slices.length === 0) await store.writePipelineActiveMarker(activeOwner);
+  const temporarySliceRefs2 = [];
+  let finalAttempt = attempt;
+  let authoritySafeToRelease = slices.length === 0;
   let pipelinePrimaryError;
   try {
-    const { reviewers, maxRounds } = resolveReviewConfig(spec);
-    const { maxIncrements } = resolveImplementationConfig(spec);
-    let finalAttempt = attempt;
+    const reviewConfig = resolveReviewConfig(spec);
+    const { reviewers, maxRounds } = reviewConfig;
+    const maxIncrements = slices.length === 0 ? resolveImplementationConfig(spec).maxIncrements : 1;
     const increments = [];
     let incrementOutcome;
     const rounds = [];
     const baselineCommit = attempt.candidate.baseCommitOid;
     let currentCandidateCommit = attempt.candidate.candidateCommitOid;
-    const frozenTestEvidence = testEvidence(attempt);
+    let frozenTestEvidence = testEvidence(attempt);
+    let pipelineSlices = [];
+    const archivePipelineFailure = async (args) => {
+      const failedAttempt = slices.length === 0 ? attempt : await archiveSlicedFailure({
+        checkoutPath,
+        attempt,
+        failure: args.failure,
+        reason: args.reason,
+        store
+      });
+      if (slices.length > 0) authoritySafeToRelease = true;
+      finalAttempt = failedAttempt;
+      return failedResult(
+        failedAttempt,
+        rounds,
+        args.finalCandidateCommit,
+        args.reason,
+        args.failure,
+        increments,
+        args.slices ?? pipelineSlices,
+        args.haltedSliceIndex ?? null
+      );
+    };
+    if (slices.length > 0) {
+      const initialNamespace = "slice-1-attempt-0";
+      const initialVerification = await verifyCandidate({
+        checkoutPath,
+        spec: initialSpec,
+        deps,
+        attempt,
+        baselineCommit,
+        candidateCommit: currentCandidateCommit,
+        store,
+        namespace: initialNamespace
+      });
+      let initialPerSliceReview = null;
+      const initialRoleLogRefs = attemptLogRefs(attempt);
+      if (reviewConfig.perSlice === true) {
+        let reviewed;
+        try {
+          reviewed = await runSliceReview({
+            checkoutPath,
+            spec: initialSpec,
+            deps,
+            runId: attempt.runId,
+            baselineCommit,
+            candidateCommit: currentCandidateCommit,
+            namespace: initialNamespace,
+            reviewers,
+            verification: initialVerification.verification,
+            store
+          });
+        } catch (error2) {
+          const archived = await archiveSliceExecutionError({
+            checkoutPath,
+            error: error2,
+            attempt,
+            store
+          });
+          authoritySafeToRelease = true;
+          finalAttempt = archived.failedAttempt;
+          if (error2 !== archived.sliceError) throw error2;
+          const failed = failedResult(
+            archived.failedAttempt,
+            rounds,
+            baselineCommit,
+            archived.sliceError.message,
+            archived.sliceError.failure,
+            increments
+          );
+          await store.writePipelineArtifact("pipeline-result", failed);
+          return failed;
+        }
+        initialPerSliceReview = reviewed.review;
+        initialRoleLogRefs.push(...reviewed.roleLogRefs);
+      }
+      const completedSlices = [];
+      let phase;
+      try {
+        phase = await runSlicePhase(slices, baselineCommit, {
+          maxRounds,
+          initialAttempt: {
+            candidateCommit: currentCandidateCommit,
+            verification: initialVerification.verification,
+            perSliceReview: initialPerSliceReview,
+            roleLogRefs: initialRoleLogRefs
+          },
+          runSlice: async (slice, index, base, sliceAttempt) => {
+            const namespace = `slice-${index}-attempt-${sliceAttempt}`;
+            const scopedSpec = scopeSpecToSlice(spec, slice);
+            return withManagedWorktree({
+              manager: new WorktreeManager(
+                checkoutPath,
+                `${attempt.runId}-${namespace}`,
+                ps
+              ),
+              commit: base,
+              cleanupFailureMessage: "slice implementation failed and its worktree could not be cleaned up",
+              run: async (worktreePath) => {
+                let gitObjectAccess2;
+                try {
+                  gitObjectAccess2 = await resolveLinkedWorktreeWritableRoots(worktreePath);
+                } catch {
+                  throw new SliceExecutionError(
+                    "slice implementer git object isolation could not be established",
+                    "sandbox-violation"
+                  );
+                }
+                const incrementRun = await runIncrement({
+                  spec: scopedSpec,
+                  pkg: {
+                    spec: scopedSpec,
+                    baselineCommit: base,
+                    candidateCommit: base,
+                    candidateDiff: "",
+                    testEvidence: completedSlices.length === 0 ? testEvidence(attempt) : sliceTestEvidence(completedSlices)
+                  },
+                  worktreePath,
+                  deps,
+                  runId: attempt.runId,
+                  increment: sliceAttempt + 1,
+                  store,
+                  gitObjectAccess: gitObjectAccess2,
+                  ...runStart === void 0 ? {} : { runStart },
+                  logNameNamespace: namespace
+                });
+                if (!incrementRun.ok) {
+                  throw new SliceExecutionError(
+                    `slice implementer did not produce valid structured output (see ${incrementRun.failedRoleLogRef})`,
+                    incrementRun.failure
+                  );
+                }
+                const candidateCommit = incrementRun.report.candidateCommit;
+                const provenanceFailure = await validateCandidateProvenance({
+                  worktreePath,
+                  previousCandidateCommit: base,
+                  candidateCommit,
+                  gitObjectAccess: gitObjectAccess2,
+                  phaseLabel: "slice implementer"
+                });
+                if (provenanceFailure !== null) {
+                  throw new SliceExecutionError(
+                    provenanceFailure.reason,
+                    provenanceFailure.failure
+                  );
+                }
+                if (candidateCommit !== base) {
+                  try {
+                    await importPromotedObjects({
+                      checkoutPath,
+                      baselineCommit: base,
+                      promotedCommit: candidateCommit,
+                      access: gitObjectAccess2
+                    });
+                  } catch {
+                    throw new SliceExecutionError(
+                      "slice candidate objects could not be imported into the shared git object store",
+                      "sandbox-violation"
+                    );
+                  }
+                  const temporaryRef = {
+                    ref: temporarySliceRef(attempt.runId, index, sliceAttempt),
+                    oid: candidateCommit
+                  };
+                  try {
+                    await createTemporarySliceRef(checkoutPath, temporaryRef);
+                  } catch {
+                    throw new SliceExecutionError(
+                      "slice candidate temporary ref could not be established",
+                      "sandbox-violation"
+                    );
+                  }
+                  temporarySliceRefs2.push(temporaryRef);
+                }
+                const verified2 = await verifyCandidate({
+                  checkoutPath,
+                  spec: scopedSpec,
+                  deps,
+                  attempt,
+                  baselineCommit: base,
+                  candidateCommit,
+                  store,
+                  namespace
+                });
+                let perSliceReview = null;
+                const roleLogRefs = [...incrementRun.roleLogRefs];
+                if (reviewConfig.perSlice === true) {
+                  const reviewed = await runSliceReview({
+                    checkoutPath,
+                    spec: scopedSpec,
+                    deps,
+                    runId: attempt.runId,
+                    baselineCommit: base,
+                    candidateCommit,
+                    namespace,
+                    reviewers,
+                    verification: verified2.verification,
+                    store
+                  });
+                  perSliceReview = reviewed.review;
+                  roleLogRefs.push(...reviewed.roleLogRefs);
+                }
+                return {
+                  candidateCommit,
+                  verification: verified2.verification,
+                  perSliceReview,
+                  roleLogRefs
+                };
+              }
+            });
+          },
+          onAttempt: (evidence) => store.writePipelineArtifact(
+            `slice-${evidence.sliceIndex}-attempt-${evidence.attempt}`,
+            evidence
+          ),
+          onSlice: async (slice) => {
+            await store.writePipelineArtifact(`slice-${slice.index}`, slice);
+            completedSlices.push(structuredClone(slice));
+          }
+        });
+      } catch (error2) {
+        const archived = await archiveSliceExecutionError({
+          checkoutPath,
+          error: error2,
+          attempt,
+          store
+        });
+        authoritySafeToRelease = true;
+        finalAttempt = archived.failedAttempt;
+        if (error2 !== archived.sliceError) throw error2;
+        const failed = failedResult(
+          archived.failedAttempt,
+          rounds,
+          completedSlices.at(-1)?.candidateCommit ?? baselineCommit,
+          archived.sliceError.message,
+          archived.sliceError.failure,
+          increments,
+          completedSlices
+        );
+        await store.writePipelineArtifact("pipeline-result", failed);
+        return failed;
+      }
+      pipelineSlices = phase.slices;
+      currentCandidateCommit = phase.finalCandidateCommit;
+      if (phase.haltedSliceIndex !== null) {
+        const halted = phase.slices.at(-1);
+        const reason = `slice phase halted at slice ${phase.haltedSliceIndex}: ${halted?.reasons.join("; ") ?? "objective gate failed"}`;
+        if (currentCandidateCommit === baselineCommit) {
+          const failedAttempt = await archiveSlicedFailure({
+            checkoutPath,
+            attempt,
+            failure: "verification-failure",
+            reason,
+            store
+          });
+          authoritySafeToRelease = true;
+          finalAttempt = failedAttempt;
+          const failed = failedResult(
+            failedAttempt,
+            rounds,
+            currentCandidateCommit,
+            reason,
+            "verification-failure",
+            increments,
+            phase.slices,
+            phase.haltedSliceIndex
+          );
+          await store.writePipelineArtifact("pipeline-result", failed);
+          return failed;
+        }
+        const promoted = await promoteFinalCandidate({
+          checkoutPath,
+          attempt,
+          initialCandidate: attempt.candidate,
+          baselineCommit,
+          candidateCommit: currentCandidateCommit,
+          store
+        });
+        if (promoted === null) {
+          const promotionReason = "partial halt candidate could not be promoted from the git object store";
+          const failedAttempt = await archiveSlicedFailure({
+            checkoutPath,
+            attempt,
+            failure: "sandbox-violation",
+            reason: promotionReason,
+            store
+          });
+          authoritySafeToRelease = true;
+          finalAttempt = failedAttempt;
+          const failed = failedResult(
+            failedAttempt,
+            rounds,
+            currentCandidateCommit,
+            promotionReason,
+            "sandbox-violation",
+            increments,
+            phase.slices,
+            phase.haltedSliceIndex
+          );
+          await store.writePipelineArtifact("pipeline-result", failed);
+          return failed;
+        }
+        finalAttempt = promoted.attempt;
+        currentCandidateCommit = promoted.candidateCommit;
+        authoritySafeToRelease = true;
+        notePhase("partial halt verification");
+        const verified2 = await verifyCandidate({
+          checkoutPath,
+          spec,
+          deps,
+          attempt: finalAttempt,
+          baselineCommit,
+          candidateCommit: currentCandidateCommit,
+          store,
+          namespace: "final"
+        });
+        await store.writePipelineArtifact("verification", verified2.verification);
+        const haltResult = {
+          runId: attempt.runId,
+          status: "human-decision-required",
+          attempt: finalAttempt,
+          increments,
+          slices: phase.slices,
+          haltedSliceIndex: phase.haltedSliceIndex,
+          rounds,
+          verification: verified2.verification,
+          gate: {
+            decisionReady: false,
+            requiresHumanDecision: true,
+            reasons: [reason]
+          },
+          finalCandidateCommit: currentCandidateCommit,
+          failure: null
+        };
+        await store.writePipelineArtifact("pipeline-result", haltResult);
+        return haltResult;
+      }
+      frozenTestEvidence = sliceTestEvidence(phase.slices);
+    }
     const candidateWorktree = await new WorktreeManager(
       checkoutPath,
-      `${attempt.runId}-pipeline`,
+      slices.length === 0 ? `${attempt.runId}-pipeline` : `${attempt.runId}-composed-review`,
       ps
     ).create(currentCandidateCommit);
     let gitObjectAccess = null;
@@ -29499,7 +30364,8 @@ async function runPipeline(checkoutPath, spec, deps) {
             currentCandidateCommit,
             "increment git object isolation could not be established",
             "sandbox-violation",
-            increments
+            increments,
+            pipelineSlices
           );
         }
         try {
@@ -29535,7 +30401,8 @@ async function runPipeline(checkoutPath, spec, deps) {
                 currentCandidateCommit,
                 `increment phase did not produce valid structured output (see ${incrementRun.failedRoleLogRef})`,
                 incrementRun.failure,
-                increments
+                increments,
+                pipelineSlices
               );
             }
             const report = redactRecord(incrementRun.report);
@@ -29553,7 +30420,8 @@ async function runPipeline(checkoutPath, spec, deps) {
                 currentCandidateCommit,
                 provenanceFailure.reason,
                 provenanceFailure.failure,
-                increments
+                increments,
+                pipelineSlices
               );
             }
             const privateObjects = privateObjectReadOptions(gitObjectAccess);
@@ -29585,7 +30453,8 @@ async function runPipeline(checkoutPath, spec, deps) {
                   currentCandidateCommit,
                   "increment objects could not be imported into the shared git object store",
                   "sandbox-violation",
-                  increments
+                  increments,
+                  pipelineSlices
                 );
               }
             }
@@ -29616,7 +30485,8 @@ async function runPipeline(checkoutPath, spec, deps) {
             currentCandidateCommit,
             "increment phase failed unexpectedly",
             "producer-failure",
-            increments
+            increments,
+            pipelineSlices
           );
         }
       }
@@ -29644,14 +30514,12 @@ async function runPipeline(checkoutPath, spec, deps) {
           store
         });
         if (!reviewRun.ok) {
-          return failedResult(
-            attempt,
-            rounds,
-            currentCandidateCommit,
-            `review phase did not produce valid structured output (see ${reviewRun.failedRoleLogRef})`,
-            "producer-failure",
-            increments
-          );
+          const reason = `review phase did not produce valid structured output (see ${reviewRun.failedRoleLogRef})`;
+          return await archivePipelineFailure({
+            finalCandidateCommit: currentCandidateCommit,
+            reason,
+            failure: "producer-failure"
+          });
         }
         const reviews = reviewRun.reviews.map((review) => ({
           reviewer: review.reviewer,
@@ -29674,14 +30542,11 @@ async function runPipeline(checkoutPath, spec, deps) {
         try {
           gitObjectAccess ??= await resolveLinkedWorktreeWritableRoots(candidateWorktree.path);
         } catch {
-          return failedResult(
-            attempt,
-            rounds,
-            currentCandidateCommit,
-            "fixer git object isolation could not be established",
-            "sandbox-violation",
-            increments
-          );
+          return await archivePipelineFailure({
+            finalCandidateCommit: currentCandidateCommit,
+            reason: "fixer git object isolation could not be established",
+            failure: "sandbox-violation"
+          });
         }
         notePhase(`round ${round}: applying fixes`);
         const fixRun = await runFix({
@@ -29696,14 +30561,11 @@ async function runPipeline(checkoutPath, spec, deps) {
           ...runStart === void 0 ? {} : { runStart }
         });
         if (!fixRun.ok) {
-          return failedResult(
-            attempt,
-            rounds,
-            currentCandidateCommit,
-            `fix phase did not produce valid structured output (see ${fixRun.failedRoleLogRef})`,
-            fixRun.failure,
-            increments
-          );
+          return await archivePipelineFailure({
+            finalCandidateCommit: currentCandidateCommit,
+            reason: `fix phase did not produce valid structured output (see ${fixRun.failedRoleLogRef})`,
+            failure: fixRun.failure
+          });
         }
         const { fix } = fixRun;
         await store.writePipelineArtifact(`round-${round}-fix`, fix);
@@ -29714,14 +30576,11 @@ async function runPipeline(checkoutPath, spec, deps) {
           gitObjectAccess
         });
         if (provenanceFailure !== null) {
-          return failedResult(
-            attempt,
-            rounds,
-            currentCandidateCommit,
-            provenanceFailure.reason,
-            provenanceFailure.failure,
-            increments
-          );
+          return await archivePipelineFailure({
+            finalCandidateCommit: currentCandidateCommit,
+            reason: provenanceFailure.reason,
+            failure: provenanceFailure.failure
+          });
         }
         currentCandidateCommit = fix.candidateCommit;
         rounds.push({
@@ -29733,73 +30592,35 @@ async function runPipeline(checkoutPath, spec, deps) {
         });
       }
       if (currentCandidateCommit !== attempt.candidate.candidateCommitOid) {
-        if (gitObjectAccess === null) {
+        if (gitObjectAccess === null && slices.length === 0) {
           return failedResult(
             attempt,
             rounds,
             currentCandidateCommit,
             "fixer git object isolation state is missing during promotion",
             "sandbox-violation",
-            increments
+            increments,
+            pipelineSlices
           );
         }
-        let canonicalCommit;
-        try {
-          const privateObjects = privateObjectReadOptions(gitObjectAccess);
-          const finalTree = (await checkedGit4(
-            checkoutPath,
-            ["rev-parse", `${currentCandidateCommit}^{tree}`],
-            privateObjects
-          )).trim();
-          canonicalCommit = (await checkedGit4(checkoutPath, [
-            "commit-tree",
-            finalTree,
-            "-p",
-            baselineCommit,
-            "-m",
-            `candidate ${attempt.runId}`
-          ], privateObjects)).trim();
-          await importPromotedObjects({
-            checkoutPath,
-            baselineCommit,
-            promotedCommit: canonicalCommit,
-            access: gitObjectAccess
-          });
-        } catch {
-          return failedResult(
-            attempt,
-            rounds,
-            currentCandidateCommit,
-            "fixer objects could not be imported into the shared git object store",
-            "sandbox-violation",
-            increments
-          );
-        }
-        await checkedGit4(checkoutPath, [
-          "update-ref",
-          attempt.candidate.anchorRef,
-          canonicalCommit,
-          attempt.candidate.candidateCommitOid
-        ]);
-        currentCandidateCommit = canonicalCommit;
-        const diffText = await checkedGit4(
+        const promoted = await promoteFinalCandidate({
           checkoutPath,
-          ["diff", `${baselineCommit}..${canonicalCommit}`]
-        );
-        const candidate = await candidateArtifact({
-          worktreePath: checkoutPath,
+          attempt,
+          initialCandidate: attempt.candidate,
           baselineCommit,
-          candidateCommit: canonicalCommit,
-          anchorRef: attempt.candidate.anchorRef,
-          diffText
+          candidateCommit: currentCandidateCommit,
+          store,
+          ...gitObjectAccess === null ? {} : { privateObjectAccess: gitObjectAccess }
         });
-        const manifest = await store.readManifest(attempt.runId);
-        if (manifest === null) throw new RuntimeError("run manifest is missing during promotion");
-        finalAttempt = { ...attempt, candidate };
-        await store.promoteTerminalArtifacts({
-          result: finalAttempt,
-          manifest: { ...manifest, candidateManifestHash: candidate.manifestHash }
-        });
+        if (promoted === null) {
+          return await archivePipelineFailure({
+            finalCandidateCommit: currentCandidateCommit,
+            reason: slices.length === 0 ? "fixer objects could not be imported into the shared git object store" : "sliced candidate could not be promoted from the shared git object store",
+            failure: "sandbox-violation"
+          });
+        }
+        finalAttempt = promoted.attempt;
+        currentCandidateCommit = promoted.candidateCommit;
       }
     } catch (error2) {
       primaryError = error2;
@@ -29823,7 +30644,8 @@ async function runPipeline(checkoutPath, spec, deps) {
       attempt: finalAttempt,
       baselineCommit,
       candidateCommit: currentCandidateCommit,
-      store
+      store,
+      ...slices.length === 0 ? {} : { namespace: "final" }
     });
     await store.writePipelineArtifact("verification", verified.verification);
     const lastRound = rounds.at(-1);
@@ -29844,6 +30666,8 @@ async function runPipeline(checkoutPath, spec, deps) {
       status: gate.decisionReady ? "decision-ready" : "human-decision-required",
       attempt: finalAttempt,
       increments,
+      slices: pipelineSlices,
+      haltedSliceIndex: null,
       rounds,
       verification: verified.verification,
       gate,
@@ -29851,19 +30675,56 @@ async function runPipeline(checkoutPath, spec, deps) {
       failure: null
     };
     await store.writePipelineArtifact("pipeline-result", result);
+    authoritySafeToRelease = true;
     return result;
   } catch (error2) {
-    pipelinePrimaryError = error2;
-    throw error2;
+    let terminalError = error2;
+    if (slices.length > 0 && finalAttempt.status === "verified-candidate" && !containsSlicedFailureArchiveError(error2)) {
+      try {
+        finalAttempt = await archiveSlicedFailure({
+          checkoutPath,
+          attempt: finalAttempt,
+          failure: "verification-failure",
+          reason: "sliced pipeline terminated before completing trusted gates",
+          store
+        });
+        authoritySafeToRelease = true;
+      } catch (archiveError) {
+        terminalError = new AggregateError(
+          [error2, archiveError],
+          "sliced pipeline failed and its attempt result could not be archived"
+        );
+      }
+    }
+    pipelinePrimaryError = terminalError;
+    throw terminalError;
   } finally {
-    try {
-      await store.clearPipelineActiveMarker();
-    } catch (cleanupError) {
-      if (pipelinePrimaryError === void 0) throw cleanupError;
-      throw new AggregateError(
-        [pipelinePrimaryError, cleanupError],
-        "pipeline failed and its active marker could not be cleared"
-      );
+    const cleanupErrors = await cleanupTemporarySliceRefs(checkoutPath, temporarySliceRefs2);
+    if (cleanupErrors.length > 0 && slices.length > 0 && finalAttempt.status === "verified-candidate" && !containsSlicedFailureArchiveError(pipelinePrimaryError)) {
+      try {
+        finalAttempt = await archiveSlicedFailure({
+          checkoutPath,
+          attempt: finalAttempt,
+          failure: "verification-failure",
+          reason: "temporary slice ref cleanup did not complete",
+          store
+        });
+        authoritySafeToRelease = true;
+      } catch (archiveError) {
+        cleanupErrors.push(archiveError);
+      }
+    }
+    if (cleanupErrors.length === 0 && authoritySafeToRelease) {
+      try {
+        await store.clearPipelineActiveMarker();
+      } catch (cleanupError) {
+        cleanupErrors.push(cleanupError);
+      }
+    }
+    if (cleanupErrors.length > 0) {
+      const errors = pipelinePrimaryError === void 0 ? cleanupErrors : [pipelinePrimaryError, ...cleanupErrors];
+      if (errors.length === 1) throw errors[0];
+      throw new AggregateError(errors, "pipeline failed or its terminal cleanup was incomplete");
     }
   }
 }
@@ -30002,8 +30863,20 @@ function storeFor(runId, deps) {
 function runtimeError(message, error2) {
   return new RuntimeError(message, { toolError: error2 });
 }
+var LifecycleLockReleaseError = class extends AggregateError {
+  constructor(primaryError, releaseError) {
+    const primaryMessage = primaryError instanceof Error ? primaryError.message : String(primaryError);
+    super(
+      [primaryError, releaseError],
+      `${primaryMessage}; checkout lock release failed`
+    );
+    this.primaryError = primaryError;
+    this.name = "LifecycleLockReleaseError";
+  }
+};
 function errorResult(error2) {
-  const code = error2 instanceof RuntimeError && typeof error2.detail?.toolError === "string" ? error2.detail.toolError : "runtime-error";
+  const classified = error2 instanceof LifecycleLockReleaseError ? error2.primaryError : error2;
+  const code = classified instanceof RuntimeError && typeof classified.detail?.toolError === "string" ? classified.detail.toolError : "runtime-error";
   const diagnostic = error2 instanceof Error ? error2.message : String(error2);
   return { ok: false, error: code, diagnostic: redact(diagnostic) };
 }
@@ -30052,13 +30925,52 @@ function requireVerifiedCandidate(run) {
   }
   return requireCandidate(run);
 }
-async function requireMatchingCheckout(run, checkoutPath, deps) {
-  const canonical = await services2(deps).canonicalizePath(checkoutPath);
-  const callerKey = canonical.gitCommonDir ?? canonical.canonical;
+function requireMatchingRepository(run, callerKey) {
   if (callerKey !== run.lockKey) {
     throw runtimeError(
       "candidate run belongs to a different repository than the supplied checkoutPath",
       "run-checkout-mismatch"
+    );
+  }
+}
+async function withCurrentArchivedRun(checkoutPath, runId, deps, fn, preserveResultOnReleaseFailure) {
+  const ps = services2(deps);
+  const canonical = await ps.canonicalizePath(checkoutPath);
+  const callerKey = canonical.gitCommonDir ?? canonical.canonical;
+  return withRepoLock(callerKey, async () => {
+    const lock = await ps.acquireCheckoutLock(canonical.canonical);
+    let action;
+    try {
+      if (lock.repositoryIdentity !== callerKey) {
+        throw runtimeError(
+          "supplied checkout repository identity changed before checkout lease acquisition",
+          "run-checkout-mismatch"
+        );
+      }
+      const run = await loadArchivedRun(runId, deps);
+      requireMatchingRepository(run, lock.repositoryIdentity);
+      action = { ok: true, result: await fn(run, lock, ps) };
+    } catch (error2) {
+      action = { ok: false, error: error2 };
+    }
+    try {
+      await lock.release();
+    } catch (releaseError) {
+      if (!action.ok) throw new LifecycleLockReleaseError(action.error, releaseError);
+      if (preserveResultOnReleaseFailure !== void 0) {
+        return preserveResultOnReleaseFailure(action.result);
+      }
+      throw releaseError;
+    }
+    if (!action.ok) throw action.error;
+    return action.result;
+  });
+}
+async function requireInactivePipeline(run, runId) {
+  if (await run.store.readPipelineActiveMarker(runId) !== null) {
+    throw runtimeError(
+      "the delegation pipeline for this run is still active",
+      "pipeline-active"
     );
   }
 }
@@ -30178,9 +31090,8 @@ async function handleDelegatePipeline(checkoutPath, input, deps = {}) {
 }
 async function handleReviewCandidate(checkoutPath, runId, deps = {}) {
   try {
-    const run = await loadArchivedRun(runId, deps);
-    await requireMatchingCheckout(run, checkoutPath, deps);
-    return await withRepoLock(run.lockKey, async () => {
+    return await withCurrentArchivedRun(checkoutPath, runId, deps, async (run) => {
+      await requireInactivePipeline(run, runId);
       const candidate = requireCandidate(run);
       const git2 = deps.git ?? git;
       const anchor = await git2(run.repoRoot, [
@@ -30226,41 +31137,28 @@ async function handleReviewCandidate(checkoutPath, runId, deps = {}) {
 }
 async function handleDecideCandidate(checkoutPath, runId, decision, deps = {}) {
   try {
-    const run = await loadArchivedRun(runId, deps);
-    await requireMatchingCheckout(run, checkoutPath, deps);
-    return await withRepoLock(run.lockKey, async () => {
-      if (await run.store.readPipelineActiveMarker(runId) !== null) {
-        throw runtimeError(
-          "the delegation pipeline for this run is still active",
-          "pipeline-active"
-        );
-      }
+    return await withCurrentArchivedRun(checkoutPath, runId, deps, async (run) => {
+      await requireInactivePipeline(run, runId);
       if (decision === "accepted") requireVerifiedCandidate(run);
-      const ps = services2(deps);
-      const lock = await ps.acquireCheckoutLock(run.repoRoot);
-      try {
-        const record2 = {
-          decision,
-          recordedAt: (deps.now ?? (() => /* @__PURE__ */ new Date()))().toISOString()
-        };
-        await run.store.writeDecision(record2);
-        if (decision === "rejected" && run.result.candidate !== null) {
-          const candidate = run.result.candidate;
-          const deleted = await (deps.git ?? git)(run.repoRoot, [
-            "update-ref",
-            "--no-deref",
-            "-d",
-            candidate.anchorRef,
-            candidate.candidateCommitOid
-          ]);
-          if (deleted.exitCode !== 0) {
-            throw runtimeError("failed to delete rejected candidate anchor", "anchor-delete-failed");
-          }
+      const record2 = {
+        decision,
+        recordedAt: (deps.now ?? (() => /* @__PURE__ */ new Date()))().toISOString()
+      };
+      await run.store.writeDecision(record2);
+      if (decision === "rejected" && run.result.candidate !== null) {
+        const candidate = run.result.candidate;
+        const deleted = await (deps.git ?? git)(run.repoRoot, [
+          "update-ref",
+          "--no-deref",
+          "-d",
+          candidate.anchorRef,
+          candidate.candidateCommitOid
+        ]);
+        if (deleted.exitCode !== 0) {
+          throw runtimeError("failed to delete rejected candidate anchor", "anchor-delete-failed");
         }
-        return { recorded: true };
-      } finally {
-        await lock.release();
       }
+      return { recorded: true };
     });
   } catch (error2) {
     return errorResult(error2);
@@ -30268,15 +31166,8 @@ async function handleDecideCandidate(checkoutPath, runId, decision, deps = {}) {
 }
 async function handleIntegrateCandidate(checkoutPath, runId, expectedArtifactHash, deps = {}) {
   try {
-    const run = await loadArchivedRun(runId, deps);
-    await requireMatchingCheckout(run, checkoutPath, deps);
-    return await withRepoLock(run.lockKey, async () => {
-      if (await run.store.readPipelineActiveMarker(runId) !== null) {
-        throw runtimeError(
-          "the delegation pipeline for this run is still active",
-          "pipeline-active"
-        );
-      }
+    return await withCurrentArchivedRun(checkoutPath, runId, deps, async (run, lock, ps) => {
+      await requireInactivePipeline(run, runId);
       const decision = await run.store.readDecision(runId);
       if (decision?.decision !== "accepted") {
         return { integration: "aborted", detail: "no-accepted-decision" };
@@ -30284,9 +31175,14 @@ async function handleIntegrateCandidate(checkoutPath, runId, expectedArtifactHas
       return (deps.applyCandidateTree ?? applyCandidateTree)({
         repoRoot: run.repoRoot,
         artifact: requireVerifiedCandidate(run),
-        expectedArtifactHash
+        expectedArtifactHash,
+        borrowedCheckoutLock: lock,
+        platformServices: ps
       });
-    });
+    }, (result) => ({
+      ...result,
+      detail: `${result.detail}; checkout lock release failed`
+    }));
   } catch (error2) {
     return errorResult(error2);
   }
@@ -30312,8 +31208,9 @@ var MAX_STATE_FILE_BYTES = 8e6;
 var SAFE_RUN_ID = /^[a-z0-9][a-z0-9._-]*$/;
 var LOCK_NAME = /^([0-9a-f]{64})\.lock$/;
 var OID = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/;
-var CANDIDATE_REF_PREFIX2 = "refs/claude-architect/candidates/";
+var CANDIDATE_REF_PREFIX3 = "refs/claude-architect/candidates/";
 var BACKUP_REF_PREFIX = "refs/claude-architect/prune-backups/";
+var SLICE_REF_PREFIX2 = "refs/claude-architect/slices/";
 var MAX_QUARANTINE_REASON_BYTES = 2e3;
 var MAX_QUARANTINE_RECORD_BYTES = 4096;
 function errorCode4(error2) {
@@ -30480,27 +31377,144 @@ async function validateGitCommonDir(commonDir) {
   }
   return canonical;
 }
-async function readDirectRef(repoRoot, ref) {
-  const symbolic = await git(repoRoot, ["symbolic-ref", "--quiet", ref]);
+async function validateRepositoryRoot(repoRoot) {
+  if (!path14.isAbsolute(repoRoot)) {
+    throw new RuntimeError("cleanup journal repository root is not absolute");
+  }
+  const canonical = await realpath6(repoRoot);
+  if (canonical !== repoRoot) {
+    throw new RuntimeError("cleanup journal repository root is no longer canonical");
+  }
+  const result = await git(canonical, ["rev-parse", "--show-toplevel"]);
+  if (result.exitCode !== 0) throw runGitError("validate cleanup repository", result);
+  if (await realpath6(result.stdout.trim()) !== canonical) {
+    throw new RuntimeError("cleanup journal repository root is not the repository top level");
+  }
+  return canonical;
+}
+async function readDirectRef(repoRoot, ref, runGit = git) {
+  const symbolic = await runGit(repoRoot, ["symbolic-ref", "--quiet", ref]);
   if (symbolic.exitCode === 0) {
     throw new RuntimeError("recovery refuses to mutate a symbolic Git ref");
   }
   if (symbolic.exitCode !== 1) throw runGitError("inspect symbolic Git ref", symbolic);
-  const direct = await git(repoRoot, ["rev-parse", "--verify", "--quiet", ref]);
+  const direct = await runGit(repoRoot, ["rev-parse", "--verify", "--quiet", ref]);
   if (direct.exitCode === 1) return null;
   if (direct.exitCode !== 0 || !OID.test(direct.stdout.trim())) {
     throw runGitError("inspect Git ref", direct);
   }
   return direct.stdout.trim();
 }
-async function deleteExactRef(repoRoot, ref, oid) {
-  const result = await git(repoRoot, ["update-ref", "--no-deref", "-d", ref, oid]);
+async function deleteExactRef(repoRoot, ref, oid, runGit = git) {
+  const result = await runGit(repoRoot, ["update-ref", "--no-deref", "-d", ref, oid]);
   if (result.exitCode !== 0) throw runGitError("delete recovery Git ref", result);
 }
 async function removeStaleCandidateAnchor(repoRoot, runId) {
-  const ref = `${CANDIDATE_REF_PREFIX2}${runId}`;
+  const ref = `${CANDIDATE_REF_PREFIX3}${runId}`;
   const oid = await readDirectRef(repoRoot, ref);
   if (oid !== null) await deleteExactRef(repoRoot, ref, oid);
+}
+async function archiveInterruptedPipeline(store, result) {
+  if (result.status !== "verified-candidate") return;
+  const manifest = await store.readManifest(result.runId);
+  if (manifest === null) {
+    throw new RuntimeError("run manifest is missing while recovering interrupted pipeline");
+  }
+  const failed = {
+    ...result,
+    status: "failed",
+    failure: "verification-failure",
+    summary: "Delegation pipeline was interrupted before trusted gates completed.",
+    unresolvedIssues: [
+      ...result.unresolvedIssues,
+      "pipeline-interrupted-before-terminal-cleanup"
+    ],
+    evidence: {
+      ...result.evidence,
+      pipelineRecovery: "interrupted-before-terminal-cleanup"
+    }
+  };
+  await store.promoteTerminalArtifacts({ result: failed, manifest });
+}
+function escapeRegex5(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+function isManagedWorktreeId(runId, managedId) {
+  if ((/* @__PURE__ */ new Set([
+    runId,
+    `baseline-${runId}`,
+    `verify-${runId}`,
+    `${runId}-pipeline`,
+    `${runId}-verify`,
+    `verify-${runId}-pipeline`,
+    `${runId}-composed-review`,
+    `${runId}-final-verify`,
+    `verify-${runId}-final-pipeline`
+  ])).has(managedId)) return true;
+  const escapedRunId = escapeRegex5(runId);
+  const index = "[1-9][0-9]*";
+  const attempt = "(?:0|[1-9][0-9]*)";
+  return new RegExp(
+    `^${escapedRunId}-slice-${index}-attempt-${attempt}(?:-review|-verify)?$`
+  ).test(managedId) || new RegExp(
+    `^verify-${escapedRunId}-slice-${index}-attempt-${attempt}-pipeline$`
+  ).test(managedId);
+}
+async function managedWorktreeIds(root, runId) {
+  const worktreesRoot = path14.join(root, "worktrees");
+  if (await plainDirectoryIdentity(worktreesRoot) === null) return [];
+  const entries = await readdir2(worktreesRoot, { withFileTypes: true });
+  return entries.map((entry) => entry.name).filter((managedId) => isManagedWorktreeId(runId, managedId)).sort((left, right) => left.localeCompare(right));
+}
+async function cleanupManagedWorktrees(commonDir, root, runId, ps) {
+  for (const managedId of await managedWorktreeIds(root, runId)) {
+    const worktreePath = path14.join(root, "worktrees", managedId);
+    if (await plainDirectoryIdentity(worktreePath) !== null) {
+      await new WorktreeManager(commonDir, managedId, ps).remove(worktreePath);
+    }
+  }
+}
+async function temporarySliceRefs(repoRoot, runId, runGit) {
+  const prefix = `${SLICE_REF_PREFIX2}${runId}/`;
+  const listed = await runGit(repoRoot, [
+    "for-each-ref",
+    "--format=%(refname)%09%(objectname)",
+    prefix
+  ]);
+  if (listed.exitCode !== 0) throw runGitError("enumerate temporary slice refs", listed);
+  const expectedName = new RegExp(
+    `^${escapeRegex5(prefix)}slice-[1-9][0-9]*-attempt-(?:0|[1-9][0-9]*)$`
+  );
+  const refs = [];
+  for (const line of listed.stdout.split("\n").filter(Boolean)) {
+    const fields = line.split("	");
+    if (fields.length !== 2 || fields[0] === void 0 || !expectedName.test(fields[0])) {
+      throw new RuntimeError("temporary slice ref name is malformed during recovery");
+    }
+    if (fields[1] === void 0 || !OID.test(fields[1])) {
+      throw new RuntimeError("temporary slice ref OID is malformed during recovery");
+    }
+    const object3 = await runGit(repoRoot, ["cat-file", "-t", fields[1]], {
+      env: { GIT_NO_REPLACE_OBJECTS: "1" }
+    });
+    if (object3.exitCode !== 0 || object3.stdout.trim() !== "commit") {
+      throw new RuntimeError("temporary slice ref does not identify a commit during recovery");
+    }
+    refs.push({ ref: fields[0], oid: fields[1] });
+  }
+  for (const temporaryRef of refs) {
+    const current = await readDirectRef(repoRoot, temporaryRef.ref, runGit);
+    if (current !== temporaryRef.oid) {
+      throw new RuntimeError("temporary slice ref moved during recovery");
+    }
+  }
+  return refs;
+}
+async function cleanupTemporarySliceRefs2(repoRoot, runId, runGit) {
+  const refs = await temporarySliceRefs(repoRoot, runId, runGit);
+  for (const temporaryRef of refs) {
+    await deleteExactRef(repoRoot, temporaryRef.ref, temporaryRef.oid, runGit);
+  }
 }
 function parseCleanupRecord(line) {
   let value;
@@ -30526,11 +31540,16 @@ function parseCleanupRecord(line) {
     throw new RuntimeError("terminal cleanup journal record cannot remain pending");
   }
   const hasRepository = typeof record2.repoRoot === "string" && typeof record2.anchorRef === "string" && typeof record2.candidateCommitOid === "string";
+  const repositoryOnly = typeof record2.repoRoot === "string" && record2.anchorRef === null && record2.backupRef === null && record2.candidateCommitOid === null;
   const noRepository = record2.repoRoot === null && record2.anchorRef === null && record2.backupRef === null && record2.candidateCommitOid === null;
-  if (!noRepository && (!hasRepository || record2.anchorRef !== `${CANDIDATE_REF_PREFIX2}${record2.runId}` || !OID.test(record2.candidateCommitOid) || record2.backupRef !== null && record2.backupRef !== `${BACKUP_REF_PREFIX}${record2.runId}`)) {
+  if (!noRepository && !repositoryOnly && (!hasRepository || record2.anchorRef !== `${CANDIDATE_REF_PREFIX3}${record2.runId}` || !OID.test(record2.candidateCommitOid) || record2.backupRef !== null && record2.backupRef !== `${BACKUP_REF_PREFIX}${record2.runId}`)) {
     throw new RuntimeError("cleanup journal Git metadata is malformed");
   }
   return record2;
+}
+function cleanupOutcome(record2) {
+  if (record2.repoRoot === null || record2.anchorRef === null) return "not-applicable";
+  return record2.backupRef === null ? "already-absent" : "deleted";
 }
 function boundedQuarantineReason(error2) {
   const raw = error2 instanceof Error ? `${error2.name}: ${error2.message}` : String(error2);
@@ -30910,6 +31929,101 @@ async function quarantineRun(runsRoot, runId, error2) {
     throw new AggregateError(errors, "run recovery failed and quarantine did not complete");
   }
 }
+async function removePlainDirectory(directory, expected) {
+  const metadata = await lstat6(directory);
+  if (!isPlainDirectory(metadata) || !sameIdentity(metadata, expected)) {
+    throw new RuntimeError("recovery directory identity changed before removal");
+  }
+  await rm7(directory, { recursive: true, force: false });
+}
+async function createExactRef(repoRoot, ref, oid) {
+  const result = await git(repoRoot, [
+    "update-ref",
+    "--no-deref",
+    ref,
+    oid,
+    "0".repeat(oid.length)
+  ]);
+  if (result.exitCode !== 0) throw runGitError("create recovery Git ref", result);
+}
+async function appendCleanupRecord(runsRoot, record2) {
+  const identity = await plainDirectoryIdentity(runsRoot);
+  if (identity === null) throw new RuntimeError("cleanup journal root disappeared");
+  const filename = path14.join(runsRoot, "cleanup.ndjson");
+  const handle = await open5(
+    filename,
+    constants4.O_WRONLY | constants4.O_CREAT | constants4.O_APPEND | NO_FOLLOW3,
+    384
+  );
+  try {
+    const metadata = await handle.stat();
+    const currentRoot2 = await lstat6(runsRoot);
+    if (!metadata.isFile() || !isPlainDirectory(currentRoot2) || !sameIdentity(currentRoot2, identity)) {
+      throw new RuntimeError("cleanup journal identity changed during recovery");
+    }
+    await handle.writeFile(`${JSON.stringify(record2)}
+`, "utf8");
+    await handle.sync();
+  } finally {
+    await handle.close();
+  }
+  const currentRoot = await lstat6(runsRoot);
+  if (!isPlainDirectory(currentRoot) || !sameIdentity(currentRoot, identity)) {
+    throw new RuntimeError("cleanup journal root changed after recovery append");
+  }
+}
+async function reconcileCleanupRefs(record2, action) {
+  const outcome = cleanupOutcome(record2);
+  if (outcome === "not-applicable") return outcome;
+  const repoRoot = await validateRepositoryRoot(record2.repoRoot);
+  const anchorRef = record2.anchorRef;
+  const candidateOid = record2.candidateCommitOid;
+  let anchorOid = await readDirectRef(repoRoot, anchorRef);
+  if (anchorOid !== null && anchorOid !== candidateOid) {
+    throw new RuntimeError("candidate anchor moved during interrupted prune recovery");
+  }
+  if (outcome === "already-absent") {
+    if (anchorOid !== null) {
+      throw new RuntimeError("candidate anchor unexpectedly reappeared during prune recovery");
+    }
+    return outcome;
+  }
+  const backupRef = record2.backupRef;
+  let backupOid = await readDirectRef(repoRoot, backupRef);
+  if (backupOid !== null && backupOid !== candidateOid) {
+    throw new RuntimeError("candidate prune backup moved during recovery");
+  }
+  if (action === "finish") {
+    if (anchorOid !== null && backupOid === null) {
+      await createExactRef(repoRoot, backupRef, candidateOid);
+      backupOid = candidateOid;
+    }
+    if (anchorOid !== null) {
+      await deleteExactRef(repoRoot, anchorRef, candidateOid);
+      anchorOid = null;
+    }
+    return outcome;
+  }
+  if (anchorOid === null) {
+    if (backupOid === null) {
+      throw new RuntimeError("cannot restore candidate anchor without its prune backup");
+    }
+    await createExactRef(repoRoot, anchorRef, candidateOid);
+    anchorOid = candidateOid;
+  }
+  if (backupOid !== null) await deleteExactRef(repoRoot, backupRef, candidateOid);
+  return outcome;
+}
+async function commitCleanupRefs(record2) {
+  if (cleanupOutcome(record2) !== "deleted") return;
+  const repoRoot = await validateRepositoryRoot(record2.repoRoot);
+  const backupOid = await readDirectRef(repoRoot, record2.backupRef);
+  if (backupOid === null) return;
+  if (backupOid !== record2.candidateCommitOid) {
+    throw new RuntimeError("candidate prune backup moved before cleanup commit");
+  }
+  await deleteExactRef(repoRoot, record2.backupRef, backupOid);
+}
 async function readPendingCleanupRecords(runsRoot) {
   const { text, tornTail } = await readCleanupJournal(path14.join(runsRoot, "cleanup.ndjson"));
   const pending = /* @__PURE__ */ new Map();
@@ -30923,14 +32037,95 @@ async function readPendingCleanupRecords(runsRoot) {
   }
   return { pending, tornTail };
 }
-async function replayInterruptedPrunes(runsRoot) {
-  const { pending, tornTail } = await readPendingCleanupRecords(runsRoot);
-  if (tornTail || pending.size > 0) {
-    logger.warn("startup recovery deferred interrupted prune replay for the shared cleanup journal");
+async function truncateCleanupTornTail(filename) {
+  let handle;
+  try {
+    handle = await open5(filename, constants4.O_RDWR | NO_FOLLOW3);
+  } catch (error2) {
+    if (isMissing2(error2)) return;
+    throw error2;
   }
-  return new Set(pending.keys());
+  try {
+    const metadata = await handle.stat();
+    const namedMetadata = await lstat6(filename);
+    if (!metadata.isFile() || metadata.nlink !== 1 || metadata.size > MAX_STATE_FILE_BYTES || !namedMetadata.isFile() || namedMetadata.isSymbolicLink() || namedMetadata.nlink !== 1 || namedMetadata.dev !== metadata.dev || namedMetadata.ino !== metadata.ino) {
+      throw new RuntimeError("cleanup journal must be a bounded regular single-link file");
+    }
+    const text = await handle.readFile({ encoding: "utf8" });
+    if (text === "" || text.endsWith("\n")) return;
+    const settled = await handle.stat();
+    if (Buffer.byteLength(text, "utf8") !== metadata.size || settled.size !== metadata.size || settled.mtimeMs !== metadata.mtimeMs || settled.ctimeMs !== metadata.ctimeMs) {
+      throw new RuntimeError("cleanup journal changed during torn-tail repair");
+    }
+    const finalNewline = text.lastIndexOf("\n");
+    const completePrefix = finalNewline === -1 ? "" : text.slice(0, finalNewline + 1);
+    await handle.truncate(Buffer.byteLength(completePrefix, "utf8"));
+    await handle.sync();
+  } finally {
+    await handle?.close();
+  }
 }
-async function recoverRun(record2, root, ps, isProcessAlive, requestCooperativeTermination, delayMs, graceMs) {
+async function replayInterruptedPrunes(runsRoot, ps) {
+  const { pending, tornTail } = await readPendingCleanupRecords(runsRoot);
+  if (tornTail) await truncateCleanupTornTail(path14.join(runsRoot, "cleanup.ndjson"));
+  for (const record2 of [...pending.values()].sort((left, right) => left.runId.localeCompare(right.runId))) {
+    if (record2.repoRoot === null) continue;
+    const repoRoot = await validateRepositoryRoot(record2.repoRoot);
+    const commonResult = await git(repoRoot, [
+      "rev-parse",
+      "--path-format=absolute",
+      "--git-common-dir"
+    ]);
+    if (commonResult.exitCode !== 0) {
+      throw runGitError("resolve cleanup repository identity", commonResult);
+    }
+    const repositoryIdentity = await realpath6(commonResult.stdout.trim());
+    const lease = await ps.acquireCheckoutLock(repoRoot);
+    let primaryError;
+    try {
+      if (lease.repositoryIdentity !== repositoryIdentity) {
+        throw new RuntimeError("checkout lease repository identity changed during prune recovery");
+      }
+      const runDirectory = path14.join(runsRoot, record2.runId);
+      const quarantinePath = path14.join(runsRoot, record2.quarantineName);
+      const runIdentity = await plainDirectoryIdentity(runDirectory);
+      const quarantineIdentity = await plainDirectoryIdentity(quarantinePath);
+      if (runIdentity !== null && quarantineIdentity !== null) {
+        throw new RuntimeError("both retained and quarantined run archives exist during recovery");
+      }
+      const action = runIdentity !== null ? "rollback" : "finish";
+      const outcome = await reconcileCleanupRefs(record2, action);
+      if (action === "finish") {
+        if (quarantineIdentity !== null) {
+          await removePlainDirectory(quarantinePath, quarantineIdentity);
+        }
+        await commitCleanupRefs(record2);
+      }
+      await appendCleanupRecord(runsRoot, {
+        ...record2,
+        event: action === "finish" ? "prune-cleanup-complete" : "prune-cleanup-rollback",
+        anchorCleanup: outcome,
+        recordedAt: (/* @__PURE__ */ new Date()).toISOString()
+      });
+    } catch (error2) {
+      primaryError = error2;
+    } finally {
+      try {
+        await lease.release();
+      } catch (releaseError) {
+        if (primaryError !== void 0) {
+          throw new AggregateError(
+            [primaryError, releaseError],
+            "prune recovery failed and its checkout lease could not be released"
+          );
+        }
+        throw releaseError;
+      }
+    }
+    if (primaryError !== void 0) throw primaryError;
+  }
+}
+async function recoverRun(record2, root, ps, isProcessAlive, requestCooperativeTermination, delayMs, graceMs, runGit = git) {
   let escalation;
   let unverifiedLivePid;
   if (record2.pid !== null && isProcessAlive(record2.pid)) {
@@ -30953,19 +32148,8 @@ async function recoverRun(record2, root, ps, isProcessAlive, requestCooperativeT
     "recovery",
     "startup recovery reclaimed unfinished run\n"
   );
-  for (const managedId of [
-    record2.runId,
-    `baseline-${record2.runId}`,
-    `verify-${record2.runId}`,
-    `${record2.runId}-pipeline`,
-    `${record2.runId}-verify`
-  ]) {
-    const worktreePath = path14.join(root, "worktrees", managedId);
-    const worktreeIdentity = await plainDirectoryIdentity(worktreePath);
-    if (worktreeIdentity !== null) {
-      await new WorktreeManager(commonDir, managedId, ps).remove(worktreePath);
-    }
-  }
+  await cleanupManagedWorktrees(commonDir, root, record2.runId, ps);
+  await cleanupTemporarySliceRefs2(commonDir, record2.runId, runGit);
   await removeStaleCandidateAnchor(commonDir, record2.runId);
   await store.writeResult({
     resultVersion: "1",
@@ -31472,11 +32656,19 @@ async function lockIsOwnedByLiveProcess(locksRoot, lockKey, isProcessAlive, getP
 }
 async function recoverStaleRuns(dependencies = {}) {
   const root = await stateRoot();
-  const ps = dependencies.platformServices ?? getPlatformServices();
+  const supplied = dependencies.platformServices;
+  const selected = getPlatformServices();
+  const ps = {
+    os: supplied?.os ?? selected.os,
+    getProcessStartToken: (pid) => (supplied ?? selected).getProcessStartToken(pid),
+    terminateProcessTreeByPid: (pid, token) => (supplied ?? selected).terminateProcessTreeByPid(pid, token),
+    acquireCheckoutLock: (checkout) => supplied && supplied.acquireCheckoutLock ? supplied.acquireCheckoutLock(checkout) : selected.acquireCheckoutLock(checkout)
+  };
   const isProcessAlive = dependencies.isProcessAlive ?? defaultIsProcessAlive;
   const requestCooperativeTermination = dependencies.requestCooperativeTermination ?? defaultRequestCooperativeTermination;
   const delayMs = dependencies.delayMs ?? defaultDelayMs;
   const graceMs = dependencies.graceMs ?? 3e3;
+  const runGit = dependencies.git ?? git;
   if (root === null) return { recovered: [], quarantined: [] };
   const locksRoot = path14.join(root, "locks");
   await mkdir5(locksRoot, { recursive: true });
@@ -31498,7 +32690,7 @@ async function recoverStaleRuns(dependencies = {}) {
   try {
     const runsRoot = path14.join(root, "runs");
     const runsIdentity = await plainDirectoryIdentity(runsRoot);
-    const deferredPruneRunIds = runsIdentity === null ? /* @__PURE__ */ new Set() : await replayInterruptedPrunes(runsRoot);
+    if (runsIdentity !== null) await replayInterruptedPrunes(runsRoot, ps);
     const journaledQuarantines = runsIdentity === null ? /* @__PURE__ */ new Set() : (await readRecoveryQuarantineJournal(runsRoot)).runIds;
     const stale = [];
     const recovered = [];
@@ -31514,7 +32706,6 @@ async function recoverStaleRuns(dependencies = {}) {
           }
           continue;
         }
-        if (deferredPruneRunIds.has(entry.name)) continue;
         if (!entry.isDirectory() || entry.isSymbolicLink() || !SAFE_RUN_ID.test(entry.name)) continue;
         try {
           const runDirectory = path14.join(runsRoot, entry.name);
@@ -31563,15 +32754,9 @@ async function recoverStaleRuns(dependencies = {}) {
                   (pid) => ps.getProcessStartToken(pid)
                 )) {
                   const commonDir = await validateGitCommonDir(lockedRecord.canonicalCommonDir);
-                  for (const managedId of [
-                    `${entry.name}-pipeline`,
-                    `${entry.name}-verify`
-                  ]) {
-                    const worktreePath = path14.join(root, "worktrees", managedId);
-                    if (await plainDirectoryIdentity(worktreePath) !== null) {
-                      await new WorktreeManager(commonDir, managedId, ps).remove(worktreePath);
-                    }
-                  }
+                  if (lockedMarker.sliced) await archiveInterruptedPipeline(store, lockedResult);
+                  await cleanupManagedWorktrees(commonDir, root, entry.name, ps);
+                  await cleanupTemporarySliceRefs2(commonDir, entry.name, runGit);
                   await store.clearPipelineActiveMarker();
                 }
               } catch (error2) {
@@ -31639,7 +32824,8 @@ async function recoverStaleRuns(dependencies = {}) {
             isProcessAlive,
             requestCooperativeTermination,
             delayMs,
-            graceMs
+            graceMs,
+            runGit
           );
         }
       } catch (error2) {
@@ -31720,7 +32906,9 @@ var delegatePipelineOutput = external_exports.object({
     rounds: external_exports.array(external_exports.record(external_exports.string(), external_exports.unknown())),
     verification: external_exports.record(external_exports.string(), external_exports.unknown()).nullable(),
     gate: external_exports.record(external_exports.string(), external_exports.unknown()),
-    finalCandidateCommit: external_exports.string()
+    finalCandidateCommit: external_exports.string(),
+    slices: external_exports.array(external_exports.record(external_exports.string(), external_exports.unknown())),
+    haltedSliceIndex: external_exports.number().nullable()
   }).optional(),
   validationErrors: external_exports.array(external_exports.object({ path: external_exports.string(), message: external_exports.string() })).optional(),
   diagnostic: external_exports.string().optional(),

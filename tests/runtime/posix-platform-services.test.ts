@@ -1,9 +1,11 @@
 import { execFile } from "node:child_process";
+import { createHash, randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { PosixPlatformServices } from "../../src/platform/posix-platform-services.js";
 import { getPlatformServices } from "../../src/platform/select-platform.js";
 import { resolveStateDir } from "../../src/runtime/state-dir.js";
 import { scrubbedGitEnv } from "./helpers/git-fixture-env.js";
@@ -104,6 +106,25 @@ describe("PosixPlatformServices", () => {
     ]);
     expect(lockB.key).toBe(lockA.key);
     await lockB.release();
+  });
+
+  it("returns the canonical repository identity used to derive its lock key", async () => {
+    const repositoryIdentity = path.join(tempRoot, `common-${randomUUID()}`);
+    const directPs = Object.assign(new PosixPlatformServices(), {
+      async canonicalizePath(input: string) {
+        return { input, canonical: repoPath, gitCommonDir: repositoryIdentity };
+      },
+      async getProcessStartToken() { return null; },
+    });
+
+    const lock = await directPs.acquireCheckoutLock(repoPath);
+
+    try {
+      expect(lock.repositoryIdentity).toBe(repositoryIdentity);
+      expect(lock.key).toBe(createHash("sha256").update(repositoryIdentity).digest("hex"));
+    } finally {
+      await lock.release();
+    }
   });
 
   it("does not release a checkout lock that has been replaced by another owner", async () => {

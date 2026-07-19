@@ -6,14 +6,23 @@ description: Let Claude Architect route a versioned implementation spec through 
 # Delegate
 
 ```claude-architect-protocol
-PROTOCOL_VERSION: 1.2.0
+PROTOCOL_VERSION: 1.3.0
 ```
 
 The current session is the architect. It owns requirements, the Delegation Spec, Producer selection, review, and acceptance. Producers are untrusted: their output is only a candidate until the runtime freezes it, independently verifies it, and the architect reviews the exact anchored bytes.
 
 Always present this skill as `/claude-architect:delegate`. Never show a shorter command.
 
-## Producer selection
+## Agent selection
+
+The delegated CLIs are the architect's **implementation agents** — the same subagent idiom Claude Code uses, except each agent launches an *untrusted Producer* through the trusted MCP runtime inside an isolated Git worktree. Present them as a selectable agent roster: the human picks one `subagent_type`, exactly one agent runs per attempt, and no agent may review or accept its own work.
+
+| Agent (`subagent_type`) | Producer / model | Reasoning control |
+| --- | --- | --- |
+| `codex-implementer` | GPT-5.6 Sol (OpenAI Codex CLI) | `low` by default |
+| `opencode-implementer` | OpenCode provider/model | optional `--variant` |
+| `pi-implementer` | Pi configured model | optional `--thinking` |
+| `pythinker-implementer` | Pythinker provider/model | optional `--thinking-effort` |
 
 If the user invokes `/claude-architect:delegate` without naming a CLI, implementer, or agent, use the host's structured question tool when available, ask this question, and wait for the answer. Include the producer and reasoning control in each option so the user knows what the lane will run:
 
@@ -68,7 +77,7 @@ When running multiple delegations, normalize reported blockers by phase, command
 
 The `delegate` and `delegatePipeline` MCP calls are synchronous. Keep each call in the foreground until it returns; never hand it to Monitor or background execution.
 
-1. Call `delegate` through `mcp__plugin_claude-architect_runtime__delegate` with `checkoutPath`, the candidate spec, and `protocolVersion: "1.2.0"` copied from this skill's `PROTOCOL_VERSION` marker.
+1. Call `delegate` through `mcp__plugin_claude-architect_runtime__delegate` with `checkoutPath`, the candidate spec, and `protocolVersion: "1.3.0"` copied from this skill's `PROTOCOL_VERSION` marker.
 2. When it returns `ok:false` with `validationErrors`, repair only the reported spec defects and resubmit. This repair loop must not touch a Producer.
 3. When it returns a protocol/schema diagnostic, stop and tell the user to update the installed marketplace copy and reload Claude Code. Never guess across a version mismatch.
 4. When the result is `unavailable`, `failed`, or `cancelled`, report the structured classification and evidence. Do not claim a candidate exists. A Codex report with `laneEligibility.edit=false`, a missing `codex-native-sandbox`, or an unsupported Host is diagnostics-only and must not enter any legacy implementation lane.
@@ -77,6 +86,39 @@ The `delegate` and `delegatePipeline` MCP calls are synchronous. Keep each call 
 7. Only after an accepted decision, call `integrateCandidate` with `checkoutPath`, the run id, and the exact candidate `manifestHash` as `expectedArtifactHash`. Report `applied`, `conflicted`, or `aborted` truthfully. Integration stages the reviewed tree but does not commit it.
 
 Never accept a Producer self-report as evidence, bypass `reviewCandidate`, call integration before an accepted decision, or substitute a different artifact hash.
+
+## Presenting delegations as subagents
+
+Surface every delegation in the Claude Code subagent look & feel. This is presentation only: it renders the runtime's durable evidence and never replaces spec construction, `reviewCandidate`, the human decision, or `integrateCandidate`. A rendered card is not evidence; a Producer self-report is not evidence; acceptance stays human-only.
+
+**Dispatch card** — emit when you call `delegate`/`delegatePipeline`, so the run reads like an `Agent` launch:
+
+```text
+▸ Agent · codex-implementer          edit · worktree-isolated
+  Task    <3–5 word description>
+  Model   GPT-5.6 Sol · reasoning low
+  Mode    foreground        Pipeline  delegatePipeline
+```
+
+**Live status** — one FleetView-style line while the call runs and after the host collapses it to background. Derive it only from the run's durable artifacts using the rules in *Monitoring a backgrounded delegation*; never invent progress.
+
+```text
+● running · codex-implementer · verification · 4m12s
+```
+
+Status glyphs: `●` running · `◑` decision-ready / human-decision-required · `✓` verified-candidate · `✗` failed, unavailable, or cancelled.
+
+**Completion notification** — when the call returns, render one compact box populated from the `reviewCandidate` evidence and verification report (mirrors a background subagent's completion notice):
+
+```text
+┌ ✓ codex-implementer · verified-candidate ───────────────
+│ 6 files · verification 5/5 pass
+│ findings 1 major (fixed in-pipeline) · 0 open
+│ manifestHash 1f2e3d… → awaiting your decision
+└──────────────────────────────────────────────────────────
+```
+
+The box summarizes; it does not decide. Still read the exact unredacted patch, changed-path manifest, and verification evidence before recommending a decision, and present `failed` or `human-decision-required` outcomes verbatim.
 
 ## Choosing delegate vs delegatePipeline
 
@@ -99,7 +141,7 @@ edits).
    ```
 
 2. Call `mcp__plugin_claude-architect_runtime__delegatePipeline` with
-   `checkoutPath`, `spec`, `protocolVersion: "1.2.0"`.
+   `checkoutPath`, `spec`, `protocolVersion: "1.3.0"`.
 3. Read the returned evidence bundle: attempt result, per-round review
    reports and consolidated findings, fix dispositions, verification report,
    and gate reasons.
@@ -114,6 +156,58 @@ edits).
      re-scope per the normal delegate failure guidance.
 4. The pipeline never merges and never waives findings; you and the human
    remain the only decision-makers.
+
+## Sliced pipeline
+
+For a task that decomposes into ordered, independently testable steps, add a
+top-level `slices` array to the spec. Each slice is a scoped mini-spec with its
+own `objective`, `context`, `writeAllowlist`, `forbiddenScope`,
+`successCriteria`, and — required — its own `verification`:
+
+```yaml
+slices:
+  - objective: Add the parser for the new record type.
+    context: The record grammar lives in docs/format.md.
+    writeAllowlist: [src/parse/**]
+    forbiddenScope: [src/emit/**]
+    successCriteria:
+      - New record type round-trips through the parser.
+    verification:
+      - id: parse-tests
+        executable: npx
+        args: [vitest, run, tests/parse]
+        cwd: "."
+        timeoutMs: 600000
+        network: denied
+        expectedExitCodes: [0]
+  - objective: Emit the new record type.
+    # ...its own scope and verification
+```
+
+Slice rules and guarantees:
+
+- Each slice runs **fresh with no context** — a slice implementer sees only its
+  own mini-spec, never a prior slice's conversation, and is gated only by its
+  own `verification`. Each slice's `writeAllowlist` must be a subset of the
+  spec's, and its verification `cwd` must stay inside the candidate root.
+- A deterministic wayfinder routes each completed slice **advance / repair /
+  halt** from objective gate results — the slice's own `verification`, plus its
+  independent per-slice review findings when `review.perSlice` is enabled —
+  never from model judgment or a Producer's self-report. A slice that passes
+  advances; a slice that fails is repaired within its round budget; a slice that
+  cannot be made to pass halts the run.
+- Review and the advisor judge the **composed candidate** at the end, over the
+  whole slice branch. Per-slice review is off by default; opt in with
+  `review.perSlice: true` to review each slice as it lands.
+- A mid-run halt **after at least one slice has advanced** yields a **partial**
+  candidate with `status: "human-decision-required"`, the halted slice index in
+  `haltedSliceIndex`, and each slice's route in `slices`; the promoted partial
+  branch (the advanced slices) is a real candidate the human may accept, reject,
+  or revise, and the halted slice's attempts stay in `slices` as evidence. A
+  halt on the very first slice, with nothing advanced, is reported `failed` with
+  the slice evidence retained — there is no partial branch to accept. Present
+  the completed slices, the halt reason, and the partial candidate to the human;
+  never accept or continue past a halt on their behalf.
 
 ## Monitoring a backgrounded delegation
 
@@ -139,8 +233,8 @@ Correlate the run without guessing:
    implement attempt (baseline or producer) is still running. `result.json`
    appearing means the run finished.
 
-After backgrounding the host returns control once; emit a single status line
-then. Continuous status requires scheduled wakeups (about 75s apart, each a full
+After backgrounding the host returns control once; emit a single Live status
+line (the FleetView-style format above) then. Continuous status requires scheduled wakeups (about 75s apart, each a full
 turn) — only do this when the human explicitly asks for live status, tell them it
 costs a turn per update, and never poll tighter than the round cadence.
 

@@ -1,6 +1,7 @@
 import path from "node:path";
 import { git, type GitExecOptions, type GitResult } from "../git/git-exec.js";
 import { WorktreeManager } from "../git/worktree-manager.js";
+import type { CheckoutLock, PlatformServices } from "../platform/platform-services.js";
 import { getPlatformServices } from "../platform/select-platform.js";
 import type {
   CandidateArtifact,
@@ -11,8 +12,10 @@ import type {
 import {
   resolveImplementationConfig,
   resolveReviewConfig,
+  resolveSlices,
   type DelegationSpec,
   type ReviewerKind,
+  type Slice,
 } from "../protocol/delegation-spec.js";
 import { loadSchemas } from "../protocol/schema-loader.js";
 import type { ProducerRegistry } from "../producers/producer-registry.js";
@@ -43,6 +46,10 @@ import type {
 } from "./report-types.js";
 import type { PipelineRole, RolePackage } from "./role-prompts.js";
 import {
+  runSlicePhase,
+  type PipelineSlice,
+} from "./slice-runner.js";
+import {
   runRole as defaultRunRole,
   type RoleRunArgs,
   type RoleRunResult,
@@ -72,6 +79,8 @@ export interface PipelineResult {
   status: "decision-ready" | "human-decision-required" | "failed";
   attempt: AttemptResult;
   increments: PipelineIncrement[];
+  slices: PipelineSlice[];
+  haltedSliceIndex: number | null;
   rounds: PipelineRound[];
   verification: PipelineVerificationReport | null;
   gate: GateResult;
@@ -131,6 +140,19 @@ const IGNORED_STRUCTURAL_FAILURES = new Set<StructuralFailure>([
   "artifact-divergence",
   "base-changed",
 ]);
+const CANDIDATE_REF_PREFIX = "refs/claude-architect/candidates/";
+const SLICE_REF_PREFIX = "refs/claude-architect/slices/";
+
+interface TemporarySliceRef {
+  ref: string;
+  oid: string;
+}
+
+export function scopeSpecToSlice(spec: DelegationSpec, slice: Slice): DelegationSpec {
+  const scoped = structuredClone({ ...spec, ...slice });
+  delete scoped.slices;
+  return scoped;
+}
 
 function gitFailure(action: string, result: GitResult): RuntimeError {
   const diagnostic = (result.stderr || result.stdout).trim().slice(0, 2_000);
@@ -145,6 +167,48 @@ async function checkedGit(
   const result = await git(cwd, args, options);
   if (result.exitCode !== 0) throw gitFailure(`git ${args[0] ?? "command"}`, result);
   return result.stdout;
+}
+
+function temporarySliceRef(runId: string, index: number, attempt: number): string {
+  return `${SLICE_REF_PREFIX}${runId}/slice-${index}-attempt-${attempt}`;
+}
+
+async function createTemporarySliceRef(
+  checkoutPath: string,
+  temporaryRef: TemporarySliceRef,
+): Promise<void> {
+  const result = await git(checkoutPath, [
+    "update-ref",
+    "--no-deref",
+    temporaryRef.ref,
+    temporaryRef.oid,
+    "0".repeat(temporaryRef.oid.length),
+  ]);
+  if (result.exitCode !== 0) throw gitFailure("create temporary slice ref", result);
+}
+
+async function cleanupTemporarySliceRefs(
+  checkoutPath: string,
+  temporaryRefs: TemporarySliceRef[],
+): Promise<unknown[]> {
+  const errors: unknown[] = [];
+  for (const temporaryRef of [...temporaryRefs].reverse()) {
+    try {
+      const result = await git(checkoutPath, [
+        "update-ref",
+        "--no-deref",
+        "-d",
+        temporaryRef.ref,
+        temporaryRef.oid,
+      ]);
+      if (result.exitCode !== 0) {
+        errors.push(gitFailure("delete temporary slice ref", result));
+      }
+    } catch (error) {
+      errors.push(error);
+    }
+  }
+  return errors;
 }
 
 function privateObjectReadOptions(access: LinkedWorktreeGitAccess): GitExecOptions {
@@ -287,12 +351,16 @@ function failedResult(
   reason: string,
   failure: FailureClassification = "producer-failure",
   increments: PipelineIncrement[] = [],
+  slices: PipelineSlice[] = [],
+  haltedSliceIndex: number | null = null,
 ): PipelineResult {
   return {
     runId: attempt.runId,
     status: "failed",
     attempt,
     increments,
+    slices,
+    haltedSliceIndex,
     rounds,
     verification: null,
     gate: {
@@ -332,6 +400,176 @@ function testEvidence(attempt: AttemptResult): string {
     exitCode: outcome.exitCode,
     timedOut: outcome.timedOut,
   })));
+}
+
+function attemptLogRefs(attempt: AttemptResult): string[] {
+  return [...new Set([
+    attempt.logsRef,
+    ...attempt.executedVerification.flatMap(outcome => [outcome.stdoutRef, outcome.stderrRef]),
+  ])];
+}
+
+function verificationTestEvidence(verification: VerificationReport): Record<string, unknown> {
+  return {
+    pass: verification.pass,
+    commandResults: verification.commandResults.map(command => ({ ...command })),
+    workspaceClean: verification.workspaceClean,
+    testsDeleted: verification.testsDeleted,
+    testsSkipped: verification.testsSkipped,
+    scopeViolations: [...verification.scopeViolations],
+  };
+}
+
+function sliceTestEvidence(slices: PipelineSlice[]): string {
+  return JSON.stringify(slices.map(slice => ({
+    sliceIndex: slice.index,
+    verification: slice.verification === null
+      ? null
+      : verificationTestEvidence(slice.verification),
+    attempts: slice.attempts.map(attempt => ({
+      attempt: attempt.attempt,
+      verification: attempt.verification === null
+        ? null
+        : verificationTestEvidence(attempt.verification),
+    })),
+  })));
+}
+
+class SliceExecutionError extends RuntimeError {
+  constructor(message: string, readonly failure: FailureClassification) {
+    super(message);
+    this.name = "SliceExecutionError";
+  }
+}
+
+class SlicedFailureArchiveError extends RuntimeError {
+  constructor(readonly cause: unknown) {
+    super(cause instanceof Error ? cause.message : "sliced failure archival failed");
+    this.name = "SlicedFailureArchiveError";
+  }
+}
+
+function findSliceExecutionError(error: unknown): SliceExecutionError | null {
+  if (error instanceof SliceExecutionError) return error;
+  if (!(error instanceof AggregateError)) return null;
+  for (const nested of error.errors) {
+    const found = findSliceExecutionError(nested);
+    if (found !== null) return found;
+  }
+  return null;
+}
+
+function containsSlicedFailureArchiveError(error: unknown): boolean {
+  if (error instanceof SlicedFailureArchiveError) return true;
+  if (!(error instanceof AggregateError)) return false;
+  return error.errors.some(containsSlicedFailureArchiveError);
+}
+
+function failedAttemptStatus(failure: FailureClassification): AttemptResult["status"] {
+  if (failure === "unavailable" || failure === "authentication-required") return "unavailable";
+  if (failure === "cancelled") return "cancelled";
+  return "failed";
+}
+
+async function archiveSlicedFailure(args: {
+  checkoutPath: string;
+  attempt: AttemptResult;
+  failure: FailureClassification;
+  reason: string;
+  store: ArtifactStore;
+}): Promise<AttemptResult> {
+  try {
+    const manifest = await args.store.readManifest(args.attempt.runId);
+    if (manifest === null) {
+      throw new RuntimeError("run manifest is missing while archiving sliced failure");
+    }
+    const retainCandidate = args.failure === "verification-failure";
+    if (!retainCandidate && args.attempt.candidate !== null) {
+      const candidate = args.attempt.candidate;
+      const expectedRef = `${CANDIDATE_REF_PREFIX}${args.attempt.runId}`;
+      if (candidate.anchorRef !== expectedRef) {
+        throw new RuntimeError("sliced candidate anchor does not match run id");
+      }
+      const deleted = await git(args.checkoutPath, [
+        "update-ref",
+        "--no-deref",
+        "-d",
+        candidate.anchorRef,
+        candidate.candidateCommitOid,
+      ]);
+      if (deleted.exitCode !== 0) throw gitFailure("delete sliced candidate anchor", deleted);
+    }
+    const failedAttempt: AttemptResult = {
+      ...args.attempt,
+      status: failedAttemptStatus(args.failure),
+      failure: args.failure,
+      summary: args.reason,
+      candidate: retainCandidate ? args.attempt.candidate : null,
+      unresolvedIssues: [...args.attempt.unresolvedIssues, args.reason],
+      evidence: {
+        ...args.attempt.evidence,
+        pipelineFailure: { failure: args.failure, reason: args.reason },
+      },
+    };
+    await args.store.promoteTerminalArtifacts({ result: failedAttempt, manifest });
+    return failedAttempt;
+  } catch (error) {
+    if (error instanceof SlicedFailureArchiveError) throw error;
+    throw new SlicedFailureArchiveError(error);
+  }
+}
+
+async function archiveSliceExecutionError(args: {
+  checkoutPath: string;
+  error: unknown;
+  attempt: AttemptResult;
+  store: ArtifactStore;
+}): Promise<{ sliceError: SliceExecutionError; failedAttempt: AttemptResult }> {
+  const sliceError = findSliceExecutionError(args.error);
+  if (sliceError === null) throw args.error;
+  try {
+    return {
+      sliceError,
+      failedAttempt: await archiveSlicedFailure({
+        checkoutPath: args.checkoutPath,
+        attempt: args.attempt,
+        failure: sliceError.failure,
+        reason: sliceError.message,
+        store: args.store,
+      }),
+    };
+  } catch (archiveError) {
+    throw new AggregateError(
+      [args.error, archiveError],
+      "sliced pipeline failed and its attempt result could not be archived",
+    );
+  }
+}
+
+async function withManagedWorktree<T>(args: {
+  manager: WorktreeManager;
+  commit: string;
+  cleanupFailureMessage: string;
+  run: (worktreePath: string) => Promise<T>;
+}): Promise<T> {
+  const worktree = await args.manager.create(args.commit);
+  let primaryError: unknown;
+  try {
+    return await args.run(worktree.path);
+  } catch (error) {
+    primaryError = error;
+    throw error;
+  } finally {
+    try {
+      await worktree.cleanup();
+    } catch (cleanupError) {
+      if (primaryError === undefined) throw cleanupError;
+      throw new AggregateError(
+        [primaryError, cleanupError],
+        args.cleanupFailureMessage,
+      );
+    }
+  }
 }
 
 function escapeRegex(character: string): string {
@@ -393,6 +631,71 @@ async function candidateArtifact(args: {
   };
 }
 
+async function promoteFinalCandidate(args: {
+  checkoutPath: string;
+  attempt: AttemptResult;
+  initialCandidate: CandidateArtifact;
+  baselineCommit: string;
+  candidateCommit: string;
+  store: ArtifactStore;
+  privateObjectAccess?: LinkedWorktreeGitAccess;
+}): Promise<{ attempt: AttemptResult; candidateCommit: string } | null> {
+  let canonicalCommit: string;
+  try {
+    const objectReadOptions = args.privateObjectAccess === undefined
+      ? undefined
+      : privateObjectReadOptions(args.privateObjectAccess);
+    const finalTree = (await checkedGit(
+      args.checkoutPath,
+      ["rev-parse", `${args.candidateCommit}^{tree}`],
+      objectReadOptions,
+    )).trim();
+    canonicalCommit = (await checkedGit(args.checkoutPath, [
+      "commit-tree",
+      finalTree,
+      "-p",
+      args.baselineCommit,
+      "-m",
+      `candidate ${args.attempt.runId}`,
+    ], objectReadOptions)).trim();
+    if (args.privateObjectAccess !== undefined) {
+      await importPromotedObjects({
+        checkoutPath: args.checkoutPath,
+        baselineCommit: args.baselineCommit,
+        promotedCommit: canonicalCommit,
+        access: args.privateObjectAccess,
+      });
+    }
+  } catch {
+    return null;
+  }
+  await checkedGit(args.checkoutPath, [
+    "update-ref",
+    args.initialCandidate.anchorRef,
+    canonicalCommit,
+    args.initialCandidate.candidateCommitOid,
+  ]);
+  const diffText = await checkedGit(
+    args.checkoutPath,
+    ["diff", `${args.baselineCommit}..${canonicalCommit}`],
+  );
+  const candidate = await candidateArtifact({
+    worktreePath: args.checkoutPath,
+    baselineCommit: args.baselineCommit,
+    candidateCommit: canonicalCommit,
+    anchorRef: args.initialCandidate.anchorRef,
+    diffText,
+  });
+  const manifest = await args.store.readManifest(args.attempt.runId);
+  if (manifest === null) throw new RuntimeError("run manifest is missing during promotion");
+  const finalAttempt = { ...args.attempt, candidate };
+  await args.store.promoteTerminalArtifacts({
+    result: finalAttempt,
+    manifest: { ...manifest, candidateManifestHash: candidate.manifestHash },
+  });
+  return { attempt: finalAttempt, candidateCommit: canonicalCommit };
+}
+
 export function detectWeakenedTests(diff: string): { testsDeleted: number; testsSkipped: number } {
   let testsDeleted = 0;
   let testsSkipped = 0;
@@ -410,7 +713,7 @@ export function detectWeakenedTests(diff: string): { testsDeleted: number; tests
   return { testsDeleted, testsSkipped };
 }
 
-async function runReviews(args: {
+export async function runReviews(args: {
   reviewers: ReviewerKind[];
   spec: DelegationSpec;
   pkg: RolePackage;
@@ -419,13 +722,17 @@ async function runReviews(args: {
   runId: string;
   round: number;
   store: ArtifactStore;
+  logNameNamespace?: string;
 }): Promise<ReviewRunResult> {
+  const logNameNamespace = args.logNameNamespace === undefined
+    ? ""
+    : `${args.logNameNamespace}-`;
   const outcomes = await Promise.all(args.reviewers.map(async reviewer => {
     const role = `reviewer-${reviewer}` as const;
     const outcome = await runStructuredRole<ReviewReport>({
       role,
       schema: schemas.reviewReport,
-      logName: `role-${role}-round${args.round}`,
+      logName: `role-${role}-${logNameNamespace}round${args.round}`,
       spec: args.spec,
       pkg: args.pkg,
       worktreePath: args.worktreePath,
@@ -449,6 +756,66 @@ async function runReviews(args: {
     throw new Error("unreachable invalid review state");
   }
   return { ok: false, failedRoleLogRef: failed.initialLogRef, roleLogRefs };
+}
+
+async function runSliceReview(args: {
+  checkoutPath: string;
+  spec: DelegationSpec;
+  deps: PipelineDependencies;
+  runId: string;
+  baselineCommit: string;
+  candidateCommit: string;
+  namespace: string;
+  reviewers: ReviewerKind[];
+  verification: PipelineVerificationReport;
+  store: ArtifactStore;
+}): Promise<{ review: ConsolidationResult; roleLogRefs: string[] }> {
+  const ps = args.deps.ps ?? getPlatformServices();
+  return withManagedWorktree({
+    manager: new WorktreeManager(
+      args.checkoutPath,
+      `${args.runId}-${args.namespace}-review`,
+      ps,
+    ),
+    commit: args.candidateCommit,
+    cleanupFailureMessage: "slice review failed and its worktree could not be cleaned up",
+    run: async worktreePath => {
+      const diffText = await checkedGit(worktreePath, [
+        "diff",
+        `${args.baselineCommit}..${args.candidateCommit}`,
+      ]);
+      const reviewRun = await runReviews({
+        reviewers: args.reviewers,
+        spec: args.spec,
+        pkg: {
+          spec: args.spec,
+          baselineCommit: args.baselineCommit,
+          candidateCommit: args.candidateCommit,
+          candidateDiff: diffText,
+          testEvidence: JSON.stringify(verificationTestEvidence(args.verification)),
+        },
+        worktreePath,
+        deps: args.deps,
+        runId: args.runId,
+        round: 1,
+        store: args.store,
+        logNameNamespace: args.namespace,
+      });
+      if (!reviewRun.ok) {
+        throw new SliceExecutionError(
+          `slice review did not produce valid structured output (see ${reviewRun.failedRoleLogRef})`,
+          "producer-failure",
+        );
+      }
+      return {
+        review: consolidate(reviewRun.reviews.map(review => ({
+          reviewer: review.reviewer,
+          report: review.report,
+        }))),
+        roleLogRefs: reviewRun.roleLogRefs,
+      };
+    },
+  });
 }
 
 async function runFix(args: {
@@ -480,7 +847,7 @@ async function runFix(args: {
     : outcome;
 }
 
-async function runIncrement(args: {
+export async function runIncrement(args: {
   spec: DelegationSpec;
   pkg: RolePackage;
   worktreePath: string;
@@ -490,11 +857,15 @@ async function runIncrement(args: {
   store: ArtifactStore;
   gitObjectAccess: LinkedWorktreeGitAccess;
   runStart?: RunStartContext;
+  logNameNamespace?: string;
 }): Promise<StructuredRoleRunResult<IncrementReport>> {
+  const logNameNamespace = args.logNameNamespace === undefined
+    ? ""
+    : `${args.logNameNamespace}-`;
   return runStructuredRole<IncrementReport>({
     role: "implementer",
     schema: schemas.incrementReport,
-    logName: `role-implementer-increment${args.increment}`,
+    logName: `role-implementer-${logNameNamespace}increment${args.increment}`,
     spec: args.spec,
     pkg: args.pkg,
     worktreePath: args.worktreePath,
@@ -516,7 +887,9 @@ async function validateCandidateProvenance(args: {
   previousCandidateCommit: string;
   candidateCommit: string;
   gitObjectAccess: LinkedWorktreeGitAccess;
+  phaseLabel?: string;
 }): Promise<CandidateProvenanceFailure | null> {
+  const phaseLabel = args.phaseLabel ?? "fix phase";
   const privateObjects = privateObjectReadOptions(args.gitObjectAccess);
   const candidateObject = await git(args.worktreePath, [
     "cat-file",
@@ -526,7 +899,7 @@ async function validateCandidateProvenance(args: {
   if (candidateObject.exitCode !== 0) {
     return {
       failure: "producer-failure",
-      reason: "fix phase reported a missing candidate commit",
+      reason: `${phaseLabel} reported a missing candidate commit`,
     };
   }
 
@@ -538,7 +911,7 @@ async function validateCandidateProvenance(args: {
   if (head.exitCode !== 0 || head.stdout.trim() !== args.candidateCommit) {
     return {
       failure: "producer-failure",
-      reason: "fix phase reported a candidate commit that does not match its worktree HEAD",
+      reason: `${phaseLabel} reported a candidate commit that does not match its worktree HEAD`,
     };
   }
 
@@ -551,7 +924,7 @@ async function validateCandidateProvenance(args: {
   if (candidateAncestry.exitCode !== 0) {
     return {
       failure: "sandbox-violation",
-      reason: "fix phase candidate commit is not descended from the reviewed candidate",
+      reason: `${phaseLabel} candidate commit is not descended from the reviewed candidate`,
     };
   }
 
@@ -563,13 +936,13 @@ async function validateCandidateProvenance(args: {
   if (worktreeStatus.exitCode !== 0) {
     return {
       failure: "sandbox-violation",
-      reason: "fix phase candidate worktree cleanliness could not be verified",
+      reason: `${phaseLabel} candidate worktree cleanliness could not be verified`,
     };
   }
   if (worktreeStatus.stdout.length > 0) {
     return {
       failure: "sandbox-violation",
-      reason: "fix phase candidate worktree contains uncommitted state",
+      reason: `${phaseLabel} candidate worktree contains uncommitted state`,
     };
   }
 
@@ -629,7 +1002,7 @@ async function validateFixProvenance(args: {
   return null;
 }
 
-async function verifyCandidate(args: {
+export async function verifyCandidate(args: {
   checkoutPath: string;
   spec: DelegationSpec;
   deps: PipelineDependencies;
@@ -637,11 +1010,13 @@ async function verifyCandidate(args: {
   baselineCommit: string;
   candidateCommit: string;
   store: ArtifactStore;
+  namespace?: string;
 }): Promise<{ verification: PipelineVerificationReport; baselineDrift: boolean }> {
   const ps = args.deps.ps ?? getPlatformServices();
+  const namespace = args.namespace === undefined ? "" : `${args.namespace}-`;
   const manager = new WorktreeManager(
     args.checkoutPath,
-    `${args.attempt.runId}-verify`,
+    `${args.attempt.runId}-${namespace}verify`,
     ps,
   );
   const fresh = await manager.create(args.candidateCommit);
@@ -686,8 +1061,8 @@ async function verifyCandidate(args: {
       spec: args.spec,
       ps,
       artifactStore: args.store,
-      verificationId: () => `${args.attempt.runId}-pipeline`,
-      logNamePrefix: "pipeline-verification",
+      verificationId: () => `${args.attempt.runId}-${namespace}pipeline`,
+      logNamePrefix: `${namespace}pipeline-verification`,
     });
     const changedPaths = nameOnly.split("\n").map(line => line.trim()).filter(Boolean);
     const scopeViolations = changedPaths.filter(pathname =>
@@ -749,21 +1124,74 @@ export async function runPipeline(
   spec: DelegationSpec,
   deps: PipelineDependencies,
 ): Promise<PipelineResult> {
+  const ps = deps.ps ?? getPlatformServices();
+  const canonical = await ps.canonicalizePath(checkoutPath);
+  const lock = await ps.acquireCheckoutLock(canonical.canonical);
+  let primaryError: unknown;
+  let hasPrimaryError = false;
+  try {
+    return await runPipelineWithLease(
+      checkoutPath,
+      spec,
+      deps,
+      ps,
+      lock,
+    );
+  } catch (error) {
+    primaryError = error;
+    hasPrimaryError = true;
+    throw error;
+  } finally {
+    try {
+      await lock.release();
+    } catch (releaseError) {
+      if (!hasPrimaryError) throw releaseError;
+      throw new AggregateError(
+        [primaryError, releaseError],
+        "pipeline failed and its checkout lease could not be released",
+      );
+    }
+  }
+}
+
+async function runPipelineWithLease(
+  checkoutPath: string,
+  spec: DelegationSpec,
+  deps: PipelineDependencies,
+  ps: PlatformServices,
+  borrowedCheckoutLease: CheckoutLock,
+): Promise<PipelineResult> {
   const runAttemptFn = deps.runAttempt ?? defaultRunAttempt;
+  const slices = resolveSlices(spec);
+  const initialSpec = slices.length === 0 ? spec : scopeSpecToSlice(spec, slices[0]!);
+  const activeOwner: PipelineActiveMarker = {
+    pid: process.pid,
+    processToken: await ps.getProcessStartToken(process.pid).catch(() => null),
+    startedAt: new Date().toISOString(),
+    sliced: slices.length > 0,
+  };
   const notePhase = (phase: string): void => {
     // Best-effort progress; must never affect pipeline control flow.
     try { deps.onPhase?.(phase); } catch { /* progress reporting is advisory */ }
   };
   let runStart: RunStartContext | undefined;
+  let slicedMarkerEstablished = false;
   const inheritedOnRunStart = deps.onRunStart;
-  const attempt = await runAttemptFn(checkoutPath, spec, {
+  const attempt = await runAttemptFn(checkoutPath, initialSpec, {
     ...deps,
-    onRunStart(context) {
+    borrowedCheckoutLease,
+    async onRunStart(context) {
       runStart = context;
-      inheritedOnRunStart?.(context);
+      if (slices.length > 0) {
+        await new ArtifactStore(context.record.runId).writePipelineActiveMarker(activeOwner);
+        slicedMarkerEstablished = true;
+      }
+      await inheritedOnRunStart?.(context);
     },
   });
+  const store = new ArtifactStore(attempt.runId);
   if (attempt.status !== "verified-candidate" || attempt.candidate === null) {
+    if (slicedMarkerEstablished) await store.clearPipelineActiveMarker();
     // Propagate the attempt's own classification (e.g. verification-failure for a
     // base-changed candidate, timeout, sandbox-violation) instead of flattening
     // every non-verified implement phase to producer-failure. A blameless base
@@ -777,28 +1205,390 @@ export async function runPipeline(
     );
   }
 
-  const store = new ArtifactStore(attempt.runId);
-  const ps = deps.ps ?? getPlatformServices();
-  const activeOwner: PipelineActiveMarker = {
-    pid: process.pid,
-    processToken: await ps.getProcessStartToken(process.pid).catch(() => null),
-    startedAt: new Date().toISOString(),
-  };
-  await store.writePipelineActiveMarker(activeOwner);
+  if (slices.length === 0) await store.writePipelineActiveMarker(activeOwner);
+  const temporarySliceRefs: TemporarySliceRef[] = [];
+  let finalAttempt = attempt;
+  let authoritySafeToRelease = slices.length === 0;
   let pipelinePrimaryError: unknown;
   try {
-    const { reviewers, maxRounds } = resolveReviewConfig(spec);
-    const { maxIncrements } = resolveImplementationConfig(spec);
-    let finalAttempt = attempt;
+    const reviewConfig = resolveReviewConfig(spec);
+    const { reviewers, maxRounds } = reviewConfig;
+    const maxIncrements = slices.length === 0
+      ? resolveImplementationConfig(spec).maxIncrements
+      : 1;
     const increments: PipelineIncrement[] = [];
     let incrementOutcome: IncrementOutcome | undefined;
     const rounds: PipelineRound[] = [];
     const baselineCommit = attempt.candidate.baseCommitOid;
     let currentCandidateCommit = attempt.candidate.candidateCommitOid;
-    const frozenTestEvidence = testEvidence(attempt);
+    let frozenTestEvidence = testEvidence(attempt);
+    let pipelineSlices: PipelineSlice[] = [];
+    const archivePipelineFailure = async (args: {
+      finalCandidateCommit: string;
+      reason: string;
+      failure: FailureClassification;
+      slices?: PipelineSlice[];
+      haltedSliceIndex?: number | null;
+    }): Promise<PipelineResult> => {
+      const failedAttempt = slices.length === 0
+        ? attempt
+        : await archiveSlicedFailure({
+          checkoutPath,
+          attempt,
+          failure: args.failure,
+          reason: args.reason,
+          store,
+        });
+      if (slices.length > 0) authoritySafeToRelease = true;
+      finalAttempt = failedAttempt;
+      return failedResult(
+        failedAttempt,
+        rounds,
+        args.finalCandidateCommit,
+        args.reason,
+        args.failure,
+        increments,
+        args.slices ?? pipelineSlices,
+        args.haltedSliceIndex ?? null,
+      );
+    };
+
+    if (slices.length > 0) {
+      const initialNamespace = "slice-1-attempt-0";
+      const initialVerification = await verifyCandidate({
+        checkoutPath,
+        spec: initialSpec,
+        deps,
+        attempt,
+        baselineCommit,
+        candidateCommit: currentCandidateCommit,
+        store,
+        namespace: initialNamespace,
+      });
+      let initialPerSliceReview: ConsolidationResult | null = null;
+      const initialRoleLogRefs = attemptLogRefs(attempt);
+      if (reviewConfig.perSlice === true) {
+        let reviewed;
+        try {
+          reviewed = await runSliceReview({
+            checkoutPath,
+            spec: initialSpec,
+            deps,
+            runId: attempt.runId,
+            baselineCommit,
+            candidateCommit: currentCandidateCommit,
+            namespace: initialNamespace,
+            reviewers,
+            verification: initialVerification.verification,
+            store,
+          });
+        } catch (error) {
+          const archived = await archiveSliceExecutionError({
+            checkoutPath,
+            error,
+            attempt,
+            store,
+          });
+          authoritySafeToRelease = true;
+          finalAttempt = archived.failedAttempt;
+          if (error !== archived.sliceError) throw error;
+          const failed = failedResult(
+            archived.failedAttempt,
+            rounds,
+            baselineCommit,
+            archived.sliceError.message,
+            archived.sliceError.failure,
+            increments,
+          );
+          await store.writePipelineArtifact("pipeline-result", failed);
+          return failed;
+        }
+        initialPerSliceReview = reviewed.review;
+        initialRoleLogRefs.push(...reviewed.roleLogRefs);
+      }
+
+      const completedSlices: PipelineSlice[] = [];
+      let phase: Awaited<ReturnType<typeof runSlicePhase>>;
+      try {
+        phase = await runSlicePhase(slices, baselineCommit, {
+          maxRounds,
+          initialAttempt: {
+            candidateCommit: currentCandidateCommit,
+            verification: initialVerification.verification,
+            perSliceReview: initialPerSliceReview,
+            roleLogRefs: initialRoleLogRefs,
+          },
+          runSlice: async (slice, index, base, sliceAttempt) => {
+            const namespace = `slice-${index}-attempt-${sliceAttempt}`;
+            const scopedSpec = scopeSpecToSlice(spec, slice);
+            return withManagedWorktree({
+              manager: new WorktreeManager(
+                checkoutPath,
+                `${attempt.runId}-${namespace}`,
+                ps,
+              ),
+              commit: base,
+              cleanupFailureMessage:
+                "slice implementation failed and its worktree could not be cleaned up",
+              run: async worktreePath => {
+                let gitObjectAccess: LinkedWorktreeGitAccess;
+                try {
+                  gitObjectAccess = await resolveLinkedWorktreeWritableRoots(worktreePath);
+                } catch {
+                  throw new SliceExecutionError(
+                    "slice implementer git object isolation could not be established",
+                    "sandbox-violation",
+                  );
+                }
+                const incrementRun = await runIncrement({
+                  spec: scopedSpec,
+                  pkg: {
+                    spec: scopedSpec,
+                    baselineCommit: base,
+                    candidateCommit: base,
+                    candidateDiff: "",
+                    testEvidence: completedSlices.length === 0
+                      ? testEvidence(attempt)
+                      : sliceTestEvidence(completedSlices),
+                  },
+                  worktreePath,
+                  deps,
+                  runId: attempt.runId,
+                  increment: sliceAttempt + 1,
+                  store,
+                  gitObjectAccess,
+                  ...(runStart === undefined ? {} : { runStart }),
+                  logNameNamespace: namespace,
+                });
+                if (!incrementRun.ok) {
+                  throw new SliceExecutionError(
+                    `slice implementer did not produce valid structured output (see ${incrementRun.failedRoleLogRef})`,
+                    incrementRun.failure,
+                  );
+                }
+
+                const candidateCommit = incrementRun.report.candidateCommit;
+                const provenanceFailure = await validateCandidateProvenance({
+                  worktreePath,
+                  previousCandidateCommit: base,
+                  candidateCommit,
+                  gitObjectAccess,
+                  phaseLabel: "slice implementer",
+                });
+                if (provenanceFailure !== null) {
+                  throw new SliceExecutionError(
+                    provenanceFailure.reason,
+                    provenanceFailure.failure,
+                  );
+                }
+                if (candidateCommit !== base) {
+                  try {
+                    await importPromotedObjects({
+                      checkoutPath,
+                      baselineCommit: base,
+                      promotedCommit: candidateCommit,
+                      access: gitObjectAccess,
+                    });
+                  } catch {
+                    throw new SliceExecutionError(
+                      "slice candidate objects could not be imported into the shared git object store",
+                      "sandbox-violation",
+                    );
+                  }
+                  const temporaryRef = {
+                    ref: temporarySliceRef(attempt.runId, index, sliceAttempt),
+                    oid: candidateCommit,
+                  };
+                  try {
+                    await createTemporarySliceRef(checkoutPath, temporaryRef);
+                  } catch {
+                    throw new SliceExecutionError(
+                      "slice candidate temporary ref could not be established",
+                      "sandbox-violation",
+                    );
+                  }
+                  temporarySliceRefs.push(temporaryRef);
+                }
+
+                const verified = await verifyCandidate({
+                  checkoutPath,
+                  spec: scopedSpec,
+                  deps,
+                  attempt,
+                  baselineCommit: base,
+                  candidateCommit,
+                  store,
+                  namespace,
+                });
+                let perSliceReview: ConsolidationResult | null = null;
+                const roleLogRefs = [...incrementRun.roleLogRefs];
+                if (reviewConfig.perSlice === true) {
+                  const reviewed = await runSliceReview({
+                    checkoutPath,
+                    spec: scopedSpec,
+                    deps,
+                    runId: attempt.runId,
+                    baselineCommit: base,
+                    candidateCommit,
+                    namespace,
+                    reviewers,
+                    verification: verified.verification,
+                    store,
+                  });
+                  perSliceReview = reviewed.review;
+                  roleLogRefs.push(...reviewed.roleLogRefs);
+                }
+                return {
+                  candidateCommit,
+                  verification: verified.verification,
+                  perSliceReview,
+                  roleLogRefs,
+                };
+              },
+            });
+          },
+          onAttempt: evidence => store.writePipelineArtifact(
+            `slice-${evidence.sliceIndex}-attempt-${evidence.attempt}`,
+            evidence,
+          ),
+          onSlice: async slice => {
+            await store.writePipelineArtifact(`slice-${slice.index}`, slice);
+            completedSlices.push(structuredClone(slice));
+          },
+        });
+      } catch (error) {
+        const archived = await archiveSliceExecutionError({
+          checkoutPath,
+          error,
+          attempt,
+          store,
+        });
+        authoritySafeToRelease = true;
+        finalAttempt = archived.failedAttempt;
+        if (error !== archived.sliceError) throw error;
+        const failed = failedResult(
+          archived.failedAttempt,
+          rounds,
+          completedSlices.at(-1)?.candidateCommit ?? baselineCommit,
+          archived.sliceError.message,
+          archived.sliceError.failure,
+          increments,
+          completedSlices,
+        );
+        await store.writePipelineArtifact("pipeline-result", failed);
+        return failed;
+      }
+      pipelineSlices = phase.slices;
+      currentCandidateCommit = phase.finalCandidateCommit;
+      if (phase.haltedSliceIndex !== null) {
+        const halted = phase.slices.at(-1);
+        const reason = `slice phase halted at slice ${phase.haltedSliceIndex}: ${halted?.reasons.join("; ") ?? "objective gate failed"}`;
+        if (currentCandidateCommit === baselineCommit) {
+          // No slice advanced past the baseline, so there is no partial branch
+          // for the human to accept. Retain the slice evidence and report the
+          // halt as a failure.
+          const failedAttempt = await archiveSlicedFailure({
+            checkoutPath,
+            attempt,
+            failure: "verification-failure",
+            reason,
+            store,
+          });
+          authoritySafeToRelease = true;
+          finalAttempt = failedAttempt;
+          const failed = failedResult(
+            failedAttempt,
+            rounds,
+            currentCandidateCommit,
+            reason,
+            "verification-failure",
+            increments,
+            phase.slices,
+            phase.haltedSliceIndex,
+          );
+          await store.writePipelineArtifact("pipeline-result", failed);
+          return failed;
+        }
+        // At least one slice advanced. Promote the partial branch (the advanced
+        // slices) to a frozen, acceptable candidate and hand the halt to the
+        // human — the design routes a mid-run halt to human-decision-required so
+        // the human can accept, reject, or revise the partial branch. The failed
+        // slice's attempts stay in `slices` as evidence. Review rounds are
+        // skipped; final verification runs so the human sees an honest report on
+        // the exact partial branch.
+        const promoted = await promoteFinalCandidate({
+          checkoutPath,
+          attempt,
+          initialCandidate: attempt.candidate,
+          baselineCommit,
+          candidateCommit: currentCandidateCommit,
+          store,
+        });
+        if (promoted === null) {
+          const promotionReason = "partial halt candidate could not be promoted from the git object store";
+          const failedAttempt = await archiveSlicedFailure({
+            checkoutPath,
+            attempt,
+            failure: "sandbox-violation",
+            reason: promotionReason,
+            store,
+          });
+          authoritySafeToRelease = true;
+          finalAttempt = failedAttempt;
+          const failed = failedResult(
+            failedAttempt,
+            rounds,
+            currentCandidateCommit,
+            promotionReason,
+            "sandbox-violation",
+            increments,
+            phase.slices,
+            phase.haltedSliceIndex,
+          );
+          await store.writePipelineArtifact("pipeline-result", failed);
+          return failed;
+        }
+        finalAttempt = promoted.attempt;
+        currentCandidateCommit = promoted.candidateCommit;
+        authoritySafeToRelease = true;
+        notePhase("partial halt verification");
+        const verified = await verifyCandidate({
+          checkoutPath,
+          spec,
+          deps,
+          attempt: finalAttempt,
+          baselineCommit,
+          candidateCommit: currentCandidateCommit,
+          store,
+          namespace: "final",
+        });
+        await store.writePipelineArtifact("verification", verified.verification);
+        const haltResult: PipelineResult = {
+          runId: attempt.runId,
+          status: "human-decision-required",
+          attempt: finalAttempt,
+          increments,
+          slices: phase.slices,
+          haltedSliceIndex: phase.haltedSliceIndex,
+          rounds,
+          verification: verified.verification,
+          gate: {
+            decisionReady: false,
+            requiresHumanDecision: true,
+            reasons: [reason],
+          },
+          finalCandidateCommit: currentCandidateCommit,
+          failure: null,
+        };
+        await store.writePipelineArtifact("pipeline-result", haltResult);
+        return haltResult;
+      }
+      frozenTestEvidence = sliceTestEvidence(phase.slices);
+    }
+
     const candidateWorktree = await new WorktreeManager(
       checkoutPath,
-      `${attempt.runId}-pipeline`,
+      slices.length === 0 ? `${attempt.runId}-pipeline` : `${attempt.runId}-composed-review`,
       ps,
     ).create(currentCandidateCommit);
     let gitObjectAccess: LinkedWorktreeGitAccess | null = null;
@@ -815,6 +1605,7 @@ export async function runPipeline(
             "increment git object isolation could not be established",
             "sandbox-violation",
             increments,
+            pipelineSlices,
           );
         }
 
@@ -852,6 +1643,7 @@ export async function runPipeline(
                 `increment phase did not produce valid structured output (see ${incrementRun.failedRoleLogRef})`,
                 incrementRun.failure,
                 increments,
+                pipelineSlices,
               );
             }
 
@@ -871,6 +1663,7 @@ export async function runPipeline(
                 provenanceFailure.reason,
                 provenanceFailure.failure,
                 increments,
+                pipelineSlices,
               );
             }
 
@@ -904,6 +1697,7 @@ export async function runPipeline(
                   "increment objects could not be imported into the shared git object store",
                   "sandbox-violation",
                   increments,
+                  pipelineSlices,
                 );
               }
             }
@@ -936,6 +1730,7 @@ export async function runPipeline(
             "increment phase failed unexpectedly",
             "producer-failure",
             increments,
+            pipelineSlices,
           );
         }
       }
@@ -964,14 +1759,12 @@ export async function runPipeline(
           store,
         });
         if (!reviewRun.ok) {
-          return failedResult(
-            attempt,
-            rounds,
-            currentCandidateCommit,
-            `review phase did not produce valid structured output (see ${reviewRun.failedRoleLogRef})`,
-            "producer-failure",
-            increments,
-          );
+          const reason = `review phase did not produce valid structured output (see ${reviewRun.failedRoleLogRef})`;
+          return await archivePipelineFailure({
+            finalCandidateCommit: currentCandidateCommit,
+            reason,
+            failure: "producer-failure",
+          });
         }
 
         const reviews = reviewRun.reviews.map(review => ({
@@ -997,14 +1790,11 @@ export async function runPipeline(
         try {
           gitObjectAccess ??= await resolveLinkedWorktreeWritableRoots(candidateWorktree.path);
         } catch {
-          return failedResult(
-            attempt,
-            rounds,
-            currentCandidateCommit,
-            "fixer git object isolation could not be established",
-            "sandbox-violation",
-            increments,
-          );
+          return await archivePipelineFailure({
+            finalCandidateCommit: currentCandidateCommit,
+            reason: "fixer git object isolation could not be established",
+            failure: "sandbox-violation",
+          });
         }
 
         notePhase(`round ${round}: applying fixes`);
@@ -1020,14 +1810,11 @@ export async function runPipeline(
           ...(runStart === undefined ? {} : { runStart }),
         });
         if (!fixRun.ok) {
-          return failedResult(
-            attempt,
-            rounds,
-            currentCandidateCommit,
-            `fix phase did not produce valid structured output (see ${fixRun.failedRoleLogRef})`,
-            fixRun.failure,
-            increments,
-          );
+          return await archivePipelineFailure({
+            finalCandidateCommit: currentCandidateCommit,
+            reason: `fix phase did not produce valid structured output (see ${fixRun.failedRoleLogRef})`,
+            failure: fixRun.failure,
+          });
         }
         const { fix } = fixRun;
         await store.writePipelineArtifact(`round-${round}-fix`, fix);
@@ -1038,14 +1825,11 @@ export async function runPipeline(
           gitObjectAccess,
         });
         if (provenanceFailure !== null) {
-          return failedResult(
-            attempt,
-            rounds,
-            currentCandidateCommit,
-            provenanceFailure.reason,
-            provenanceFailure.failure,
-            increments,
-          );
+          return await archivePipelineFailure({
+            finalCandidateCommit: currentCandidateCommit,
+            reason: provenanceFailure.reason,
+            failure: provenanceFailure.failure,
+          });
         }
         currentCandidateCommit = fix.candidateCommit;
         rounds.push({
@@ -1058,7 +1842,7 @@ export async function runPipeline(
       }
 
       if (currentCandidateCommit !== attempt.candidate.candidateCommitOid) {
-        if (gitObjectAccess === null) {
+        if (gitObjectAccess === null && slices.length === 0) {
           return failedResult(
             attempt,
             rounds,
@@ -1066,65 +1850,29 @@ export async function runPipeline(
             "fixer git object isolation state is missing during promotion",
             "sandbox-violation",
             increments,
+            pipelineSlices,
           );
         }
-        let canonicalCommit: string;
-        try {
-          const privateObjects = privateObjectReadOptions(gitObjectAccess);
-          const finalTree = (await checkedGit(
-            checkoutPath,
-            ["rev-parse", `${currentCandidateCommit}^{tree}`],
-            privateObjects,
-          )).trim();
-          canonicalCommit = (await checkedGit(checkoutPath, [
-            "commit-tree",
-            finalTree,
-            "-p",
-            baselineCommit,
-            "-m",
-            `candidate ${attempt.runId}`,
-          ], privateObjects)).trim();
-          await importPromotedObjects({
-            checkoutPath,
-            baselineCommit,
-            promotedCommit: canonicalCommit,
-            access: gitObjectAccess,
-          });
-        } catch {
-          return failedResult(
-            attempt,
-            rounds,
-            currentCandidateCommit,
-            "fixer objects could not be imported into the shared git object store",
-            "sandbox-violation",
-            increments,
-          );
-        }
-        await checkedGit(checkoutPath, [
-          "update-ref",
-          attempt.candidate.anchorRef,
-          canonicalCommit,
-          attempt.candidate.candidateCommitOid,
-        ]);
-        currentCandidateCommit = canonicalCommit;
-        const diffText = await checkedGit(
+        const promoted = await promoteFinalCandidate({
           checkoutPath,
-          ["diff", `${baselineCommit}..${canonicalCommit}`],
-        );
-        const candidate = await candidateArtifact({
-          worktreePath: checkoutPath,
+          attempt,
+          initialCandidate: attempt.candidate,
           baselineCommit,
-          candidateCommit: canonicalCommit,
-          anchorRef: attempt.candidate.anchorRef,
-          diffText,
+          candidateCommit: currentCandidateCommit,
+          store,
+          ...(gitObjectAccess === null ? {} : { privateObjectAccess: gitObjectAccess }),
         });
-        const manifest = await store.readManifest(attempt.runId);
-        if (manifest === null) throw new RuntimeError("run manifest is missing during promotion");
-        finalAttempt = { ...attempt, candidate };
-        await store.promoteTerminalArtifacts({
-          result: finalAttempt,
-          manifest: { ...manifest, candidateManifestHash: candidate.manifestHash },
-        });
+        if (promoted === null) {
+          return await archivePipelineFailure({
+            finalCandidateCommit: currentCandidateCommit,
+            reason: slices.length === 0
+              ? "fixer objects could not be imported into the shared git object store"
+              : "sliced candidate could not be promoted from the shared git object store",
+            failure: "sandbox-violation",
+          });
+        }
+        finalAttempt = promoted.attempt;
+        currentCandidateCommit = promoted.candidateCommit;
       }
     } catch (error) {
       primaryError = error;
@@ -1150,6 +1898,7 @@ export async function runPipeline(
       baselineCommit,
       candidateCommit: currentCandidateCommit,
       store,
+      ...(slices.length === 0 ? {} : { namespace: "final" }),
     });
     await store.writePipelineArtifact("verification", verified.verification);
     const lastRound = rounds.at(-1);
@@ -1170,6 +1919,8 @@ export async function runPipeline(
       status: gate.decisionReady ? "decision-ready" : "human-decision-required",
       attempt: finalAttempt,
       increments,
+      slices: pipelineSlices,
+      haltedSliceIndex: null,
       rounds,
       verification: verified.verification,
       gate,
@@ -1177,19 +1928,63 @@ export async function runPipeline(
       failure: null,
     };
     await store.writePipelineArtifact("pipeline-result", result);
+    authoritySafeToRelease = true;
     return result;
   } catch (error) {
-    pipelinePrimaryError = error;
-    throw error;
+    let terminalError = error;
+    if (slices.length > 0
+      && finalAttempt.status === "verified-candidate"
+      && !containsSlicedFailureArchiveError(error)) {
+      try {
+        finalAttempt = await archiveSlicedFailure({
+          checkoutPath,
+          attempt: finalAttempt,
+          failure: "verification-failure",
+          reason: "sliced pipeline terminated before completing trusted gates",
+          store,
+        });
+        authoritySafeToRelease = true;
+      } catch (archiveError) {
+        terminalError = new AggregateError(
+          [error, archiveError],
+          "sliced pipeline failed and its attempt result could not be archived",
+        );
+      }
+    }
+    pipelinePrimaryError = terminalError;
+    throw terminalError;
   } finally {
-    try {
-      await store.clearPipelineActiveMarker();
-    } catch (cleanupError) {
-      if (pipelinePrimaryError === undefined) throw cleanupError;
-      throw new AggregateError(
-        [pipelinePrimaryError, cleanupError],
-        "pipeline failed and its active marker could not be cleared",
-      );
+    const cleanupErrors = await cleanupTemporarySliceRefs(checkoutPath, temporarySliceRefs);
+    if (cleanupErrors.length > 0
+      && slices.length > 0
+      && finalAttempt.status === "verified-candidate"
+      && !containsSlicedFailureArchiveError(pipelinePrimaryError)) {
+      try {
+        finalAttempt = await archiveSlicedFailure({
+          checkoutPath,
+          attempt: finalAttempt,
+          failure: "verification-failure",
+          reason: "temporary slice ref cleanup did not complete",
+          store,
+        });
+        authoritySafeToRelease = true;
+      } catch (archiveError) {
+        cleanupErrors.push(archiveError);
+      }
+    }
+    if (cleanupErrors.length === 0 && authoritySafeToRelease) {
+      try {
+        await store.clearPipelineActiveMarker();
+      } catch (cleanupError) {
+        cleanupErrors.push(cleanupError);
+      }
+    }
+    if (cleanupErrors.length > 0) {
+      const errors = pipelinePrimaryError === undefined
+        ? cleanupErrors
+        : [pipelinePrimaryError, ...cleanupErrors];
+      if (errors.length === 1) throw errors[0];
+      throw new AggregateError(errors, "pipeline failed or its terminal cleanup was incomplete");
     }
   }
 }

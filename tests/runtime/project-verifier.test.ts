@@ -115,6 +115,30 @@ describe("projectVerify", () => {
     expect(await readFile(marker, "utf8")).toMatch(/verify-project-verifier$/);
   });
 
+  it("evaluates verificationId once to select its managed worktree name", async () => {
+    const fixture = await frozenFixture();
+    const marker = join(await temporaryDirectory("ca-project-verifier-marker-"), "cwd.txt");
+    let calls = 0;
+
+    await projectVerify({
+      repoRoot: fixture.repoRoot,
+      artifact: fixture.artifact,
+      commands: [command({
+        args: [
+          "-e",
+          `require('node:fs').writeFileSync(${JSON.stringify(marker)}, process.cwd())`,
+        ],
+      })],
+      verificationId: () => {
+        calls += 1;
+        return "slice-2-attempt-0";
+      },
+    });
+
+    expect(calls).toBe(1);
+    expect(await readFile(marker, "utf8")).toMatch(/verify-slice-2-attempt-0$/);
+  });
+
   it("records a passing Host-authorized command without mutation", async () => {
     const fixture = await frozenFixture();
 

@@ -146,7 +146,7 @@ Repository maintainers should enable the push gate once per clone:
 git config core.hooksPath .githooks
 ```
 
-Agents must not change Git configuration unless the user explicitly requests it. `.githooks/pre-push` runs TypeScript and the full Vitest suite for every push. Pushes to `main` or a tag also run release validation and check the latest `origin/main` CI conclusion.
+Agents must not change Git configuration unless the user explicitly requests it. `.githooks/pre-push` runs TypeScript and the full Vitest suite for every push. Because that suite runs on one OS, cross-platform (Linux/macOS/Windows) failures only appear in CI; the hook therefore also consults actual CI conclusions via `gh`: it **refuses** to push more onto a feature branch whose latest completed CI is `failure` (use `git push --no-verify` only when the push itself is the fix), and it **warns** whenever `origin/main` CI is red so an inherited failure is visible before a merge or rebase. Pushes to `main` or a tag additionally run release validation, and a tag push is hard-blocked when `origin/main` CI is failing. These CI checks degrade gracefully to no-ops when `gh` is unavailable, so they cannot fully substitute for green cross-platform CI—never merge or tag on a red Windows/Linux run.
 
 ## Git safety
 

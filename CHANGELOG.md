@@ -6,6 +6,30 @@ All notable changes to Claude Architect are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.21.0] - 2026-07-19
+
+### Added
+
+- Sliced delegation: a spec may carry a top-level `slices` array that decomposes
+  the task into ordered, independently testable steps. Each slice is a scoped
+  mini-spec with its own `writeAllowlist` (a subset of the spec's),
+  `forbiddenScope`, `successCriteria`, and required `verification`, and runs
+  fresh with no context from prior slices. A deterministic wayfinder routes each
+  completed slice advance/repair/halt from its verification result alone. Review
+  and the advisor judge the composed candidate over the whole slice branch at the
+  end; per-slice review is opt-in via `review.perSlice: true`. A mid-run halt
+  after at least one slice has advanced yields a partial `human-decision-required`
+  candidate — the promoted advanced-slice branch, which the human may accept,
+  reject, or revise — carrying `haltedSliceIndex` and each slice's route in
+  `slices`; a halt on the first slice with nothing advanced is reported `failed`
+  with the slice evidence retained.
+
+### Changed
+
+- The `delegatePipeline` result now exposes `slices` (per-slice routes) and
+  `haltedSliceIndex` on the MCP wire. The MCP tool protocol advances 1.2.0 to
+  1.3.0 (additive).
+
 ## [0.20.0] - 2026-07-18
 
 ### Added

@@ -3,10 +3,12 @@ import { access, mkdtemp, readFile, readdir, realpath, rm, symlink, writeFile } 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { git } from "../../src/git/git-exec.js";
+import { WorktreeManager } from "../../src/git/worktree-manager.js";
 import { verifyBaseline } from "../../src/verify/baseline-verifier.js";
 import type {
+  CheckoutLock,
   PlatformServices,
   ResolvedExecutable,
 } from "../../src/platform/platform-services.js";
@@ -240,6 +242,47 @@ function dependencies(
   };
 }
 
+async function borrowedLeaseFixture(repoRoot: string): Promise<{
+  ps: PlatformServices;
+  borrowedCheckoutLease: CheckoutLock;
+  acquireCalls(): number;
+  releaseCalls(): number;
+}> {
+  const platformServices = getPlatformServices();
+  const canonical = await platformServices.canonicalizePath(repoRoot);
+  const repositoryIdentity = canonical.gitCommonDir ?? canonical.canonical;
+  let acquireCalls = 0;
+  let releaseCalls = 0;
+  const lock: CheckoutLock = {
+    key: "borrowed-checkout-lock-key",
+    repositoryIdentity,
+    async release() {
+      releaseCalls += 1;
+    },
+  };
+  const ps = Object.assign(Object.create(platformServices), {
+    async acquireCheckoutLock() {
+      acquireCalls += 1;
+      throw new Error("borrowed attempt acquired a nested checkout lock");
+    },
+  }) as PlatformServices;
+  return {
+    ps,
+    borrowedCheckoutLease: lock,
+    acquireCalls: () => acquireCalls,
+    releaseCalls: () => releaseCalls,
+  };
+}
+
+function withBorrowedLease(
+  deps: AttemptRuntimeDependencies,
+  fixture: Awaited<ReturnType<typeof borrowedLeaseFixture>>,
+): AttemptRuntimeDependencies {
+  return Object.assign(deps, {
+    borrowedCheckoutLease: fixture.borrowedCheckoutLease,
+  });
+}
+
 async function archivedJson(runId: string, name: string): Promise<Record<string, unknown>> {
   return JSON.parse(await readFile(
     join(process.env.CLAUDE_PLUGIN_DATA!, "runs", runId, name),
@@ -294,6 +337,8 @@ describe("runAttempt", () => {
     const platformServices = getPlatformServices();
     let lockHeld = false;
     let lockReleased = false;
+    let acquireCalls = 0;
+    let releaseCalls = 0;
 
     const result = await runAttempt(repoRoot, validSpec(), dependencies(
       new FakeAdapter(),
@@ -303,11 +348,14 @@ describe("runAttempt", () => {
           acquireCheckoutLock: async (
             checkout: Parameters<PlatformServices["acquireCheckoutLock"]>[0],
           ) => {
+            acquireCalls += 1;
             const lock = await platformServices.acquireCheckoutLock(checkout);
             lockHeld = true;
             return {
               key: lock.key,
+              repositoryIdentity: lock.repositoryIdentity,
               release: async () => {
+                releaseCalls += 1;
                 await lock.release();
                 lockHeld = false;
                 lockReleased = true;
@@ -329,6 +377,183 @@ describe("runAttempt", () => {
     expect(result.status).toBe("verified-candidate");
     expect(lockHeld).toBe(false);
     expect(lockReleased).toBe(true);
+    expect(acquireCalls).toBe(1);
+    expect(releaseCalls).toBe(1);
+  });
+
+  it("reports standalone checkout lease drift truthfully and releases its owned lock once", async () => {
+    const repoRoot = await initRepo();
+    const platformServices = getPlatformServices();
+    const canonical = await platformServices.canonicalizePath(repoRoot);
+    const beforeAcquireIdentity = `${canonical.gitCommonDir ?? canonical.canonical}-before-acquire`;
+    const acquisitionIdentity = `${canonical.gitCommonDir ?? canonical.canonical}-at-acquire`;
+    const observations: string[] = [];
+    let acquireCalls = 0;
+    let releaseCalls = 0;
+    let ps: PlatformServices;
+    ps = Object.assign(Object.create(platformServices), {
+      async canonicalizePath(input: string) {
+        const repositoryIdentity = observations.length === 0
+          ? beforeAcquireIdentity
+          : acquisitionIdentity;
+        observations.push(repositoryIdentity);
+        return { input, canonical: canonical.canonical, gitCommonDir: repositoryIdentity };
+      },
+      async acquireCheckoutLock(checkout: string) {
+        acquireCalls += 1;
+        const acquired = await ps.canonicalizePath(checkout);
+        const repositoryIdentity = acquired.gitCommonDir ?? acquired.canonical;
+        return {
+          key: createHash("sha256").update(repositoryIdentity).digest("hex"),
+          repositoryIdentity,
+          async release() { releaseCalls += 1; },
+        };
+      },
+    }) as PlatformServices;
+    const adapter = new FakeAdapter();
+    const runId = "run-owned-lock-identity-drift";
+    let thrown: unknown;
+
+    try {
+      await runAttempt(
+        repoRoot,
+        validSpec(),
+        dependencies(adapter, runId, { ps }),
+      );
+    } catch (error) {
+      thrown = error;
+    }
+
+    expect.soft(thrown).toMatchObject({
+      message: "owned checkout lease repository identity mismatch",
+    });
+    expect.soft(observations).toEqual([beforeAcquireIdentity, acquisitionIdentity]);
+    expect.soft(acquireCalls).toBe(1);
+    expect.soft(releaseCalls).toBe(1);
+    expect.soft(adapter.probeCalls).toBe(0);
+    await expect(access(join(process.env.CLAUDE_PLUGIN_DATA!, "runs", runId)))
+      .rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("uses a matching borrowed checkout lease without acquiring or releasing it", async () => {
+    const repoRoot = await initRepo();
+    const fixture = await borrowedLeaseFixture(repoRoot);
+    const runId = "run-borrowed-lock-success";
+
+    const result = await runAttempt(
+      repoRoot,
+      validSpec(),
+      withBorrowedLease(
+        dependencies(new FakeAdapter(), runId, { ps: fixture.ps }),
+        fixture,
+      ),
+    );
+
+    expect(result.status).toBe("verified-candidate");
+    expect(fixture.acquireCalls()).toBe(0);
+    expect(fixture.releaseCalls()).toBe(0);
+    expect(await archivedJson(runId, "run-start.json")).toMatchObject({
+      lockKey: fixture.borrowedCheckoutLease.key,
+    });
+  });
+
+  it("does not release a borrowed checkout lease on a classified early return", async () => {
+    const repoRoot = await initRepo();
+    const fixture = await borrowedLeaseFixture(repoRoot);
+
+    const result = await runAttempt(
+      repoRoot,
+      validSpec(),
+      withBorrowedLease(dependencies(
+        new FakeAdapter({ eligible: false }),
+        "run-borrowed-lock-unavailable",
+        { ps: fixture.ps },
+      ), fixture),
+    );
+
+    expect(result.status).toBe("unavailable");
+    expect(fixture.acquireCalls()).toBe(0);
+    expect(fixture.releaseCalls()).toBe(0);
+  });
+
+  it("does not release a borrowed checkout lease when the attempt throws", async () => {
+    const repoRoot = await initRepo();
+    const fixture = await borrowedLeaseFixture(repoRoot);
+
+    await expect(runAttempt(
+      repoRoot,
+      validSpec(),
+      withBorrowedLease(dependencies(new FakeAdapter(), "run-borrowed-lock-throw", {
+        ps: fixture.ps,
+        baselineVerifier: async () => { throw new Error("baseline infrastructure failed"); },
+      }), fixture),
+    )).rejects.toThrow("baseline infrastructure failed");
+
+    expect(fixture.acquireCalls()).toBe(0);
+    expect(fixture.releaseCalls()).toBe(0);
+  });
+
+  it("does not release a borrowed checkout lease when attempt cleanup fails", async () => {
+    const repoRoot = await initRepo();
+    const fixture = await borrowedLeaseFixture(repoRoot);
+    const create = WorktreeManager.prototype.create;
+    const createSpy = vi.spyOn(WorktreeManager.prototype, "create")
+      .mockImplementationOnce(async function (baseCommitOid) {
+        const worktree = await create.call(this, baseCommitOid);
+        return {
+          ...worktree,
+          async cleanup() {
+            await worktree.cleanup();
+            throw new Error("attempt worktree cleanup failed");
+          },
+        };
+      });
+
+    try {
+      await expect(runAttempt(
+        repoRoot,
+        validSpec(),
+        withBorrowedLease(dependencies(
+          new FakeAdapter(),
+          "run-borrowed-lock-cleanup-failure",
+          { ps: fixture.ps },
+        ), fixture),
+      )).rejects.toThrow("attempt worktree cleanup failed");
+    } finally {
+      createSpy.mockRestore();
+    }
+
+    expect(fixture.acquireCalls()).toBe(0);
+    expect(fixture.releaseCalls()).toBe(0);
+  });
+
+  it("rejects a borrowed lock bound to another repository before Producer execution", async () => {
+    const repoRoot = await initRepo();
+    const fixture = await borrowedLeaseFixture(repoRoot);
+    fixture.borrowedCheckoutLease = {
+      ...fixture.borrowedCheckoutLease,
+      repositoryIdentity: `${fixture.borrowedCheckoutLease.repositoryIdentity}-forged-lock-binding`,
+    };
+    const adapter = new FakeAdapter();
+    const runId = "run-borrowed-lock-binding-mismatch";
+
+    await expect(runAttempt(
+      repoRoot,
+      validSpec(),
+      withBorrowedLease(dependencies(
+        adapter,
+        runId,
+        { ps: fixture.ps },
+      ), fixture),
+    )).rejects.toMatchObject({
+      message: "borrowed checkout lease repository identity mismatch",
+    });
+
+    expect(adapter.probeCalls).toBe(0);
+    expect(fixture.acquireCalls()).toBe(0);
+    expect(fixture.releaseCalls()).toBe(0);
+    await expect(access(join(process.env.CLAUDE_PLUGIN_DATA!, "runs", runId)))
+      .rejects.toMatchObject({ code: "ENOENT" });
   });
 
   it("stops on a failing baseline before probing producers", async () => {
@@ -520,6 +745,37 @@ describe("runAttempt", () => {
     await expectAttemptResourcesCleaned(runId);
   });
 
+  it("awaits onRunStart after durably archiving run-start", async () => {
+    const repoRoot = await initRepo();
+    const runId = "run-start-callback";
+    let callbackAwaited = false;
+    let observedRunStart: Record<string, unknown> | undefined;
+    const callbackCompletion = {
+      then(resolve: () => void, reject: (error: unknown) => void): void {
+        callbackAwaited = true;
+        void archivedJson(runId, "run-start.json").then(record => {
+          observedRunStart = record;
+          resolve();
+        }, reject);
+      },
+    };
+
+    const result = await runAttempt(
+      repoRoot,
+      validSpec(),
+      dependencies(new FakeAdapter(), runId, {
+        onRunStart: () => callbackCompletion as unknown as Promise<void>,
+      }),
+    );
+
+    expect(result.status).toBe("verified-candidate");
+    expect(callbackAwaited).toBe(true);
+    expect(observedRunStart).toMatchObject({
+      runId,
+      pid: null,
+    });
+  });
+
   it("collects repository instructions and packaged verifier provenance by default", async () => {
     const repoRoot = await initRepo();
     const instructionContent = "# Repository instructions\nUse the committed policy.\n";
@@ -679,6 +935,7 @@ describe("runAttempt", () => {
             const lock = await platformServices.acquireCheckoutLock(checkout);
             return {
               key: lock.key,
+              repositoryIdentity: lock.repositoryIdentity,
               release: async () => {
                 await lock.release();
                 lockReleased = true;
