@@ -3,8 +3,10 @@ import {
   access,
   link,
   mkdir,
+  lstat,
   mkdtemp,
   readFile,
+  readdir,
   realpath,
   rename,
   rm,
@@ -1218,20 +1220,55 @@ describe("recoverStaleRuns", () => {
     const runId = "run-live-orphan-cooperative";
     const store = await createUnfinishedRun(runId, repo.commonDir, 4343, "darwin:start");
     const events: string[] = [];
+    let signalLocksAcquired!: () => void;
+    const locksAcquired = new Promise<void>(resolve => { signalLocksAcquired = resolve; });
+    let releaseRecovery!: () => void;
+    const recoveryReleased = new Promise<void>(resolve => { releaseRecovery = resolve; });
     let alive = true;
 
-    await expect(recoverStaleRuns({
+    const recovery = recoverStaleRuns({
       platformServices: {
         os: "darwin",
         async getProcessStartToken() { return "darwin:start"; },
         async terminateProcessTreeByPid() { events.push("forced"); },
       },
       isProcessAlive: () => alive,
-      requestCooperativeTermination() { events.push("cooperative"); },
+      async requestCooperativeTermination() {
+        events.push("cooperative");
+        signalLocksAcquired();
+        await recoveryReleased;
+      },
       async delayMs() { events.push("delay"); alive = false; },
-    })).resolves.toEqual({ recovered: [runId], quarantined: [] });
+    });
+
+    await locksAcquired;
+    const locksRoot = path.join(process.env.CLAUDE_PLUGIN_DATA!, "locks");
+    const lockKey = createHash("sha256").update(repo.commonDir).digest("hex");
+    const lockPaths = [
+      path.join(locksRoot, "recovery.lock"),
+      path.join(locksRoot, `${lockKey}.lock`),
+    ];
+    const ownerBytes = Buffer.from(JSON.stringify({
+      pid: process.pid,
+      processToken: "darwin:start",
+    }));
+    try {
+      for (const lockPath of lockPaths) {
+        const metadata = await lstat(lockPath);
+        expect(metadata.isFile()).toBe(true);
+        expect(metadata.isSymbolicLink()).toBe(false);
+        expect(metadata.nlink).toBe(1);
+        await expect(readFile(lockPath)).resolves.toEqual(ownerBytes);
+      }
+      expect((await readdir(locksRoot)).filter(entry =>
+        /^\.recovery-lock-.*\.tmp$/.test(entry))).toEqual([]);
+    } finally {
+      releaseRecovery();
+    }
+    await expect(recovery).resolves.toEqual({ recovered: [runId], quarantined: [] });
 
     expect(events).toEqual(["cooperative", "delay"]);
+    await Promise.all(lockPaths.map(expectMissing));
     await expect(store.readResult(runId)).resolves.toMatchObject({
       evidence: { recovery: "startup-stale-run", escalation: "cooperative" },
     });

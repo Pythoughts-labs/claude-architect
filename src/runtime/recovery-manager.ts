@@ -1038,14 +1038,16 @@ async function removeLockIfUnchanged(
   handle: Awaited<ReturnType<typeof open>>,
   expectedIdentity: DirectoryIdentity,
   expectedContents: Buffer,
+  expectedLinks = 1,
 ): Promise<boolean> {
   const expectedSize = expectedContents.byteLength;
   const handleMetadata = await handle.stat();
-  if (!handleMetadata.isFile()
-    || handleMetadata.nlink !== 1
-    || !sameIdentity(handleMetadata, expectedIdentity)
-    || handleMetadata.size > MAX_STATE_FILE_BYTES
-    || handleMetadata.size !== expectedSize) return false;
+  if (!isExpectedLockMetadata(
+    handleMetadata,
+    expectedIdentity,
+    expectedSize,
+    expectedLinks,
+  )) return false;
   const currentContents = await readHandleBytes(handle, handleMetadata.size);
   if (!currentContents.equals(expectedContents)) return false;
 
@@ -1056,19 +1058,20 @@ async function removeLockIfUnchanged(
     if (isMissing(error)) return false;
     throw error;
   }
-  if (!pathMetadata.isFile()
-    || pathMetadata.isSymbolicLink()
-    || pathMetadata.nlink !== 1
-    || !sameIdentity(pathMetadata, expectedIdentity)
-    || pathMetadata.size > MAX_STATE_FILE_BYTES
-    || pathMetadata.size !== expectedSize) return false;
+  if (!isExpectedLockMetadata(
+    pathMetadata,
+    expectedIdentity,
+    expectedSize,
+    expectedLinks,
+  )) return false;
 
   const settledHandleMetadata = await handle.stat();
-  if (!settledHandleMetadata.isFile()
-    || settledHandleMetadata.nlink !== 1
-    || !sameIdentity(settledHandleMetadata, expectedIdentity)
-    || settledHandleMetadata.size > MAX_STATE_FILE_BYTES
-    || settledHandleMetadata.size !== expectedSize) return false;
+  if (!isExpectedLockMetadata(
+    settledHandleMetadata,
+    expectedIdentity,
+    expectedSize,
+    expectedLinks,
+  )) return false;
   const settledContents = await readHandleBytes(handle, settledHandleMetadata.size);
   if (!settledContents.equals(expectedContents)) return false;
 
@@ -1079,12 +1082,12 @@ async function removeLockIfUnchanged(
     if (isMissing(error)) return false;
     throw error;
   }
-  if (!settledPathMetadata.isFile()
-    || settledPathMetadata.isSymbolicLink()
-    || settledPathMetadata.nlink !== 1
-    || !sameIdentity(settledPathMetadata, expectedIdentity)
-    || settledPathMetadata.size > MAX_STATE_FILE_BYTES
-    || settledPathMetadata.size !== expectedSize) return false;
+  if (!isExpectedLockMetadata(
+    settledPathMetadata,
+    expectedIdentity,
+    expectedSize,
+    expectedLinks,
+  )) return false;
   try {
     await rm(lockPath, { force: false });
     return true;
@@ -1131,69 +1134,358 @@ async function reclaimDeadLock(
   }
 }
 
+async function validateLockParentIdentity(
+  parentPath: string,
+  expectedIdentity: DirectoryIdentity,
+): Promise<void> {
+  const metadata = await lstat(parentPath);
+  if (!isPlainDirectory(metadata) || !sameIdentity(metadata, expectedIdentity)) {
+    throw new RuntimeError("recovery lock parent identity changed");
+  }
+}
+
+function isExpectedLockMetadata(
+  metadata: Awaited<ReturnType<typeof lstat>>,
+  expectedIdentity: DirectoryIdentity,
+  expectedSize: number,
+  expectedLinks: number,
+): boolean {
+  return metadata.isFile()
+    && !metadata.isSymbolicLink()
+    && metadata.nlink === expectedLinks
+    && sameIdentity(metadata, expectedIdentity)
+    && metadata.size === expectedSize
+    && metadata.size <= MAX_STATE_FILE_BYTES;
+}
+
+async function validateOwnedLockState(
+  handle: Awaited<ReturnType<typeof open>>,
+  namedPaths: readonly string[],
+  expectedIdentity: DirectoryIdentity,
+  expectedContents: Buffer,
+  expectedLinks: number,
+  parentPath: string,
+  parentIdentity: DirectoryIdentity,
+): Promise<void> {
+  const validateHandle = async () => {
+    const metadata = await handle.stat();
+    if (!isExpectedLockMetadata(
+      metadata,
+      expectedIdentity,
+      expectedContents.byteLength,
+      expectedLinks,
+    ) || !(await readHandleBytes(handle, metadata.size)).equals(expectedContents)) {
+      throw new RuntimeError("recovery lock handle or contents changed");
+    }
+  };
+
+  await validateLockParentIdentity(parentPath, parentIdentity);
+  await validateHandle();
+  for (const namedPath of namedPaths) {
+    const metadata = await lstat(namedPath);
+    if (!isExpectedLockMetadata(
+      metadata,
+      expectedIdentity,
+      expectedContents.byteLength,
+      expectedLinks,
+    )) throw new RuntimeError("recovery lock path changed");
+  }
+  await validateHandle();
+  await validateLockParentIdentity(parentPath, parentIdentity);
+}
+
+type ExpectedLockRemoval = "removed" | "absent" | "changed";
+
+async function removeExpectedLockPath(
+  filename: string,
+  expectedIdentity: DirectoryIdentity,
+  expectedContents: Buffer,
+  expectedLinks: number,
+): Promise<ExpectedLockRemoval> {
+  let handle;
+  try {
+    handle = await open(filename, constants.O_RDONLY | NO_FOLLOW);
+  } catch (error) {
+    if (isMissing(error)) return "absent";
+    throw error;
+  }
+  let primaryError: unknown;
+  let removed = false;
+  try {
+    removed = await removeLockIfUnchanged(
+      filename,
+      handle,
+      expectedIdentity,
+      expectedContents,
+      expectedLinks,
+    );
+  } catch (error) {
+    primaryError = error;
+  }
+  try {
+    await handle.close();
+  } catch (closeError) {
+    if (primaryError !== undefined) {
+      throw new AggregateError(
+        [primaryError, closeError],
+        "recovery lock cleanup failed and its handle could not be closed",
+      );
+    }
+    throw closeError;
+  }
+  if (primaryError !== undefined) throw primaryError;
+  return removed ? "removed" : "changed";
+}
+
+async function pathNamesLockIdentity(
+  filename: string,
+  expectedIdentity: DirectoryIdentity,
+): Promise<boolean> {
+  try {
+    const metadata = await lstat(filename);
+    return metadata.isFile()
+      && !metadata.isSymbolicLink()
+      && sameIdentity(metadata, expectedIdentity);
+  } catch (error) {
+    if (isMissing(error)) return false;
+    throw error;
+  }
+}
+
+async function validatePublishedLock(
+  lockPath: string,
+  expectedIdentity: DirectoryIdentity,
+  expectedContents: Buffer,
+  parentPath: string,
+  parentIdentity: DirectoryIdentity,
+): Promise<void> {
+  const handle = await open(lockPath, constants.O_RDONLY | NO_FOLLOW);
+  let primaryError: unknown;
+  try {
+    await validateOwnedLockState(
+      handle,
+      [lockPath],
+      expectedIdentity,
+      expectedContents,
+      1,
+      parentPath,
+      parentIdentity,
+    );
+  } catch (error) {
+    primaryError = error;
+  }
+  try {
+    await handle.close();
+  } catch (closeError) {
+    if (primaryError !== undefined) {
+      throw new AggregateError(
+        [primaryError, closeError],
+        "published recovery lock validation failed and its handle could not be closed",
+      );
+    }
+    throw closeError;
+  }
+  if (primaryError !== undefined) throw primaryError;
+}
+
+function throwLockAcquisitionErrors(errors: unknown[]): never {
+  if (errors.length === 1) throw errors[0]!;
+  throw new AggregateError(errors, "recovery lock acquisition and safe cleanup failed");
+}
+
+async function cleanupOwnedLockPaths(
+  parentPath: string,
+  parentIdentity: DirectoryIdentity,
+  temporaryPath: string,
+  lockPath: string,
+  expectedIdentity: DirectoryIdentity,
+  expectedContents: Buffer,
+  published: boolean,
+): Promise<unknown[]> {
+  const errors: unknown[] = [];
+  try {
+    await validateLockParentIdentity(parentPath, parentIdentity);
+  } catch (error) {
+    return [error];
+  }
+
+  if (published) {
+    try {
+      const temporaryExists = await pathNamesLockIdentity(temporaryPath, expectedIdentity);
+      const result = await removeExpectedLockPath(
+        lockPath,
+        expectedIdentity,
+        expectedContents,
+        temporaryExists ? 2 : 1,
+      );
+      if (result === "changed") {
+        errors.push(new RuntimeError("published recovery lock changed before safe cleanup"));
+      }
+    } catch (error) {
+      errors.push(error);
+    }
+  }
+  try {
+    const result = await removeExpectedLockPath(
+      temporaryPath,
+      expectedIdentity,
+      expectedContents,
+      1,
+    );
+    if (result === "changed") {
+      errors.push(new RuntimeError("temporary recovery lock changed before safe cleanup"));
+    }
+  } catch (error) {
+    errors.push(error);
+  }
+  try {
+    await validateLockParentIdentity(parentPath, parentIdentity);
+  } catch (error) {
+    errors.push(error);
+  }
+  return errors;
+}
+
 async function createOwnedLock(
   lockPath: string,
   contents: Buffer,
 ): Promise<AcquiredLock | null> {
-  const temporaryPath = path.join(
-    path.dirname(lockPath),
-    `.recovery-lock-${randomUUID()}.tmp`,
-  );
+  if (contents.byteLength > MAX_STATE_FILE_BYTES) {
+    throw new RuntimeError("new recovery lock exceeds its size limit");
+  }
+  const parentPath = path.dirname(lockPath);
+  const parentIdentity = await plainDirectoryIdentity(parentPath);
+  if (parentIdentity === null) {
+    throw new RuntimeError("recovery lock parent must remain a plain directory");
+  }
+  const temporaryPath = path.join(parentPath, `.recovery-lock-${randomUUID()}.tmp`);
   let handle;
-  let primaryError: unknown;
+  let temporaryIdentity: DirectoryIdentity | undefined;
+  let temporaryCreated = false;
+  let published = false;
+  let contended = false;
+  const errors: unknown[] = [];
+
   try {
     handle = await open(
       temporaryPath,
-      constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | NO_FOLLOW,
+      constants.O_RDWR | constants.O_CREAT | constants.O_EXCL | NO_FOLLOW,
       0o600,
     );
+    temporaryCreated = true;
+    const metadata = await handle.stat();
+    temporaryIdentity = { dev: metadata.dev, ino: metadata.ino };
     await handle.writeFile(contents);
     await handle.sync();
-    const metadata = await handle.stat();
-    if (!metadata.isFile() || metadata.size !== contents.byteLength) {
-      throw new RuntimeError("new recovery lock is not a regular file");
-    }
-    await handle.close();
-    handle = undefined;
+    await validateOwnedLockState(
+      handle,
+      [temporaryPath],
+      temporaryIdentity,
+      contents,
+      1,
+      parentPath,
+      parentIdentity,
+    );
     try {
       await link(temporaryPath, lockPath);
+      published = true;
     } catch (error) {
-      if (errorCode(error) === "EEXIST") return null;
-      throw error;
+      if (errorCode(error) === "EEXIST") contended = true;
+      else throw error;
     }
-    return {
-      lockPath,
-      identity: { dev: metadata.dev, ino: metadata.ino },
-      contents,
-    };
-  } catch (error) {
-    primaryError = error;
-    throw error;
-  } finally {
-    let cleanupError: unknown;
-    try {
-      await handle?.close();
-    } catch (error) {
-      cleanupError = error;
-    }
-    try {
-      await rm(temporaryPath, { force: true });
-    } catch (error) {
-      cleanupError = cleanupError === undefined
-        ? error
-        : new AggregateError(
-          [cleanupError, error],
-          "temporary recovery lock could not be closed or removed",
-        );
-    }
-    if (cleanupError !== undefined) {
-      if (primaryError === undefined) throw cleanupError;
-      throw new AggregateError(
-        [primaryError, cleanupError],
-        "recovery lock publication failed and its temporary file could not be cleaned up",
+    if (published) {
+      await validateOwnedLockState(
+        handle,
+        [temporaryPath, lockPath],
+        temporaryIdentity,
+        contents,
+        2,
+        parentPath,
+        parentIdentity,
       );
     }
+  } catch (error) {
+    errors.push(error);
   }
+  if (handle !== undefined) {
+    try {
+      await handle.close();
+    } catch (error) {
+      errors.push(error);
+    }
+  }
+
+  if (temporaryCreated && temporaryIdentity === undefined) {
+    errors.push(new RuntimeError("temporary recovery lock identity is unavailable for cleanup"));
+  }
+  if (temporaryIdentity === undefined) throwLockAcquisitionErrors(errors);
+
+  if (contended) {
+    errors.push(...await cleanupOwnedLockPaths(
+      parentPath,
+      parentIdentity,
+      temporaryPath,
+      lockPath,
+      temporaryIdentity,
+      contents,
+      false,
+    ));
+    if (errors.length === 0) return null;
+    throwLockAcquisitionErrors(errors);
+  }
+
+  if (!published) {
+    if (temporaryCreated) {
+      errors.push(...await cleanupOwnedLockPaths(
+        parentPath,
+        parentIdentity,
+        temporaryPath,
+        lockPath,
+        temporaryIdentity,
+        contents,
+        false,
+      ));
+    }
+    throwLockAcquisitionErrors(errors);
+  }
+
+  if (errors.length === 0) {
+    try {
+      await validateLockParentIdentity(parentPath, parentIdentity);
+      const result = await removeExpectedLockPath(
+        temporaryPath,
+        temporaryIdentity,
+        contents,
+        2,
+      );
+      if (result === "changed") {
+        throw new RuntimeError("temporary recovery lock changed before unlink");
+      }
+      await validatePublishedLock(
+        lockPath,
+        temporaryIdentity,
+        contents,
+        parentPath,
+        parentIdentity,
+      );
+    } catch (error) {
+      errors.push(error);
+    }
+  }
+
+  if (errors.length === 0) {
+    return { lockPath, identity: temporaryIdentity, contents };
+  }
+  errors.push(...await cleanupOwnedLockPaths(
+    parentPath,
+    parentIdentity,
+    temporaryPath,
+    lockPath,
+    temporaryIdentity,
+    contents,
+    true,
+  ));
+  throwLockAcquisitionErrors(errors);
 }
 
 async function acquireOwnedLock(
