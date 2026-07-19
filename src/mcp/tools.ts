@@ -145,19 +145,31 @@ function requireVerifiedCandidate(run: ArchivedRun): CandidateArtifact {
   return requireCandidate(run);
 }
 
-async function requireMatchingCheckout(
+function requireMatchingRepository(
   run: ArchivedRun,
-  checkoutPath: string,
-  deps: ToolDependencies,
-): Promise<void> {
-  const canonical = await services(deps).canonicalizePath(checkoutPath);
-  const callerKey = canonical.gitCommonDir ?? canonical.canonical;
+  callerKey: string,
+): void {
   if (callerKey !== run.lockKey) {
     throw runtimeError(
       "candidate run belongs to a different repository than the supplied checkoutPath",
       "run-checkout-mismatch",
     );
   }
+}
+
+async function withCurrentArchivedRun<T>(
+  checkoutPath: string,
+  runId: string,
+  deps: ToolDependencies,
+  fn: (run: ArchivedRun) => Promise<T>,
+): Promise<T> {
+  const canonical = await services(deps).canonicalizePath(checkoutPath);
+  const callerKey = canonical.gitCommonDir ?? canonical.canonical;
+  return withRepoLock(callerKey, async () => {
+    const run = await loadArchivedRun(runId, deps);
+    requireMatchingRepository(run, callerKey);
+    return fn(run);
+  });
 }
 
 function schemaCompatibility(input: unknown): { ok: true } | { ok: false; diagnostic: string } {
@@ -328,9 +340,7 @@ export async function handleReviewCandidate(
   | ToolErrorResult
 > {
   try {
-    const run = await loadArchivedRun(runId, deps);
-    await requireMatchingCheckout(run, checkoutPath, deps);
-    return await withRepoLock(run.lockKey, async () => {
+    return await withCurrentArchivedRun(checkoutPath, runId, deps, async run => {
       const candidate = requireCandidate(run);
       const git = deps.git ?? runGit;
       const anchor = await git(run.repoRoot, [
@@ -385,9 +395,7 @@ export async function handleDecideCandidate(
   deps: ToolDependencies = {},
 ): Promise<{ recorded: true } | ToolErrorResult> {
   try {
-    const run = await loadArchivedRun(runId, deps);
-    await requireMatchingCheckout(run, checkoutPath, deps);
-    return await withRepoLock(run.lockKey, async () => {
+    return await withCurrentArchivedRun(checkoutPath, runId, deps, async run => {
       if (await run.store.readPipelineActiveMarker(runId) !== null) {
         throw runtimeError(
           "the delegation pipeline for this run is still active",
@@ -433,9 +441,7 @@ export async function handleIntegrateCandidate(
   deps: ToolDependencies = {},
 ): Promise<{ integration: "applied" | "conflicted" | "aborted"; detail: string } | ToolErrorResult> {
   try {
-    const run = await loadArchivedRun(runId, deps);
-    await requireMatchingCheckout(run, checkoutPath, deps);
-    return await withRepoLock(run.lockKey, async () => {
+    return await withCurrentArchivedRun(checkoutPath, runId, deps, async run => {
       if (await run.store.readPipelineActiveMarker(runId) !== null) {
         throw runtimeError(
           "the delegation pipeline for this run is still active",

@@ -16,6 +16,7 @@ import {
   type ToolArtifactStore,
   type ToolDependencies,
 } from "../../src/mcp/tools.js";
+import { withRepoLock } from "../../src/mcp/serialize.js";
 import type { PipelineResult } from "../../src/pipeline/pipeline-runtime.js";
 import type { PlatformServices } from "../../src/platform/platform-services.js";
 import { getPlatformServices } from "../../src/platform/select-platform.js";
@@ -77,6 +78,14 @@ const result: AttemptResult = {
   producerModel: null,
   durationMs: 1,
   sessionId: null,
+};
+
+const failedSlicedResult: AttemptResult = {
+  ...result,
+  status: "failed",
+  failure: "producer-failure",
+  summary: "sliced pipeline failed",
+  candidate: null,
 };
 
 const pipelineResult: PipelineResult = {
@@ -142,8 +151,8 @@ class FakeStore implements ToolArtifactStore {
   pipelineActiveMarker: PipelineActiveMarker | null = null;
 
   constructor(
-    private readonly storedResult: AttemptResult = result,
-    private readonly storedManifest: RunManifest = manifest,
+    public storedResult: AttemptResult = result,
+    public storedManifest: RunManifest = manifest,
   ) {}
 
   async readResult(_runId: string): Promise<AttemptResult | null> {
@@ -187,6 +196,26 @@ function fakePlatform(): PlatformServices {
       release: async () => {},
     }),
   } as PlatformServices;
+}
+
+async function holdRepoLock(key: string): Promise<() => Promise<void>> {
+  let markHeld!: () => void;
+  let allowRelease!: () => void;
+  const held = new Promise<void>(resolve => { markHeld = resolve; });
+  const releaseAllowed = new Promise<void>(resolve => { allowRelease = resolve; });
+  const pending = withRepoLock(key, async () => {
+    markHeld();
+    await releaseAllowed;
+  });
+  await held;
+  return async () => {
+    allowRelease();
+    await pending;
+  };
+}
+
+async function waitForLockQueue(): Promise<void> {
+  await new Promise<void>(resolve => setImmediate(resolve));
 }
 
 function gitResult(stdout = "", exitCode = 0): GitResult {
@@ -486,6 +515,117 @@ describe("MCP tool handlers", () => {
 
     await expect(git(repoA, ["rev-parse", archivedCandidate.anchorRef])).resolves.toBe(commitOid);
     expect(store.decision).toBeNull();
+  });
+
+  it.each(["review", "decide", "integrate"] as const)(
+    "reloads the archive after a queued %s lifecycle request acquires the repository lock",
+    async operation => {
+      const store = new FakeStore();
+      if (operation === "integrate") {
+        store.decision = { decision: "accepted", recordedAt: "2026-07-19T00:00:00.000Z" };
+      }
+      let markCallerCanonicalized!: () => void;
+      const callerCanonicalized = new Promise<void>(resolve => {
+        markCallerCanonicalized = resolve;
+      });
+      const basePlatform = fakePlatform();
+      const ps = {
+        ...basePlatform,
+        canonicalizePath: async (input: string) => {
+          const canonical = await basePlatform.canonicalizePath(input);
+          if (input === "/supplied/repo") markCallerCanonicalized();
+          return canonical;
+        },
+      } as PlatformServices;
+      const deps = dependencies(store, ps);
+      let gitCalls = 0;
+      let integrationCalls = 0;
+      const originalGit = deps.git!;
+      deps.git = async (cwd, args, indexFile) => {
+        gitCalls += 1;
+        return originalGit(cwd, args, indexFile);
+      };
+      deps.applyCandidateTree = async () => {
+        integrationCalls += 1;
+        return { integration: "applied", detail: "candidate tree applied" };
+      };
+      const releaseLock = await holdRepoLock("/canonical/repo/.git");
+      const pending = operation === "review"
+        ? handleReviewCandidate("/supplied/repo", "run-tools", deps)
+        : operation === "decide"
+          ? handleDecideCandidate("/supplied/repo", "run-tools", "accepted", deps)
+          : handleIntegrateCandidate(
+            "/supplied/repo",
+            "run-tools",
+            candidate.manifestHash,
+            deps,
+          );
+
+      await callerCanonicalized;
+      await waitForLockQueue();
+      store.storedResult = failedSlicedResult;
+      await releaseLock();
+
+      await expect(pending).resolves.toEqual(operation === "review"
+        ? {
+          ok: false,
+          error: "candidate-not-found",
+          diagnostic: "archived run has no candidate",
+        }
+        : {
+          ok: false,
+          error: "candidate-not-verified",
+          diagnostic: "candidate did not complete independent verification",
+        });
+      expect(gitCalls).toBe(0);
+      expect(integrationCalls).toBe(0);
+      if (operation === "decide") expect(store.decision).toBeNull();
+    },
+  );
+
+  it("rejects an archived repository identity that changes before the queued archive load", async () => {
+    const repoA = "/canonical/repo-a";
+    const repoB = "/canonical/repo-b";
+    const callerPath = "/supplied/repo-a";
+    const store = new FakeStore(result, { ...manifest, repoRoot: repoA });
+    let markCallerCanonicalized!: () => void;
+    const callerCanonicalized = new Promise<void>(resolve => {
+      markCallerCanonicalized = resolve;
+    });
+    const ps = {
+      ...fakePlatform(),
+      canonicalizePath: async (input: string) => {
+        if (input === callerPath) {
+          markCallerCanonicalized();
+          return { input, canonical: repoA, gitCommonDir: `${repoA}/.git` };
+        }
+        if (input === repoA || input === repoB) {
+          return { input, canonical: input, gitCommonDir: `${input}/.git` };
+        }
+        throw new Error(`unexpected path: ${input}`);
+      },
+    } as PlatformServices;
+    const deps = dependencies(store, ps);
+    let gitCalls = 0;
+    const originalGit = deps.git!;
+    deps.git = async (cwd, args, indexFile) => {
+      gitCalls += 1;
+      return originalGit(cwd, args, indexFile);
+    };
+    const releaseLock = await holdRepoLock(`${repoA}/.git`);
+    const pending = handleReviewCandidate(callerPath, "run-tools", deps);
+
+    await callerCanonicalized;
+    await waitForLockQueue();
+    store.storedManifest = { ...manifest, repoRoot: repoB };
+    await releaseLock();
+
+    await expect(pending).resolves.toEqual({
+      ok: false,
+      error: "run-checkout-mismatch",
+      diagnostic: "candidate run belongs to a different repository than the supplied checkoutPath",
+    });
+    expect(gitCalls).toBe(0);
   });
 
   it("holds the checkout file lock while recording a decision and releases it afterwards", async () => {
