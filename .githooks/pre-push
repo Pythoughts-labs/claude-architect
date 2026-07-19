@@ -17,32 +17,65 @@ npx tsc --noEmit
 echo "[pre-push] full test suite"
 npx vitest run --silent
 
-# Pushing main or a tag is a release-facing action: also run the release validator.
+# Record which refs are being pushed (stdin is consumed here; read it once).
 release_push=0
 tag_push=0
+pushed_branches=()
 while read -r _local_ref _local_sha remote_ref _remote_sha; do
   case "$remote_ref" in
-    refs/heads/main) release_push=1 ;;
+    refs/heads/main) release_push=1; pushed_branches+=("main") ;;
+    refs/heads/*) pushed_branches+=("${remote_ref#refs/heads/}") ;;
     refs/tags/*) release_push=1; tag_push=1 ;;
   esac
 done
 
+# The local suite above runs on ONE OS. Cross-platform jobs (Linux/macOS/Windows)
+# only run in CI, so a platform-specific failure — like a POSIX-only file op that
+# EPERMs on Windows — is invisible here. Actual CI conclusions are the only signal.
+# Return the latest COMPLETED CI conclusion for a branch, else "none".
+branch_ci_conclusion() {
+  command -v gh >/dev/null 2>&1 || { echo "none"; return; }
+  gh run list --branch "$1" --limit 1 --json status,conclusion \
+    --jq 'if (.[0].status // "") == "completed" then (.[0].conclusion // "none") else "none" end' \
+    2>/dev/null || echo "none"
+}
+
+# A red base branch cannot be run locally, so inheriting its failures via a
+# merge/rebase is invisible to the suite above. Surface it loudly on every push.
+main_ci=$(branch_ci_conclusion main)
+if [ "$main_ci" = "failure" ]; then
+  echo "[pre-push] WARNING: latest CI on origin/main is FAILING — a merge/rebase inherits its red." >&2
+  echo "[pre-push]   Inspect: gh run list --branch main --limit 1" >&2
+fi
+
+# Refuse to stack more work on, or merge, a branch whose latest CI is already red
+# (e.g. a platform-only failure the local suite never sees). This turns "CI went
+# red and nobody noticed" into a hard stop at the next push.
+for br in "${pushed_branches[@]}"; do
+  [ "$br" = "main" ] && continue  # main handled by the release block below
+  concl=$(branch_ci_conclusion "$br")
+  if [ "$concl" = "failure" ]; then
+    echo "[pre-push] ERROR: latest CI on '$br' is FAILING (includes cross-platform jobs the local suite cannot run)." >&2
+    echo "[pre-push]   Inspect: gh run list --branch $br --limit 1" >&2
+    echo "[pre-push]   Fix CI first. If THIS push IS the fix, re-run: git push --no-verify" >&2
+    exit 1
+  fi
+done
+
+# Pushing main or a tag is a release-facing action: also run the release validator.
 if [ "$release_push" -eq 1 ]; then
   echo "[pre-push] release validator (main/tag push)"
   bash scripts/validate-release.sh
 
-  # Cross-platform CI cannot run locally. A tag must never be cut on red CI;
-  # a main push on red CI is allowed (it may BE the fix) but warns loudly.
-  if command -v gh >/dev/null 2>&1; then
-    latest=$(gh run list --branch main --limit 1 --json conclusion --jq '.[0].conclusion' 2>/dev/null || echo "unknown")
-    if [ "$latest" = "failure" ]; then
-      if [ "$tag_push" -eq 1 ]; then
-        echo "[pre-push] ERROR: latest CI on origin/main is FAILING — refusing to push a tag." >&2
-        echo "[pre-push] Fix CI first, or bypass knowingly with --no-verify." >&2
-        exit 1
-      fi
-      echo "[pre-push] WARNING: latest CI on origin/main is FAILING — this push should fix it." >&2
+  # A tag must never be cut on red CI; a main push on red CI is allowed (it may BE
+  # the fix) but warns loudly.
+  if [ "$main_ci" = "failure" ]; then
+    if [ "$tag_push" -eq 1 ]; then
+      echo "[pre-push] ERROR: latest CI on origin/main is FAILING — refusing to push a tag." >&2
+      echo "[pre-push] Fix CI first, or bypass knowingly with --no-verify." >&2
+      exit 1
     fi
+    echo "[pre-push] WARNING: latest CI on origin/main is FAILING — this push should fix it." >&2
   fi
 fi
 
