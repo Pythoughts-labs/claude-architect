@@ -32143,6 +32143,7 @@ async function truncateCleanupTornTail(filename) {
   }
 }
 async function repositoryRootExists(repoRoot) {
+  if (!path14.isAbsolute(repoRoot)) return true;
   try {
     await realpath6(repoRoot);
     return true;

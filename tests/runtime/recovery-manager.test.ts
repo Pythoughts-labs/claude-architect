@@ -1994,6 +1994,40 @@ describe("recoverStaleRuns", () => {
     })).resolves.toEqual({ recovered: [], quarantined: [] });
   });
 
+  it("fails closed on a malformed relative repoRoot instead of treating it as repo-gone", async () => {
+    const runId = "run-prune-relative-reporoot";
+    const quarantineName = `.prune-${runId}-00000000-0000-4000-8000-00000000000a`;
+    const runsRoot = path.join(process.env.CLAUDE_PLUGIN_DATA!, "runs");
+    await mkdir(path.join(runsRoot, runId), { recursive: true });
+    await writeFile(path.join(runsRoot, "cleanup.ndjson"), `${JSON.stringify({
+      event: "prune-cleanup-intent",
+      runId,
+      reason: "max-age",
+      anchorCleanup: "pending",
+      archiveBytes: 3,
+      quarantineName,
+      repoRoot: "relative/not-absolute/repo",
+      anchorRef: null,
+      backupRef: null,
+      candidateCommitOid: null,
+      recordedAt: "2026-07-14T12:00:00.000Z",
+    })}\n`);
+
+    // A relative repoRoot is a corrupted record, not a deleted repository. Recovery must
+    // fail closed (validateRepositoryRoot rejects a non-absolute root) rather than resolve
+    // it against the CWD and silently route it into the repo-absent reconcile path. Without
+    // the absoluteness guard, realpath resolves it against the CWD, reports absence, and
+    // recovery wrongly reconciles the run as repo-gone.
+    await expect(recoverStaleRuns({
+      platformServices: {
+        os: "darwin",
+        async getProcessStartToken() { return null; },
+        async terminateProcessTreeByPid() {},
+      },
+      isProcessAlive: () => false,
+    })).rejects.toThrow(/not absolute/i);
+  });
+
   it("reclaims a dead-owner cleanup journal lock before replaying an interrupted prune", async () => {
     const repo = await initRepo();
     const runId = "run-prune-journal-locked";

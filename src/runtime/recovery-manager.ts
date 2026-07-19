@@ -1233,6 +1233,12 @@ async function truncateCleanupTornTail(filename: string): Promise<void> {
 }
 
 async function repositoryRootExists(repoRoot: string): Promise<boolean> {
+  // A non-absolute repoRoot is a malformed record, not a deleted repository: realpath
+  // would resolve it against the process CWD and could report a corrupt record as "gone",
+  // fail-open routing it into the repo-absent reconcile path. Report it present so it falls
+  // through to validateRepositoryRoot's absoluteness rejection and stays fail-closed,
+  // matching how every other anomalous cleanup record halts recovery for investigation.
+  if (!path.isAbsolute(repoRoot)) return true;
   try {
     await realpath(repoRoot);
     return true;
