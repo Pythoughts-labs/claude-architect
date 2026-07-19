@@ -1657,6 +1657,31 @@ describe("recoverStaleRuns", () => {
     await expect(recoverStaleRuns()).rejects.toThrow(/cleanup journal contains invalid JSON/i);
   });
 
+  it.each([
+    ["blank", "\n"],
+    ["whitespace-only", " \t\n"],
+  ])("rejects a complete %s cleanup journal record", async (_description, contents) => {
+    const runsRoot = path.join(process.env.CLAUDE_PLUGIN_DATA!, "runs");
+    await mkdir(runsRoot, { recursive: true });
+    await writeFile(path.join(runsRoot, "cleanup.ndjson"), contents);
+
+    await expect(recoverStaleRuns()).rejects.toThrow(/cleanup journal contains a blank record/i);
+  });
+
+  it("rejects a hard-linked cleanup journal without mutating its alias", async () => {
+    const runsRoot = path.join(process.env.CLAUDE_PLUGIN_DATA!, "runs");
+    const journalPath = path.join(runsRoot, "cleanup.ndjson");
+    const aliasPath = path.join(process.env.CLAUDE_PLUGIN_DATA!, "cleanup-journal-alias");
+    const journalBytes = Buffer.alloc(0);
+    await mkdir(runsRoot, { recursive: true });
+    await writeFile(journalPath, journalBytes);
+    await link(journalPath, aliasPath);
+
+    await expect(recoverStaleRuns()).rejects.toThrow(/cleanup journal.*single-link/i);
+    await expect(readFile(journalPath)).resolves.toEqual(journalBytes);
+    await expect(readFile(aliasPath)).resolves.toEqual(journalBytes);
+  });
+
   it("allows normal recovery when the cleanup journal is fully terminal", async () => {
     const repo = await initRepo();
     const runId = "run-terminal-cleanup-healthy";
