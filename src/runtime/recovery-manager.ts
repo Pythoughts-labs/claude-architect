@@ -412,12 +412,55 @@ function boundedQuarantineReason(error: unknown): string {
   const sanitized = redact(raw)
     .replace(/\\\\[^'"\r\n]*/g, "[path]")
     .replace(/[A-Za-z]:[\\/][^'"\r\n]*/g, "[path]")
+    .replace(/\\[^'"\r\n]*/g, "[path]")
     .replace(/\/[^'"\r\n]*/g, "[path]");
   const bytes = Buffer.from(sanitized, "utf8");
   if (bytes.byteLength <= MAX_QUARANTINE_REASON_BYTES) return sanitized;
   let end = MAX_QUARANTINE_REASON_BYTES;
   while (end > 0 && (bytes[end]! & 0xc0) === 0x80) end -= 1;
   return bytes.subarray(0, end).toString("utf8");
+}
+
+function parseRecoveryQuarantineRecord(line: string): RecoveryQuarantineRecord {
+  if (Buffer.byteLength(`${line}\n`, "utf8") > MAX_QUARANTINE_RECORD_BYTES) {
+    throw new RuntimeError("recovery quarantine journal record exceeds its size limit");
+  }
+  let value: unknown;
+  try {
+    value = JSON.parse(line);
+  } catch (cause) {
+    throw new RuntimeError("recovery quarantine journal contains invalid JSON", { cause });
+  }
+  if (typeof value !== "object" || value === null) {
+    throw new RuntimeError("recovery quarantine journal record must be an object");
+  }
+  const record = value as Partial<RecoveryQuarantineRecord>;
+  validateRunId(record.runId);
+  if (Object.keys(value).sort().join(",") !== "event,reason,recordedAt,runId"
+    || record.event !== "recovery-quarantine"
+    || typeof record.reason !== "string"
+    || Buffer.byteLength(record.reason, "utf8") > MAX_QUARANTINE_REASON_BYTES
+    || typeof record.recordedAt !== "string"
+    || !Number.isFinite(Date.parse(record.recordedAt))) {
+    throw new RuntimeError("recovery quarantine journal record is malformed");
+  }
+  return record as RecoveryQuarantineRecord;
+}
+
+async function readRecoveryQuarantineJournal(runsRoot: string): Promise<Set<string>> {
+  const text = await readBoundedRegularFile(
+    path.join(runsRoot, "recovery-quarantine.ndjson"),
+  );
+  const runIds = new Set<string>();
+  if (text === null || text === "") return runIds;
+  if (!text.endsWith("\n")) {
+    throw new RuntimeError("recovery quarantine journal has a torn final record");
+  }
+  for (const line of text.slice(0, -1).split("\n")) {
+    if (line === "") throw new RuntimeError("recovery quarantine journal contains a blank record");
+    runIds.add(parseRecoveryQuarantineRecord(line).runId);
+  }
+  return runIds;
 }
 
 async function appendRecoveryQuarantineRecord(
@@ -463,30 +506,57 @@ async function quarantineRun(
   error: unknown,
 ): Promise<void> {
   const runDirectory = path.join(runsRoot, runId);
-  const runIdentity = await plainDirectoryIdentity(runDirectory);
-  if (runIdentity === null) throw new RuntimeError("poisoned recovery run disappeared");
   const quarantinePath = path.join(runsRoot, `.poisoned-${runId}`);
-  if (await plainDirectoryIdentity(quarantinePath) !== null) {
-    throw new RuntimeError("poisoned recovery quarantine already exists");
+  let runIdentity: DirectoryIdentity | null = null;
+  let renamed = false;
+  let journaled = false;
+  try {
+    runIdentity = await plainDirectoryIdentity(runDirectory);
+    if (runIdentity === null) throw new RuntimeError("poisoned recovery run disappeared");
+    if (await plainDirectoryIdentity(quarantinePath) !== null) {
+      throw new RuntimeError("poisoned recovery quarantine already exists");
+    }
+    await rename(runDirectory, quarantinePath);
+    renamed = true;
+    const quarantineIdentity = await plainDirectoryIdentity(quarantinePath);
+    if (quarantineIdentity === null
+      || quarantineIdentity.dev !== runIdentity.dev
+      || quarantineIdentity.ino !== runIdentity.ino) {
+      throw new RuntimeError("poisoned recovery run identity changed during quarantine");
+    }
+    const record: RecoveryQuarantineRecord = {
+      event: "recovery-quarantine",
+      runId,
+      reason: boundedQuarantineReason(error),
+      recordedAt: new Date().toISOString(),
+    };
+    await appendRecoveryQuarantineRecord(runsRoot, record);
+    journaled = true;
+    logger.warn("startup recovery quarantined poisoned run", {
+      runId,
+      reason: record.reason,
+    });
+  } catch (quarantineError) {
+    const errors = [error, quarantineError];
+    if (renamed && !journaled && runIdentity !== null) {
+      try {
+        const quarantineMetadata = await lstat(quarantinePath);
+        if (!isPlainDirectory(quarantineMetadata)
+          || !sameIdentity(quarantineMetadata, runIdentity)
+          || await plainDirectoryIdentity(runDirectory) !== null) {
+          throw new RuntimeError("poisoned recovery rollback identity or destination is unsafe");
+        }
+        await rename(quarantinePath, runDirectory);
+        const restoredMetadata = await lstat(runDirectory);
+        if (!isPlainDirectory(restoredMetadata) || !sameIdentity(restoredMetadata, runIdentity)) {
+          throw new RuntimeError("poisoned recovery rollback identity changed");
+        }
+      } catch (rollbackError) {
+        errors.push(rollbackError);
+      }
+    }
+    throw new AggregateError(errors, "run recovery failed and quarantine did not complete");
   }
-  await rename(runDirectory, quarantinePath);
-  const quarantineIdentity = await plainDirectoryIdentity(quarantinePath);
-  if (quarantineIdentity === null
-    || quarantineIdentity.dev !== runIdentity.dev
-    || quarantineIdentity.ino !== runIdentity.ino) {
-    throw new RuntimeError("poisoned recovery run identity changed during quarantine");
-  }
-  const record: RecoveryQuarantineRecord = {
-    event: "recovery-quarantine",
-    runId,
-    reason: boundedQuarantineReason(error),
-    recordedAt: new Date().toISOString(),
-  };
-  await appendRecoveryQuarantineRecord(runsRoot, record);
-  logger.warn("startup recovery quarantined poisoned run", {
-    runId,
-    reason: record.reason,
-  });
 }
 
 async function reconcileCleanupRefs(
@@ -955,6 +1025,9 @@ export async function recoverStaleRuns(
     const runsRoot = path.join(root, "runs");
     const runsIdentity = await plainDirectoryIdentity(runsRoot);
     if (runsIdentity !== null) await replayInterruptedPrunes(runsRoot);
+    const journaledQuarantines = runsIdentity === null
+      ? new Set<string>()
+      : await readRecoveryQuarantineJournal(runsRoot);
 
     const stale: RunStartRecord[] = [];
     const recovered: string[] = [];
@@ -962,6 +1035,14 @@ export async function recoverStaleRuns(
     if (runsIdentity !== null) {
       const runEntries = await readdir(runsRoot, { withFileTypes: true });
       for (const entry of runEntries.sort((left, right) => left.name.localeCompare(right.name))) {
+        if (entry.isDirectory() && !entry.isSymbolicLink() && entry.name.startsWith(".poisoned-")) {
+          const runId = entry.name.slice(".poisoned-".length);
+          validateRunId(runId);
+          if (!journaledQuarantines.has(runId)) {
+            throw new RuntimeError(`unjournaled poisoned run detected: ${runId}`);
+          }
+          continue;
+        }
         if (!entry.isDirectory() || entry.isSymbolicLink() || !SAFE_RUN_ID.test(entry.name)) continue;
         try {
           const runDirectory = path.join(runsRoot, entry.name);

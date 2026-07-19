@@ -726,6 +726,122 @@ describe("recoverStaleRuns", () => {
     await expectQuarantinedRun(poisonedRunId, poisonedStore.runDirectory, [missingCommonDir]);
   }, { timeout: 120_000 });
 
+  it("restores a poisoned run and preserves both errors when quarantine persistence fails", async () => {
+    const runId = "run-journal-failure";
+    const repo = await initRepo();
+    const store = await createUnfinishedRun(runId, repo.commonDir, 4242, "darwin:recorded");
+    const runsRoot = path.dirname(store.runDirectory);
+
+    let thrown: unknown;
+    try {
+      await recoverStaleRuns({
+        platformServices: {
+          os: "darwin",
+          async getProcessStartToken(pid) {
+            if (pid === 4242) {
+              await mkdir(path.join(runsRoot, "recovery-quarantine.ndjson"));
+              throw new Error("primary poison error");
+            }
+            return "darwin:self";
+          },
+          async terminateProcessTreeByPid() {},
+        },
+        isProcessAlive: pid => pid === 4242,
+      });
+    } catch (error) {
+      thrown = error;
+    }
+
+    expect(thrown).toBeInstanceOf(AggregateError);
+    const errors = (thrown as AggregateError).errors as unknown[];
+    expect(errors).toHaveLength(2);
+    expect(String(errors[0])).toContain("primary poison error");
+    expect(String(errors[1])).toMatch(/EISDIR|regular file|incompatible/i);
+    await expect(access(store.runDirectory)).resolves.toBeUndefined();
+    await expectMissing(path.join(runsRoot, `.poisoned-${runId}`));
+  });
+
+  it("fails closed for an unjournaled poisoned run directory", async () => {
+    const runId = "run-unjournaled-poison";
+    const runsRoot = path.join(process.env.CLAUDE_PLUGIN_DATA!, "runs");
+    await mkdir(path.join(runsRoot, `.poisoned-${runId}`), { recursive: true });
+
+    await expect(recoverStaleRuns()).rejects.toThrow(/unjournaled poisoned run/i);
+  });
+
+  it("authorizes journaled poison without suppressing a normal historical run", async () => {
+    const repo = await initRepo();
+    const poisonRunId = "run-journaled-poison";
+    const historicalRunId = "run-historical-record";
+    const historicalStore = await createUnfinishedRun(historicalRunId, repo.commonDir, null);
+    const runsRoot = path.dirname(historicalStore.runDirectory);
+    await mkdir(path.join(runsRoot, `.poisoned-${poisonRunId}`));
+    await writeFile(path.join(runsRoot, "recovery-quarantine.ndjson"), [
+      JSON.stringify({
+        event: "recovery-quarantine",
+        runId: poisonRunId,
+        reason: "Error: poison",
+        recordedAt: "2026-07-19T00:00:00.000Z",
+      }),
+      JSON.stringify({
+        event: "recovery-quarantine",
+        runId: historicalRunId,
+        reason: "Error: historical intent",
+        recordedAt: "2026-07-19T00:00:00.000Z",
+      }),
+      "",
+    ].join("\n"));
+
+    await expect(recoverStaleRuns({ isProcessAlive: () => false }))
+      .resolves.toEqual({ recovered: [historicalRunId], quarantined: [] });
+  });
+
+  it.each([
+    ["torn", "{\"event\":\"recovery-quarantine\"}"],
+    ["malformed", `${JSON.stringify({
+      event: "unexpected",
+      runId: "run-bad-journal",
+      reason: "Error: bad",
+      recordedAt: "2026-07-19T00:00:00.000Z",
+    })}\n`],
+  ])("fails closed for a %s quarantine journal", async (_kind, contents) => {
+    const runsRoot = path.join(process.env.CLAUDE_PLUGIN_DATA!, "runs");
+    await mkdir(runsRoot, { recursive: true });
+    await writeFile(path.join(runsRoot, "recovery-quarantine.ndjson"), contents);
+
+    await expect(recoverStaleRuns()).rejects.toThrow(/recovery quarantine journal/i);
+  });
+
+  it("redacts a single-backslash-rooted Windows path from quarantine diagnostics", async () => {
+    const runId = "run-rooted-windows-path";
+    const repo = await initRepo();
+    await createUnfinishedRun(runId, repo.commonDir, 4242, "darwin:recorded");
+    const rootedPath = "\\Users\\alice\\repo";
+    const warn = vi.spyOn(logger, "warn").mockImplementation(() => {});
+
+    await expect(recoverStaleRuns({
+      platformServices: {
+        os: "darwin",
+        async getProcessStartToken(pid) {
+          if (pid === 4242) throw new Error(`callback failed at ${rootedPath}`);
+          return "darwin:self";
+        },
+        async terminateProcessTreeByPid() {},
+      },
+      isProcessAlive: pid => pid === 4242,
+    })).resolves.toEqual({ recovered: [], quarantined: [runId] });
+
+    const journal = await readFile(
+      path.join(process.env.CLAUDE_PLUGIN_DATA!, "runs", "recovery-quarantine.ndjson"),
+      "utf8",
+    );
+    const record = JSON.parse(journal) as { reason: string };
+    const diagnostic = warn.mock.calls[0]?.[1] as { reason?: string };
+    warn.mockRestore();
+    expect(record.reason).not.toContain(rootedPath);
+    expect(diagnostic.reason).not.toContain(rootedPath);
+  });
+
   it("escalates a live matching orphan cooperatively and then forcibly", async () => {
     const repo = await initRepo();
     const runId = "run-live-orphan-forced";
