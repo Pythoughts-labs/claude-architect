@@ -948,40 +948,126 @@ async function commitCleanupRefs(record: CleanupRecord): Promise<void> {
   await deleteExactRef(repoRoot, record.backupRef!, backupOid);
 }
 
-async function replayInterruptedPrunes(runsRoot: string): Promise<void> {
+async function readPendingCleanupRecords(
+  runsRoot: string,
+): Promise<Map<string, CleanupRecord>> {
   const text = await readCleanupJournal(path.join(runsRoot, "cleanup.ndjson"));
-  if (text === null || text.trim() === "") return;
   const pending = new Map<string, CleanupRecord>();
+  if (text === null || text.trim() === "") return pending;
   for (const line of text.trimEnd().split("\n")) {
     if (line.trim() === "") throw new RuntimeError("cleanup journal contains a blank record");
     const record = parseCleanupRecord(line);
     if (record.event === "prune-cleanup-intent") pending.set(record.runId, record);
     else pending.delete(record.runId);
   }
+  return pending;
+}
+
+async function currentPendingCleanupRecord(
+  runsRoot: string,
+  expected: CleanupRecord,
+): Promise<CleanupRecord | null> {
+  const current = (await readPendingCleanupRecords(runsRoot)).get(expected.runId) ?? null;
+  if (current !== null && JSON.stringify(current) !== JSON.stringify(expected)) {
+    throw new RuntimeError("cleanup journal record changed before interrupted prune replay");
+  }
+  return current;
+}
+
+async function checkoutLockKeyForRepository(repoRoot: string): Promise<string> {
+  const canonicalRoot = await validateRepositoryRoot(repoRoot);
+  const result = await git(canonicalRoot, [
+    "rev-parse",
+    "--path-format=absolute",
+    "--git-common-dir",
+  ]);
+  if (result.exitCode !== 0) {
+    throw runGitError("resolve cleanup repository common directory", result);
+  }
+  const commonDir = await validateGitCommonDir(await realpath(result.stdout.trim()));
+  return createHash("sha256").update(commonDir).digest("hex");
+}
+
+async function replayInterruptedPruneRecord(
+  runsRoot: string,
+  record: CleanupRecord,
+): Promise<void> {
+  const runDirectory = path.join(runsRoot, record.runId);
+  const quarantinePath = path.join(runsRoot, record.quarantineName);
+  const runIdentity = await plainDirectoryIdentity(runDirectory);
+  const quarantineIdentity = await plainDirectoryIdentity(quarantinePath);
+  if (runIdentity !== null && quarantineIdentity !== null) {
+    throw new RuntimeError("both retained and quarantined run archives exist during recovery");
+  }
+  const action = runIdentity !== null ? "rollback" : "finish";
+  const outcome = await reconcileCleanupRefs(record, action);
+  if (action === "finish") {
+    if (quarantineIdentity !== null) {
+      await removePlainDirectory(quarantinePath, quarantineIdentity);
+    }
+    await commitCleanupRefs(record);
+  }
+  await appendCleanupRecord(runsRoot, {
+    ...record,
+    event: action === "finish" ? "prune-cleanup-complete" : "prune-cleanup-rollback",
+    anchorCleanup: outcome,
+    recordedAt: new Date().toISOString(),
+  });
+}
+
+async function replayInterruptedPrunes(
+  runsRoot: string,
+  locksRoot: string,
+  ownerContents: Buffer,
+  isProcessAlive: (pid: number) => boolean,
+  getProcessStartToken: (pid: number) => Promise<string | null>,
+): Promise<void> {
+  const pending = await readPendingCleanupRecords(runsRoot);
 
   for (const record of [...pending.values()].sort((left, right) =>
     left.runId.localeCompare(right.runId))) {
-    const runDirectory = path.join(runsRoot, record.runId);
-    const quarantinePath = path.join(runsRoot, record.quarantineName);
-    const runIdentity = await plainDirectoryIdentity(runDirectory);
-    const quarantineIdentity = await plainDirectoryIdentity(quarantinePath);
-    if (runIdentity !== null && quarantineIdentity !== null) {
-      throw new RuntimeError("both retained and quarantined run archives exist during recovery");
-    }
-    const action = runIdentity !== null ? "rollback" : "finish";
-    const outcome = await reconcileCleanupRefs(record, action);
-    if (action === "finish") {
-      if (quarantineIdentity !== null) {
-        await removePlainDirectory(quarantinePath, quarantineIdentity);
+    if (record.repoRoot === null) {
+      const currentRecord = await currentPendingCleanupRecord(runsRoot, record);
+      if (currentRecord !== null) {
+        await replayInterruptedPruneRecord(runsRoot, currentRecord);
       }
-      await commitCleanupRefs(record);
+      continue;
     }
-    await appendCleanupRecord(runsRoot, {
-      ...record,
-      event: action === "finish" ? "prune-cleanup-complete" : "prune-cleanup-rollback",
-      anchorCleanup: outcome,
-      recordedAt: new Date().toISOString(),
-    });
+
+    const lockKey = await checkoutLockKeyForRepository(record.repoRoot);
+    const checkoutLock = await acquireOwnedLock(
+      path.join(locksRoot, `${lockKey}.lock`),
+      ownerContents,
+      isProcessAlive,
+      getProcessStartToken,
+    );
+    if (checkoutLock === null) continue;
+    let replayError: unknown;
+    let replayFailed = false;
+    try {
+      const currentRecord = await currentPendingCleanupRecord(runsRoot, record);
+      if (currentRecord !== null) {
+        const currentLockKey = await checkoutLockKeyForRepository(currentRecord.repoRoot!);
+        if (currentLockKey !== lockKey) {
+          throw new RuntimeError("cleanup repository identity changed after checkout lock acquisition");
+        }
+        await replayInterruptedPruneRecord(runsRoot, currentRecord);
+      }
+    } catch (error) {
+      replayError = error;
+      replayFailed = true;
+    } finally {
+      try {
+        await releaseOwnedLock(checkoutLock);
+      } catch (releaseError) {
+        if (!replayFailed) throw releaseError;
+        throw new AggregateError(
+          [replayError, releaseError],
+          "interrupted prune replay failed and its checkout lock could not be released",
+        );
+      }
+    }
+    if (replayFailed) throw replayError;
   }
 }
 
@@ -1678,7 +1764,15 @@ export async function recoverStaleRuns(
   try {
     const runsRoot = path.join(root, "runs");
     const runsIdentity = await plainDirectoryIdentity(runsRoot);
-    if (runsIdentity !== null) await replayInterruptedPrunes(runsRoot);
+    if (runsIdentity !== null) {
+      await replayInterruptedPrunes(
+        runsRoot,
+        locksRoot,
+        ownerContents,
+        isProcessAlive,
+        pid => ps.getProcessStartToken(pid),
+      );
+    }
     const journaledQuarantines = runsIdentity === null
       ? new Set<string>()
       : (await readRecoveryQuarantineJournal(runsRoot)).runIds;

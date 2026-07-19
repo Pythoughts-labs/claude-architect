@@ -1580,6 +1580,92 @@ describe("recoverStaleRuns", () => {
     await expect(store.readResult(runId)).resolves.toMatchObject({ status: "cancelled" });
   });
 
+  it.each([
+    {
+      ownerDescription: "a live matching-token owner",
+      lockBytes: Buffer.from(JSON.stringify({
+        pid: 9501,
+        processToken: "darwin:live-prune",
+      })),
+      ownerIsLive: true,
+    },
+    {
+      ownerDescription: "an incomplete empty owner",
+      lockBytes: Buffer.alloc(0),
+      ownerIsLive: false,
+    },
+  ])("defers interrupted prune replay for $ownerDescription", async ({
+    lockBytes,
+    ownerIsLive,
+  }) => {
+    const repo = await initRepo();
+    const healthyRepo = await initRepo();
+    const runId = ownerIsLive ? "run-prune-live-lock" : "run-prune-incomplete-lock";
+    const healthyRunId = ownerIsLive
+      ? "run-prune-live-lock-healthy"
+      : "run-prune-incomplete-lock-healthy";
+    const healthyStore = await createUnfinishedRun(healthyRunId, healthyRepo.commonDir, null);
+    const anchorRef = `refs/claude-architect/candidates/${runId}`;
+    const backupRef = `refs/claude-architect/prune-backups/${runId}`;
+    const quarantineName = `.prune-${runId}-00000000-0000-4000-8000-000000000003`;
+    const runsRoot = path.join(process.env.CLAUDE_PLUGIN_DATA!, "runs");
+    const runDirectory = path.join(runsRoot, runId);
+    const quarantinePath = path.join(runsRoot, quarantineName);
+    await mkdir(runDirectory, { recursive: true });
+    await writeFile(path.join(runDirectory, "result.json"), "{}\n");
+    await runGit(repo.directory, ["update-ref", backupRef, repo.head]);
+    await rename(runDirectory, quarantinePath);
+    const cleanupBytes = Buffer.from(`${JSON.stringify({
+      event: "prune-cleanup-intent",
+      runId,
+      reason: "max-age",
+      anchorCleanup: "pending",
+      archiveBytes: 3,
+      quarantineName,
+      repoRoot: repo.directory,
+      anchorRef,
+      backupRef,
+      candidateCommitOid: repo.head,
+      recordedAt: "2026-07-14T12:00:00.000Z",
+    })}\n`);
+    const cleanupPath = path.join(runsRoot, "cleanup.ndjson");
+    await writeFile(cleanupPath, cleanupBytes);
+    const quarantineIdentity = await lstat(quarantinePath);
+
+    const lockKey = createHash("sha256").update(repo.commonDir).digest("hex");
+    const checkoutLockPath = path.join(
+      process.env.CLAUDE_PLUGIN_DATA!,
+      "locks",
+      `${lockKey}.lock`,
+    );
+    await mkdir(path.dirname(checkoutLockPath), { recursive: true });
+    await writeFile(checkoutLockPath, lockBytes);
+
+    await expect(recoverStaleRuns({
+      platformServices: {
+        os: "darwin",
+        async getProcessStartToken(pid) {
+          return pid === 9501 ? "darwin:live-prune" : "darwin:self";
+        },
+        async terminateProcessTreeByPid() {},
+      },
+      isProcessAlive: pid => ownerIsLive && pid === 9501,
+    })).resolves.toEqual({ recovered: [healthyRunId], quarantined: [] });
+
+    const settledQuarantine = await lstat(quarantinePath);
+    expect({ dev: settledQuarantine.dev, ino: settledQuarantine.ino }).toEqual({
+      dev: quarantineIdentity.dev,
+      ino: quarantineIdentity.ino,
+    });
+    await expect(readFile(cleanupPath)).resolves.toEqual(cleanupBytes);
+    await expect(readFile(checkoutLockPath)).resolves.toEqual(lockBytes);
+    expect((await git(repo.directory, ["rev-parse", "--verify", "--quiet", anchorRef])).exitCode)
+      .not.toBe(0);
+    expect(await runGit(repo.directory, ["rev-parse", backupRef])).toBe(repo.head);
+    await expect(healthyStore.readResult(healthyRunId))
+      .resolves.toMatchObject({ status: "cancelled" });
+  }, { timeout: 120_000 });
+
   it("finishes an interrupted prune after the archive was quarantined", async () => {
     const repo = await initRepo();
     const runId = "run-prune-finish";
