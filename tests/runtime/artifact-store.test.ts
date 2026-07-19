@@ -30,6 +30,7 @@ import {
   clearRegisteredSecrets,
   registerSecretValue,
 } from "../../src/runtime/redaction.js";
+import { scrubbedGitEnv } from "./helpers/git-fixture-env.js";
 
 const filesystemHooks = vi.hoisted(() => ({
   beforeOpen: undefined as undefined | ((filename: string) => Promise<void>),
@@ -133,13 +134,12 @@ function manifestArgs(
 async function git(cwd: string, args: string[]): Promise<string> {
   const result = await execFileAsync("git", args, {
     cwd,
-    env: {
-      ...process.env,
+    env: scrubbedGitEnv({
       GIT_AUTHOR_NAME: "test",
       GIT_AUTHOR_EMAIL: "test@example.invalid",
       GIT_COMMITTER_NAME: "test",
       GIT_COMMITTER_EMAIL: "test@example.invalid",
-    },
+    }),
   });
   return result.stdout.trim();
 }

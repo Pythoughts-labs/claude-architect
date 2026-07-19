@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { getPlatformServices } from "../../src/platform/select-platform.js";
 import { resolveStateDir } from "../../src/runtime/state-dir.js";
+import { scrubbedGitEnv } from "./helpers/git-fixture-env.js";
 
 const fixture = fileURLToPath(new URL("./fixtures/echo-sleep.mjs", import.meta.url));
 const ps = getPlatformServices();
@@ -17,7 +18,7 @@ let previousStateDir: string | undefined;
 
 function runGit(args: string[], cwd: string): Promise<void> {
   return new Promise((resolve, reject) => {
-    execFile("git", args, { cwd }, error => error ? reject(error) : resolve());
+    execFile("git", args, { cwd, env: scrubbedGitEnv() }, error => error ? reject(error) : resolve());
   });
 }
 

@@ -10,21 +10,48 @@ import {
   gitStatus,
   type GitReadDependencies,
 } from "../../src/mcp/git-read-tools.js";
+import { scrubbedGitEnv } from "./helpers/git-fixture-env.js";
 
 const temporaryPaths: string[] = [];
+const originalGitDir = process.env.GIT_DIR;
 
 function execGit(cwd: string, args: string[]): Promise<void> {
   return new Promise((resolve, reject) => {
-    execFile("git", args, { cwd }, error => error ? reject(error) : resolve());
+    execFile("git", args, { cwd, env: scrubbedGitEnv() }, error => error ? reject(error) : resolve());
   });
 }
 
 afterEach(async () => {
+  if (originalGitDir === undefined) delete process.env.GIT_DIR;
+  else process.env.GIT_DIR = originalGitDir;
   await Promise.all(temporaryPaths.splice(0).map(entry =>
     rm(entry, { recursive: true, force: true })));
 });
 
 describe("read-only Git tools", () => {
+  it("keeps fixture git operations isolated from an inherited GIT_DIR", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "ca-git-read-isolation-"));
+    temporaryPaths.push(root);
+    const foreignGitDir = path.join(root, "foreign-gitdir");
+    const repo = path.join(root, "repo");
+    await mkdir(foreignGitDir);
+    await mkdir(repo);
+    process.env.GIT_DIR = foreignGitDir;
+
+    await execGit(repo, ["init", "-q"]);
+    await execGit(repo, ["config", "user.name", "Test"]);
+    await execGit(repo, ["config", "user.email", "test@example.com"]);
+    await writeFile(path.join(repo, "tracked.txt"), "fixture content\n", "utf8");
+    await execGit(repo, ["add", "tracked.txt"]);
+    await execGit(repo, ["commit", "-qm", "fixture isolation commit"]);
+
+    await expect(access(path.join(repo, ".git"))).resolves.toBeUndefined();
+    await expect(gitLog(repo)).resolves.toMatchObject({
+      ok: true,
+      output: expect.stringContaining("fixture isolation commit"),
+    });
+  }, 30_000);
+
   it("returns redacted status, diff, log, and changed-file observations", async () => {
     const secret = "sk-12345678advisor";
     const root = await mkdtemp(path.join(tmpdir(), "ca-git-read-"));
