@@ -331,7 +331,11 @@ describe("recoverStaleRuns", () => {
     await expect(store.readResult(runId)).resolves.toBeNull();
   }, { timeout: 120_000 });
 
-  it("preserves a primary recovery error when lock releases also fail", async () => {
+  // POSIX-only: the release failure is forced by rm-ing the locks directory while
+  // recovery holds recovery.lock open. Windows blocks removing a directory that
+  // contains an open handle, so the trigger cannot be reproduced; the AggregateError
+  // composition it checks is platform-independent and covered by the POSIX run.
+  it.skipIf(process.platform === "win32")("preserves a primary recovery error when lock releases also fail", async () => {
     const repo = await initRepo();
     const runId = "run-primary-and-release-failure";
     await createUnfinishedRun(runId, repo.commonDir, 4242, "darwin:live");
@@ -465,7 +469,11 @@ describe("recoverStaleRuns", () => {
     await expect(readFile(lockPath, "utf8")).resolves.toBe("9103");
   }, { timeout: 120_000 });
 
-  it("preserves a replacement lock swapped during owner token probing", async () => {
+  // POSIX-only: this simulates a concurrent process renaming a replacement lock onto
+  // the lock file while the reclaimer holds it open for owner probing. Windows blocks
+  // renaming onto an open file at the OS level, so the swap cannot occur — the OS
+  // itself enforces the property the reclaimer's TOCTOU guard proves on POSIX.
+  it.skipIf(process.platform === "win32")("preserves a replacement lock swapped during owner token probing", async () => {
     const locksRoot = path.join(process.env.CLAUDE_PLUGIN_DATA!, "locks");
     const lockPath = path.join(locksRoot, `${"f".repeat(64)}.lock`);
     const replacementPath = path.join(locksRoot, "replacement.lock");
