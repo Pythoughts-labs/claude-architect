@@ -115,6 +115,52 @@ edits).
 4. The pipeline never merges and never waives findings; you and the human
    remain the only decision-makers.
 
+## Sliced pipeline
+
+For a task that decomposes into ordered, independently testable steps, add a
+top-level `slices` array to the spec. Each slice is a scoped mini-spec with its
+own `objective`, `context`, `writeAllowlist`, `forbiddenScope`,
+`successCriteria`, and — required — its own `verification`:
+
+```yaml
+slices:
+  - objective: Add the parser for the new record type.
+    context: The record grammar lives in docs/format.md.
+    writeAllowlist: [src/parse/**]
+    forbiddenScope: [src/emit/**]
+    successCriteria:
+      - New record type round-trips through the parser.
+    verification:
+      - id: parse-tests
+        executable: npx
+        args: [vitest, run, tests/parse]
+        cwd: "."
+        timeoutMs: 600000
+        network: denied
+        expectedExitCodes: [0]
+  - objective: Emit the new record type.
+    # ...its own scope and verification
+```
+
+Slice rules and guarantees:
+
+- Each slice runs **fresh with no context** — a slice implementer sees only its
+  own mini-spec, never a prior slice's conversation, and is gated only by its
+  own `verification`. Each slice's `writeAllowlist` must be a subset of the
+  spec's, and its verification `cwd` must stay inside the candidate root.
+- A deterministic wayfinder routes each completed slice **advance / repair /
+  halt** from its verification result alone — no model judgment. A slice that
+  passes advances; a slice that fails is repaired within its round budget; a
+  slice that cannot be made to pass halts the run.
+- Review and the advisor judge the **composed candidate** at the end, over the
+  whole slice branch. Per-slice review is off by default; opt in with
+  `review.perSlice: true` to review each slice as it lands.
+- A mid-run halt yields a **partial** candidate with
+  `status: "human-decision-required"`, the halted slice index in
+  `haltedSliceIndex`, and each slice's route in `slices`. Present the completed
+  slices, the halt reason, and the partial candidate to the human; never accept
+  or continue past a halt on their behalf.
+
 ## Monitoring a backgrounded delegation
 
 `delegate` and `delegatePipeline` are synchronous, but the host auto-backgrounds
