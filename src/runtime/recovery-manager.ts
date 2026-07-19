@@ -667,8 +667,10 @@ async function reclaimDeadLock(
     }
     const contents = await readHandleBytes(handle, metadata.size);
     if (contents.byteLength !== metadata.size) return "contended";
+    const owner = parseLockOwner(contents.toString("utf8"));
+    if (owner === null) return "contended";
     if (await lockOwnerIsLive(
-      parseLockOwner(contents.toString("utf8")),
+      owner,
       isProcessAlive,
       getProcessStartToken,
     )) return "live";

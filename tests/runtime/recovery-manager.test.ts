@@ -549,6 +549,30 @@ describe("recoverStaleRuns", () => {
     await expect(store.readResult(runId)).resolves.toBeNull();
   });
 
+  it("defers recovery when the checkout lock owner is empty", async () => {
+    const repo = await initRepo();
+    const runId = "run-empty-checkout-owner";
+    const store = await createUnfinishedRun(runId, repo.commonDir, null);
+    const worktree = await new WorktreeManager(repo.directory, runId).create(repo.head);
+    const anchorRef = `refs/claude-architect/candidates/${runId}`;
+    await runGit(repo.directory, ["update-ref", anchorRef, repo.head]);
+    const lockKey = createHash("sha256").update(repo.commonDir).digest("hex");
+    const lockPath = path.join(
+      process.env.CLAUDE_PLUGIN_DATA!,
+      "locks",
+      `${lockKey}.lock`,
+    );
+    await mkdir(path.dirname(lockPath), { recursive: true });
+    await writeFile(lockPath, "");
+
+    await expect(recoverStaleRuns()).resolves.toEqual({ recovered: [], quarantined: [] });
+
+    await expect(store.readResult(runId)).resolves.toBeNull();
+    await expect(access(worktree.path)).resolves.toBeUndefined();
+    expect(await runGit(repo.directory, ["rev-parse", anchorRef])).toBe(repo.head);
+    await expect(readFile(lockPath, "utf8")).resolves.toBe("");
+  }, { timeout: 120_000 });
+
   it("rejects a coercible non-string status instead of treating it as terminal", async () => {
     const runId = "run-malformed-terminal";
     const commonDir = path.join(process.env.CLAUDE_PLUGIN_DATA!, "missing-common-dir");
