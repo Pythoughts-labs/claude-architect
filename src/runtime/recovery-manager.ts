@@ -7,6 +7,7 @@ import {
   open,
   readdir,
   realpath,
+  rename,
   rm,
 } from "node:fs/promises";
 import path from "node:path";
@@ -16,7 +17,9 @@ import { WorktreeManager } from "../git/worktree-manager.js";
 import type { PlatformServices } from "../platform/platform-services.js";
 import { getPlatformServices } from "../platform/select-platform.js";
 import { RuntimeError } from "../util/errors.js";
+import { logger } from "../util/logger.js";
 import { ArtifactStore } from "./artifact-store.js";
+import { redact } from "./redaction.js";
 import { resolveStateDir } from "./state-dir.js";
 
 const NO_FOLLOW = constants.O_NOFOLLOW ?? 0;
@@ -26,6 +29,8 @@ const LOCK_NAME = /^([0-9a-f]{64})\.lock$/;
 const OID = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/;
 const CANDIDATE_REF_PREFIX = "refs/claude-architect/candidates/";
 const BACKUP_REF_PREFIX = "refs/claude-architect/prune-backups/";
+const MAX_QUARANTINE_REASON_BYTES = 2_000;
+const MAX_QUARANTINE_RECORD_BYTES = 4_096;
 
 interface RunStartRecord {
   runId: string;
@@ -50,6 +55,13 @@ interface CleanupRecord {
   anchorRef: string | null;
   backupRef: string | null;
   candidateCommitOid: string | null;
+  recordedAt: string;
+}
+
+interface RecoveryQuarantineRecord {
+  event: "recovery-quarantine";
+  runId: string;
+  reason: string;
   recordedAt: string;
 }
 
@@ -393,6 +405,88 @@ async function appendCleanupRecord(runsRoot: string, record: CleanupRecord): Pro
   if (!isPlainDirectory(currentRoot) || !sameIdentity(currentRoot, identity)) {
     throw new RuntimeError("cleanup journal root changed after recovery append");
   }
+}
+
+function boundedQuarantineReason(error: unknown): string {
+  const raw = error instanceof Error ? `${error.name}: ${error.message}` : String(error);
+  const sanitized = redact(raw)
+    .replace(/\\\\[^'"\r\n]*/g, "[path]")
+    .replace(/[A-Za-z]:[\\/][^'"\r\n]*/g, "[path]")
+    .replace(/\/[^'"\r\n]*/g, "[path]");
+  const bytes = Buffer.from(sanitized, "utf8");
+  if (bytes.byteLength <= MAX_QUARANTINE_REASON_BYTES) return sanitized;
+  let end = MAX_QUARANTINE_REASON_BYTES;
+  while (end > 0 && (bytes[end]! & 0xc0) === 0x80) end -= 1;
+  return bytes.subarray(0, end).toString("utf8");
+}
+
+async function appendRecoveryQuarantineRecord(
+  runsRoot: string,
+  record: RecoveryQuarantineRecord,
+): Promise<void> {
+  const identity = await plainDirectoryIdentity(runsRoot);
+  if (identity === null) throw new RuntimeError("recovery quarantine journal root disappeared");
+  const line = `${JSON.stringify(record)}\n`;
+  const lineBytes = Buffer.byteLength(line, "utf8");
+  if (lineBytes > MAX_QUARANTINE_RECORD_BYTES) {
+    throw new RuntimeError("recovery quarantine record exceeds its size limit");
+  }
+  const filename = path.join(runsRoot, "recovery-quarantine.ndjson");
+  const handle = await open(
+    filename,
+    constants.O_WRONLY | constants.O_CREAT | constants.O_APPEND | NO_FOLLOW,
+    0o600,
+  );
+  try {
+    const metadata = await handle.stat();
+    const currentRoot = await lstat(runsRoot);
+    if (!metadata.isFile()
+      || metadata.size + lineBytes > MAX_STATE_FILE_BYTES
+      || !isPlainDirectory(currentRoot)
+      || !sameIdentity(currentRoot, identity)) {
+      throw new RuntimeError("recovery quarantine journal changed during append");
+    }
+    await handle.writeFile(line, "utf8");
+    await handle.sync();
+  } finally {
+    await handle.close();
+  }
+  const currentRoot = await lstat(runsRoot);
+  if (!isPlainDirectory(currentRoot) || !sameIdentity(currentRoot, identity)) {
+    throw new RuntimeError("recovery quarantine journal root changed after append");
+  }
+}
+
+async function quarantineRun(
+  runsRoot: string,
+  runId: string,
+  error: unknown,
+): Promise<void> {
+  const runDirectory = path.join(runsRoot, runId);
+  const runIdentity = await plainDirectoryIdentity(runDirectory);
+  if (runIdentity === null) throw new RuntimeError("poisoned recovery run disappeared");
+  const quarantinePath = path.join(runsRoot, `.poisoned-${runId}`);
+  if (await plainDirectoryIdentity(quarantinePath) !== null) {
+    throw new RuntimeError("poisoned recovery quarantine already exists");
+  }
+  await rename(runDirectory, quarantinePath);
+  const quarantineIdentity = await plainDirectoryIdentity(quarantinePath);
+  if (quarantineIdentity === null
+    || quarantineIdentity.dev !== runIdentity.dev
+    || quarantineIdentity.ino !== runIdentity.ino) {
+    throw new RuntimeError("poisoned recovery run identity changed during quarantine");
+  }
+  const record: RecoveryQuarantineRecord = {
+    event: "recovery-quarantine",
+    runId,
+    reason: boundedQuarantineReason(error),
+    recordedAt: new Date().toISOString(),
+  };
+  await appendRecoveryQuarantineRecord(runsRoot, record);
+  logger.warn("startup recovery quarantined poisoned run", {
+    runId,
+    reason: record.reason,
+  });
 }
 
 async function reconcileCleanupRefs(
@@ -863,49 +957,55 @@ export async function recoverStaleRuns(
     if (runsIdentity !== null) await replayInterruptedPrunes(runsRoot);
 
     const stale: RunStartRecord[] = [];
+    const recovered: string[] = [];
+    const quarantined: string[] = [];
     if (runsIdentity !== null) {
       const runEntries = await readdir(runsRoot, { withFileTypes: true });
       for (const entry of runEntries.sort((left, right) => left.name.localeCompare(right.name))) {
         if (!entry.isDirectory() || entry.isSymbolicLink() || !SAFE_RUN_ID.test(entry.name)) continue;
-        const runDirectory = path.join(runsRoot, entry.name);
-        const runStartText = await readBoundedRegularFile(path.join(runDirectory, "run-start.json"));
-        if (runStartText === null) continue;
-        const record = parseRunStart(runStartText, entry.name);
-        const store = new ArtifactStore(entry.name);
-        const result = await store.readResult(entry.name);
-        if (result !== null) {
-          validateTerminalResult(result, entry.name);
-          const marker = await store.readPipelineActiveMarker(entry.name);
-          if (marker !== null && !await lockOwnerIsLive(
-            { pid: marker.pid, processToken: marker.processToken },
+        try {
+          const runDirectory = path.join(runsRoot, entry.name);
+          const runStartText = await readBoundedRegularFile(path.join(runDirectory, "run-start.json"));
+          if (runStartText === null) continue;
+          const record = parseRunStart(runStartText, entry.name);
+          const store = new ArtifactStore(entry.name);
+          const result = await store.readResult(entry.name);
+          if (result !== null) {
+            validateTerminalResult(result, entry.name);
+            const marker = await store.readPipelineActiveMarker(entry.name);
+            if (marker !== null && !await lockOwnerIsLive(
+              { pid: marker.pid, processToken: marker.processToken },
+              isProcessAlive,
+              pid => ps.getProcessStartToken(pid),
+            )) {
+              const commonDir = await validateGitCommonDir(record.canonicalCommonDir);
+              for (const managedId of [
+                `${entry.name}-pipeline`,
+                `${entry.name}-verify`,
+              ]) {
+                const worktreePath = path.join(root, "worktrees", managedId);
+                if (await plainDirectoryIdentity(worktreePath) !== null) {
+                  await new WorktreeManager(commonDir, managedId, ps).remove(worktreePath);
+                }
+              }
+              await store.clearPipelineActiveMarker();
+            }
+            continue;
+          }
+          if (await lockIsOwnedByLiveProcess(
+            locksRoot,
+            record.lockKey,
             isProcessAlive,
             pid => ps.getProcessStartToken(pid),
-          )) {
-            const commonDir = await validateGitCommonDir(record.canonicalCommonDir);
-            for (const managedId of [
-              `${entry.name}-pipeline`,
-              `${entry.name}-verify`,
-            ]) {
-              const worktreePath = path.join(root, "worktrees", managedId);
-              if (await plainDirectoryIdentity(worktreePath) !== null) {
-                await new WorktreeManager(commonDir, managedId, ps).remove(worktreePath);
-              }
-            }
-            await store.clearPipelineActiveMarker();
-          }
-          continue;
+          )) continue;
+          stale.push(record);
+        } catch (error) {
+          await quarantineRun(runsRoot, entry.name, error);
+          quarantined.push(entry.name);
         }
-        if (await lockIsOwnedByLiveProcess(
-          locksRoot,
-          record.lockKey,
-          isProcessAlive,
-          pid => ps.getProcessStartToken(pid),
-        )) continue;
-        stale.push(record);
       }
     }
 
-    const recovered: string[] = [];
     for (const record of stale) {
       const checkoutLock = await acquireOwnedLock(
         path.join(locksRoot, `${record.lockKey}.lock`),
@@ -914,7 +1014,8 @@ export async function recoverStaleRuns(
         pid => ps.getProcessStartToken(pid),
       );
       if (checkoutLock === null) continue;
-      let primaryError: unknown;
+      let recoveryError: unknown;
+      let recoveryFailed = false;
       try {
         await recoverRun(
           record,
@@ -925,28 +1026,33 @@ export async function recoverStaleRuns(
           delayMs,
           graceMs,
         );
-        recovered.push(record.runId);
       } catch (error) {
-        primaryError = error;
-        throw error;
+        recoveryError = error;
+        recoveryFailed = true;
       } finally {
         try {
           await releaseOwnedLock(checkoutLock);
         } catch (cleanupError) {
-          if (primaryError === undefined) throw cleanupError;
+          if (!recoveryFailed) throw cleanupError;
           throw new AggregateError(
-            [primaryError, cleanupError],
+            [recoveryError, cleanupError],
             "stale-run recovery failed and its checkout lock could not be released",
           );
         }
       }
+      if (recoveryFailed) {
+        await quarantineRun(runsRoot, record.runId, recoveryError);
+        quarantined.push(record.runId);
+        continue;
+      }
+      recovered.push(record.runId);
     }
     await reclaimLocks(
       locksRoot,
       isProcessAlive,
       pid => ps.getProcessStartToken(pid),
     );
-    return { recovered, quarantined: [] };
+    return { recovered, quarantined };
   } catch (error) {
     primaryError = error;
     throw error;

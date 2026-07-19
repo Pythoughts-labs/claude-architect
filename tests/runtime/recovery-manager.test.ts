@@ -17,6 +17,7 @@ import { WorktreeManager } from "../../src/git/worktree-manager.js";
 import { start } from "../../src/mcp/server.js";
 import { ArtifactStore } from "../../src/runtime/artifact-store.js";
 import { recoverStaleRuns } from "../../src/runtime/recovery-manager.js";
+import { logger } from "../../src/util/logger.js";
 
 const serverEvents = vi.hoisted(() => [] as string[]);
 
@@ -62,6 +63,32 @@ async function initRepo(): Promise<{ directory: string; commonDir: string; head:
 
 async function expectMissing(filename: string): Promise<void> {
   await expect(access(filename)).rejects.toMatchObject({ code: "ENOENT" });
+}
+
+async function expectQuarantinedRun(
+  runId: string,
+  runDirectory: string,
+  forbiddenText: string[] = [],
+): Promise<string> {
+  await expectMissing(runDirectory);
+  await expect(access(path.join(path.dirname(runDirectory), `.poisoned-${runId}`)))
+    .resolves.toBeUndefined();
+  const journal = await readFile(
+    path.join(path.dirname(runDirectory), "recovery-quarantine.ndjson"),
+    "utf8",
+  );
+  const records = journal.trimEnd().split("\n");
+  expect(records).toHaveLength(1);
+  expect(Buffer.byteLength(records[0]!, "utf8")).toBeLessThanOrEqual(4_096);
+  const record = JSON.parse(records[0]!) as { reason: string };
+  expect(record).toMatchObject({
+    event: "recovery-quarantine",
+    runId,
+  });
+  expect(Buffer.byteLength(record.reason, "utf8")).toBeLessThanOrEqual(2_000);
+  await expectMissing(path.join(path.dirname(runDirectory), "cleanup.ndjson"));
+  for (const text of forbiddenText) expect(records[0]).not.toContain(text);
+  return records[0]!;
 }
 
 async function createUnfinishedRun(
@@ -573,7 +600,7 @@ describe("recoverStaleRuns", () => {
     await expect(readFile(lockPath, "utf8")).resolves.toBe("");
   }, { timeout: 120_000 });
 
-  it("rejects a coercible non-string status instead of treating it as terminal", async () => {
+  it("quarantines a coercible non-string terminal status", async () => {
     const runId = "run-malformed-terminal";
     const commonDir = path.join(process.env.CLAUDE_PLUGIN_DATA!, "missing-common-dir");
     const lockKey = createHash("sha256").update(commonDir).digest("hex");
@@ -598,10 +625,11 @@ describe("recoverStaleRuns", () => {
         async getProcessStartToken() { return null; },
         async terminateProcessTreeByPid() {},
       },
-    })).rejects.toThrow(/attempt result.*invalid|terminal attempt result is malformed/);
+    })).resolves.toEqual({ recovered: [], quarantined: [runId] });
+    await expectQuarantinedRun(runId, runDirectory);
   });
 
-  it("rejects a non-string process token", async () => {
+  it("quarantines a non-string process token", async () => {
     const runId = "run-malformed-process-token";
     const commonDir = path.join(process.env.CLAUDE_PLUGIN_DATA!, "missing-common-dir");
     const lockKey = createHash("sha256").update(commonDir).digest("hex");
@@ -622,12 +650,18 @@ describe("recoverStaleRuns", () => {
         async getProcessStartToken() { return null; },
         async terminateProcessTreeByPid() {},
       },
-    })).rejects.toThrow("run-start recovery record is malformed");
+    })).resolves.toEqual({ recovered: [], quarantined: [runId] });
+    await expectQuarantinedRun(runId, runDirectory);
   });
 
-  it("terminates the recorded producer before validating a missing repository", async () => {
+  it("quarantines a missing recorded repository with a bounded redacted diagnostic", async () => {
     const runId = "run-missing-repository";
-    const commonDir = path.join(process.env.CLAUDE_PLUGIN_DATA!, "missing-common-dir");
+    const secret = "sk-recovery-secret-12345678";
+    const commonDir = path.join(
+      process.env.CLAUDE_PLUGIN_DATA!,
+      "missing-common-dir",
+      secret,
+    );
     const lockKey = createHash("sha256").update(commonDir).digest("hex");
     const runDirectory = path.join(process.env.CLAUDE_PLUGIN_DATA!, "runs", runId);
     await mkdir(runDirectory, { recursive: true });
@@ -639,6 +673,7 @@ describe("recoverStaleRuns", () => {
       startedAt: "2026-07-14T12:00:00.000Z",
     })}\n`);
     const terminated: number[] = [];
+    const warn = vi.spyOn(logger, "warn").mockImplementation(() => {});
 
     await expect(recoverStaleRuns({
       platformServices: {
@@ -646,9 +681,50 @@ describe("recoverStaleRuns", () => {
         async getProcessStartToken() { return null; },
         async terminateProcessTreeByPid(pid) { terminated.push(pid); },
       },
-    })).rejects.toMatchObject({ code: "ENOENT" });
+    })).resolves.toEqual({ recovered: [], quarantined: [runId] });
     expect(terminated).toEqual([]);
+    await expectQuarantinedRun(runId, runDirectory, [secret, commonDir]);
+    const warnCalls = [...warn.mock.calls];
+    warn.mockRestore();
+    expect(warnCalls).toHaveLength(1);
+    const diagnostic = JSON.stringify(warnCalls[0]);
+    expect(Buffer.byteLength(diagnostic, "utf8")).toBeLessThanOrEqual(4_096);
+    expect(diagnostic).not.toContain(secret);
+    expect(diagnostic).not.toContain(commonDir);
+    expect(diagnostic).not.toContain(process.env.CLAUDE_PLUGIN_DATA!);
   });
+
+  it("preserves a healthy recovery when a later stale run is poisoned", async () => {
+    const repo = await initRepo();
+    const healthyRunId = "run-a-healthy";
+    const poisonedRunId = "run-z-poisoned";
+    const healthyStore = await createUnfinishedRun(healthyRunId, repo.commonDir, null);
+    const missingCommonDir = path.join(
+      process.env.CLAUDE_PLUGIN_DATA!,
+      "missing-common-dir",
+    );
+    const poisonedStore = await createUnfinishedRun(
+      poisonedRunId,
+      missingCommonDir,
+      null,
+    );
+
+    await expect(recoverStaleRuns({
+      platformServices: {
+        os: "darwin",
+        async getProcessStartToken() { return null; },
+        async terminateProcessTreeByPid() {},
+      },
+      isProcessAlive: () => false,
+    })).resolves.toEqual({
+      recovered: [healthyRunId],
+      quarantined: [poisonedRunId],
+    });
+
+    await expect(healthyStore.readResult(healthyRunId))
+      .resolves.toMatchObject({ status: "cancelled" });
+    await expectQuarantinedRun(poisonedRunId, poisonedStore.runDirectory, [missingCommonDir]);
+  }, { timeout: 120_000 });
 
   it("escalates a live matching orphan cooperatively and then forcibly", async () => {
     const repo = await initRepo();
