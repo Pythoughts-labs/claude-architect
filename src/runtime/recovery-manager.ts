@@ -70,6 +70,13 @@ interface DirectoryIdentity {
   ino: number;
 }
 
+interface RecoveryQuarantineSnapshot {
+  bytes: Buffer;
+  runIds: Set<string>;
+  rootIdentity: DirectoryIdentity;
+  journalIdentity: DirectoryIdentity | null;
+}
+
 export interface RecoveryDependencies {
   platformServices?: Pick<PlatformServices, "os" | "getProcessStartToken" | "terminateProcessTreeByPid">;
   isProcessAlive?: (pid: number) => boolean;
@@ -447,7 +454,23 @@ function parseRecoveryQuarantineRecord(line: string): RecoveryQuarantineRecord {
   return record as RecoveryQuarantineRecord;
 }
 
-async function readRecoveryQuarantineJournal(runsRoot: string): Promise<Set<string>> {
+function parseRecoveryQuarantineJournal(bytes: Buffer): Set<string> {
+  const text = bytes.toString("utf8");
+  const runIds = new Set<string>();
+  if (text === "") return runIds;
+  if (!text.endsWith("\n")) {
+    throw new RuntimeError("recovery quarantine journal has a torn final record");
+  }
+  for (const line of text.slice(0, -1).split("\n")) {
+    if (line === "") throw new RuntimeError("recovery quarantine journal contains a blank record");
+    runIds.add(parseRecoveryQuarantineRecord(line).runId);
+  }
+  return runIds;
+}
+
+async function readRecoveryQuarantineJournal(
+  runsRoot: string,
+): Promise<RecoveryQuarantineSnapshot> {
   const rootIdentity = await plainDirectoryIdentity(runsRoot);
   if (rootIdentity === null) {
     throw new RuntimeError("recovery quarantine journal root disappeared");
@@ -462,7 +485,12 @@ async function readRecoveryQuarantineJournal(runsRoot: string): Promise<Set<stri
     if (!isPlainDirectory(currentRoot) || !sameIdentity(currentRoot, rootIdentity)) {
       throw new RuntimeError("recovery quarantine journal root changed during missing read");
     }
-    return new Set<string>();
+    return {
+      bytes: Buffer.alloc(0),
+      runIds: new Set<string>(),
+      rootIdentity,
+      journalIdentity: null,
+    };
   }
   if (!expectedMetadata.isFile()
     || expectedMetadata.isSymbolicLink()
@@ -481,13 +509,19 @@ async function readRecoveryQuarantineJournal(runsRoot: string): Promise<Set<stri
       if (isMissing(namedError)) {
         const currentRoot = await lstat(runsRoot);
         if (isPlainDirectory(currentRoot) && sameIdentity(currentRoot, rootIdentity)) {
-          return new Set<string>();
+          return {
+            bytes: Buffer.alloc(0),
+            runIds: new Set<string>(),
+            rootIdentity,
+            journalIdentity: null,
+          };
         }
       }
     }
     throw new RuntimeError("recovery quarantine journal changed before read", { cause: error });
   }
-  let text: string | undefined;
+  let bytes: Buffer | undefined;
+  let journalIdentity: DirectoryIdentity | undefined;
   let primaryError: unknown;
   try {
     const metadata = await handle.stat();
@@ -495,10 +529,12 @@ async function readRecoveryQuarantineJournal(runsRoot: string): Promise<Set<stri
     const currentRoot = await lstat(runsRoot);
     if (!metadata.isFile()
       || metadata.size > MAX_STATE_FILE_BYTES
+      || metadata.size !== expectedMetadata.size
       || metadata.nlink !== 1
       || !namedMetadata.isFile()
       || namedMetadata.isSymbolicLink()
       || namedMetadata.nlink !== 1
+      || namedMetadata.size !== metadata.size
       || namedMetadata.dev !== expectedMetadata.dev
       || namedMetadata.ino !== expectedMetadata.ino
       || namedMetadata.dev !== metadata.dev
@@ -507,12 +543,14 @@ async function readRecoveryQuarantineJournal(runsRoot: string): Promise<Set<stri
       || !sameIdentity(currentRoot, rootIdentity)) {
       throw new RuntimeError("recovery quarantine journal changed during read");
     }
-    text = await handle.readFile({ encoding: "utf8" });
+    journalIdentity = { dev: metadata.dev, ino: metadata.ino };
+    bytes = await handle.readFile();
     const settledMetadata = await lstat(filename);
     const settledRoot = await lstat(runsRoot);
     if (!settledMetadata.isFile()
       || settledMetadata.isSymbolicLink()
       || settledMetadata.nlink !== 1
+      || settledMetadata.size !== bytes.byteLength
       || settledMetadata.dev !== metadata.dev
       || settledMetadata.ino !== metadata.ino
       || !isPlainDirectory(settledRoot)
@@ -534,25 +572,48 @@ async function readRecoveryQuarantineJournal(runsRoot: string): Promise<Set<stri
     throw closeError;
   }
   if (primaryError !== undefined) throw primaryError;
-  if (text === undefined) {
+  if (bytes === undefined || journalIdentity === undefined) {
     throw new RuntimeError("recovery quarantine journal read produced no content");
   }
-  const runIds = new Set<string>();
-  if (text === "") return runIds;
-  if (!text.endsWith("\n")) {
-    throw new RuntimeError("recovery quarantine journal has a torn final record");
+  return {
+    bytes,
+    runIds: parseRecoveryQuarantineJournal(bytes),
+    rootIdentity,
+    journalIdentity,
+  };
+}
+
+async function syncRecoveryDirectory(directory: string): Promise<void> {
+  let handle;
+  let primaryError: unknown;
+  try {
+    handle = await open(directory, constants.O_RDONLY | NO_FOLLOW);
+    await handle.sync();
+  } catch (error) {
+    const unsupportedOnWindows = nodeProcess.platform === "win32"
+      && ["EISDIR", "EINVAL", "ENOTSUP", "EPERM"].includes(errorCode(error) ?? "");
+    if (!unsupportedOnWindows) primaryError = error;
   }
-  for (const line of text.slice(0, -1).split("\n")) {
-    if (line === "") throw new RuntimeError("recovery quarantine journal contains a blank record");
-    runIds.add(parseRecoveryQuarantineRecord(line).runId);
+
+  try {
+    await handle?.close();
+  } catch (closeError) {
+    if (primaryError !== undefined) {
+      throw new AggregateError(
+        [primaryError, closeError],
+        "recovery directory sync failed and its handle could not be closed",
+      );
+    }
+    throw closeError;
   }
-  return runIds;
+  if (primaryError !== undefined) throw primaryError;
 }
 
 async function publishRecoveryQuarantineJournal(
   runsRoot: string,
-  rootIdentity: DirectoryIdentity,
   filename: string,
+  snapshot: RecoveryQuarantineSnapshot,
+  nextBytes: Buffer,
 ): Promise<void> {
   const temporaryPath = path.join(
     runsRoot,
@@ -560,6 +621,7 @@ async function publishRecoveryQuarantineJournal(
   );
   let handle;
   let temporaryCreated = false;
+  let temporaryConsumed = false;
   let temporaryIdentity: DirectoryIdentity | undefined;
   let primaryError: unknown;
   try {
@@ -580,10 +642,12 @@ async function publishRecoveryQuarantineJournal(
       || namedMetadata.nlink !== 1
       || namedMetadata.dev !== metadata.dev
       || namedMetadata.ino !== metadata.ino
+      || metadata.size > MAX_STATE_FILE_BYTES
       || !isPlainDirectory(currentRoot)
-      || !sameIdentity(currentRoot, rootIdentity)) {
+      || !sameIdentity(currentRoot, snapshot.rootIdentity)) {
       throw new RuntimeError("recovery quarantine journal temp changed during creation");
     }
+    await handle.writeFile(nextBytes);
     await handle.sync();
   } catch (error) {
     primaryError = error;
@@ -611,21 +675,34 @@ async function publishRecoveryQuarantineJournal(
         || temporaryMetadata.nlink !== 1
         || temporaryIdentity === undefined
         || !sameIdentity(temporaryMetadata, temporaryIdentity)
+        || temporaryMetadata.size !== nextBytes.byteLength
+        || temporaryMetadata.size > MAX_STATE_FILE_BYTES
         || !isPlainDirectory(currentRoot)
-        || !sameIdentity(currentRoot, rootIdentity)) {
+        || !sameIdentity(currentRoot, snapshot.rootIdentity)) {
         throw new RuntimeError("recovery quarantine journal temp changed before publication");
       }
-      try {
+      if (snapshot.journalIdentity === null) {
         await link(temporaryPath, filename);
-      } catch (error) {
-        if (errorCode(error) !== "EEXIST") throw error;
+      } else {
+        const publicMetadata = await lstat(filename);
+        const settledRoot = await lstat(runsRoot);
+        if (!publicMetadata.isFile()
+          || publicMetadata.isSymbolicLink()
+          || publicMetadata.nlink !== 1
+          || !sameIdentity(publicMetadata, snapshot.journalIdentity)
+          || !isPlainDirectory(settledRoot)
+          || !sameIdentity(settledRoot, snapshot.rootIdentity)) {
+          throw new RuntimeError("recovery quarantine journal changed before publication");
+        }
+        await rename(temporaryPath, filename);
+        temporaryConsumed = true;
       }
     } catch (error) {
       primaryError = error;
     }
   }
   let cleanupError: unknown;
-  if (temporaryCreated) {
+  if (temporaryCreated && !temporaryConsumed) {
     try {
       await rm(temporaryPath, { force: false });
     } catch (error) {
@@ -640,93 +717,39 @@ async function publishRecoveryQuarantineJournal(
   }
   if (primaryError !== undefined) throw primaryError;
   if (cleanupError !== undefined) throw cleanupError;
+
+  const publishedMetadata = await lstat(filename);
+  const settledRoot = await lstat(runsRoot);
+  if (!publishedMetadata.isFile()
+    || publishedMetadata.isSymbolicLink()
+    || publishedMetadata.nlink !== 1
+    || temporaryIdentity === undefined
+    || !sameIdentity(publishedMetadata, temporaryIdentity)
+    || publishedMetadata.size !== nextBytes.byteLength
+    || publishedMetadata.size > MAX_STATE_FILE_BYTES
+    || !isPlainDirectory(settledRoot)
+    || !sameIdentity(settledRoot, snapshot.rootIdentity)) {
+    throw new RuntimeError("recovery quarantine journal changed after publication");
+  }
+  await syncRecoveryDirectory(runsRoot);
 }
 
 async function appendRecoveryQuarantineRecord(
   runsRoot: string,
   record: RecoveryQuarantineRecord,
 ): Promise<void> {
-  const identity = await plainDirectoryIdentity(runsRoot);
-  if (identity === null) throw new RuntimeError("recovery quarantine journal root disappeared");
   const line = `${JSON.stringify(record)}\n`;
   const lineBytes = Buffer.byteLength(line, "utf8");
   if (lineBytes > MAX_QUARANTINE_RECORD_BYTES) {
     throw new RuntimeError("recovery quarantine record exceeds its size limit");
   }
   const filename = path.join(runsRoot, "recovery-quarantine.ndjson");
-  let expectedMetadata;
-  try {
-    expectedMetadata = await lstat(filename);
-  } catch (error) {
-    if (!isMissing(error)) throw error;
-    await publishRecoveryQuarantineJournal(runsRoot, identity, filename);
-    expectedMetadata = await lstat(filename);
+  const snapshot = await readRecoveryQuarantineJournal(runsRoot);
+  const nextBytes = Buffer.concat([snapshot.bytes, Buffer.from(line, "utf8")]);
+  if (nextBytes.byteLength > MAX_STATE_FILE_BYTES) {
+    throw new RuntimeError("recovery quarantine journal exceeds its size limit");
   }
-  const currentRoot = await lstat(runsRoot);
-  if (!expectedMetadata.isFile()
-    || expectedMetadata.isSymbolicLink()
-    || expectedMetadata.nlink !== 1
-    || expectedMetadata.size > MAX_STATE_FILE_BYTES
-    || !isPlainDirectory(currentRoot)
-    || !sameIdentity(currentRoot, identity)) {
-    throw new RuntimeError(
-      "recovery quarantine journal changed during append or is not a regular file",
-    );
-  }
-  let handle;
-  let primaryError: unknown;
-  try {
-    handle = await open(
-      filename,
-      constants.O_WRONLY | constants.O_APPEND | NO_FOLLOW,
-    );
-    const metadata = await handle.stat();
-    const namedMetadata = await lstat(filename);
-    const currentRoot = await lstat(runsRoot);
-    if (!metadata.isFile()
-      || metadata.size + lineBytes > MAX_STATE_FILE_BYTES
-      || metadata.nlink !== 1
-      || !namedMetadata.isFile()
-      || namedMetadata.isSymbolicLink()
-      || namedMetadata.nlink !== 1
-      || namedMetadata.dev !== expectedMetadata.dev
-      || namedMetadata.ino !== expectedMetadata.ino
-      || namedMetadata.dev !== metadata.dev
-      || namedMetadata.ino !== metadata.ino
-      || !isPlainDirectory(currentRoot)
-      || !sameIdentity(currentRoot, identity)) {
-      throw new RuntimeError("recovery quarantine journal changed during append");
-    }
-    await handle.writeFile(line, "utf8");
-    await handle.sync();
-    const settledMetadata = await lstat(filename);
-    const settledRoot = await lstat(runsRoot);
-    if (!settledMetadata.isFile()
-      || settledMetadata.isSymbolicLink()
-      || settledMetadata.nlink !== 1
-      || settledMetadata.dev !== metadata.dev
-      || settledMetadata.ino !== metadata.ino
-      || !isPlainDirectory(settledRoot)
-      || !sameIdentity(settledRoot, identity)) {
-      throw new RuntimeError("recovery quarantine journal changed after append");
-    }
-  } catch (error) {
-    primaryError = error;
-  }
-  if (handle !== undefined) {
-    try {
-      await handle.close();
-    } catch (closeError) {
-      if (primaryError !== undefined) {
-        throw new AggregateError(
-          [primaryError, closeError],
-          "recovery quarantine journal append failed and its handle could not be closed",
-        );
-      }
-      throw closeError;
-    }
-  }
-  if (primaryError !== undefined) throw primaryError;
+  await publishRecoveryQuarantineJournal(runsRoot, filename, snapshot, nextBytes);
 }
 
 async function quarantineRun(
@@ -1256,7 +1279,7 @@ export async function recoverStaleRuns(
     if (runsIdentity !== null) await replayInterruptedPrunes(runsRoot);
     const journaledQuarantines = runsIdentity === null
       ? new Set<string>()
-      : await readRecoveryQuarantineJournal(runsRoot);
+      : (await readRecoveryQuarantineJournal(runsRoot)).runIds;
 
     const stale: RunStartRecord[] = [];
     const recovered: string[] = [];

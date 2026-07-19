@@ -797,10 +797,82 @@ describe("recoverStaleRuns", () => {
     const errors = (thrown as AggregateError).errors as unknown[];
     expect(errors).toHaveLength(2);
     expect(String(errors[0])).toContain("primary hard-link poison error");
-    expect(String(errors[1])).toMatch(/recovery quarantine journal changed during append/i);
+    expect(String(errors[1])).toMatch(/recovery quarantine journal.*bounded regular file/i);
     await expect(readFile(externalPath, "utf8")).resolves.toBe(externalBytes);
     await expect(access(store.runDirectory)).resolves.toBeUndefined();
     await expectMissing(path.join(runsRoot, `.poisoned-${runId}`));
+  });
+
+  it("rejects a COW update when the validated journal snapshot has a hard-link alias", async () => {
+    const repo = await initRepo();
+    const firstRunId = "run-cow-alias-first";
+    const secondRunId = "run-cow-alias-second";
+    const missingCommonDir = path.join(process.env.CLAUDE_PLUGIN_DATA!, "missing-common-dir");
+    const firstStore = await createUnfinishedRun(firstRunId, missingCommonDir, null);
+
+    await expect(recoverStaleRuns({ isProcessAlive: () => false }))
+      .resolves.toEqual({ recovered: [], quarantined: [firstRunId] });
+
+    const runsRoot = path.dirname(firstStore.runDirectory);
+    const journalPath = path.join(runsRoot, "recovery-quarantine.ndjson");
+    const aliasPath = path.join(process.env.CLAUDE_PLUGIN_DATA!, "old-journal-alias");
+    const oldBytes = await readFile(journalPath);
+    const secondStore = await createUnfinishedRun(
+      secondRunId,
+      missingCommonDir,
+      4242,
+      "darwin:recorded",
+    );
+
+    let thrown: unknown;
+    try {
+      await recoverStaleRuns({
+        platformServices: {
+          os: "darwin",
+          async getProcessStartToken(pid) {
+            if (pid === 4242) {
+              await link(journalPath, aliasPath);
+              throw new Error("second quarantine poison error");
+            }
+            return "darwin:self";
+          },
+          async terminateProcessTreeByPid() {},
+        },
+        isProcessAlive: pid => pid === 4242,
+      });
+    } catch (error) {
+      thrown = error;
+    }
+
+    expect(thrown).toBeInstanceOf(AggregateError);
+    const containedErrors = (error: unknown): unknown[] => error instanceof AggregateError
+      ? error.errors.flatMap(containedErrors)
+      : [error];
+    expect(containedErrors(thrown).map(String).join("\n"))
+      .toMatch(/recovery quarantine journal.*bounded regular file/i);
+    await expect(readFile(aliasPath)).resolves.toEqual(oldBytes);
+    await expect(readFile(journalPath)).resolves.toEqual(oldBytes);
+    await expect(access(secondStore.runDirectory)).resolves.toBeUndefined();
+    await expectMissing(path.join(runsRoot, `.poisoned-${secondRunId}`));
+  });
+
+  it("preserves journal record order across two successful COW updates", async () => {
+    const firstRunId = "run-cow-order-first";
+    const secondRunId = "run-cow-order-second";
+    const missingCommonDir = path.join(process.env.CLAUDE_PLUGIN_DATA!, "missing-common-dir");
+    const firstStore = await createUnfinishedRun(firstRunId, missingCommonDir, null);
+    await createUnfinishedRun(secondRunId, missingCommonDir, null);
+
+    await expect(recoverStaleRuns({ isProcessAlive: () => false }))
+      .resolves.toEqual({ recovered: [], quarantined: [firstRunId, secondRunId] });
+
+    const journal = await readFile(
+      path.join(path.dirname(firstStore.runDirectory), "recovery-quarantine.ndjson"),
+      "utf8",
+    );
+    const records = journal.trimEnd().split("\n")
+      .map(line => JSON.parse(line) as { runId: string });
+    expect(records.map(record => record.runId)).toEqual([firstRunId, secondRunId]);
   });
 
   it("rejects a symlinked quarantine journal without mutating its external target", async ({
@@ -849,7 +921,7 @@ describe("recoverStaleRuns", () => {
     const errors = (thrown as AggregateError).errors as unknown[];
     expect(errors).toHaveLength(2);
     expect(String(errors[0])).toContain("primary symlink poison error");
-    expect(String(errors[1])).toMatch(/ELOOP|symbolic link|changed during append/i);
+    expect(String(errors[1])).toMatch(/ELOOP|symbolic link|bounded regular file/i);
     await expect(readFile(externalPath, "utf8")).resolves.toBe(externalBytes);
     await expect(access(store.runDirectory)).resolves.toBeUndefined();
     await expectMissing(path.join(runsRoot, `.poisoned-${runId}`));
