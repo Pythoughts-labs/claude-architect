@@ -381,6 +381,60 @@ describe("runAttempt", () => {
     expect(releaseCalls).toBe(1);
   });
 
+  it("reports standalone checkout lease drift truthfully and releases its owned lock once", async () => {
+    const repoRoot = await initRepo();
+    const platformServices = getPlatformServices();
+    const canonical = await platformServices.canonicalizePath(repoRoot);
+    const beforeAcquireIdentity = `${canonical.gitCommonDir ?? canonical.canonical}-before-acquire`;
+    const acquisitionIdentity = `${canonical.gitCommonDir ?? canonical.canonical}-at-acquire`;
+    const observations: string[] = [];
+    let acquireCalls = 0;
+    let releaseCalls = 0;
+    let ps: PlatformServices;
+    ps = Object.assign(Object.create(platformServices), {
+      async canonicalizePath(input: string) {
+        const repositoryIdentity = observations.length === 0
+          ? beforeAcquireIdentity
+          : acquisitionIdentity;
+        observations.push(repositoryIdentity);
+        return { input, canonical: canonical.canonical, gitCommonDir: repositoryIdentity };
+      },
+      async acquireCheckoutLock(checkout: string) {
+        acquireCalls += 1;
+        const acquired = await ps.canonicalizePath(checkout);
+        const repositoryIdentity = acquired.gitCommonDir ?? acquired.canonical;
+        return {
+          key: createHash("sha256").update(repositoryIdentity).digest("hex"),
+          repositoryIdentity,
+          async release() { releaseCalls += 1; },
+        };
+      },
+    }) as PlatformServices;
+    const adapter = new FakeAdapter();
+    const runId = "run-owned-lock-identity-drift";
+    let thrown: unknown;
+
+    try {
+      await runAttempt(
+        repoRoot,
+        validSpec(),
+        dependencies(adapter, runId, { ps }),
+      );
+    } catch (error) {
+      thrown = error;
+    }
+
+    expect.soft(thrown).toMatchObject({
+      message: "owned checkout lease repository identity mismatch",
+    });
+    expect.soft(observations).toEqual([beforeAcquireIdentity, acquisitionIdentity]);
+    expect.soft(acquireCalls).toBe(1);
+    expect.soft(releaseCalls).toBe(1);
+    expect.soft(adapter.probeCalls).toBe(0);
+    await expect(access(join(process.env.CLAUDE_PLUGIN_DATA!, "runs", runId)))
+      .rejects.toMatchObject({ code: "ENOENT" });
+  });
+
   it("uses a matching borrowed checkout lease without acquiring or releasing it", async () => {
     const repoRoot = await initRepo();
     const fixture = await borrowedLeaseFixture(repoRoot);

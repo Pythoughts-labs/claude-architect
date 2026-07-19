@@ -27887,7 +27887,8 @@ async function runAttempt(checkoutPath, spec, deps) {
       lock = ownedLock;
     }
     if (lock.repositoryIdentity !== repositoryIdentity) {
-      throw new RuntimeError("borrowed checkout lease repository identity mismatch");
+      const ownership = ownedLock === null ? "borrowed" : "owned";
+      throw new RuntimeError(`${ownership} checkout lease repository identity mismatch`);
     }
     const preconditions = await checkPreconditions(canonical.canonical, {
       writeAllowlist: spec.writeAllowlist
