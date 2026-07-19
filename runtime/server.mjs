@@ -30369,29 +30369,53 @@ async function readCleanupJournal(filename) {
   let handle;
   try {
     handle = await open5(filename, constants4.O_RDONLY | NO_FOLLOW3);
-    const metadata = await handle.stat();
-    if (!metadata.isFile() || metadata.size > MAX_STATE_FILE_BYTES) {
-      throw new RuntimeError("cleanup journal is not a bounded regular file");
-    }
-    const bytes = await readHandleBytes(handle, metadata.size);
-    const settledMetadata = await handle.stat();
-    if (bytes.byteLength > MAX_STATE_FILE_BYTES || settledMetadata.size > MAX_STATE_FILE_BYTES) {
-      throw new RuntimeError("cleanup journal exceeds its size limit during read");
-    }
-    const text = bytes.toString("utf8");
-    const changedDuringRead = bytes.byteLength !== metadata.size || settledMetadata.size !== metadata.size;
-    if (!changedDuringRead && (text === "" || text.endsWith("\n"))) {
-      return { text, tornTail: false };
-    }
-    const finalNewline = text.lastIndexOf("\n");
-    const completePrefix = finalNewline === -1 ? "" : text.slice(0, finalNewline + 1);
-    return { text: completePrefix, tornTail: true };
   } catch (error2) {
     if (isMissing2(error2)) return { text: null, tornTail: false };
     throw error2;
-  } finally {
-    await handle?.close();
   }
+  let result;
+  let primaryError;
+  try {
+    const metadata = await handle.stat();
+    const namedMetadata = await lstat6(filename);
+    if (!metadata.isFile() || metadata.nlink !== 1 || metadata.size > MAX_STATE_FILE_BYTES || !namedMetadata.isFile() || namedMetadata.isSymbolicLink() || namedMetadata.nlink !== 1 || namedMetadata.dev !== metadata.dev || namedMetadata.ino !== metadata.ino || namedMetadata.size !== metadata.size) {
+      throw new RuntimeError("cleanup journal must be a bounded regular single-link file");
+    }
+    const bytes = await readHandleBytes(handle, metadata.size);
+    const repeatedBytes = await readHandleBytes(handle, metadata.size);
+    const settledMetadata = await handle.stat();
+    const settledNamedMetadata = await lstat6(filename);
+    if (bytes.byteLength > MAX_STATE_FILE_BYTES || settledMetadata.size > MAX_STATE_FILE_BYTES) {
+      throw new RuntimeError("cleanup journal exceeds its size limit during read");
+    }
+    if (!settledMetadata.isFile() || settledMetadata.nlink !== 1 || settledMetadata.dev !== metadata.dev || settledMetadata.ino !== metadata.ino || settledMetadata.size !== metadata.size || settledMetadata.mtimeMs !== metadata.mtimeMs || settledMetadata.ctimeMs !== metadata.ctimeMs || !settledNamedMetadata.isFile() || settledNamedMetadata.isSymbolicLink() || settledNamedMetadata.nlink !== 1 || settledNamedMetadata.dev !== metadata.dev || settledNamedMetadata.ino !== metadata.ino || settledNamedMetadata.size !== metadata.size || bytes.byteLength !== metadata.size || !repeatedBytes.equals(bytes)) {
+      throw new RuntimeError("cleanup journal changed during read");
+    }
+    const text = bytes.toString("utf8");
+    if (text === "" || text.endsWith("\n")) {
+      result = { text, tornTail: false };
+    } else {
+      const finalNewline = text.lastIndexOf("\n");
+      const completePrefix = finalNewline === -1 ? "" : text.slice(0, finalNewline + 1);
+      result = { text: completePrefix, tornTail: true };
+    }
+  } catch (error2) {
+    primaryError = error2;
+  }
+  try {
+    await handle.close();
+  } catch (closeError) {
+    if (primaryError !== void 0) {
+      throw new AggregateError(
+        [primaryError, closeError],
+        "cleanup journal read failed and its handle could not be closed"
+      );
+    }
+    throw closeError;
+  }
+  if (primaryError !== void 0) throw primaryError;
+  if (result === void 0) throw new RuntimeError("cleanup journal read produced no result");
+  return result;
 }
 async function plainDirectoryIdentity(directory) {
   try {
@@ -30889,8 +30913,9 @@ async function quarantineRun(runsRoot, runId, error2) {
 async function readPendingCleanupRecords(runsRoot) {
   const { text, tornTail } = await readCleanupJournal(path14.join(runsRoot, "cleanup.ndjson"));
   const pending = /* @__PURE__ */ new Map();
-  if (text === null || text.trim() === "") return { pending, tornTail };
-  for (const line of text.trimEnd().split("\n")) {
+  if (text === null || text === "") return { pending, tornTail };
+  const completeText = text.endsWith("\n") ? text.slice(0, -1) : text;
+  for (const line of completeText.split("\n")) {
     if (line.trim() === "") throw new RuntimeError("cleanup journal contains a blank record");
     const record2 = parseCleanupRecord(line);
     if (record2.event === "prune-cleanup-intent") pending.set(record2.runId, record2);
