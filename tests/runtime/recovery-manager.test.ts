@@ -17,6 +17,7 @@ import { WorktreeManager } from "../../src/git/worktree-manager.js";
 import { start } from "../../src/mcp/server.js";
 import { ArtifactStore } from "../../src/runtime/artifact-store.js";
 import { recoverStaleRuns } from "../../src/runtime/recovery-manager.js";
+import { buildRunManifest } from "../../src/runtime/run-manifest.js";
 
 const serverEvents = vi.hoisted(() => [] as string[]);
 
@@ -84,6 +85,102 @@ async function createUnfinishedRun(
   return store;
 }
 
+function slicedManagedIds(runId: string): string[] {
+  return [
+    `${runId}-slice-1-attempt-0`,
+    `${runId}-slice-1-attempt-0-review`,
+    `${runId}-slice-1-attempt-0-verify`,
+    `verify-${runId}-slice-1-attempt-0-pipeline`,
+    `${runId}-composed-review`,
+    `${runId}-final-verify`,
+    `verify-${runId}-final-pipeline`,
+  ];
+}
+
+async function createManagedWorktrees(
+  repo: { directory: string; head: string },
+  managedIds: string[],
+): Promise<Array<{ path: string; cleanup(): Promise<void> }>> {
+  const worktrees: Array<{ path: string; cleanup(): Promise<void> }> = [];
+  for (const managedId of managedIds) {
+    worktrees.push(await new WorktreeManager(repo.directory, managedId).create(repo.head));
+  }
+  return worktrees;
+}
+
+async function writeTerminalFailure(store: ArtifactStore, runId: string): Promise<void> {
+  await store.writeResult({
+    resultVersion: "1",
+    runId,
+    status: "failed",
+    failure: "producer-failure",
+    summary: "pipeline failed",
+    producerSummary: null,
+    candidate: null,
+    requestedVerification: [],
+    executedVerification: [],
+    unresolvedIssues: [],
+    evidence: {},
+    logsRef: "logs/producer.log",
+    producerId: null,
+    producerVersion: null,
+    producerModel: null,
+    durationMs: 1,
+    sessionId: null,
+  });
+}
+
+async function writeVerifiedCandidate(
+  store: ArtifactStore,
+  runId: string,
+  repo: { directory: string; head: string },
+): Promise<void> {
+  const tree = await runGit(repo.directory, ["rev-parse", `${repo.head}^{tree}`]);
+  const manifestHash = createHash("sha256").update("[]").digest("hex");
+  const anchorRef = `refs/claude-architect/candidates/${runId}`;
+  await runGit(repo.directory, ["update-ref", anchorRef, repo.head]);
+  await store.writeResult({
+    resultVersion: "1",
+    runId,
+    status: "verified-candidate",
+    failure: null,
+    summary: "candidate produced and independently verified",
+    producerSummary: "test producer",
+    candidate: {
+      baseCommitOid: repo.head,
+      candidateTreeOid: tree,
+      candidateCommitOid: repo.head,
+      anchorRef,
+      manifestHash,
+      changedPaths: [],
+      patch: "",
+    },
+    requestedVerification: [],
+    executedVerification: [],
+    unresolvedIssues: [],
+    evidence: {},
+    logsRef: "logs/producer.log",
+    producerId: "stub",
+    producerVersion: "1",
+    producerModel: null,
+    durationMs: 1,
+    sessionId: null,
+  });
+  await store.writeManifest(buildRunManifest({
+    runId,
+    repoRoot: repo.directory,
+    baseCommitOid: repo.head,
+    candidateManifestHash: manifestHash,
+    producer: { id: "stub", version: "1", model: null },
+    effectivePolicy: { isolation: "temporary-home", retries: 0 },
+    repositoryInstructions: [],
+    prompt: "test",
+    executionPolicy: { network: "denied", writeAllowlist: ["**"] },
+    environment: [],
+    packagedVerifier: { version: "1", content: "test" },
+  }));
+}
+
 beforeEach(async () => {
   previousPluginData = process.env.CLAUDE_PLUGIN_DATA;
   previousDelegated = process.env.CLAUDE_ARCHITECT_DELEGATED;
@@ -105,6 +202,207 @@ afterEach(async () => {
 });
 
 describe("recoverStaleRuns", () => {
+  it("downgrades a verified candidate before clearing a dead pipeline marker", async () => {
+    const repo = await initRepo();
+    const runId = "run-interrupted-pipeline-authority";
+    const store = await createUnfinishedRun(runId, repo.commonDir, null);
+    await writeVerifiedCandidate(store, runId, repo);
+    await store.writePipelineActiveMarker({
+      pid: 4242,
+      processToken: "darwin:dead",
+      startedAt: "2026-07-18T12:00:00.000Z",
+    });
+
+    await expect(recoverStaleRuns({
+      platformServices: {
+        os: "darwin",
+        async getProcessStartToken() { return null; },
+        async terminateProcessTreeByPid() {},
+      },
+      isProcessAlive: () => false,
+    })).resolves.toEqual({ recovered: [] });
+
+    await expect(store.readResult(runId)).resolves.toMatchObject({
+      status: "failed",
+      failure: "verification-failure",
+      candidate: expect.any(Object),
+      unresolvedIssues: ["pipeline-interrupted-before-terminal-cleanup"],
+      evidence: {
+        pipelineRecovery: "interrupted-before-terminal-cleanup",
+      },
+    });
+    await expectMissing(path.join(store.runDirectory, "pipeline-active.json"));
+  });
+
+  it("cleans every sliced worktree and ref for a terminal run without touching a prefix neighbor", async () => {
+    const repo = await initRepo();
+    const runId = "run-sliced-terminal";
+    const neighborRunId = `${runId}-neighbor`;
+    const store = await createUnfinishedRun(runId, repo.commonDir, null);
+    await writeTerminalFailure(store, runId);
+    const slicedWorktrees = await createManagedWorktrees(repo, slicedManagedIds(runId));
+    const neighborWorktree = (await createManagedWorktrees(
+      repo,
+      [`${neighborRunId}-slice-1-attempt-0`],
+    ))[0]!;
+    const sliceRefs = [
+      `refs/claude-architect/slices/${runId}/slice-1-attempt-1`,
+      `refs/claude-architect/slices/${runId}/slice-2-attempt-0`,
+    ];
+    const neighborRef = `refs/claude-architect/slices/${neighborRunId}/slice-1-attempt-0`;
+    for (const ref of [...sliceRefs, neighborRef]) {
+      await runGit(repo.directory, ["update-ref", ref, repo.head]);
+    }
+    await store.writePipelineActiveMarker({
+      pid: 4242,
+      processToken: "darwin:dead",
+      startedAt: "2026-07-18T12:00:00.000Z",
+    });
+
+    await expect(recoverStaleRuns({
+      platformServices: {
+        os: "darwin",
+        async getProcessStartToken() { return null; },
+        async terminateProcessTreeByPid() {},
+      },
+      isProcessAlive: () => false,
+    })).resolves.toEqual({ recovered: [] });
+
+    await Promise.all(slicedWorktrees.map(worktree => expectMissing(worktree.path)));
+    await expect(access(neighborWorktree.path)).resolves.toBeUndefined();
+    for (const ref of sliceRefs) {
+      expect((await git(repo.directory, ["rev-parse", "--verify", "--quiet", ref])).exitCode)
+        .not.toBe(0);
+    }
+    expect(await runGit(repo.directory, ["rev-parse", neighborRef])).toBe(repo.head);
+    await expectMissing(path.join(store.runDirectory, "pipeline-active.json"));
+    await expect(recoverStaleRuns({
+      platformServices: {
+        os: "darwin",
+        async getProcessStartToken() { return null; },
+        async terminateProcessTreeByPid() {},
+      },
+      isProcessAlive: () => false,
+    })).resolves.toEqual({ recovered: [] });
+    await expect(access(neighborWorktree.path)).resolves.toBeUndefined();
+    expect(await runGit(repo.directory, ["rev-parse", neighborRef])).toBe(repo.head);
+  }, { timeout: 120_000 });
+
+  it("cleans every sliced worktree and ref for an unfinished run idempotently", async () => {
+    const repo = await initRepo();
+    const runId = "run-sliced-unfinished";
+    const store = await createUnfinishedRun(runId, repo.commonDir, null);
+    const slicedWorktrees = await createManagedWorktrees(repo, slicedManagedIds(runId));
+    const sliceRefs = [
+      `refs/claude-architect/slices/${runId}/slice-1-attempt-1`,
+      `refs/claude-architect/slices/${runId}/slice-2-attempt-0`,
+    ];
+    for (const ref of sliceRefs) await runGit(repo.directory, ["update-ref", ref, repo.head]);
+
+    await expect(recoverStaleRuns({
+      platformServices: {
+        os: "darwin",
+        async getProcessStartToken() { return null; },
+        async terminateProcessTreeByPid() {},
+      },
+      isProcessAlive: () => false,
+    })).resolves.toEqual({ recovered: [runId] });
+
+    await Promise.all(slicedWorktrees.map(worktree => expectMissing(worktree.path)));
+    for (const ref of sliceRefs) {
+      expect((await git(repo.directory, ["rev-parse", "--verify", "--quiet", ref])).exitCode)
+        .not.toBe(0);
+    }
+    await expect(store.readResult(runId)).resolves.toMatchObject({ status: "cancelled" });
+    await expect(recoverStaleRuns({
+      platformServices: {
+        os: "darwin",
+        async getProcessStartToken() { return null; },
+        async terminateProcessTreeByPid() {},
+      },
+      isProcessAlive: () => false,
+    })).resolves.toEqual({ recovered: [] });
+  }, { timeout: 120_000 });
+
+  it("fails closed on a malformed ref inside the run-specific slice namespace", async () => {
+    const repo = await initRepo();
+    const runId = "run-sliced-malformed-ref";
+    const store = await createUnfinishedRun(runId, repo.commonDir, null);
+    const malformedRef = `refs/claude-architect/slices/${runId}/unexpected`;
+    await runGit(repo.directory, ["update-ref", malformedRef, repo.head]);
+
+    await expect(recoverStaleRuns({
+      platformServices: {
+        os: "darwin",
+        async getProcessStartToken() { return null; },
+        async terminateProcessTreeByPid() {},
+      },
+      isProcessAlive: () => false,
+    })).rejects.toThrow("temporary slice ref name is malformed during recovery");
+
+    expect(await runGit(repo.directory, ["rev-parse", malformedRef])).toBe(repo.head);
+    await expect(store.readResult(runId)).resolves.toBeNull();
+  });
+
+  it("fails closed when a slice ref points to a tag that peels to a commit", async () => {
+    const repo = await initRepo();
+    const runId = "run-sliced-tag-ref";
+    const store = await createUnfinishedRun(runId, repo.commonDir, null);
+    const sliceRef = `refs/claude-architect/slices/${runId}/slice-2-attempt-0`;
+    await runGit(repo.directory, ["tag", "-a", "slice-tag", "-m", "slice tag", repo.head]);
+    const tagOid = await runGit(repo.directory, ["rev-parse", "refs/tags/slice-tag"]);
+    await runGit(repo.directory, ["update-ref", sliceRef, tagOid]);
+
+    await expect(recoverStaleRuns({
+      platformServices: {
+        os: "darwin",
+        async getProcessStartToken() { return null; },
+        async terminateProcessTreeByPid() {},
+      },
+      isProcessAlive: () => false,
+    })).rejects.toThrow("temporary slice ref does not identify a commit during recovery");
+
+    expect(await runGit(repo.directory, ["rev-parse", sliceRef])).toBe(tagOid);
+    await expect(store.readResult(runId)).resolves.toBeNull();
+  });
+
+  it("fails closed when a slice ref moves after recovery enumeration", async () => {
+    const repo = await initRepo();
+    const runId = "run-sliced-moved-ref";
+    const store = await createUnfinishedRun(runId, repo.commonDir, null);
+    const sliceRef = `refs/claude-architect/slices/${runId}/slice-2-attempt-0`;
+    await runGit(repo.directory, ["update-ref", sliceRef, repo.head]);
+    const movedOid = await runGit(repo.directory, [
+      "commit-tree",
+      `${repo.head}^{tree}`,
+      "-p",
+      repo.head,
+      "-m",
+      "moved slice ref",
+    ]);
+    let moved = false;
+
+    await expect(recoverStaleRuns({
+      platformServices: {
+        os: "darwin",
+        async getProcessStartToken() { return null; },
+        async terminateProcessTreeByPid() {},
+      },
+      isProcessAlive: () => false,
+      git: async (cwd, args, options) => {
+        const result = await git(cwd, args, options);
+        if (!moved && args[0] === "for-each-ref") {
+          moved = true;
+          await runGit(repo.directory, ["update-ref", sliceRef, movedOid, repo.head]);
+        }
+        return result;
+      },
+    })).rejects.toThrow("temporary slice ref moved during recovery");
+
+    expect(await runGit(repo.directory, ["rev-parse", sliceRef])).toBe(movedOid);
+    await expect(store.readResult(runId)).resolves.toBeNull();
+  });
+
   it("cleans dead-owner pipeline worktrees for a terminal run", async () => {
     const repo = await initRepo();
     const runId = "run-dead-pipeline";

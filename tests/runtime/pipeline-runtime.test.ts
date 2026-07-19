@@ -14,6 +14,7 @@ import { git } from "../../src/git/git-exec.js";
 import { WorktreeManager } from "../../src/git/worktree-manager.js";
 import { applyCandidateTree } from "../../src/integrate/controlled-integrator.js";
 import { delegatePipelineOutput } from "../../src/mcp/server.js";
+import { handleIntegrateCandidate } from "../../src/mcp/tools.js";
 import { getPlatformServices } from "../../src/platform/select-platform.js";
 import type {
   AttemptResult,
@@ -673,6 +674,8 @@ describe("runPipeline", () => {
     });
     let initialSpec: DelegationSpec | undefined;
     let implementerArgs: RoleRunArgs | undefined;
+    const temporarySliceRef = `refs/claude-architect/slices/${runId}/slice-2-attempt-0`;
+    let observedTemporaryRef = "";
     const reviewArgs: RoleRunArgs[] = [];
     const roleRunner = async (args: RoleRunArgs): Promise<RoleRunResult> => {
       if (args.role === "implementer") {
@@ -693,6 +696,7 @@ describe("runPipeline", () => {
         }));
       }
       if (args.role === "reviewer-correctness") {
+        observedTemporaryRef = await runGit(repo, ["rev-parse", "--verify", temporarySliceRef]);
         reviewArgs.push(args);
         return success(fenced(approve));
       }
@@ -742,6 +746,9 @@ describe("runPipeline", () => {
     expect(result.slices[1]?.roleLogRefs).toEqual([
       "logs/role-implementer-slice-2-attempt-0-increment1.log",
     ]);
+    expect(observedTemporaryRef).toBe(result.slices[1]?.candidateCommit);
+    expect((await git(repo, ["rev-parse", "--verify", "--quiet", temporarySliceRef])).exitCode)
+      .not.toBe(0);
     expect(result.slices[1]?.verification?.scopeViolations).toEqual([]);
     expect(result.rounds).toHaveLength(1);
     expect(result.verification?.pass).toBe(true);
@@ -800,6 +807,122 @@ describe("runPipeline", () => {
       .toBe("slice one candidate");
     expect(await runGit(repo, ["show", `${result.finalCandidateCommit}:slice-two.txt`]))
       .toBe("slice two candidate");
+  }, { timeout: 120_000 });
+
+  it("aggregates primary, moved slice-ref, and active-marker cleanup failures", async () => {
+    const repo = await initSlicedRepo();
+    const runId = "pipeline-slices-cleanup-errors";
+    const spec = slicedSpec();
+    const initialRun = fakeAttempt(runId, async checkout => {
+      await writeFile(path.join(checkout, "slice-one.txt"), "slice one candidate\n");
+    });
+    const baselineCommit = await runGit(repo, ["rev-parse", "HEAD"]);
+    const temporarySliceRef = `refs/claude-architect/slices/${runId}/slice-2-attempt-0`;
+    const roleRunner = async (args: RoleRunArgs): Promise<RoleRunResult> => {
+      if (args.role === "implementer") {
+        const candidateCommit = await commitRoleFile(
+          args,
+          "slice-two.txt",
+          "slice two candidate\n",
+        );
+        return success(fenced({
+          reportVersion: "1",
+          candidateCommit,
+          status: "complete",
+          summary: "slice complete",
+        }));
+      }
+      if (args.role === "reviewer-correctness") {
+        const expectedOid = await runGit(repo, ["rev-parse", "--verify", temporarySliceRef]);
+        await runGit(repo, [
+          "update-ref",
+          temporarySliceRef,
+          baselineCommit,
+          expectedOid,
+        ]);
+        throw new Error("primary composed-review failure");
+      }
+      throw new Error(`unexpected role ${args.role}`);
+    };
+    const deps = dependencies({ runId, roleRunner });
+    deps.runAttempt = async checkoutPath => initialRun(checkoutPath);
+    const markerCleanup = vi.spyOn(ArtifactStore.prototype, "clearPipelineActiveMarker")
+      .mockRejectedValueOnce(new Error("active-marker cleanup failure"));
+
+    let thrown: unknown;
+    try {
+      await runPipeline(repo, spec, deps);
+    } catch (error) {
+      thrown = error;
+    }
+
+    const messages: string[] = [];
+    const collectMessages = (error: unknown): void => {
+      if (error instanceof Error) messages.push(error.message);
+      if (error instanceof AggregateError) error.errors.forEach(collectMessages);
+    };
+    collectMessages(thrown);
+    expect(thrown).toBeInstanceOf(AggregateError);
+    expect(messages).toContain("primary composed-review failure");
+    expect(messages.some(message => message.includes("delete temporary slice ref"))).toBe(true);
+    expect(messages).toContain("active-marker cleanup failure");
+    expect(markerCleanup).toHaveBeenCalledOnce();
+    expect(await runGit(repo, ["rev-parse", "--verify", temporarySliceRef]))
+      .toBe(baselineCommit);
+  }, { timeout: 120_000 });
+
+  it("archives a temporary-ref cleanup failure before clearing lifecycle authority", async () => {
+    const repo = await initSlicedRepo();
+    const runId = "pipeline-slices-ref-cleanup-failure";
+    const spec = slicedSpec();
+    const initialRun = fakeAttempt(runId, async checkout => {
+      await writeFile(path.join(checkout, "slice-one.txt"), "slice one candidate\n");
+    });
+    const baselineCommit = await runGit(repo, ["rev-parse", "HEAD"]);
+    const temporarySliceRef = `refs/claude-architect/slices/${runId}/slice-2-attempt-0`;
+    const roleRunner = async (args: RoleRunArgs): Promise<RoleRunResult> => {
+      if (args.role === "implementer") {
+        const candidateCommit = await commitRoleFile(
+          args,
+          "slice-two.txt",
+          "slice two candidate\n",
+        );
+        return success(fenced({
+          reportVersion: "1",
+          candidateCommit,
+          status: "complete",
+          summary: "slice complete",
+        }));
+      }
+      if (args.role === "reviewer-correctness") {
+        const expectedOid = await runGit(repo, ["rev-parse", "--verify", temporarySliceRef]);
+        await runGit(repo, [
+          "update-ref",
+          temporarySliceRef,
+          baselineCommit,
+          expectedOid,
+        ]);
+        return success(fenced(approve));
+      }
+      throw new Error(`unexpected role ${args.role}`);
+    };
+    const deps = dependencies({ runId, roleRunner });
+    deps.runAttempt = async checkoutPath => initialRun(checkoutPath);
+
+    await expect(runPipeline(repo, spec, deps))
+      .rejects.toThrow("delete temporary slice ref");
+
+    const store = new ArtifactStore(runId);
+    await expect(store.readResult(runId)).resolves.toMatchObject({
+      status: "failed",
+      failure: "verification-failure",
+      candidate: expect.any(Object),
+    });
+    await expect(readFile(
+      path.join(store.runDirectory, "pipeline-active.json"),
+      "utf8",
+    )).rejects.toMatchObject({ code: "ENOENT" });
+    expect(await runGit(repo, ["rev-parse", temporarySliceRef])).toBe(baselineCommit);
   }, { timeout: 120_000 });
 
   it("runs independent per-slice reviewers with slice-local evidence and logs", async () => {
@@ -929,6 +1052,288 @@ describe("runPipeline", () => {
       .resolves.toMatchObject({ route: "halt" });
     await expect(store.readPipelineArtifact(runId, "slice-1"))
       .resolves.toMatchObject({ route: "halt" });
+    const archived = await store.readResult(runId);
+    expect(archived).toMatchObject({
+      status: "failed",
+      failure: "verification-failure",
+      candidate: result.attempt.candidate,
+    });
+    expect(result.attempt).toEqual(archived);
+    await store.writeDecision({
+      decision: "accepted",
+      recordedAt: "2026-07-19T12:00:00.000Z",
+    });
+    await expect(handleIntegrateCandidate(
+      repo,
+      runId,
+      result.attempt.candidate!.manifestHash,
+    )).resolves.toEqual({
+      ok: false,
+      error: "candidate-not-verified",
+      diagnostic: "candidate did not complete independent verification",
+    });
+  }, { timeout: 120_000 });
+
+  it("archives a SliceExecutionError as the returned non-integrable attempt", async () => {
+    const repo = await initSlicedRepo();
+    const runId = "pipeline-slices-role-failure";
+    const spec = slicedSpec();
+    const initialRun = fakeAttempt(runId, async checkout => {
+      await writeFile(path.join(checkout, "slice-one.txt"), "slice one candidate\n");
+    });
+    const deps = dependencies({
+      runId,
+      roleRunner: async args => {
+        if (args.role === "implementer") {
+          return {
+            ok: false,
+            rawOutput: "",
+            failure: "timeout",
+            producerId: "stub",
+          };
+        }
+        throw new Error(`unexpected role ${args.role}`);
+      },
+    });
+    deps.runAttempt = async checkoutPath => initialRun(checkoutPath);
+
+    const result = await runPipeline(repo, spec, deps);
+
+    expect(result).toMatchObject({
+      status: "failed",
+      failure: "timeout",
+      attempt: {
+        status: "failed",
+        failure: "timeout",
+        candidate: null,
+      },
+    });
+    const store = new ArtifactStore(runId);
+    await expect(store.readResult(runId)).resolves.toEqual(result.attempt);
+    await expect(readFile(
+      path.join(store.runDirectory, "pipeline-active.json"),
+      "utf8",
+    )).rejects.toMatchObject({ code: "ENOENT" });
+  }, { timeout: 120_000 });
+
+  it("labels sliced candidate provenance failures as slice implementer failures", async () => {
+    const repo = await initSlicedRepo();
+    const runId = "pipeline-slices-provenance-label";
+    const spec = slicedSpec();
+    const initialRun = fakeAttempt(runId, async checkout => {
+      await writeFile(path.join(checkout, "slice-one.txt"), "slice one candidate\n");
+    });
+    const deps = dependencies({
+      runId,
+      roleRunner: async args => {
+        if (args.role === "implementer") {
+          return success(fenced({
+            reportVersion: "1",
+            candidateCommit: "d".repeat(40),
+            status: "complete",
+            summary: "reported a nonexistent commit",
+          }));
+        }
+        throw new Error(`unexpected role ${args.role}`);
+      },
+    });
+    deps.runAttempt = async checkoutPath => initialRun(checkoutPath);
+
+    const result = await runPipeline(repo, spec, deps);
+
+    expect(result.gate.reasons).toContain("slice implementer reported a missing candidate commit");
+    expect(result.gate.reasons.some(reason => reason.includes("fix phase"))).toBe(false);
+  }, { timeout: 120_000 });
+
+  it("archives an initial per-slice review error before returning failure", async () => {
+    const repo = await initSlicedRepo();
+    const runId = "pipeline-slices-initial-review-failure";
+    const spec = slicedSpec(true);
+    const initialRun = fakeAttempt(runId, async checkout => {
+      await writeFile(path.join(checkout, "slice-one.txt"), "slice one candidate\n");
+    });
+    const deps = dependencies({
+      runId,
+      roleRunner: async args => {
+        if (args.role === "reviewer-correctness") {
+          return {
+            ok: false,
+            rawOutput: "",
+            failure: "timeout",
+            producerId: "stub",
+          };
+        }
+        throw new Error(`unexpected role ${args.role}`);
+      },
+    });
+    deps.runAttempt = async checkoutPath => initialRun(checkoutPath);
+
+    const result = await runPipeline(repo, spec, deps);
+
+    expect(result).toMatchObject({
+      status: "failed",
+      failure: "producer-failure",
+      attempt: {
+        status: "failed",
+        failure: "producer-failure",
+        candidate: null,
+      },
+    });
+    await expect(new ArtifactStore(runId).readResult(runId)).resolves.toEqual(result.attempt);
+  }, { timeout: 120_000 });
+
+  it("archives a composed-review failure as the returned non-integrable attempt", async () => {
+    const repo = await initSlicedRepo();
+    const runId = "pipeline-slices-composed-review-failure";
+    const spec = slicedSpec();
+    const initialRun = fakeAttempt(runId, async checkout => {
+      await writeFile(path.join(checkout, "slice-one.txt"), "slice one candidate\n");
+    });
+    const deps = dependencies({
+      runId,
+      roleRunner: async args => {
+        if (args.role === "implementer") {
+          const candidateCommit = await commitRoleFile(
+            args,
+            "slice-two.txt",
+            "slice two candidate\n",
+          );
+          return success(fenced({
+            reportVersion: "1",
+            candidateCommit,
+            status: "complete",
+            summary: "slice complete",
+          }));
+        }
+        if (args.role === "reviewer-correctness") {
+          return {
+            ok: false,
+            rawOutput: "",
+            failure: "timeout",
+            producerId: "stub",
+          };
+        }
+        throw new Error(`unexpected role ${args.role}`);
+      },
+    });
+    deps.runAttempt = async checkoutPath => initialRun(checkoutPath);
+
+    const result = await runPipeline(repo, spec, deps);
+
+    expect(result).toMatchObject({
+      status: "failed",
+      failure: "producer-failure",
+      attempt: {
+        status: "failed",
+        failure: "producer-failure",
+      },
+    });
+    expect(result.attempt.candidate).toBeNull();
+    await expect(new ArtifactStore(runId).readResult(runId)).resolves.toEqual(result.attempt);
+  }, { timeout: 120_000 });
+
+  it("archives an unexpected final-verification error before clearing lifecycle authority", async () => {
+    const repo = await initSlicedRepo();
+    const runId = "pipeline-slices-final-verification-error";
+    const spec = slicedSpec();
+    const initialRun = fakeAttempt(runId, async checkout => {
+      await writeFile(path.join(checkout, "slice-one.txt"), "slice one candidate\n");
+    });
+    const deps = dependencies({
+      runId,
+      roleRunner: async args => {
+        if (args.role === "implementer") {
+          const candidateCommit = await commitRoleFile(
+            args,
+            "slice-two.txt",
+            "slice two candidate\n",
+          );
+          return success(fenced({
+            reportVersion: "1",
+            candidateCommit,
+            status: "complete",
+            summary: "slice complete",
+          }));
+        }
+        if (args.role === "reviewer-correctness") return success(fenced(approve));
+        throw new Error(`unexpected role ${args.role}`);
+      },
+    });
+    deps.runAttempt = async checkoutPath => initialRun(checkoutPath);
+    const originalVerify = AcceptanceVerifier.prototype.verify;
+    let verificationCalls = 0;
+    vi.spyOn(AcceptanceVerifier.prototype, "verify").mockImplementation(function (args) {
+      verificationCalls += 1;
+      if (verificationCalls === 3) {
+        return Promise.reject(new Error("final verification infrastructure failed"));
+      }
+      return originalVerify.call(this, args);
+    });
+
+    await expect(runPipeline(repo, spec, deps))
+      .rejects.toThrow("final verification infrastructure failed");
+
+    const store = new ArtifactStore(runId);
+    await expect(store.readResult(runId)).resolves.toMatchObject({
+      status: "failed",
+      failure: "verification-failure",
+      candidate: expect.any(Object),
+    });
+    await expect(readFile(
+      path.join(store.runDirectory, "pipeline-active.json"),
+      "utf8",
+    )).rejects.toMatchObject({ code: "ENOENT" });
+  }, { timeout: 120_000 });
+
+  it("archives a composed-fixer failure as the returned non-integrable attempt", async () => {
+    const repo = await initSlicedRepo();
+    const runId = "pipeline-slices-composed-fixer-failure";
+    const spec = slicedSpec();
+    const initialRun = fakeAttempt(runId, async checkout => {
+      await writeFile(path.join(checkout, "slice-one.txt"), "slice one candidate\n");
+    });
+    const deps = dependencies({
+      runId,
+      roleRunner: async args => {
+        if (args.role === "implementer") {
+          const candidateCommit = await commitRoleFile(
+            args,
+            "slice-two.txt",
+            "slice two candidate\n",
+          );
+          return success(fenced({
+            reportVersion: "1",
+            candidateCommit,
+            status: "complete",
+            summary: "slice complete",
+          }));
+        }
+        if (args.role === "reviewer-correctness") return success(fenced(blocker));
+        if (args.role === "fixer") {
+          return {
+            ok: false,
+            rawOutput: "",
+            failure: "timeout",
+            producerId: "stub",
+          };
+        }
+        throw new Error(`unexpected role ${args.role}`);
+      },
+    });
+    deps.runAttempt = async checkoutPath => initialRun(checkoutPath);
+
+    const result = await runPipeline(repo, spec, deps);
+
+    expect(result).toMatchObject({
+      status: "failed",
+      failure: "timeout",
+      attempt: {
+        status: "failed",
+        failure: "timeout",
+        candidate: null,
+      },
+    });
+    await expect(new ArtifactStore(runId).readResult(runId)).resolves.toEqual(result.attempt);
   }, { timeout: 120_000 });
 
   it("runs a completed increment, redacts and archives it, then reviews its diff", async () => {

@@ -13,6 +13,7 @@ import { git, type GitResult } from "../git/git-exec.js";
 import { WorktreeManager } from "../git/worktree-manager.js";
 import type { PlatformServices } from "../platform/platform-services.js";
 import { getPlatformServices } from "../platform/select-platform.js";
+import type { AttemptResult } from "../protocol/attempt-result.js";
 import { RuntimeError } from "../util/errors.js";
 import { ArtifactStore } from "./artifact-store.js";
 import { resolveStateDir } from "./state-dir.js";
@@ -24,6 +25,7 @@ const LOCK_NAME = /^([0-9a-f]{64})\.lock$/;
 const OID = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/;
 const CANDIDATE_REF_PREFIX = "refs/claude-architect/candidates/";
 const BACKUP_REF_PREFIX = "refs/claude-architect/prune-backups/";
+const SLICE_REF_PREFIX = "refs/claude-architect/slices/";
 
 interface RunStartRecord {
   runId: string;
@@ -62,6 +64,7 @@ export interface RecoveryDependencies {
   requestCooperativeTermination?: (pid: number) => void | Promise<void>;
   delayMs?: (ms: number) => Promise<void>;
   graceMs?: number;
+  git?: typeof git;
 }
 
 interface LockOwner {
@@ -265,13 +268,17 @@ async function validateRepositoryRoot(repoRoot: string): Promise<string> {
   return canonical;
 }
 
-async function readDirectRef(repoRoot: string, ref: string): Promise<string | null> {
-  const symbolic = await git(repoRoot, ["symbolic-ref", "--quiet", ref]);
+async function readDirectRef(
+  repoRoot: string,
+  ref: string,
+  runGit: typeof git = git,
+): Promise<string | null> {
+  const symbolic = await runGit(repoRoot, ["symbolic-ref", "--quiet", ref]);
   if (symbolic.exitCode === 0) {
     throw new RuntimeError("recovery refuses to mutate a symbolic Git ref");
   }
   if (symbolic.exitCode !== 1) throw runGitError("inspect symbolic Git ref", symbolic);
-  const direct = await git(repoRoot, ["rev-parse", "--verify", "--quiet", ref]);
+  const direct = await runGit(repoRoot, ["rev-parse", "--verify", "--quiet", ref]);
   if (direct.exitCode === 1) return null;
   if (direct.exitCode !== 0 || !OID.test(direct.stdout.trim())) {
     throw runGitError("inspect Git ref", direct);
@@ -279,8 +286,13 @@ async function readDirectRef(repoRoot: string, ref: string): Promise<string | nu
   return direct.stdout.trim();
 }
 
-async function deleteExactRef(repoRoot: string, ref: string, oid: string): Promise<void> {
-  const result = await git(repoRoot, ["update-ref", "--no-deref", "-d", ref, oid]);
+async function deleteExactRef(
+  repoRoot: string,
+  ref: string,
+  oid: string,
+  runGit: typeof git = git,
+): Promise<void> {
+  const result = await runGit(repoRoot, ["update-ref", "--no-deref", "-d", ref, oid]);
   if (result.exitCode !== 0) throw runGitError("delete recovery Git ref", result);
 }
 
@@ -299,6 +311,138 @@ async function removeStaleCandidateAnchor(repoRoot: string, runId: string): Prom
   const ref = `${CANDIDATE_REF_PREFIX}${runId}`;
   const oid = await readDirectRef(repoRoot, ref);
   if (oid !== null) await deleteExactRef(repoRoot, ref, oid);
+}
+
+async function archiveInterruptedPipeline(
+  store: ArtifactStore,
+  result: AttemptResult,
+): Promise<void> {
+  if (result.status !== "verified-candidate") return;
+  const manifest = await store.readManifest(result.runId);
+  if (manifest === null) {
+    throw new RuntimeError("run manifest is missing while recovering interrupted pipeline");
+  }
+  const failed: AttemptResult = {
+    ...result,
+    status: "failed",
+    failure: "verification-failure",
+    summary: "Delegation pipeline was interrupted before trusted gates completed.",
+    unresolvedIssues: [
+      ...result.unresolvedIssues,
+      "pipeline-interrupted-before-terminal-cleanup",
+    ],
+    evidence: {
+      ...result.evidence,
+      pipelineRecovery: "interrupted-before-terminal-cleanup",
+    },
+  };
+  await store.promoteTerminalArtifacts({ result: failed, manifest });
+}
+
+function escapeRegex(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function isManagedWorktreeId(runId: string, managedId: string): boolean {
+  if (new Set([
+    runId,
+    `baseline-${runId}`,
+    `verify-${runId}`,
+    `${runId}-pipeline`,
+    `${runId}-verify`,
+    `verify-${runId}-pipeline`,
+    `${runId}-composed-review`,
+    `${runId}-final-verify`,
+    `verify-${runId}-final-pipeline`,
+  ]).has(managedId)) return true;
+  const escapedRunId = escapeRegex(runId);
+  const index = "[1-9][0-9]*";
+  const attempt = "(?:0|[1-9][0-9]*)";
+  return new RegExp(
+    `^${escapedRunId}-slice-${index}-attempt-${attempt}(?:-review|-verify)?$`,
+  ).test(managedId)
+    || new RegExp(
+      `^verify-${escapedRunId}-slice-${index}-attempt-${attempt}-pipeline$`,
+    ).test(managedId);
+}
+
+async function managedWorktreeIds(root: string, runId: string): Promise<string[]> {
+  const worktreesRoot = path.join(root, "worktrees");
+  if (await plainDirectoryIdentity(worktreesRoot) === null) return [];
+  const entries = await readdir(worktreesRoot, { withFileTypes: true });
+  return entries
+    .map(entry => entry.name)
+    .filter(managedId => isManagedWorktreeId(runId, managedId))
+    .sort((left, right) => left.localeCompare(right));
+}
+
+async function cleanupManagedWorktrees(
+  commonDir: string,
+  root: string,
+  runId: string,
+  ps: Pick<PlatformServices, "os">,
+): Promise<void> {
+  for (const managedId of await managedWorktreeIds(root, runId)) {
+    const worktreePath = path.join(root, "worktrees", managedId);
+    if (await plainDirectoryIdentity(worktreePath) !== null) {
+      await new WorktreeManager(commonDir, managedId, ps).remove(worktreePath);
+    }
+  }
+}
+
+interface TemporarySliceRef {
+  ref: string;
+  oid: string;
+}
+
+async function temporarySliceRefs(
+  repoRoot: string,
+  runId: string,
+  runGit: typeof git,
+): Promise<TemporarySliceRef[]> {
+  const prefix = `${SLICE_REF_PREFIX}${runId}/`;
+  const listed = await runGit(repoRoot, [
+    "for-each-ref",
+    "--format=%(refname)%09%(objectname)",
+    prefix,
+  ]);
+  if (listed.exitCode !== 0) throw runGitError("enumerate temporary slice refs", listed);
+  const expectedName = new RegExp(
+    `^${escapeRegex(prefix)}slice-[1-9][0-9]*-attempt-(?:0|[1-9][0-9]*)$`,
+  );
+  const refs: TemporarySliceRef[] = [];
+  for (const line of listed.stdout.split("\n").filter(Boolean)) {
+    const fields = line.split("\t");
+    if (fields.length !== 2 || fields[0] === undefined || !expectedName.test(fields[0])) {
+      throw new RuntimeError("temporary slice ref name is malformed during recovery");
+    }
+    if (fields[1] === undefined || !OID.test(fields[1])) {
+      throw new RuntimeError("temporary slice ref OID is malformed during recovery");
+    }
+    const object = await runGit(repoRoot, ["cat-file", "-t", fields[1]]);
+    if (object.exitCode !== 0 || object.stdout.trim() !== "commit") {
+      throw new RuntimeError("temporary slice ref does not identify a commit during recovery");
+    }
+    refs.push({ ref: fields[0], oid: fields[1] });
+  }
+  for (const temporaryRef of refs) {
+    const current = await readDirectRef(repoRoot, temporaryRef.ref, runGit);
+    if (current !== temporaryRef.oid) {
+      throw new RuntimeError("temporary slice ref moved during recovery");
+    }
+  }
+  return refs;
+}
+
+async function cleanupTemporarySliceRefs(
+  repoRoot: string,
+  runId: string,
+  runGit: typeof git,
+): Promise<void> {
+  const refs = await temporarySliceRefs(repoRoot, runId, runGit);
+  for (const temporaryRef of refs) {
+    await deleteExactRef(repoRoot, temporaryRef.ref, temporaryRef.oid, runGit);
+  }
 }
 
 function parseCleanupRecord(line: string): CleanupRecord {
@@ -489,6 +633,7 @@ async function recoverRun(
   requestCooperativeTermination: (pid: number) => void | Promise<void>,
   delayMs: (ms: number) => Promise<void>,
   graceMs: number,
+  runGit: typeof git,
 ): Promise<void> {
   let escalation: "cooperative" | "forced" | undefined;
   if (record.pid !== null && isProcessAlive(record.pid)) {
@@ -512,19 +657,8 @@ async function recoverRun(
     "recovery",
     "startup recovery reclaimed unfinished run\n",
   );
-  for (const managedId of [
-    record.runId,
-    `baseline-${record.runId}`,
-    `verify-${record.runId}`,
-    `${record.runId}-pipeline`,
-    `${record.runId}-verify`,
-  ]) {
-    const worktreePath = path.join(root, "worktrees", managedId);
-    const worktreeIdentity = await plainDirectoryIdentity(worktreePath);
-    if (worktreeIdentity !== null) {
-      await new WorktreeManager(commonDir, managedId, ps).remove(worktreePath);
-    }
-  }
+  await cleanupManagedWorktrees(commonDir, root, record.runId, ps);
+  await cleanupTemporarySliceRefs(commonDir, record.runId, runGit);
   await removeStaleCandidateAnchor(commonDir, record.runId);
   await store.writeResult({
     resultVersion: "1",
@@ -656,6 +790,7 @@ export async function recoverStaleRuns(
     ?? defaultRequestCooperativeTermination;
   const delayMs = dependencies.delayMs ?? defaultDelayMs;
   const graceMs = dependencies.graceMs ?? 3000;
+  const runGit = dependencies.git ?? git;
   const locksRoot = path.join(root, "locks");
   const stale: RunStartRecord[] = [];
   if (runsIdentity !== null) {
@@ -677,15 +812,9 @@ export async function recoverStaleRuns(
           pid => ps.getProcessStartToken(pid),
         )) {
           const commonDir = await validateGitCommonDir(record.canonicalCommonDir);
-          for (const managedId of [
-            `${entry.name}-pipeline`,
-            `${entry.name}-verify`,
-          ]) {
-            const worktreePath = path.join(root, "worktrees", managedId);
-            if (await plainDirectoryIdentity(worktreePath) !== null) {
-              await new WorktreeManager(commonDir, managedId, ps).remove(worktreePath);
-            }
-          }
+          await archiveInterruptedPipeline(store, result);
+          await cleanupManagedWorktrees(commonDir, root, entry.name, ps);
+          await cleanupTemporarySliceRefs(commonDir, entry.name, runGit);
           await store.clearPipelineActiveMarker();
         }
         continue;
@@ -710,6 +839,7 @@ export async function recoverStaleRuns(
       requestCooperativeTermination,
       delayMs,
       graceMs,
+      runGit,
     );
     recovered.push(record.runId);
   }
