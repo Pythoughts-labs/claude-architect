@@ -217,6 +217,7 @@ export function withRunStartPidRecording(
     terminateProcessTreeByPid: (pid, expectedToken) =>
       ps.terminateProcessTreeByPid(pid, expectedToken),
     acquireCheckoutLock: checkout => ps.acquireCheckoutLock(checkout),
+    acquireCleanupJournalLock: () => ps.acquireCleanupJournalLock(),
     createSecureTempDirectory: () => ps.createSecureTempDirectory(),
     canonicalizePath: input => ps.canonicalizePath(input),
   };

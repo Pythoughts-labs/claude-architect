@@ -1081,28 +1081,36 @@ export class ArtifactStore {
 
   private async appendCleanupRecord(record: CleanupRecord): Promise<void> {
     await enqueueCleanupJournalWrite(async () => {
-      await this.ensureRunsRoot();
-      const runsRootIdentity = await ensurePlainDirectory(this.runsRoot);
-      const filename = path.join(this.runsRoot, CLEANUP_JOURNAL);
-      const handle = await open(
-        filename,
-        constants.O_WRONLY | constants.O_CREAT | constants.O_APPEND | NO_FOLLOW,
-        0o600,
-      );
+      // Cross-process mutex over the shared journal: serializes this append against
+      // a concurrent process's append or recovery torn-tail truncation. Leaf lock —
+      // acquired and released here without holding any other lock across it.
+      const journalLock = await getPlatformServices().acquireCleanupJournalLock();
       try {
+        await this.ensureRunsRoot();
+        const runsRootIdentity = await ensurePlainDirectory(this.runsRoot);
+        const filename = path.join(this.runsRoot, CLEANUP_JOURNAL);
+        const handle = await open(
+          filename,
+          constants.O_WRONLY | constants.O_CREAT | constants.O_APPEND | NO_FOLLOW,
+          0o600,
+        );
+        try {
+          await assertDirectoryIdentity(this.runsRoot, runsRootIdentity);
+          const metadata = await handle.stat();
+          if (!metadata.isFile()) throw new RuntimeError("cleanup journal is not a regular file");
+          const line = `${serializeJson(record)}\n`;
+          await handle.writeFile(line, { encoding: "utf8" });
+          await handle.sync();
+          await assertDirectoryIdentity(this.runsRoot, runsRootIdentity);
+        } finally {
+          await handle.close();
+        }
         await assertDirectoryIdentity(this.runsRoot, runsRootIdentity);
-        const metadata = await handle.stat();
-        if (!metadata.isFile()) throw new RuntimeError("cleanup journal is not a regular file");
-        const line = `${serializeJson(record)}\n`;
-        await handle.writeFile(line, { encoding: "utf8" });
-        await handle.sync();
+        await syncDirectory(this.runsRoot);
         await assertDirectoryIdentity(this.runsRoot, runsRootIdentity);
       } finally {
-        await handle.close();
+        await journalLock.release();
       }
-      await assertDirectoryIdentity(this.runsRoot, runsRootIdentity);
-      await syncDirectory(this.runsRoot);
-      await assertDirectoryIdentity(this.runsRoot, runsRootIdentity);
     });
   }
 

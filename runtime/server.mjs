@@ -21930,7 +21930,7 @@ var StdioServerTransport = class {
 var PROTOCOL_VERSION = "1.3.0";
 var DELEGATION_SPEC_VERSION = "1";
 var ATTEMPT_RESULT_VERSION = "1";
-var RUNTIME_VERSION = "0.21.0";
+var RUNTIME_VERSION = "0.22.0";
 
 // src/platform/posix-platform-services.ts
 import { spawn, execFile } from "node:child_process";
@@ -22012,6 +22012,7 @@ var logger = {
 // src/platform/posix-platform-services.ts
 var LOCK_RETRY_MS = 30;
 var LOCK_TIMEOUT_MS = 2500;
+var CLEANUP_JOURNAL_LOCK_KEY = createHash("sha256").update("claude-architect:cleanup-journal:v1").digest("hex");
 function errorCode(error2) {
   return typeof error2 === "object" && error2 !== null && "code" in error2 ? String(error2.code) : void 0;
 }
@@ -22191,6 +22192,10 @@ var PosixPlatformServices = class {
     const ownerToken = await this.getProcessStartToken(nodeProcess2.pid);
     const lock = await acquireWxFileLock(key, `checkout is locked: ${checkout}`, ownerToken);
     return { ...lock, repositoryIdentity };
+  }
+  async acquireCleanupJournalLock() {
+    const ownerToken = await this.getProcessStartToken(nodeProcess2.pid);
+    return acquireWxFileLock(CLEANUP_JOURNAL_LOCK_KEY, "cleanup journal is locked", ownerToken);
   }
   async createSecureTempDirectory() {
     return fs.mkdtemp(path.join(tmpdir2(), "claude-architect-"));
@@ -22517,6 +22522,10 @@ var WindowsPlatformServices = class {
     const ownerToken = await this.getProcessStartToken(nodeProcess3.pid);
     const lock = await acquireWxFileLock(key, `checkout is locked: ${checkout}`, ownerToken);
     return { ...lock, repositoryIdentity };
+  }
+  async acquireCleanupJournalLock() {
+    const ownerToken = await this.getProcessStartToken(nodeProcess3.pid);
+    return acquireWxFileLock(CLEANUP_JOURNAL_LOCK_KEY, "cleanup journal is locked", ownerToken);
   }
   async createSecureTempDirectory() {
     return fs2.mkdtemp(path2.join(tmpdir3(), "claude-architect-"));
@@ -27271,29 +27280,34 @@ var ArtifactStore = class {
   }
   async appendCleanupRecord(record2) {
     await enqueueCleanupJournalWrite(async () => {
-      await this.ensureRunsRoot();
-      const runsRootIdentity = await ensurePlainDirectory(this.runsRoot);
-      const filename = path9.join(this.runsRoot, CLEANUP_JOURNAL);
-      const handle = await open3(
-        filename,
-        constants2.O_WRONLY | constants2.O_CREAT | constants2.O_APPEND | NO_FOLLOW,
-        384
-      );
+      const journalLock = await getPlatformServices().acquireCleanupJournalLock();
       try {
-        await assertDirectoryIdentity(this.runsRoot, runsRootIdentity);
-        const metadata = await handle.stat();
-        if (!metadata.isFile()) throw new RuntimeError("cleanup journal is not a regular file");
-        const line = `${serializeJson(record2)}
+        await this.ensureRunsRoot();
+        const runsRootIdentity = await ensurePlainDirectory(this.runsRoot);
+        const filename = path9.join(this.runsRoot, CLEANUP_JOURNAL);
+        const handle = await open3(
+          filename,
+          constants2.O_WRONLY | constants2.O_CREAT | constants2.O_APPEND | NO_FOLLOW,
+          384
+        );
+        try {
+          await assertDirectoryIdentity(this.runsRoot, runsRootIdentity);
+          const metadata = await handle.stat();
+          if (!metadata.isFile()) throw new RuntimeError("cleanup journal is not a regular file");
+          const line = `${serializeJson(record2)}
 `;
-        await handle.writeFile(line, { encoding: "utf8" });
-        await handle.sync();
+          await handle.writeFile(line, { encoding: "utf8" });
+          await handle.sync();
+          await assertDirectoryIdentity(this.runsRoot, runsRootIdentity);
+        } finally {
+          await handle.close();
+        }
+        await assertDirectoryIdentity(this.runsRoot, runsRootIdentity);
+        await syncDirectory(this.runsRoot);
         await assertDirectoryIdentity(this.runsRoot, runsRootIdentity);
       } finally {
-        await handle.close();
+        await journalLock.release();
       }
-      await assertDirectoryIdentity(this.runsRoot, runsRootIdentity);
-      await syncDirectory(this.runsRoot);
-      await assertDirectoryIdentity(this.runsRoot, runsRootIdentity);
     });
   }
   async prune(policy, dependencies = {}) {
@@ -27733,6 +27747,7 @@ function withRunStartPidRecording(ps, context) {
     getProcessStartToken: (pid) => ps.getProcessStartToken(pid),
     terminateProcessTreeByPid: (pid, expectedToken) => ps.terminateProcessTreeByPid(pid, expectedToken),
     acquireCheckoutLock: (checkout) => ps.acquireCheckoutLock(checkout),
+    acquireCleanupJournalLock: () => ps.acquireCleanupJournalLock(),
     createSecureTempDirectory: () => ps.createSecureTempDirectory(),
     canonicalizePath: (input) => ps.canonicalizePath(input)
   };
@@ -31947,29 +31962,34 @@ async function createExactRef(repoRoot, ref, oid) {
   if (result.exitCode !== 0) throw runGitError("create recovery Git ref", result);
 }
 async function appendCleanupRecord(runsRoot, record2) {
-  const identity = await plainDirectoryIdentity(runsRoot);
-  if (identity === null) throw new RuntimeError("cleanup journal root disappeared");
-  const filename = path14.join(runsRoot, "cleanup.ndjson");
-  const handle = await open5(
-    filename,
-    constants4.O_WRONLY | constants4.O_CREAT | constants4.O_APPEND | NO_FOLLOW3,
-    384
-  );
+  const journalLock = await getPlatformServices().acquireCleanupJournalLock();
   try {
-    const metadata = await handle.stat();
-    const currentRoot2 = await lstat6(runsRoot);
-    if (!metadata.isFile() || !isPlainDirectory(currentRoot2) || !sameIdentity(currentRoot2, identity)) {
-      throw new RuntimeError("cleanup journal identity changed during recovery");
-    }
-    await handle.writeFile(`${JSON.stringify(record2)}
+    const identity = await plainDirectoryIdentity(runsRoot);
+    if (identity === null) throw new RuntimeError("cleanup journal root disappeared");
+    const filename = path14.join(runsRoot, "cleanup.ndjson");
+    const handle = await open5(
+      filename,
+      constants4.O_WRONLY | constants4.O_CREAT | constants4.O_APPEND | NO_FOLLOW3,
+      384
+    );
+    try {
+      const metadata = await handle.stat();
+      const currentRoot2 = await lstat6(runsRoot);
+      if (!metadata.isFile() || !isPlainDirectory(currentRoot2) || !sameIdentity(currentRoot2, identity)) {
+        throw new RuntimeError("cleanup journal identity changed during recovery");
+      }
+      await handle.writeFile(`${JSON.stringify(record2)}
 `, "utf8");
-    await handle.sync();
+      await handle.sync();
+    } finally {
+      await handle.close();
+    }
+    const currentRoot = await lstat6(runsRoot);
+    if (!isPlainDirectory(currentRoot) || !sameIdentity(currentRoot, identity)) {
+      throw new RuntimeError("cleanup journal root changed after recovery append");
+    }
   } finally {
-    await handle.close();
-  }
-  const currentRoot = await lstat6(runsRoot);
-  if (!isPlainDirectory(currentRoot) || !sameIdentity(currentRoot, identity)) {
-    throw new RuntimeError("cleanup journal root changed after recovery append");
+    await journalLock.release();
   }
 }
 async function reconcileCleanupRefs(record2, action) {
@@ -32066,8 +32086,15 @@ async function truncateCleanupTornTail(filename) {
   }
 }
 async function replayInterruptedPrunes(runsRoot, ps) {
-  const { pending, tornTail } = await readPendingCleanupRecords(runsRoot);
-  if (tornTail) await truncateCleanupTornTail(path14.join(runsRoot, "cleanup.ndjson"));
+  let pending;
+  const journalLock = await getPlatformServices().acquireCleanupJournalLock();
+  try {
+    const read = await readPendingCleanupRecords(runsRoot);
+    if (read.tornTail) await truncateCleanupTornTail(path14.join(runsRoot, "cleanup.ndjson"));
+    pending = read.pending;
+  } finally {
+    await journalLock.release();
+  }
   for (const record2 of [...pending.values()].sort((left, right) => left.runId.localeCompare(right.runId))) {
     if (record2.repoRoot === null) continue;
     const repoRoot = await validateRepositoryRoot(record2.repoRoot);

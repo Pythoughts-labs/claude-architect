@@ -34,10 +34,12 @@ export interface SupervisedExit {
   truncated: { stdout: boolean; stderr: boolean };
   spawnError?: unknown;             // set when the child emitted 'error' before start (→ spawn-failure)
 }
-export interface CheckoutLock {
+export interface FileLock {
   key: string;
-  readonly repositoryIdentity: string;
   release(): Promise<void>;
+}
+export interface CheckoutLock extends FileLock {
+  readonly repositoryIdentity: string;
 }
 export interface CanonicalPath { input: string; canonical: string; gitCommonDir: string | null; }
 
@@ -51,6 +53,13 @@ export interface PlatformServices {
   getProcessStartToken(pid: number): Promise<string | null>;
   terminateProcessTreeByPid(pid: number, expectedToken?: string | null): Promise<void>;   // crash recovery: kill a tree by recorded pid (no live SupervisedProcess). POSIX: kill(-pid); ESRCH treated as success.
   acquireCheckoutLock(checkout: string): Promise<CheckoutLock>;
+  /**
+   * Cross-process mutex over the shared cleanup journal (state-dir scoped, fixed
+   * key). All journal appends and the recovery torn-tail truncation acquire it so
+   * a truncation can never erase an intent a concurrent process appended+fsynced.
+   * A leaf lock: never held while acquiring another lock. Reclaimed like any lock.
+   */
+  acquireCleanupJournalLock(): Promise<FileLock>;
   createSecureTempDirectory(): Promise<string>;
   canonicalizePath(path: string): Promise<CanonicalPath>;
 }
