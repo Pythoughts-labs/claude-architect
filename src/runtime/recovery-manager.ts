@@ -1009,8 +1009,9 @@ async function lockOwnerIsLive(
   getProcessStartToken: (pid: number) => Promise<string | null>,
 ): Promise<boolean> {
   if (owner === null || !isProcessAlive(owner.pid)) return false;
-  return owner.processToken === null
-    || await getProcessStartToken(owner.pid) === owner.processToken;
+  if (owner.processToken === null) return true;
+  const currentToken = await getProcessStartToken(owner.pid);
+  return currentToken === null || currentToken === owner.processToken;
 }
 
 async function readHandleBytes(
@@ -1038,10 +1039,13 @@ async function removeLockIfUnchanged(
   expectedIdentity: DirectoryIdentity,
   expectedContents: Buffer,
 ): Promise<boolean> {
+  const expectedSize = expectedContents.byteLength;
   const handleMetadata = await handle.stat();
-  if (!handleMetadata.isFile() || handleMetadata.size > MAX_STATE_FILE_BYTES) {
-    return false;
-  }
+  if (!handleMetadata.isFile()
+    || handleMetadata.nlink !== 1
+    || !sameIdentity(handleMetadata, expectedIdentity)
+    || handleMetadata.size > MAX_STATE_FILE_BYTES
+    || handleMetadata.size !== expectedSize) return false;
   const currentContents = await readHandleBytes(handle, handleMetadata.size);
   if (!currentContents.equals(expectedContents)) return false;
 
@@ -1054,8 +1058,33 @@ async function removeLockIfUnchanged(
   }
   if (!pathMetadata.isFile()
     || pathMetadata.isSymbolicLink()
+    || pathMetadata.nlink !== 1
     || !sameIdentity(pathMetadata, expectedIdentity)
-    || pathMetadata.size !== currentContents.byteLength) return false;
+    || pathMetadata.size > MAX_STATE_FILE_BYTES
+    || pathMetadata.size !== expectedSize) return false;
+
+  const settledHandleMetadata = await handle.stat();
+  if (!settledHandleMetadata.isFile()
+    || settledHandleMetadata.nlink !== 1
+    || !sameIdentity(settledHandleMetadata, expectedIdentity)
+    || settledHandleMetadata.size > MAX_STATE_FILE_BYTES
+    || settledHandleMetadata.size !== expectedSize) return false;
+  const settledContents = await readHandleBytes(handle, settledHandleMetadata.size);
+  if (!settledContents.equals(expectedContents)) return false;
+
+  let settledPathMetadata;
+  try {
+    settledPathMetadata = await lstat(lockPath);
+  } catch (error) {
+    if (isMissing(error)) return false;
+    throw error;
+  }
+  if (!settledPathMetadata.isFile()
+    || settledPathMetadata.isSymbolicLink()
+    || settledPathMetadata.nlink !== 1
+    || !sameIdentity(settledPathMetadata, expectedIdentity)
+    || settledPathMetadata.size > MAX_STATE_FILE_BYTES
+    || settledPathMetadata.size !== expectedSize) return false;
   try {
     await rm(lockPath, { force: false });
     return true;

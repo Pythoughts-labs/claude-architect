@@ -168,6 +168,43 @@ describe("recoverStaleRuns", () => {
       .resolves.toBe(JSON.stringify(owner));
   }, { timeout: 120_000 });
 
+  it("defers recovery when a live recovery mutex token cannot be probed", async () => {
+    const repo = await initRepo();
+    const runId = "run-unprobeable-recovery-mutex";
+    const store = await createUnfinishedRun(runId, repo.commonDir, null);
+    const worktree = await new WorktreeManager(repo.directory, runId).create(repo.head);
+    const anchorRef = `refs/claude-architect/candidates/${runId}`;
+    await runGit(repo.directory, ["update-ref", anchorRef, repo.head]);
+    const recoveryLockPath = path.join(
+      process.env.CLAUDE_PLUGIN_DATA!,
+      "locks",
+      "recovery.lock",
+    );
+    const owner = { pid: 9104, processToken: "recorded" };
+    const lockBytes = Buffer.from(JSON.stringify(owner));
+    const tokenProbes: number[] = [];
+    await mkdir(path.dirname(recoveryLockPath), { recursive: true });
+    await writeFile(recoveryLockPath, lockBytes);
+
+    await expect(recoverStaleRuns({
+      platformServices: {
+        os: "darwin",
+        async getProcessStartToken(pid) {
+          if (pid === owner.pid) tokenProbes.push(pid);
+          return null;
+        },
+        async terminateProcessTreeByPid() {},
+      },
+      isProcessAlive: pid => pid === owner.pid,
+    })).resolves.toEqual({ recovered: [], quarantined: [] });
+
+    expect(tokenProbes).toEqual([owner.pid]);
+    await expect(readFile(recoveryLockPath)).resolves.toEqual(lockBytes);
+    await expect(access(worktree.path)).resolves.toBeUndefined();
+    expect(await runGit(repo.directory, ["rev-parse", anchorRef])).toBe(repo.head);
+    await expect(store.readResult(runId)).resolves.toBeNull();
+  }, { timeout: 120_000 });
+
   it("preserves a primary recovery error when lock releases also fail", async () => {
     const repo = await initRepo();
     const runId = "run-primary-and-release-failure";
@@ -231,6 +268,43 @@ describe("recoverStaleRuns", () => {
     await expect(store.readResult(runId))
       .resolves.toMatchObject({ status: "cancelled" });
     await expectMissing(recoveryLockPath);
+  }, { timeout: 120_000 });
+
+  it("defers recovery rather than unlinking a hard-linked stale recovery mutex", async () => {
+    const repo = await initRepo();
+    const runId = "run-hard-linked-recovery-mutex";
+    const store = await createUnfinishedRun(runId, repo.commonDir, null);
+    const worktree = await new WorktreeManager(repo.directory, runId).create(repo.head);
+    const anchorRef = `refs/claude-architect/candidates/${runId}`;
+    await runGit(repo.directory, ["update-ref", anchorRef, repo.head]);
+    const recoveryLockPath = path.join(
+      process.env.CLAUDE_PLUGIN_DATA!,
+      "locks",
+      "recovery.lock",
+    );
+    const aliasPath = path.join(process.env.CLAUDE_PLUGIN_DATA!, "recovery-lock-alias");
+    const lockBytes = Buffer.from(JSON.stringify({
+      pid: 9105,
+      processToken: "stale",
+    }));
+    await mkdir(path.dirname(recoveryLockPath), { recursive: true });
+    await writeFile(recoveryLockPath, lockBytes);
+    await link(recoveryLockPath, aliasPath);
+
+    await expect(recoverStaleRuns({
+      platformServices: {
+        os: "darwin",
+        async getProcessStartToken() { return null; },
+        async terminateProcessTreeByPid() {},
+      },
+      isProcessAlive: () => false,
+    })).resolves.toEqual({ recovered: [], quarantined: [] });
+
+    await expect(readFile(recoveryLockPath)).resolves.toEqual(lockBytes);
+    await expect(readFile(aliasPath)).resolves.toEqual(lockBytes);
+    await expect(access(worktree.path)).resolves.toBeUndefined();
+    expect(await runGit(repo.directory, ["rev-parse", anchorRef])).toBe(repo.head);
+    await expect(store.readResult(runId)).resolves.toBeNull();
   }, { timeout: 120_000 });
 
   it("defers recovery when checkout ownership becomes live before mutation", async () => {
