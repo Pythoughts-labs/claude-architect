@@ -24007,7 +24007,7 @@ function gitChangedFiles(checkoutPath, deps = {}) {
 }
 
 // src/mcp/tools.ts
-import { createHash as createHash7 } from "node:crypto";
+import { createHash as createHash5 } from "node:crypto";
 
 // src/git/repo-preconditions.ts
 import { access as access2, lstat, opendir, readlink, realpath } from "node:fs/promises";
@@ -24240,18 +24240,8 @@ async function checkPreconditions(repoRoot, options = {}) {
   return { ok: true, baseCommitOid, gitCommonDir: gitCommonDir3 };
 }
 
-// src/verify/structural-verifier.ts
+// src/git/changed-path-manifest.ts
 import { createHash as createHash3 } from "node:crypto";
-var MAX_DIAGNOSTIC_LENGTH2 = 2e3;
-function gitFailure(action, result) {
-  const diagnostic = redact(result.stderr || result.stdout).trim().slice(0, MAX_DIAGNOSTIC_LENGTH2);
-  return new RuntimeError(`${action} failed${diagnostic ? `: ${diagnostic}` : ""}`);
-}
-async function checkedGit(cwd, args) {
-  const result = await git(cwd, args);
-  if (result.exitCode !== 0) throw gitFailure(`git ${args[0] ?? "command"}`, result);
-  return result.stdout;
-}
 function splitNul(value) {
   const fields = value.split("\0");
   if (fields.at(-1) === "") fields.pop();
@@ -24302,6 +24292,42 @@ function changeType(status) {
 }
 function sortChangedPaths(changedPaths) {
   return changedPaths.sort((left, right) => left.path < right.path ? -1 : left.path > right.path ? 1 : 0);
+}
+function manifestHashOf(changedPaths) {
+  return createHash3("sha256").update(JSON.stringify(changedPaths)).digest("hex");
+}
+function computeChangedPathManifest(inputs) {
+  const rawEntries = new Map(inputs.rawDiff.map((entry) => [entry.path, entry]));
+  const treeEntries = parseTree(inputs.treeOutput);
+  const changedPaths = sortChangedPaths(parseNameStatus(inputs.nameStatusOutput).map(({ path: path15, status }) => {
+    const treeEntry = treeEntries.get(path15);
+    const rawEntry = rawEntries.get(path15);
+    if (treeEntry === void 0 && status !== "D") {
+      throw new RuntimeError("candidate tree is missing a changed path");
+    }
+    if (treeEntry === void 0 && rawEntry === void 0) {
+      throw new RuntimeError("git diff-tree outputs disagree");
+    }
+    return {
+      path: path15,
+      changeType: changeType(status),
+      mode: treeEntry?.mode ?? rawEntry.oldMode,
+      contentHash: treeEntry?.oid ?? null
+    };
+  }));
+  return { changedPaths, manifestHash: manifestHashOf(changedPaths) };
+}
+
+// src/verify/structural-verifier.ts
+var MAX_DIAGNOSTIC_LENGTH2 = 2e3;
+function gitFailure(action, result) {
+  const diagnostic = redact(result.stderr || result.stdout).trim().slice(0, MAX_DIAGNOSTIC_LENGTH2);
+  return new RuntimeError(`${action} failed${diagnostic ? `: ${diagnostic}` : ""}`);
+}
+async function checkedGit(cwd, args) {
+  const result = await git(cwd, args);
+  if (result.exitCode !== 0) throw gitFailure(`git ${args[0] ?? "command"}`, result);
+  return result.stdout;
 }
 function escapeRegex2(character) {
   return /[\\^$.*+?()[\]{}|]/.test(character) ? `\\${character}` : character;
@@ -24357,29 +24383,12 @@ async function recomputeManifest(args) {
     checkedGit(args.worktreePath, ["ls-tree", "-r", "-z", args.artifact.candidateTreeOid])
   ]);
   const rawDiff = parseRawDiff(rawOutput);
-  const rawByPath = new Map(rawDiff.map((entry) => [entry.path, entry]));
-  const treeByPath = parseTree(treeOutput);
-  const changedPaths = sortChangedPaths(parseNameStatus(nameStatusOutput).map(({ path: path15, status }) => {
-    const rawEntry = rawByPath.get(path15);
-    const treeEntry = treeByPath.get(path15);
-    if (treeEntry === void 0 && status !== "D") {
-      throw new RuntimeError("candidate tree is missing a changed path");
-    }
-    if (treeEntry === void 0 && rawEntry === void 0) {
-      throw new RuntimeError("git diff-tree outputs disagree");
-    }
-    return {
-      path: path15,
-      changeType: changeType(status),
-      mode: treeEntry?.mode ?? rawEntry.oldMode,
-      contentHash: treeEntry?.oid ?? null
-    };
-  }));
-  return {
-    changedPaths,
-    manifestHash: createHash3("sha256").update(JSON.stringify(changedPaths)).digest("hex"),
-    rawDiff
-  };
+  const { changedPaths, manifestHash } = computeChangedPathManifest({
+    rawDiff,
+    nameStatusOutput,
+    treeOutput
+  });
+  return { changedPaths, manifestHash, rawDiff };
 }
 async function artifactIdentityMatches(args) {
   const [anchorResult, treeResult, parentResult] = await Promise.all([
@@ -25280,7 +25289,6 @@ import { randomUUID as randomUUID4 } from "node:crypto";
 import { rm as rm5 } from "node:fs/promises";
 
 // src/git/candidate-tree.ts
-import { createHash as createHash4 } from "node:crypto";
 import { lstat as lstat2, mkdtemp as mkdtemp2, rm as rm2 } from "node:fs/promises";
 import { tmpdir as tmpdir5 } from "node:os";
 import path6 from "node:path";
@@ -25302,13 +25310,8 @@ async function checkedGit2(cwd, args, indexFile) {
   if (result.exitCode !== 0) throw gitFailure2(`git ${args[0] ?? "command"}`, result);
   return result.stdout;
 }
-function splitNul2(value) {
-  const fields = value.split("\0");
-  if (fields.at(-1) === "") fields.pop();
-  return fields;
-}
 function parsePorcelainPaths(output, kind) {
-  const fields = splitNul2(output);
+  const fields = splitNul(output);
   const paths = [];
   for (let index = 0; index < fields.length; index += 1) {
     const entry = fields[index];
@@ -25386,48 +25389,6 @@ async function advisoryLstatScan(worktreePath, changedPaths) {
   }));
   return symlinkResults.some(Boolean);
 }
-function parseRawDiff2(output) {
-  const fields = splitNul2(output);
-  const entries = [];
-  for (let index = 0; index < fields.length; index += 2) {
-    const metadata = fields[index];
-    const entryPath = fields[index + 1];
-    const match = /^:(\d{6}) (\d{6}) [0-9a-f]+ [0-9a-f]+ [A-Z]$/.exec(metadata);
-    if (match === null || entryPath === void 0) {
-      throw new RuntimeError("git diff-tree returned invalid raw output");
-    }
-    entries.push({ path: entryPath, oldMode: match[1], newMode: match[2] });
-  }
-  return entries;
-}
-function parseNameStatus2(output) {
-  const fields = splitNul2(output);
-  if (fields.length % 2 !== 0) throw new RuntimeError("git diff-tree returned invalid name-status output");
-  const entries = [];
-  for (let index = 0; index < fields.length; index += 2) {
-    entries.push({ status: fields[index], path: fields[index + 1] });
-  }
-  return entries;
-}
-function parseTree2(output) {
-  const entries = /* @__PURE__ */ new Map();
-  for (const record2 of splitNul2(output)) {
-    const separator = record2.indexOf("	");
-    if (separator < 0) throw new RuntimeError("git ls-tree returned invalid output");
-    const [mode, , oid] = record2.slice(0, separator).split(" ");
-    if (mode === void 0 || oid === void 0) throw new RuntimeError("git ls-tree returned invalid output");
-    entries.set(record2.slice(separator + 1), { mode, oid });
-  }
-  return entries;
-}
-function changeType2(status) {
-  if (status === "A") return "added";
-  if (status === "D") return "deleted";
-  return "modified";
-}
-function sortChangedPaths2(changedPaths) {
-  return changedPaths.sort((left, right) => left.path < right.path ? -1 : left.path > right.path ? 1 : 0);
-}
 function sanitizeReviewPatch(patch) {
   const sanitizedLines = [];
   let omittingBinaryPayload = false;
@@ -25468,7 +25429,7 @@ async function freezeCandidate(args) {
       ["rev-parse", `${args.baseCommitOid}^{tree}`]
     )).trim();
     if (candidateTreeOid === baseTreeOid) return { ok: false, reason: "empty-candidate" };
-    const rawDiff = parseRawDiff2(await checkedGit2(args.worktreePath, [
+    const rawDiff = parseRawDiff(await checkedGit2(args.worktreePath, [
       "diff-tree",
       "-r",
       "--no-commit-id",
@@ -25494,7 +25455,7 @@ async function freezeCandidate(args) {
     if (rawDiff.some((entry) => [entry.oldMode, entry.newMode].some((mode) => mode === "120000" || mode === "160000"))) {
       return { ok: false, reason: "modified-symlink" };
     }
-    const nameStatus = parseNameStatus2(await checkedGit2(args.repoRoot, [
+    const nameStatusOutput = await checkedGit2(args.repoRoot, [
       "diff-tree",
       "-r",
       "--no-commit-id",
@@ -25503,29 +25464,16 @@ async function freezeCandidate(args) {
       "-z",
       args.baseCommitOid,
       candidateTreeOid
-    ]));
-    const treeEntries = parseTree2(await checkedGit2(
+    ]);
+    const treeOutput = await checkedGit2(
       args.repoRoot,
       ["ls-tree", "-r", "-z", candidateTreeOid]
-    ));
-    const rawEntries = new Map(rawDiff.map((entry) => [entry.path, entry]));
-    const changedPaths = sortChangedPaths2(nameStatus.map(({ path: changedPath, status }) => {
-      const treeEntry = treeEntries.get(changedPath);
-      const rawEntry = rawEntries.get(changedPath);
-      if (treeEntry === void 0 && status !== "D") {
-        throw new RuntimeError("candidate tree is missing a changed path");
-      }
-      if (treeEntry === void 0 && rawEntry === void 0) {
-        throw new RuntimeError("git diff-tree outputs disagree");
-      }
-      return {
-        path: changedPath,
-        changeType: changeType2(status),
-        mode: treeEntry?.mode ?? rawEntry.oldMode,
-        contentHash: treeEntry?.oid ?? null
-      };
-    }));
-    const manifestHash = createHash4("sha256").update(JSON.stringify(changedPaths)).digest("hex");
+    );
+    const { changedPaths, manifestHash } = computeChangedPathManifest({
+      rawDiff,
+      nameStatusOutput,
+      treeOutput
+    });
     const patch = sanitizeReviewPatch(await checkedGit2(args.repoRoot, [
       "diff",
       "--no-ext-diff",
@@ -26278,7 +26226,7 @@ async function verifyBaseline(args) {
 }
 
 // src/runtime/artifact-store.ts
-import { createHash as createHash6, randomUUID as randomUUID2 } from "node:crypto";
+import { randomUUID as randomUUID2 } from "node:crypto";
 import { constants as constants2 } from "node:fs";
 import {
   link,
@@ -26294,12 +26242,12 @@ import {
 import path9 from "node:path";
 
 // src/runtime/run-manifest.ts
-import { createHash as createHash5 } from "node:crypto";
+import { createHash as createHash4 } from "node:crypto";
 function compareText(left, right) {
   return left < right ? -1 : left > right ? 1 : 0;
 }
 function sha256(value) {
-  return createHash5("sha256").update(value).digest("hex");
+  return createHash4("sha256").update(value).digest("hex");
 }
 function canonicalize(value) {
   if (Array.isArray(value)) return value.map(canonicalize);
@@ -26760,7 +26708,7 @@ function sanitizeCandidate(candidate) {
     mode: preserveIdentity2(change.mode, "candidate mode"),
     contentHash: preserveNullableIdentity2(change.contentHash, "candidate content hash")
   }));
-  const expectedManifestHash = createHash6("sha256").update(JSON.stringify(changedPaths)).digest("hex");
+  const expectedManifestHash = manifestHashOf(changedPaths);
   if (candidate.manifestHash !== expectedManifestHash) {
     throw new RuntimeError("candidate manifest hash does not match changed paths");
   }
@@ -30074,7 +30022,7 @@ async function loadArchivedRun(runId, deps) {
   if (result.runId !== runId || manifest.runId !== runId) {
     throw runtimeError("archived run identity does not match", "archive-inconsistent");
   }
-  if (result.candidate !== null && (manifest.baseCommitOid !== result.candidate.baseCommitOid || manifest.candidateManifestHash !== result.candidate.manifestHash || result.candidate.manifestHash !== createHash7("sha256").update(JSON.stringify(result.candidate.changedPaths)).digest("hex"))) {
+  if (result.candidate !== null && (manifest.baseCommitOid !== result.candidate.baseCommitOid || manifest.candidateManifestHash !== result.candidate.manifestHash || result.candidate.manifestHash !== createHash5("sha256").update(JSON.stringify(result.candidate.changedPaths)).digest("hex"))) {
     throw runtimeError("archived candidate does not match its run manifest", "archive-inconsistent");
   }
   const canonical = await services2(deps).canonicalizePath(manifest.repoRoot);
@@ -30345,7 +30293,7 @@ async function handleIntegrateCandidate(checkoutPath, runId, expectedArtifactHas
 }
 
 // src/runtime/recovery-manager.ts
-import { createHash as createHash8 } from "node:crypto";
+import { createHash as createHash6 } from "node:crypto";
 import { constants as constants4 } from "node:fs";
 import {
   lstat as lstat6,
@@ -30468,7 +30416,7 @@ function parseRunStart(text, expectedRunId) {
   if (record2.runId !== expectedRunId || typeof record2.lockKey !== "string" || !/^[0-9a-f]{64}$/.test(record2.lockKey) || typeof record2.canonicalCommonDir !== "string" || !path14.isAbsolute(record2.canonicalCommonDir) || record2.pid !== null && (record2.pid === void 0 || !Number.isSafeInteger(record2.pid) || record2.pid <= 1) || record2.processToken !== void 0 && record2.processToken !== null && typeof record2.processToken !== "string" || typeof record2.startedAt !== "string" || !Number.isFinite(Date.parse(record2.startedAt))) {
     throw new RuntimeError("run-start recovery record is malformed");
   }
-  const expectedLockKey = createHash8("sha256").update(record2.canonicalCommonDir).digest("hex");
+  const expectedLockKey = createHash6("sha256").update(record2.canonicalCommonDir).digest("hex");
   if (record2.lockKey !== expectedLockKey) {
     throw new RuntimeError("run-start lock key does not match its canonical common directory");
   }

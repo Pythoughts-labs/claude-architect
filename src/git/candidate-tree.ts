@@ -1,11 +1,11 @@
-import { createHash } from "node:crypto";
 import { lstat, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import type { CandidateArtifact, ChangedPath } from "../protocol/attempt-result.js";
+import type { CandidateArtifact } from "../protocol/attempt-result.js";
 import { redact } from "../runtime/redaction.js";
 import { RuntimeError } from "../util/errors.js";
 import { git, type GitResult } from "./git-exec.js";
+import { computeChangedPathManifest, parseRawDiff, splitNul } from "./changed-path-manifest.js";
 
 const MAX_DIAGNOSTIC_LENGTH = 2_000;
 const MAX_REJECT_PATHS = 25;
@@ -35,17 +35,6 @@ interface WorktreeInventory {
   ignoredPaths: string[];
 }
 
-interface RawDiffEntry {
-  path: string;
-  oldMode: string;
-  newMode: string;
-}
-
-interface TreeEntry {
-  mode: string;
-  oid: string;
-}
-
 function gitFailure(action: string, result: GitResult): RuntimeError {
   const diagnostic = redact(result.stderr || result.stdout).trim().slice(0, MAX_DIAGNOSTIC_LENGTH);
   return new RuntimeError(`${action} failed${diagnostic ? `: ${diagnostic}` : ""}`);
@@ -65,12 +54,6 @@ async function checkedGit(
   }
   if (result.exitCode !== 0) throw gitFailure(`git ${args[0] ?? "command"}`, result);
   return result.stdout;
-}
-
-function splitNul(value: string): string[] {
-  const fields = value.split("\0");
-  if (fields.at(-1) === "") fields.pop();
-  return fields;
 }
 
 function parsePorcelainPaths(output: string, kind: "changed" | "ignored"): string[] {
@@ -165,53 +148,6 @@ async function advisoryLstatScan(worktreePath: string, changedPaths: string[]): 
   return symlinkResults.some(Boolean);
 }
 
-function parseRawDiff(output: string): RawDiffEntry[] {
-  const fields = splitNul(output);
-  const entries: RawDiffEntry[] = [];
-  for (let index = 0; index < fields.length; index += 2) {
-    const metadata = fields[index]!;
-    const entryPath = fields[index + 1];
-    const match = /^:(\d{6}) (\d{6}) [0-9a-f]+ [0-9a-f]+ [A-Z]$/.exec(metadata);
-    if (match === null || entryPath === undefined) {
-      throw new RuntimeError("git diff-tree returned invalid raw output");
-    }
-    entries.push({ path: entryPath, oldMode: match[1]!, newMode: match[2]! });
-  }
-  return entries;
-}
-
-function parseNameStatus(output: string): Array<{ path: string; status: string }> {
-  const fields = splitNul(output);
-  if (fields.length % 2 !== 0) throw new RuntimeError("git diff-tree returned invalid name-status output");
-  const entries: Array<{ path: string; status: string }> = [];
-  for (let index = 0; index < fields.length; index += 2) {
-    entries.push({ status: fields[index]!, path: fields[index + 1]! });
-  }
-  return entries;
-}
-
-function parseTree(output: string): Map<string, TreeEntry> {
-  const entries = new Map<string, TreeEntry>();
-  for (const record of splitNul(output)) {
-    const separator = record.indexOf("\t");
-    if (separator < 0) throw new RuntimeError("git ls-tree returned invalid output");
-    const [mode, , oid] = record.slice(0, separator).split(" ");
-    if (mode === undefined || oid === undefined) throw new RuntimeError("git ls-tree returned invalid output");
-    entries.set(record.slice(separator + 1), { mode, oid });
-  }
-  return entries;
-}
-
-function changeType(status: string): ChangedPath["changeType"] {
-  if (status === "A") return "added";
-  if (status === "D") return "deleted";
-  return "modified";
-}
-
-function sortChangedPaths(changedPaths: ChangedPath[]): ChangedPath[] {
-  return changedPaths.sort((left, right) => left.path < right.path ? -1 : left.path > right.path ? 1 : 0);
-}
-
 function sanitizeReviewPatch(patch: string): string {
   const sanitizedLines: string[] = [];
   let omittingBinaryPayload = false;
@@ -288,7 +224,7 @@ export async function freezeCandidate(args: FreezeCandidateArgs): Promise<Freeze
       return { ok: false, reason: "modified-symlink" };
     }
 
-    const nameStatus = parseNameStatus(await checkedGit(args.repoRoot, [
+    const nameStatusOutput = await checkedGit(args.repoRoot, [
       "diff-tree",
       "-r",
       "--no-commit-id",
@@ -297,31 +233,16 @@ export async function freezeCandidate(args: FreezeCandidateArgs): Promise<Freeze
       "-z",
       args.baseCommitOid,
       candidateTreeOid,
-    ]));
-    const treeEntries = parseTree(await checkedGit(
+    ]);
+    const treeOutput = await checkedGit(
       args.repoRoot,
       ["ls-tree", "-r", "-z", candidateTreeOid],
-    ));
-    const rawEntries = new Map(rawDiff.map(entry => [entry.path, entry]));
-    const changedPaths = sortChangedPaths(nameStatus.map(({ path: changedPath, status }) => {
-      const treeEntry = treeEntries.get(changedPath);
-      const rawEntry = rawEntries.get(changedPath);
-      if (treeEntry === undefined && status !== "D") {
-        throw new RuntimeError("candidate tree is missing a changed path");
-      }
-      if (treeEntry === undefined && rawEntry === undefined) {
-        throw new RuntimeError("git diff-tree outputs disagree");
-      }
-      return {
-        path: changedPath,
-        changeType: changeType(status),
-        mode: treeEntry?.mode ?? rawEntry!.oldMode,
-        contentHash: treeEntry?.oid ?? null,
-      };
-    }));
-    const manifestHash = createHash("sha256")
-      .update(JSON.stringify(changedPaths))
-      .digest("hex");
+    );
+    const { changedPaths, manifestHash } = computeChangedPathManifest({
+      rawDiff,
+      nameStatusOutput,
+      treeOutput,
+    });
     const patch = sanitizeReviewPatch(await checkedGit(args.repoRoot, [
       "diff",
       "--no-ext-diff",

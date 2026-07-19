@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import { constants } from "node:fs";
 import {
   link,
@@ -13,6 +13,7 @@ import {
 } from "node:fs/promises";
 import path from "node:path";
 import { git } from "../git/git-exec.js";
+import { manifestHashOf } from "../git/changed-path-manifest.js";
 import type {
   AttemptResult,
   CandidateArtifact,
@@ -453,9 +454,7 @@ function sanitizeCandidate(candidate: CandidateArtifact): CandidateArtifact {
     mode: preserveIdentity(change.mode, "candidate mode"),
     contentHash: preserveNullableIdentity(change.contentHash, "candidate content hash"),
   }));
-  const expectedManifestHash = createHash("sha256")
-    .update(JSON.stringify(changedPaths))
-    .digest("hex");
+  const expectedManifestHash = manifestHashOf(changedPaths);
   if (candidate.manifestHash !== expectedManifestHash) {
     throw new RuntimeError("candidate manifest hash does not match changed paths");
   }
