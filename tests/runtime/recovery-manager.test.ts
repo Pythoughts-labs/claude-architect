@@ -1627,7 +1627,7 @@ describe("recoverStaleRuns", () => {
       backupRef,
       candidateCommitOid: repo.head,
       recordedAt: "2026-07-14T12:00:00.000Z",
-    })}\n{"event":"prune-cleanup-com`);
+    })}\n`);
     const cleanupPath = path.join(runsRoot, "cleanup.ndjson");
     await writeFile(cleanupPath, cleanupBytes);
     const quarantineIdentity = await lstat(quarantinePath);
@@ -1666,6 +1666,89 @@ describe("recoverStaleRuns", () => {
       .resolves.toMatchObject({ status: "cancelled" });
   }, { timeout: 120_000 });
 
+  it("defers all interrupted prunes when the shared cleanup journal has a torn tail", async () => {
+    const firstRepo = await initRepo();
+    const secondRepo = await initRepo();
+    const healthyRepo = await initRepo();
+    const healthyRunId = "run-torn-prune-healthy";
+    const healthyStore = await createUnfinishedRun(healthyRunId, healthyRepo.commonDir, null);
+    const runsRoot = path.join(process.env.CLAUDE_PLUGIN_DATA!, "runs");
+    const fixtures = [
+      { repo: firstRepo, runId: "run-torn-prune-first", suffix: "4" },
+      { repo: secondRepo, runId: "run-torn-prune-second", suffix: "5" },
+    ];
+    const records: string[] = [];
+    const identities = new Map<string, { dev: number; ino: number }>();
+
+    for (const { repo, runId, suffix } of fixtures) {
+      const anchorRef = `refs/claude-architect/candidates/${runId}`;
+      const backupRef = `refs/claude-architect/prune-backups/${runId}`;
+      const quarantineName = `.prune-${runId}-00000000-0000-4000-8000-00000000000${suffix}`;
+      const runDirectory = path.join(runsRoot, runId);
+      const quarantinePath = path.join(runsRoot, quarantineName);
+      await mkdir(runDirectory, { recursive: true });
+      await writeFile(path.join(runDirectory, "result.json"), "{}\n");
+      await runGit(repo.directory, ["update-ref", backupRef, repo.head]);
+      await rename(runDirectory, quarantinePath);
+      const identity = await lstat(quarantinePath);
+      identities.set(runId, { dev: identity.dev, ino: identity.ino });
+      records.push(JSON.stringify({
+        event: "prune-cleanup-intent",
+        runId,
+        reason: "max-age",
+        anchorCleanup: "pending",
+        archiveBytes: 3,
+        quarantineName,
+        repoRoot: repo.directory,
+        anchorRef,
+        backupRef,
+        candidateCommitOid: repo.head,
+        recordedAt: "2026-07-14T12:00:00.000Z",
+      }));
+    }
+
+    const cleanupPath = path.join(runsRoot, "cleanup.ndjson");
+    const cleanupBytes = Buffer.from(
+      `${records.join("\n")}\n{"event":"prune-cleanup-com`,
+    );
+    await writeFile(cleanupPath, cleanupBytes);
+    const warn = vi.spyOn(logger, "warn").mockImplementation(() => {});
+    let recoveryResult: Awaited<ReturnType<typeof recoverStaleRuns>> | undefined;
+    let warnCalls: unknown[][] = [];
+    try {
+      recoveryResult = await recoverStaleRuns({ isProcessAlive: () => false });
+    } finally {
+      warnCalls = [...warn.mock.calls];
+      warn.mockRestore();
+    }
+
+    expect(recoveryResult).toEqual({ recovered: [healthyRunId], quarantined: [] });
+    expect(warnCalls).toEqual([[
+      "startup recovery deferred interrupted prune replay for a torn cleanup journal",
+    ]]);
+    await expect(readFile(cleanupPath)).resolves.toEqual(cleanupBytes);
+    for (const { repo, runId, suffix } of fixtures) {
+      const quarantinePath = path.join(
+        runsRoot,
+        `.prune-${runId}-00000000-0000-4000-8000-00000000000${suffix}`,
+      );
+      const identity = await lstat(quarantinePath);
+      expect({ dev: identity.dev, ino: identity.ino }).toEqual(identities.get(runId));
+      expect((await git(repo.directory, [
+        "rev-parse",
+        "--verify",
+        "--quiet",
+        `refs/claude-architect/candidates/${runId}`,
+      ])).exitCode).not.toBe(0);
+      expect(await runGit(repo.directory, [
+        "rev-parse",
+        `refs/claude-architect/prune-backups/${runId}`,
+      ])).toBe(repo.head);
+    }
+    await expect(healthyStore.readResult(healthyRunId))
+      .resolves.toMatchObject({ status: "cancelled" });
+  }, { timeout: 120_000 });
+
   it("finishes an interrupted prune after the archive was quarantined", async () => {
     const repo = await initRepo();
     const runId = "run-prune-finish";
@@ -1691,7 +1774,7 @@ describe("recoverStaleRuns", () => {
       backupRef,
       candidateCommitOid: repo.head,
       recordedAt: "2026-07-14T12:00:00.000Z",
-    })}\n{"event":"prune-cleanup-com`);
+    })}\n`);
 
     await recoverStaleRuns({
       platformServices: {

@@ -58,6 +58,11 @@ interface CleanupRecord {
   recordedAt: string;
 }
 
+interface CleanupJournalRead {
+  text: string | null;
+  tornTail: boolean;
+}
+
 interface RecoveryQuarantineRecord {
   event: "recovery-quarantine";
   runId: string;
@@ -160,31 +165,21 @@ async function readBoundedRegularFile(filename: string): Promise<string | null> 
   }
 }
 
-async function readCleanupJournal(
-  filename: string,
-  repairTornTail: boolean,
-): Promise<string | null> {
+async function readCleanupJournal(filename: string): Promise<CleanupJournalRead> {
   let handle;
   try {
-    handle = await open(
-      filename,
-      (repairTornTail ? constants.O_RDWR : constants.O_RDONLY) | NO_FOLLOW,
-    );
+    handle = await open(filename, constants.O_RDONLY | NO_FOLLOW);
     const metadata = await handle.stat();
     if (!metadata.isFile() || metadata.size > MAX_STATE_FILE_BYTES) {
       throw new RuntimeError("cleanup journal is not a bounded regular file");
     }
     const text = await handle.readFile({ encoding: "utf8" });
-    if (text === "" || text.endsWith("\n")) return text;
+    if (text === "" || text.endsWith("\n")) return { text, tornTail: false };
     const finalNewline = text.lastIndexOf("\n");
     const completePrefix = finalNewline === -1 ? "" : text.slice(0, finalNewline + 1);
-    if (repairTornTail) {
-      await handle.truncate(Buffer.byteLength(completePrefix, "utf8"));
-      await handle.sync();
-    }
-    return completePrefix;
+    return { text: completePrefix, tornTail: true };
   } catch (error) {
-    if (isMissing(error)) return null;
+    if (isMissing(error)) return { text: null, tornTail: false };
     throw error;
   } finally {
     await handle?.close();
@@ -958,28 +953,26 @@ async function commitCleanupRefs(record: CleanupRecord): Promise<void> {
 
 async function readPendingCleanupRecords(
   runsRoot: string,
-  repairTornTail: boolean,
-): Promise<Map<string, CleanupRecord>> {
-  const text = await readCleanupJournal(
-    path.join(runsRoot, "cleanup.ndjson"),
-    repairTornTail,
-  );
+): Promise<{ pending: Map<string, CleanupRecord>; tornTail: boolean }> {
+  const { text, tornTail } = await readCleanupJournal(path.join(runsRoot, "cleanup.ndjson"));
   const pending = new Map<string, CleanupRecord>();
-  if (text === null || text.trim() === "") return pending;
+  if (text === null || text.trim() === "") return { pending, tornTail };
   for (const line of text.trimEnd().split("\n")) {
     if (line.trim() === "") throw new RuntimeError("cleanup journal contains a blank record");
     const record = parseCleanupRecord(line);
     if (record.event === "prune-cleanup-intent") pending.set(record.runId, record);
     else pending.delete(record.runId);
   }
-  return pending;
+  return { pending, tornTail };
 }
 
 async function currentPendingCleanupRecord(
   runsRoot: string,
   expected: CleanupRecord,
 ): Promise<CleanupRecord | null> {
-  const current = (await readPendingCleanupRecords(runsRoot, true)).get(expected.runId) ?? null;
+  const snapshot = await readPendingCleanupRecords(runsRoot);
+  if (snapshot.tornTail) return null;
+  const current = snapshot.pending.get(expected.runId) ?? null;
   if (current !== null && JSON.stringify(current) !== JSON.stringify(expected)) {
     throw new RuntimeError("cleanup journal record changed before interrupted prune replay");
   }
@@ -1034,7 +1027,11 @@ async function replayInterruptedPrunes(
   isProcessAlive: (pid: number) => boolean,
   getProcessStartToken: (pid: number) => Promise<string | null>,
 ): Promise<void> {
-  const pending = await readPendingCleanupRecords(runsRoot, false);
+  const { pending, tornTail } = await readPendingCleanupRecords(runsRoot);
+  if (tornTail) {
+    logger.warn("startup recovery deferred interrupted prune replay for a torn cleanup journal");
+    return;
+  }
 
   for (const record of [...pending.values()].sort((left, right) =>
     left.runId.localeCompare(right.runId))) {
