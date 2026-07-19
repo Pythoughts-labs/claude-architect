@@ -34,6 +34,8 @@ import {
   type RunManifest,
 } from "./run-manifest.js";
 import { resolveStateDir } from "./state-dir.js";
+import { getPlatformServices } from "../platform/select-platform.js";
+import type { CheckoutLock, PlatformServices } from "../platform/platform-services.js";
 
 const SAFE_COMPONENT = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 const WINDOWS_RESERVED_COMPONENT = /^(?:CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])$/i;
@@ -52,6 +54,10 @@ export interface PrunePolicy {
 export interface PruneResult {
   removed: string[];
   retained: Array<{ runId: string; reason: string }>;
+}
+
+export interface PruneDependencies {
+  platformServices?: Pick<PlatformServices, "acquireCheckoutLock" | "canonicalizePath">;
 }
 
 export type RunDecisionValue = "accepted" | "rejected" | "revision-requested";
@@ -924,11 +930,13 @@ export class ArtifactStore {
   private async prepareCandidateAnchorCleanup(
     runId: string,
     result: AttemptResult,
+    manifest: RunManifest,
+    canonicalRepoRoot: string,
   ): Promise<PreparedAnchorCleanup> {
     if (result.candidate === null) {
       return {
         outcome: "not-applicable",
-        repoRoot: null,
+        repoRoot: canonicalRepoRoot,
         anchorRef: null,
         backupRef: null,
         candidateCommitOid: null,
@@ -943,15 +951,10 @@ export class ArtifactStore {
     if (!/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(candidate.candidateCommitOid)) {
       throw new RuntimeError("archived candidate commit oid is invalid");
     }
-    const manifest = await this.readManifest(runId);
-    if (manifest === null) {
-      throw new RuntimeError("cannot remove candidate anchor without archived repository root");
-    }
     if (manifest.baseCommitOid !== candidate.baseCommitOid
       || manifest.candidateManifestHash !== candidate.manifestHash) {
       throw new RuntimeError("archived candidate does not match its run manifest");
     }
-    const canonicalRepoRoot = await realpath(manifest.repoRoot);
     const repositoryTopLevel = await git(canonicalRepoRoot, ["rev-parse", "--show-toplevel"]);
     if (repositoryTopLevel.exitCode !== 0
       || await realpath(repositoryTopLevel.stdout.trim()) !== canonicalRepoRoot) {
@@ -1103,7 +1106,10 @@ export class ArtifactStore {
     });
   }
 
-  async prune(policy: PrunePolicy): Promise<PruneResult> {
+  async prune(
+    policy: PrunePolicy,
+    dependencies: PruneDependencies = {},
+  ): Promise<PruneResult> {
     validatePruneLimit(policy.maxAgeMs, "maxAgeMs");
     validatePruneLimit(policy.maxBytes, "maxBytes");
 
@@ -1122,13 +1128,62 @@ export class ArtifactStore {
       let transaction: AnchorCleanupTransaction | null = null;
       let runsRootIdentity: DirectoryIdentity | null = null;
       let archiveRemovalCommitted = false;
+      let lease: CheckoutLock | null = null;
       try {
+        // Fast path: never wait on a checkout lease for a run that still
+        // advertises a live pipeline. Refuse before canonicalizing or locking.
+        if (await this.readPipelineActiveMarker(entry.runId) !== null) {
+          retained.push({ runId: entry.runId, reason: "active-run" });
+          return;
+        }
+        const initialManifest = await this.readManifest(entry.runId);
+        if (initialManifest === null) {
+          retained.push({ runId: entry.runId, reason: "incomplete-run" });
+          return;
+        }
+        const initialResult = await this.readResult(entry.runId);
+        if (initialResult === null) {
+          retained.push({ runId: entry.runId, reason: "incomplete-run" });
+          return;
+        }
+        // Serialize archive removal against the checkout lifecycle: hold the
+        // repository's checkout lease so recovery/integration cannot race a
+        // prune that is deleting the same candidate anchors.
+        const platformServices = dependencies.platformServices ?? getPlatformServices();
+        const canonical = await platformServices.canonicalizePath(initialManifest.repoRoot);
+        const repositoryIdentity = canonical.gitCommonDir ?? canonical.canonical;
+        lease = await platformServices.acquireCheckoutLock(canonical.canonical);
+        if (lease.repositoryIdentity !== repositoryIdentity) {
+          throw new RuntimeError("checkout lease repository identity changed before pruning");
+        }
+        await assertDirectoryIdentity(entry.directory, entry.identity);
+        // Re-establish authority under the lease: the manifest, terminal
+        // result, and active marker may all have changed while we waited.
+        const currentManifest = await this.readManifest(entry.runId);
+        if (currentManifest === null
+          || serializeJson(currentManifest) !== serializeJson(initialManifest)) {
+          retained.push({ runId: entry.runId, reason: "run identity changed while waiting" });
+          return;
+        }
+        if (await this.readPipelineActiveMarker(entry.runId) !== null) {
+          retained.push({ runId: entry.runId, reason: "active-run" });
+          return;
+        }
         const result = await this.readResult(entry.runId);
         if (result === null) {
           retained.push({ runId: entry.runId, reason: "incomplete-run" });
           return;
         }
-        prepared = await this.prepareCandidateAnchorCleanup(entry.runId, result);
+        if (serializeJson(result) !== serializeJson(initialResult)) {
+          retained.push({ runId: entry.runId, reason: "terminal authority changed while waiting" });
+          return;
+        }
+        prepared = await this.prepareCandidateAnchorCleanup(
+          entry.runId,
+          result,
+          currentManifest,
+          canonical.canonical,
+        );
         await this.appendCleanupRecord({
           event: "prune-cleanup-intent",
           runId: entry.runId,
@@ -1223,6 +1278,22 @@ export class ArtifactStore {
             runId: entry.runId,
             reason: redact(`${primary}${rollback}`),
           });
+        }
+      } finally {
+        if (lease !== null) {
+          try {
+            await lease.release();
+          } catch (error) {
+            // A release failure must never be swallowed. Surface it, and make
+            // clear whether the archive was already removed under the lease.
+            const reason = redact(error instanceof Error ? error.message : String(error));
+            retained.push({
+              runId: entry.runId,
+              reason: archiveRemovalCommitted
+                ? `archive removed; checkout lease release failed: ${reason}`
+                : reason,
+            });
+          }
         }
       }
     };

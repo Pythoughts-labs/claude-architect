@@ -345,6 +345,178 @@ describe("recoverStaleRuns", () => {
     expect(await runGit(repo.directory, ["rev-parse", neighborRef])).toBe(repo.head);
   }, { timeout: 120_000 });
 
+  it("waits for the checkout lease and preserves a run that completes while waiting", async () => {
+    const repo = await initRepo();
+    const runId = "run-completes-while-lease-waits";
+    const store = await createUnfinishedRun(runId, repo.commonDir, null);
+
+    await expect(recoverStaleRuns({
+      platformServices: {
+        os: "darwin",
+        async getProcessStartToken() { return null; },
+        async terminateProcessTreeByPid() {},
+        async acquireCheckoutLock() {
+          // The producer reaches a terminal result while recovery waits for the
+          // lease; recovery must observe it and leave the run untouched.
+          await writeTerminalFailure(store, runId);
+          return { key: "test", repositoryIdentity: repo.commonDir, async release() {} };
+        },
+      },
+      isProcessAlive: () => false,
+    })).resolves.toEqual({ recovered: [] });
+
+    await expect(store.readResult(runId)).resolves.toMatchObject({ status: "failed" });
+  });
+
+  it("preserves an unfinished run when its marker becomes live while the lease waits", async () => {
+    const repo = await initRepo();
+    const runId = "run-marker-live-while-lease-waits";
+    const store = await createUnfinishedRun(runId, repo.commonDir, null);
+
+    await expect(recoverStaleRuns({
+      platformServices: {
+        os: "darwin",
+        async getProcessStartToken() { return "darwin:live"; },
+        async terminateProcessTreeByPid() {},
+        async acquireCheckoutLock() {
+          await store.writePipelineActiveMarker({
+            pid: 9191,
+            processToken: "darwin:live",
+            startedAt: "2026-07-18T12:00:00.000Z",
+            sliced: false,
+          });
+          return { key: "test", repositoryIdentity: repo.commonDir, async release() {} };
+        },
+      },
+      isProcessAlive: pid => pid === 9191,
+    })).resolves.toEqual({ recovered: [] });
+
+    await expect(store.readResult(runId)).resolves.toBeNull();
+  });
+
+  it("preserves a replacement live run-start owner installed while the lease waits", async () => {
+    const repo = await initRepo();
+    const runId = "run-replacement-owner-while-lease-waits";
+    const store = await createUnfinishedRun(runId, repo.commonDir, null);
+    const lockKey = createHash("sha256").update(repo.commonDir).digest("hex");
+    const runStartPath = path.join(store.runDirectory, "run-start.json");
+
+    await expect(recoverStaleRuns({
+      platformServices: {
+        os: "darwin",
+        async getProcessStartToken() { return "darwin:new-owner"; },
+        async terminateProcessTreeByPid() {},
+        async acquireCheckoutLock() {
+          // A fresh, live owner claims the same run while we wait for the lease.
+          await writeFile(runStartPath, `${JSON.stringify({
+            runId,
+            lockKey,
+            canonicalCommonDir: repo.commonDir,
+            pid: 7373,
+            processToken: "darwin:new-owner",
+            startedAt: "2026-07-18T12:30:00.000Z",
+          })}\n`);
+          return { key: "test", repositoryIdentity: repo.commonDir, async release() {} };
+        },
+      },
+      isProcessAlive: pid => pid === 7373,
+    })).resolves.toEqual({ recovered: [] });
+
+    await expect(store.readResult(runId)).resolves.toBeNull();
+  });
+
+  it("exposes both recovery and release failures and releases exactly once", async () => {
+    const repo = await initRepo();
+    const runId = "run-recovery-and-release-fail";
+    await createUnfinishedRun(runId, repo.commonDir, null);
+    let releases = 0;
+
+    await expect(recoverStaleRuns({
+      platformServices: {
+        os: "darwin",
+        async getProcessStartToken() { return null; },
+        async terminateProcessTreeByPid() {},
+        async acquireCheckoutLock() {
+          return {
+            key: "test",
+            repositoryIdentity: "/identity/that/does/not/match",
+            async release() { releases += 1; throw new Error("release boom"); },
+          };
+        },
+      },
+      isProcessAlive: () => false,
+    })).rejects.toThrow(AggregateError);
+
+    expect(releases).toBe(1);
+  });
+
+  it("fails visibly when the acquired checkout identity differs", async () => {
+    const repo = await initRepo();
+    const runId = "run-lease-identity-differs";
+    await createUnfinishedRun(runId, repo.commonDir, null);
+
+    await expect(recoverStaleRuns({
+      platformServices: {
+        os: "darwin",
+        async getProcessStartToken() { return null; },
+        async terminateProcessTreeByPid() {},
+        async acquireCheckoutLock() {
+          return {
+            key: "test",
+            repositoryIdentity: "/identity/that/does/not/match",
+            async release() {},
+          };
+        },
+      },
+      isProcessAlive: () => false,
+    })).rejects.toThrow("checkout lease repository identity changed during recovery");
+  });
+
+  it("preserves a malformed lock during the broad reclaim sweep", async () => {
+    // No stale runs: exercise only the end-of-recovery broad lock sweep.
+    const locksRoot = path.join(process.env.CLAUDE_PLUGIN_DATA!, "locks");
+    await mkdir(locksRoot, { recursive: true });
+    const strayLock = path.join(locksRoot, `${"de".repeat(32)}.lock`);
+    await writeFile(strayLock, "not-json-not-a-pid");
+
+    await expect(recoverStaleRuns({
+      platformServices: {
+        os: "darwin",
+        async getProcessStartToken() { return null; },
+        async terminateProcessTreeByPid() {},
+      },
+      isProcessAlive: () => false,
+    })).resolves.toEqual({ recovered: [] });
+
+    // A lock whose owner cannot be parsed is never unlinked blindly.
+    await expect(access(strayLock)).resolves.toBeUndefined();
+  });
+
+  it("refuses to unlink a malformed exact lock and fails closed", async () => {
+    const repo = await initRepo();
+    const runId = "run-malformed-exact-lock";
+    await createUnfinishedRun(runId, repo.commonDir, null);
+    const locksRoot = path.join(process.env.CLAUDE_PLUGIN_DATA!, "locks");
+    await mkdir(locksRoot, { recursive: true });
+    // The exact checkout lock key for this run carries unparseable bytes.
+    const exactLockKey = createHash("sha256").update(repo.commonDir).digest("hex");
+    const exactLock = path.join(locksRoot, `${exactLockKey}.lock`);
+    await writeFile(exactLock, "not-json-not-a-pid");
+
+    // reclaimExactLock refuses to remove it, so the checkout lease cannot be
+    // acquired — recovery fails closed rather than force-clearing the lock.
+    await expect(recoverStaleRuns({
+      platformServices: {
+        os: "darwin",
+        async getProcessStartToken() { return null; },
+        async terminateProcessTreeByPid() {},
+      },
+      isProcessAlive: () => false,
+    })).rejects.toThrow("checkout is locked");
+
+    await expect(access(exactLock)).resolves.toBeUndefined();
+  });
+
   it("cleans every sliced worktree and ref for an unfinished run idempotently", async () => {
     const repo = await initRepo();
     const runId = "run-sliced-unfinished";

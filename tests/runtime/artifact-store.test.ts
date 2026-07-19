@@ -7,6 +7,7 @@ import {
   mkdir,
   mkdtemp,
   readFile,
+  realpath,
   rename,
   rm,
   stat,
@@ -142,6 +143,23 @@ async function git(cwd: string, args: string[]): Promise<string> {
     }),
   });
   return result.stdout.trim();
+}
+
+// Prune now serializes archive removal against the repository checkout lease,
+// which requires a run manifest to resolve the repository root. Give a run a
+// real repository plus manifest so it is eligible for the full prune path.
+async function writePrunableResult(
+  store: ArtifactStore,
+  runId: string,
+  result: AttemptResult,
+): Promise<string> {
+  const repoRoot = await mkdtemp(join(tmpdir(), "claude-architect-prunable-repo-"));
+  temporaryPaths.push(repoRoot);
+  await git(repoRoot, ["init", "-q"]);
+  await git(repoRoot, ["commit", "--allow-empty", "-q", "-m", "base"]);
+  await store.writeResult(result);
+  await store.writeManifest(buildRunManifest(manifestArgs(runId, repoRoot)));
+  return repoRoot;
 }
 
 beforeEach(async () => {
@@ -853,7 +871,7 @@ describe("ArtifactStore", () => {
 
   it("prunes over-age runs", async () => {
     const oldStore = new ArtifactStore("run-old");
-    await oldStore.writeResult(sampleResult("run-old"));
+    await writePrunableResult(oldStore, "run-old", sampleResult("run-old"));
     const oldDirectory = join(process.env.CLAUDE_PLUGIN_DATA!, "runs", "run-old");
     const oldTime = new Date(Date.now() - 60_000);
     await utimes(oldDirectory, oldTime, oldTime);
@@ -864,9 +882,199 @@ describe("ArtifactStore", () => {
     await expect(stat(oldDirectory)).rejects.toMatchObject({ code: "ENOENT" });
   });
 
+  it("fast-retains an active pipeline marker without acquiring a checkout lease", async () => {
+    const repoRoot = await mkdtemp(join(tmpdir(), "claude-architect-active-prune-repo-"));
+    temporaryPaths.push(repoRoot);
+    await git(repoRoot, ["init", "-q"]);
+    await git(repoRoot, ["commit", "--allow-empty", "-q", "-m", "base"]);
+    const runId = "run-active-prune";
+    const store = new ArtifactStore(runId);
+    await store.writeResult(sampleResult(runId));
+    await store.writeManifest(buildRunManifest(manifestArgs(runId, repoRoot)));
+    await store.writePipelineActiveMarker({
+      pid: 4242,
+      processToken: "test:live",
+      startedAt: new Date().toISOString(),
+      sliced: false,
+    });
+    const oldTime = new Date(Date.now() - 60_000);
+    await utimes(store.runDirectory, oldTime, oldTime);
+
+    const result = await store.prune(
+      { maxAgeMs: 1_000, maxBytes: Number.MAX_SAFE_INTEGER },
+      {
+        platformServices: {
+          async canonicalizePath() { throw new Error("must not canonicalize an active run"); },
+          async acquireCheckoutLock() { throw new Error("must not lock an active run"); },
+        },
+      },
+    );
+
+    expect(result.removed).not.toContain(runId);
+    expect(result.retained).toContainEqual({ runId, reason: "active-run" });
+    await expect(stat(store.runDirectory)).resolves.toBeDefined();
+  });
+
+  it("rereads the active marker under the checkout lease before pruning", async () => {
+    const repoRoot = await mkdtemp(join(tmpdir(), "claude-architect-waiting-prune-repo-"));
+    temporaryPaths.push(repoRoot);
+    await git(repoRoot, ["init", "-q"]);
+    await git(repoRoot, ["commit", "--allow-empty", "-q", "-m", "base"]);
+    const commonDir = await realpath(join(repoRoot, ".git"));
+    const runId = "run-active-while-prune-waits";
+    const store = new ArtifactStore(runId);
+    await store.writeResult(sampleResult(runId));
+    await store.writeManifest(buildRunManifest(manifestArgs(runId, repoRoot)));
+    await utimes(store.runDirectory, new Date(Date.now() - 60_000), new Date(Date.now() - 60_000));
+    const events: string[] = [];
+
+    const result = await store.prune(
+      { maxAgeMs: 1_000, maxBytes: Number.MAX_SAFE_INTEGER },
+      {
+        platformServices: {
+          async canonicalizePath(input) {
+            return { input, canonical: repoRoot, gitCommonDir: commonDir };
+          },
+          async acquireCheckoutLock() {
+            events.push("acquire");
+            await store.writePipelineActiveMarker({
+              pid: 4343,
+              processToken: "test:live",
+              startedAt: new Date().toISOString(),
+              sliced: false,
+            });
+            return {
+              key: "test",
+              repositoryIdentity: commonDir,
+              async release() { events.push("release"); },
+            };
+          },
+        },
+      },
+    );
+
+    expect(events).toEqual(["acquire", "release"]);
+    expect(result.removed).not.toContain(runId);
+    expect(result.retained).toContainEqual({ runId, reason: "active-run" });
+    await expect(stat(store.runDirectory)).resolves.toBeDefined();
+  });
+
+  it("retains an archive without journaling when checkout lease acquisition fails", async () => {
+    const runId = "run-prune-acquire-failure";
+    const store = new ArtifactStore(runId);
+    const repoRoot = await writePrunableResult(store, runId, sampleResult(runId));
+    const commonDir = await realpath(join(repoRoot, ".git"));
+    await utimes(store.runDirectory, new Date(0), new Date(0));
+
+    const result = await store.prune(
+      { maxAgeMs: 1_000, maxBytes: Number.MAX_SAFE_INTEGER },
+      {
+        platformServices: {
+          async canonicalizePath(input) {
+            return { input, canonical: repoRoot, gitCommonDir: commonDir };
+          },
+          async acquireCheckoutLock() { throw new Error("lease unavailable"); },
+        },
+      },
+    );
+
+    expect(result.removed).not.toContain(runId);
+    expect(result.retained).toContainEqual({ runId, reason: "lease unavailable" });
+    await expect(stat(store.runDirectory)).resolves.toBeDefined();
+    await expect(readFile(join(process.env.CLAUDE_PLUGIN_DATA!, "runs", "cleanup.ndjson"), "utf8"))
+      .rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("retains latest terminal authority when the result changes while waiting", async () => {
+    const runId = "run-prune-result-changed";
+    const store = new ArtifactStore(runId);
+    const initial = sampleResult(runId);
+    const repoRoot = await writePrunableResult(store, runId, initial);
+    const commonDir = await realpath(join(repoRoot, ".git"));
+    await utimes(store.runDirectory, new Date(0), new Date(0));
+    const replacement = { ...initial, summary: "new terminal authority" };
+
+    const result = await store.prune(
+      { maxAgeMs: 1_000, maxBytes: Number.MAX_SAFE_INTEGER },
+      {
+        platformServices: {
+          async canonicalizePath(input) {
+            return { input, canonical: repoRoot, gitCommonDir: commonDir };
+          },
+          async acquireCheckoutLock() {
+            await rm(join(store.runDirectory, "result.json"));
+            await store.writeResult(replacement);
+            return { key: "test", repositoryIdentity: commonDir, async release() {} };
+          },
+        },
+      },
+    );
+
+    expect(result.removed).not.toContain(runId);
+    expect(result.retained.some(entry => entry.reason.includes("authority changed"))).toBe(true);
+    await expect(store.readResult(runId)).resolves.toEqual(replacement);
+  });
+
+  it("records repository identity for candidate-null cleanup intents", async () => {
+    const runId = "run-null-candidate-intent";
+    const store = new ArtifactStore(runId);
+    const repoRoot = await writePrunableResult(store, runId, sampleResult(runId));
+    await utimes(store.runDirectory, new Date(0), new Date(0));
+
+    const result = await store.prune({ maxAgeMs: 1_000, maxBytes: Number.MAX_SAFE_INTEGER });
+
+    expect(result.removed).toContain(runId);
+    const records = (await readFile(
+      join(process.env.CLAUDE_PLUGIN_DATA!, "runs", "cleanup.ndjson"),
+      "utf8",
+    )).trim().split("\n").map(line => JSON.parse(line) as {
+      event: string; repoRoot: string | null; anchorRef: string | null;
+    });
+    expect(records[0]).toMatchObject({
+      event: "prune-cleanup-intent",
+      repoRoot: await realpath(repoRoot),
+      anchorRef: null,
+    });
+  });
+
+  it("surfaces a checkout lease release failure after a committed removal", async () => {
+    const runId = "run-prune-release-failure";
+    const store = new ArtifactStore(runId);
+    const repoRoot = await writePrunableResult(store, runId, sampleResult(runId));
+    const commonDir = await realpath(join(repoRoot, ".git"));
+    await utimes(store.runDirectory, new Date(0), new Date(0));
+    let releases = 0;
+
+    const result = await store.prune(
+      { maxAgeMs: 1_000, maxBytes: Number.MAX_SAFE_INTEGER },
+      {
+        platformServices: {
+          async canonicalizePath(input) {
+            return { input, canonical: repoRoot, gitCommonDir: commonDir };
+          },
+          async acquireCheckoutLock() {
+            return {
+              key: "test",
+              repositoryIdentity: commonDir,
+              async release() { releases += 1; throw new Error("release failed after removal"); },
+            };
+          },
+        },
+      },
+    );
+
+    expect(releases).toBe(1);
+    expect(result.removed).toContain(runId);
+    expect(result.retained).toContainEqual({
+      runId,
+      reason: "archive removed; checkout lease release failed: release failed after removal",
+    });
+    await expect(stat(store.runDirectory)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
   it("enforces the byte limit", async () => {
     const store = new ArtifactStore("run-large");
-    await store.writeResult(sampleResult("run-large"));
+    await writePrunableResult(store, "run-large", sampleResult("run-large"));
     await store.writeLog("large", "x".repeat(1_000));
 
     const result = await store.prune({ maxAgeMs: Number.MAX_SAFE_INTEGER, maxBytes: 0 });
@@ -890,7 +1098,7 @@ describe("ArtifactStore", () => {
 
   it("durably records cleanup before removing an archived run", async () => {
     const store = new ArtifactStore("run-audited");
-    await store.writeResult(sampleResult("run-audited"));
+    await writePrunableResult(store, "run-audited", sampleResult("run-audited"));
     const runDirectory = join(process.env.CLAUDE_PLUGIN_DATA!, "runs", "run-audited");
     const oldTime = new Date(Date.now() - 60_000);
     await utimes(runDirectory, oldTime, oldTime);
@@ -917,7 +1125,7 @@ describe("ArtifactStore", () => {
   it("does not write cleanup intent after the archive root is swapped", async () => {
     const runId = "run-cleanup-root-swap";
     const store = new ArtifactStore(runId);
-    await store.writeResult(sampleResult(runId));
+    await writePrunableResult(store, runId, sampleResult(runId));
     const runsRoot = join(process.env.CLAUDE_PLUGIN_DATA!, "runs");
     const preservedRunsRoot = join(process.env.CLAUDE_PLUGIN_DATA!, "preserved-runs");
     const cleanupJournal = join(runsRoot, "cleanup.ndjson");
@@ -1311,7 +1519,7 @@ describe("ArtifactStore", () => {
 
   it("does not remove a replacement swapped into the quarantine path", async () => {
     const store = new ArtifactStore("run-quarantine-swap");
-    await store.writeResult(sampleResult("run-quarantine-swap"));
+    await writePrunableResult(store, "run-quarantine-swap", sampleResult("run-quarantine-swap"));
     const runsRoot = join(process.env.CLAUDE_PLUGIN_DATA!, "runs");
     const oldTime = new Date(Date.now() - 60_000);
     await utimes(store.runDirectory, oldTime, oldTime);

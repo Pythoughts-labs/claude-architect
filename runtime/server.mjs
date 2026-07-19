@@ -27134,11 +27134,11 @@ var ArtifactStore = class {
     }));
     return entries.filter((entry) => entry !== null).sort(compareEntries);
   }
-  async prepareCandidateAnchorCleanup(runId, result) {
+  async prepareCandidateAnchorCleanup(runId, result, manifest, canonicalRepoRoot) {
     if (result.candidate === null) {
       return {
         outcome: "not-applicable",
-        repoRoot: null,
+        repoRoot: canonicalRepoRoot,
         anchorRef: null,
         backupRef: null,
         candidateCommitOid: null
@@ -27152,14 +27152,9 @@ var ArtifactStore = class {
     if (!/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(candidate.candidateCommitOid)) {
       throw new RuntimeError("archived candidate commit oid is invalid");
     }
-    const manifest = await this.readManifest(runId);
-    if (manifest === null) {
-      throw new RuntimeError("cannot remove candidate anchor without archived repository root");
-    }
     if (manifest.baseCommitOid !== candidate.baseCommitOid || manifest.candidateManifestHash !== candidate.manifestHash) {
       throw new RuntimeError("archived candidate does not match its run manifest");
     }
-    const canonicalRepoRoot = await realpath3(manifest.repoRoot);
     const repositoryTopLevel = await git(canonicalRepoRoot, ["rev-parse", "--show-toplevel"]);
     if (repositoryTopLevel.exitCode !== 0 || await realpath3(repositoryTopLevel.stdout.trim()) !== canonicalRepoRoot) {
       throw new RuntimeError("archived repository root is not a canonical repository root");
@@ -27301,7 +27296,7 @@ var ArtifactStore = class {
       await assertDirectoryIdentity(this.runsRoot, runsRootIdentity);
     });
   }
-  async prune(policy) {
+  async prune(policy, dependencies = {}) {
     validatePruneLimit(policy.maxAgeMs, "maxAgeMs");
     validatePruneLimit(policy.maxBytes, "maxBytes");
     const entries = await this.entries();
@@ -27318,13 +27313,54 @@ var ArtifactStore = class {
       let transaction = null;
       let runsRootIdentity = null;
       let archiveRemovalCommitted = false;
+      let lease = null;
       try {
+        if (await this.readPipelineActiveMarker(entry.runId) !== null) {
+          retained.push({ runId: entry.runId, reason: "active-run" });
+          return;
+        }
+        const initialManifest = await this.readManifest(entry.runId);
+        if (initialManifest === null) {
+          retained.push({ runId: entry.runId, reason: "incomplete-run" });
+          return;
+        }
+        const initialResult = await this.readResult(entry.runId);
+        if (initialResult === null) {
+          retained.push({ runId: entry.runId, reason: "incomplete-run" });
+          return;
+        }
+        const platformServices = dependencies.platformServices ?? getPlatformServices();
+        const canonical = await platformServices.canonicalizePath(initialManifest.repoRoot);
+        const repositoryIdentity = canonical.gitCommonDir ?? canonical.canonical;
+        lease = await platformServices.acquireCheckoutLock(canonical.canonical);
+        if (lease.repositoryIdentity !== repositoryIdentity) {
+          throw new RuntimeError("checkout lease repository identity changed before pruning");
+        }
+        await assertDirectoryIdentity(entry.directory, entry.identity);
+        const currentManifest = await this.readManifest(entry.runId);
+        if (currentManifest === null || serializeJson(currentManifest) !== serializeJson(initialManifest)) {
+          retained.push({ runId: entry.runId, reason: "run identity changed while waiting" });
+          return;
+        }
+        if (await this.readPipelineActiveMarker(entry.runId) !== null) {
+          retained.push({ runId: entry.runId, reason: "active-run" });
+          return;
+        }
         const result = await this.readResult(entry.runId);
         if (result === null) {
           retained.push({ runId: entry.runId, reason: "incomplete-run" });
           return;
         }
-        prepared = await this.prepareCandidateAnchorCleanup(entry.runId, result);
+        if (serializeJson(result) !== serializeJson(initialResult)) {
+          retained.push({ runId: entry.runId, reason: "terminal authority changed while waiting" });
+          return;
+        }
+        prepared = await this.prepareCandidateAnchorCleanup(
+          entry.runId,
+          result,
+          currentManifest,
+          canonical.canonical
+        );
         await this.appendCleanupRecord({
           event: "prune-cleanup-intent",
           runId: entry.runId,
@@ -27417,6 +27453,18 @@ var ArtifactStore = class {
             runId: entry.runId,
             reason: redact(`${primary}${rollback}`)
           });
+        }
+      } finally {
+        if (lease !== null) {
+          try {
+            await lease.release();
+          } catch (error2) {
+            const reason2 = redact(error2 instanceof Error ? error2.message : String(error2));
+            retained.push({
+              runId: entry.runId,
+              reason: archiveRemovalCommitted ? `archive removed; checkout lease release failed: ${reason2}` : reason2
+            });
+          }
         }
       }
     };
@@ -31406,14 +31454,15 @@ function parseCleanupRecord(line) {
     throw new RuntimeError("terminal cleanup journal record cannot remain pending");
   }
   const hasRepository = typeof record2.repoRoot === "string" && typeof record2.anchorRef === "string" && typeof record2.candidateCommitOid === "string";
+  const repositoryOnly = typeof record2.repoRoot === "string" && record2.anchorRef === null && record2.backupRef === null && record2.candidateCommitOid === null;
   const noRepository = record2.repoRoot === null && record2.anchorRef === null && record2.backupRef === null && record2.candidateCommitOid === null;
-  if (!noRepository && (!hasRepository || record2.anchorRef !== `${CANDIDATE_REF_PREFIX3}${record2.runId}` || !OID.test(record2.candidateCommitOid) || record2.backupRef !== null && record2.backupRef !== `${BACKUP_REF_PREFIX}${record2.runId}`)) {
+  if (!noRepository && !repositoryOnly && (!hasRepository || record2.anchorRef !== `${CANDIDATE_REF_PREFIX3}${record2.runId}` || !OID.test(record2.candidateCommitOid) || record2.backupRef !== null && record2.backupRef !== `${BACKUP_REF_PREFIX}${record2.runId}`)) {
     throw new RuntimeError("cleanup journal Git metadata is malformed");
   }
   return record2;
 }
 function cleanupOutcome(record2) {
-  if (record2.repoRoot === null) return "not-applicable";
+  if (record2.repoRoot === null || record2.anchorRef === null) return "not-applicable";
   return record2.backupRef === null ? "already-absent" : "deleted";
 }
 async function appendCleanupRecord(runsRoot, record2) {
@@ -31494,7 +31543,7 @@ async function commitCleanupRefs(record2) {
   }
   await deleteExactRef(repoRoot, record2.backupRef, backupOid);
 }
-async function replayInterruptedPrunes(runsRoot) {
+async function replayInterruptedPrunes(runsRoot, ps) {
   const text = await readCleanupJournal(path14.join(runsRoot, "cleanup.ndjson"));
   if (text === null || text.trim() === "") return;
   const pending = /* @__PURE__ */ new Map();
@@ -31505,30 +31554,63 @@ async function replayInterruptedPrunes(runsRoot) {
     else pending.delete(record2.runId);
   }
   for (const record2 of [...pending.values()].sort((left, right) => left.runId.localeCompare(right.runId))) {
-    const runDirectory = path14.join(runsRoot, record2.runId);
-    const quarantinePath = path14.join(runsRoot, record2.quarantineName);
-    const runIdentity = await plainDirectoryIdentity(runDirectory);
-    const quarantineIdentity = await plainDirectoryIdentity(quarantinePath);
-    if (runIdentity !== null && quarantineIdentity !== null) {
-      throw new RuntimeError("both retained and quarantined run archives exist during recovery");
+    if (record2.repoRoot === null) continue;
+    const repoRoot = await validateRepositoryRoot(record2.repoRoot);
+    const commonResult = await git(repoRoot, [
+      "rev-parse",
+      "--path-format=absolute",
+      "--git-common-dir"
+    ]);
+    if (commonResult.exitCode !== 0) {
+      throw runGitError("resolve cleanup repository identity", commonResult);
     }
-    const action = runIdentity !== null ? "rollback" : "finish";
-    const outcome = await reconcileCleanupRefs(record2, action);
-    if (action === "finish") {
-      if (quarantineIdentity !== null) {
-        await removePlainDirectory(quarantinePath, quarantineIdentity);
+    const repositoryIdentity = await realpath6(commonResult.stdout.trim());
+    const lease = await ps.acquireCheckoutLock(repoRoot);
+    let primaryError;
+    try {
+      if (lease.repositoryIdentity !== repositoryIdentity) {
+        throw new RuntimeError("checkout lease repository identity changed during prune recovery");
       }
-      await commitCleanupRefs(record2);
+      const runDirectory = path14.join(runsRoot, record2.runId);
+      const quarantinePath = path14.join(runsRoot, record2.quarantineName);
+      const runIdentity = await plainDirectoryIdentity(runDirectory);
+      const quarantineIdentity = await plainDirectoryIdentity(quarantinePath);
+      if (runIdentity !== null && quarantineIdentity !== null) {
+        throw new RuntimeError("both retained and quarantined run archives exist during recovery");
+      }
+      const action = runIdentity !== null ? "rollback" : "finish";
+      const outcome = await reconcileCleanupRefs(record2, action);
+      if (action === "finish") {
+        if (quarantineIdentity !== null) {
+          await removePlainDirectory(quarantinePath, quarantineIdentity);
+        }
+        await commitCleanupRefs(record2);
+      }
+      await appendCleanupRecord(runsRoot, {
+        ...record2,
+        event: action === "finish" ? "prune-cleanup-complete" : "prune-cleanup-rollback",
+        anchorCleanup: outcome,
+        recordedAt: (/* @__PURE__ */ new Date()).toISOString()
+      });
+    } catch (error2) {
+      primaryError = error2;
+    } finally {
+      try {
+        await lease.release();
+      } catch (releaseError) {
+        if (primaryError !== void 0) {
+          throw new AggregateError(
+            [primaryError, releaseError],
+            "prune recovery failed and its checkout lease could not be released"
+          );
+        }
+        throw releaseError;
+      }
     }
-    await appendCleanupRecord(runsRoot, {
-      ...record2,
-      event: action === "finish" ? "prune-cleanup-complete" : "prune-cleanup-rollback",
-      anchorCleanup: outcome,
-      recordedAt: (/* @__PURE__ */ new Date()).toISOString()
-    });
+    if (primaryError !== void 0) throw primaryError;
   }
 }
-async function recoverRun(record2, root, ps, isProcessAlive, requestCooperativeTermination, delayMs, graceMs, runGit) {
+async function recoverRun(record2, root, ps, isProcessAlive, requestCooperativeTermination, delayMs, graceMs, runGit, locksRoot) {
   let escalation;
   if (record2.pid !== null && isProcessAlive(record2.pid)) {
     const liveToken = record2.processToken === null ? null : await ps.getProcessStartToken(record2.pid);
@@ -31543,38 +31625,99 @@ async function recoverRun(record2, root, ps, isProcessAlive, requestCooperativeT
       }
     }
   }
-  const commonDir = await validateGitCommonDir(record2.canonicalCommonDir);
-  const store = new ArtifactStore(record2.runId);
-  const logsRef = await store.writeLog(
-    "recovery",
-    "startup recovery reclaimed unfinished run\n"
+  await reclaimExactLock(
+    locksRoot,
+    record2.lockKey,
+    isProcessAlive,
+    (pid) => ps.getProcessStartToken(pid)
   );
-  await cleanupManagedWorktrees(commonDir, root, record2.runId, ps);
-  await cleanupTemporarySliceRefs2(commonDir, record2.runId, runGit);
-  await removeStaleCandidateAnchor(commonDir, record2.runId);
-  await store.writeResult({
-    resultVersion: "1",
-    runId: record2.runId,
-    status: "cancelled",
-    failure: "cancelled",
-    summary: "Interrupted attempt was cancelled during startup recovery.",
-    producerSummary: null,
-    candidate: null,
-    requestedVerification: [],
-    executedVerification: [],
-    unresolvedIssues: ["attempt-interrupted-before-terminal-result"],
-    evidence: {
-      recovery: "startup-stale-run",
-      originalStartedAt: record2.startedAt,
-      ...escalation === void 0 ? {} : { escalation }
-    },
-    logsRef,
-    producerId: null,
-    producerVersion: null,
-    producerModel: null,
-    durationMs: Math.max(0, Date.now() - Date.parse(record2.startedAt)),
-    sessionId: null
-  });
+  const commonDir = await validateGitCommonDir(record2.canonicalCommonDir);
+  const lease = await ps.acquireCheckoutLock(commonDir);
+  let primaryError;
+  let recovered = false;
+  try {
+    if (lease.repositoryIdentity !== commonDir) {
+      throw new RuntimeError("checkout lease repository identity changed during recovery");
+    }
+    const store = new ArtifactStore(record2.runId);
+    const currentRunStartText = await readBoundedRegularFile(
+      path14.join(store.runDirectory, "run-start.json")
+    );
+    if (currentRunStartText === null) return false;
+    const currentRecord = parseRunStart(currentRunStartText, record2.runId);
+    if (currentRecord.canonicalCommonDir !== commonDir || currentRecord.lockKey !== record2.lockKey) {
+      throw new RuntimeError("run-start repository identity changed during recovery");
+    }
+    const result = await store.readResult(record2.runId);
+    const marker = await store.readPipelineActiveMarker(record2.runId);
+    if (marker !== null && await lockOwnerIsLive(
+      { pid: marker.pid, processToken: marker.processToken },
+      isProcessAlive,
+      (pid) => ps.getProcessStartToken(pid)
+    )) return false;
+    if (result !== null) {
+      validateTerminalResult(result, record2.runId);
+      if (marker === null) return false;
+      if (marker.sliced) await archiveInterruptedPipeline(store, result);
+      await cleanupManagedWorktrees(commonDir, root, record2.runId, ps);
+      await cleanupTemporarySliceRefs2(commonDir, record2.runId, runGit);
+      await store.clearPipelineActiveMarker();
+      return false;
+    }
+    if (currentRecord.pid !== null && isProcessAlive(currentRecord.pid)) {
+      const token = currentRecord.processToken === null ? null : await ps.getProcessStartToken(currentRecord.pid);
+      const ownerIsLive = currentRecord.processToken === null || token === currentRecord.processToken;
+      const isExactTerminatedOwner = escalation !== void 0 && currentRecord.pid === record2.pid && currentRecord.processToken === record2.processToken;
+      if (ownerIsLive && !isExactTerminatedOwner) return false;
+    }
+    const logsRef = await store.writeLog(
+      "recovery",
+      "startup recovery reclaimed unfinished run\n"
+    );
+    await cleanupManagedWorktrees(commonDir, root, record2.runId, ps);
+    await cleanupTemporarySliceRefs2(commonDir, record2.runId, runGit);
+    await removeStaleCandidateAnchor(commonDir, record2.runId);
+    await store.writeResult({
+      resultVersion: "1",
+      runId: record2.runId,
+      status: "cancelled",
+      failure: "cancelled",
+      summary: "Interrupted attempt was cancelled during startup recovery.",
+      producerSummary: null,
+      candidate: null,
+      requestedVerification: [],
+      executedVerification: [],
+      unresolvedIssues: ["attempt-interrupted-before-terminal-result"],
+      evidence: {
+        recovery: "startup-stale-run",
+        originalStartedAt: record2.startedAt,
+        ...escalation === void 0 ? {} : { escalation }
+      },
+      logsRef,
+      producerId: null,
+      producerVersion: null,
+      producerModel: null,
+      durationMs: Math.max(0, Date.now() - Date.parse(record2.startedAt)),
+      sessionId: null
+    });
+    recovered = true;
+  } catch (error2) {
+    primaryError = error2;
+  } finally {
+    try {
+      await lease.release();
+    } catch (releaseError) {
+      if (primaryError !== void 0) {
+        throw new AggregateError(
+          [primaryError, releaseError],
+          "startup recovery failed and its checkout lease could not be released"
+        );
+      }
+      throw releaseError;
+    }
+  }
+  if (primaryError !== void 0) throw primaryError;
+  return recovered;
 }
 function defaultRequestCooperativeTermination(pid) {
   try {
@@ -31636,13 +31779,31 @@ async function reclaimLocks(locksRoot, isProcessAlive, getProcessStartToken) {
     }
     const contents = await readBoundedRegularFile(lockPath);
     if (contents === null) continue;
-    if (await lockOwnerIsLive(parseLockOwner(contents), isProcessAlive, getProcessStartToken)) continue;
-    const identity = await lstat6(lockPath);
-    if (!identity.isFile() || identity.isSymbolicLink()) {
+    const owner = parseLockOwner(contents);
+    if (owner === null || await lockOwnerIsLive(owner, isProcessAlive, getProcessStartToken)) continue;
+    if (!await lockIsStableRegularFile(lockPath, contents)) {
       throw new RuntimeError("checkout lock identity changed during recovery");
     }
     await rm7(lockPath, { force: false });
   }
+}
+async function lockIsStableRegularFile(lockPath, expected) {
+  const before = await lstat6(lockPath);
+  const current = await readBoundedRegularFile(lockPath);
+  if (current === null) return false;
+  const after = await lstat6(lockPath);
+  return before.isFile() && !before.isSymbolicLink() && after.isFile() && !after.isSymbolicLink() && before.dev === after.dev && before.ino === after.ino && current === expected;
+}
+async function reclaimExactLock(locksRoot, lockKey, isProcessAlive, getProcessStartToken) {
+  const lockPath = path14.join(locksRoot, `${lockKey}.lock`);
+  const contents = await readBoundedRegularFile(lockPath);
+  if (contents === null) return;
+  const owner = parseLockOwner(contents);
+  if (owner === null || await lockOwnerIsLive(owner, isProcessAlive, getProcessStartToken)) return;
+  if (!await lockIsStableRegularFile(lockPath, contents)) {
+    throw new RuntimeError("checkout lock identity changed during recovery");
+  }
+  await rm7(lockPath, { force: false });
 }
 async function lockIsOwnedByLiveProcess(locksRoot, lockKey, isProcessAlive, getProcessStartToken) {
   const contents = await readBoundedRegularFile(path14.join(locksRoot, `${lockKey}.lock`));
@@ -31654,8 +31815,15 @@ async function recoverStaleRuns(dependencies = {}) {
   if (root === null) return { recovered: [] };
   const runsRoot = path14.join(root, "runs");
   const runsIdentity = await plainDirectoryIdentity(runsRoot);
-  if (runsIdentity !== null) await replayInterruptedPrunes(runsRoot);
-  const ps = dependencies.platformServices ?? getPlatformServices();
+  const supplied = dependencies.platformServices;
+  const selected = getPlatformServices();
+  const ps = {
+    os: supplied?.os ?? selected.os,
+    getProcessStartToken: (pid) => (supplied ?? selected).getProcessStartToken(pid),
+    terminateProcessTreeByPid: (pid, token) => (supplied ?? selected).terminateProcessTreeByPid(pid, token),
+    acquireCheckoutLock: (checkout) => supplied && supplied.acquireCheckoutLock ? supplied.acquireCheckoutLock(checkout) : selected.acquireCheckoutLock(checkout)
+  };
+  if (runsIdentity !== null) await replayInterruptedPrunes(runsRoot, ps);
   const isProcessAlive = dependencies.isProcessAlive ?? defaultIsProcessAlive;
   const requestCooperativeTermination = dependencies.requestCooperativeTermination ?? defaultRequestCooperativeTermination;
   const delayMs = dependencies.delayMs ?? defaultDelayMs;
@@ -31673,22 +31841,14 @@ async function recoverStaleRuns(dependencies = {}) {
       const record2 = parseRunStart(runStartText, entry.name);
       const store = new ArtifactStore(entry.name);
       const result = await store.readResult(entry.name);
-      if (result !== null) {
-        validateTerminalResult(result, entry.name);
-        const marker = await store.readPipelineActiveMarker(entry.name);
-        if (marker !== null && !await lockOwnerIsLive(
-          { pid: marker.pid, processToken: marker.processToken },
-          isProcessAlive,
-          (pid) => ps.getProcessStartToken(pid)
-        )) {
-          const commonDir = await validateGitCommonDir(record2.canonicalCommonDir);
-          if (marker.sliced) await archiveInterruptedPipeline(store, result);
-          await cleanupManagedWorktrees(commonDir, root, entry.name, ps);
-          await cleanupTemporarySliceRefs2(commonDir, entry.name, runGit);
-          await store.clearPipelineActiveMarker();
-        }
-        continue;
-      }
+      if (result !== null) validateTerminalResult(result, entry.name);
+      const marker = result === null ? null : await store.readPipelineActiveMarker(entry.name);
+      if (result !== null && marker === null) continue;
+      if (marker !== null && await lockOwnerIsLive(
+        { pid: marker.pid, processToken: marker.processToken },
+        isProcessAlive,
+        (pid) => ps.getProcessStartToken(pid)
+      )) continue;
       if (await lockIsOwnedByLiveProcess(
         locksRoot,
         record2.lockKey,
@@ -31700,7 +31860,7 @@ async function recoverStaleRuns(dependencies = {}) {
   }
   const recovered = [];
   for (const record2 of stale) {
-    await recoverRun(
+    if (await recoverRun(
       record2,
       root,
       ps,
@@ -31708,9 +31868,9 @@ async function recoverStaleRuns(dependencies = {}) {
       requestCooperativeTermination,
       delayMs,
       graceMs,
-      runGit
-    );
-    recovered.push(record2.runId);
+      runGit,
+      locksRoot
+    )) recovered.push(record2.runId);
   }
   await reclaimLocks(
     locksRoot,
