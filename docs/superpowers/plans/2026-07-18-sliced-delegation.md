@@ -44,7 +44,7 @@ Each task ends with an independently testable deliverable and a commit.
 
 **Files:**
 - Modify: `src/protocol/delegation-spec.ts`
-- Test: `tests/protocol/slice-types.test.ts` (create)
+- Test: `tests/runtime/protocol/slice-types.test.ts` (create)
 
 **Interfaces:**
 - Consumes: existing `VerificationCommand`, `DelegationSpec`, `ReviewConfig`.
@@ -57,10 +57,10 @@ Each task ends with an independently testable deliverable and a commit.
 - [ ] **Step 1: Write the failing test**
 
 ```ts
-// tests/protocol/slice-types.test.ts
+// tests/runtime/protocol/slice-types.test.ts
 import { describe, it, expect } from "vitest";
-import { resolveSlices } from "../../src/protocol/delegation-spec.js";
-import type { DelegationSpec } from "../../src/protocol/delegation-spec.js";
+import { resolveSlices } from "../../../src/protocol/delegation-spec.js";
+import type { DelegationSpec } from "../../../src/protocol/delegation-spec.js";
 
 const base = {
   specVersion: "1", objective: "x", context: "", writeAllowlist: ["**"],
@@ -83,7 +83,7 @@ describe("resolveSlices", () => {
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `npx vitest run tests/protocol/slice-types.test.ts`
+Run: `npx vitest run tests/runtime/protocol/slice-types.test.ts`
 Expected: FAIL — `resolveSlices` is not exported.
 
 - [ ] **Step 3: Add the types and helper**
@@ -111,13 +111,13 @@ export function resolveSlices(spec: DelegationSpec): Slice[] {
 
 - [ ] **Step 4: Run test to verify it passes**
 
-Run: `npx vitest run tests/protocol/slice-types.test.ts` — Expected: PASS.
+Run: `npx vitest run tests/runtime/protocol/slice-types.test.ts` — Expected: PASS.
 Run: `npx tsc --noEmit` — Expected: no errors.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/protocol/delegation-spec.ts tests/protocol/slice-types.test.ts
+git add src/protocol/delegation-spec.ts tests/runtime/protocol/slice-types.test.ts
 git commit -m "feat(protocol): add Slice type and slices/perSlice spec fields"
 ```
 
@@ -127,7 +127,7 @@ git commit -m "feat(protocol): add Slice type and slices/perSlice spec fields"
 
 **Files:**
 - Modify: `runtime/schemas/delegation-spec.v1.json`
-- Test: `tests/protocol/slice-schema.test.ts` (create)
+- Test: `tests/runtime/protocol/slice-schema.test.ts` (create)
 
 **Interfaces:**
 - Consumes: `loadSchemas().delegationSpec` (Ajv validator over the canonical schema).
@@ -136,9 +136,9 @@ git commit -m "feat(protocol): add Slice type and slices/perSlice spec fields"
 - [ ] **Step 1: Write the failing test**
 
 ```ts
-// tests/protocol/slice-schema.test.ts
+// tests/runtime/protocol/slice-schema.test.ts
 import { describe, it, expect } from "vitest";
-import { loadSchemas } from "../../src/protocol/schema-loader.js";
+import { loadSchemas } from "../../../src/protocol/schema-loader.js";
 
 const schemas = loadSchemas();
 const base = {
@@ -167,7 +167,7 @@ describe("delegation-spec schema: slices", () => {
 
 - [ ] **Step 2: Run to verify it fails**
 
-Run: `npx vitest run tests/protocol/slice-schema.test.ts`
+Run: `npx vitest run tests/runtime/protocol/slice-schema.test.ts`
 Expected: FAIL — schema has `additionalProperties: false`, so `slices`/`perSlice` are rejected (first test fails).
 
 - [ ] **Step 3: Extend the schema**
@@ -200,12 +200,12 @@ Note: `#/properties/verification` already enforces `minItems: 1` and the full co
 
 - [ ] **Step 4: Run to verify it passes**
 
-Run: `npx vitest run tests/protocol/slice-schema.test.ts` — Expected: PASS (all three).
+Run: `npx vitest run tests/runtime/protocol/slice-schema.test.ts` — Expected: PASS (all three).
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add runtime/schemas/delegation-spec.v1.json tests/protocol/slice-schema.test.ts
+git add runtime/schemas/delegation-spec.v1.json tests/runtime/protocol/slice-schema.test.ts
 git commit -m "feat(schema): add slices and review.perSlice to delegation spec v1"
 ```
 
@@ -215,7 +215,7 @@ git commit -m "feat(schema): add slices and review.perSlice to delegation spec v
 
 **Files:**
 - Modify: `src/protocol/spec-validator.ts`
-- Test: `tests/protocol/slice-validation.test.ts` (create)
+- Test: `tests/runtime/protocol/slice-validation.test.ts` (create)
 
 **Interfaces:**
 - Consumes: `validateSpec(input): ValidateResult`, `resolveSlices`.
@@ -226,9 +226,9 @@ git commit -m "feat(schema): add slices and review.perSlice to delegation spec v
 - [ ] **Step 1: Write the failing tests**
 
 ```ts
-// tests/protocol/slice-validation.test.ts
+// tests/runtime/protocol/slice-validation.test.ts
 import { describe, it, expect } from "vitest";
-import { validateSpec } from "../../src/protocol/spec-validator.js";
+import { validateSpec } from "../../../src/protocol/spec-validator.js";
 
 const cmd = { id: "v", executable: "node", args: ["-v"], cwd: ".", timeoutMs: 1000, network: "denied", expectedExitCodes: [0] };
 const base = {
@@ -259,7 +259,7 @@ describe("validateSpec: slices", () => {
 
 - [ ] **Step 2: Run to verify it fails**
 
-Run: `npx vitest run tests/protocol/slice-validation.test.ts`
+Run: `npx vitest run tests/runtime/protocol/slice-validation.test.ts`
 Expected: FAIL — the widening and escaping cases currently pass schema validation and return `ok:true`.
 
 - [ ] **Step 3: Add semantic checks**
@@ -301,13 +301,13 @@ Then in the block:
 
 - [ ] **Step 4: Run to verify it passes**
 
-Run: `npx vitest run tests/protocol/slice-validation.test.ts` — Expected: PASS.
+Run: `npx vitest run tests/runtime/protocol/slice-validation.test.ts` — Expected: PASS.
 Run: `npx tsc --noEmit` — Expected: no errors.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/protocol/spec-validator.ts tests/protocol/slice-validation.test.ts
+git add src/protocol/spec-validator.ts tests/runtime/protocol/slice-validation.test.ts
 git commit -m "feat(protocol): validate slice allowlist subset and cwd escape"
 ```
 
@@ -317,7 +317,7 @@ git commit -m "feat(protocol): validate slice allowlist subset and cwd escape"
 
 **Files:**
 - Create: `src/pipeline/wayfinder.ts`
-- Test: `tests/pipeline/wayfinder.test.ts` (create)
+- Test: `tests/runtime/pipeline/wayfinder.test.ts` (create)
 
 **Interfaces:**
 - Consumes: `VerificationReport` from `./report-types.js`, `ConsolidationResult` from `./consolidator.js` (only when `perSlice` review is enabled — pass `null` otherwise).
@@ -337,10 +337,10 @@ git commit -m "feat(protocol): validate slice allowlist subset and cwd escape"
 - [ ] **Step 1: Write the failing tests**
 
 ```ts
-// tests/pipeline/wayfinder.test.ts
+// tests/runtime/pipeline/wayfinder.test.ts
 import { describe, it, expect } from "vitest";
-import { routeSlice } from "../../src/pipeline/wayfinder.js";
-import type { VerificationReport } from "../../src/pipeline/report-types.js";
+import { routeSlice } from "../../../src/pipeline/wayfinder.js";
+import type { VerificationReport } from "../../../src/pipeline/report-types.js";
 
 const green: VerificationReport = { pass: true, testsDeleted: 0, testsSkipped: 0, workspaceClean: true, scopeViolations: [] } as VerificationReport;
 const red: VerificationReport = { ...green, pass: false };
@@ -366,7 +366,7 @@ describe("routeSlice", () => {
 
 - [ ] **Step 2: Run to verify it fails**
 
-Run: `npx vitest run tests/pipeline/wayfinder.test.ts` — Expected: FAIL — module not found.
+Run: `npx vitest run tests/runtime/pipeline/wayfinder.test.ts` — Expected: FAIL — module not found.
 
 - [ ] **Step 3: Implement the wayfinder**
 
@@ -418,7 +418,7 @@ export function routeSlice(input: SliceGateInput): SliceGateResult {
 
 - [ ] **Step 4: Run to verify it passes**
 
-Run: `npx vitest run tests/pipeline/wayfinder.test.ts` — Expected: PASS (all five).
+Run: `npx vitest run tests/runtime/pipeline/wayfinder.test.ts` — Expected: PASS (all five).
 Run: `npx tsc --noEmit` — Expected: no errors.
 
 > Note: confirm the exact field names on `VerificationReport` and `ConsolidationResult` by reading `src/pipeline/report-types.ts` and `src/pipeline/consolidator.ts` before writing Step 3; the field set above mirrors the existing checks in `src/pipeline/gates.ts` (`v.pass`, `v.testsDeleted`, `v.testsSkipped`, `v.workspaceClean`, `v.scopeViolations`). If a name differs, update both the test and the implementation.
@@ -426,7 +426,7 @@ Run: `npx tsc --noEmit` — Expected: no errors.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/pipeline/wayfinder.ts tests/pipeline/wayfinder.test.ts
+git add src/pipeline/wayfinder.ts tests/runtime/pipeline/wayfinder.test.ts
 git commit -m "feat(pipeline): add deterministic per-slice wayfinder router"
 ```
 
@@ -437,7 +437,7 @@ git commit -m "feat(pipeline): add deterministic per-slice wayfinder router"
 **Files:**
 - Create: `src/pipeline/slice-runner.ts`
 - Modify: `src/pipeline/pipeline-runtime.ts` (call the runner; extend result types)
-- Test: `tests/pipeline/slice-runner.test.ts` (create)
+- Test: `tests/runtime/pipeline/slice-runner.test.ts` (create)
 
 **Read before implementing:** `runIncrement` (`src/pipeline/pipeline-runtime.ts:480`), the increment loop (`:791-924`), `verifyCandidate` usage (`:1125`), `defaultRunAttempt`, `ArtifactStore.writePipelineArtifact`, `WorktreeManager`, `resolveLinkedWorktreeWritableRoots`, `importPromotedObjects`, `validateCandidateProvenance`. The slice loop mirrors the increment loop's git-object isolation and promotion, with two differences: (1) each slice's implementer receives the slice's own scoped spec with **no `progress` field**; (2) progression is decided by `routeSlice` over that slice's verification, not by a self-reported `status`.
 
@@ -459,13 +459,13 @@ git commit -m "feat(pipeline): add deterministic per-slice wayfinder router"
 
 - [ ] **Step 1: Write the failing test (routing integration, deps injected)**
 
-Model this test on the existing pipeline tests (find one that constructs `PipelineDependencies` with a fake `runAttempt`/`roleRunner` — e.g. under `tests/pipeline/`). Inject a fake implementer that produces a known commit and a fake verifier returning green for slice 1 and red for slice 2, and assert:
+Model this test on the existing pipeline tests (find one that constructs `PipelineDependencies` with a fake `runAttempt`/`roleRunner` — e.g. under `tests/runtime/pipeline/`). Inject a fake implementer that produces a known commit and a fake verifier returning green for slice 1 and red for slice 2, and assert:
 
 ```ts
-// tests/pipeline/slice-runner.test.ts (skeleton — fill deps from an existing pipeline test's harness)
+// tests/runtime/pipeline/slice-runner.test.ts (skeleton — fill deps from an existing pipeline test's harness)
 import { describe, it, expect } from "vitest";
-import { runSlicePhase } from "../../src/pipeline/slice-runner.js";
-// import the shared fake-deps builder used by other tests in tests/pipeline/
+import { runSlicePhase } from "../../../src/pipeline/slice-runner.js";
+// import the shared fake-deps builder used by other tests in tests/runtime/pipeline/
 
 describe("runSlicePhase", () => {
   it("advances slice 1, halts slice 2 when its gate stays red past maxRounds", async () => {
@@ -483,7 +483,7 @@ describe("runSlicePhase", () => {
 
 - [ ] **Step 2: Run to verify it fails**
 
-Run: `npx vitest run tests/pipeline/slice-runner.test.ts` — Expected: FAIL — module not found.
+Run: `npx vitest run tests/runtime/pipeline/slice-runner.test.ts` — Expected: FAIL — module not found.
 
 - [ ] **Step 3: Implement `runSlicePhase`**
 
@@ -491,13 +491,13 @@ Write `src/pipeline/slice-runner.ts` following the Behavior spec above, reusing 
 
 - [ ] **Step 4: Run to verify it passes**
 
-Run: `npx vitest run tests/pipeline/slice-runner.test.ts` — Expected: PASS.
+Run: `npx vitest run tests/runtime/pipeline/slice-runner.test.ts` — Expected: PASS.
 Run: `npx tsc --noEmit` — Expected: no errors.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/pipeline/slice-runner.ts tests/pipeline/slice-runner.test.ts src/pipeline/*.ts
+git add src/pipeline/slice-runner.ts tests/runtime/pipeline/slice-runner.test.ts src/pipeline/*.ts
 git commit -m "feat(pipeline): add sequential test-gated slice runner"
 ```
 
@@ -507,7 +507,7 @@ git commit -m "feat(pipeline): add sequential test-gated slice runner"
 
 **Files:**
 - Modify: `src/pipeline/pipeline-runtime.ts`
-- Test: `tests/pipeline/sliced-pipeline.test.ts` (create)
+- Test: `tests/runtime/pipeline/sliced-pipeline.test.ts` (create)
 
 **Interfaces:**
 - Consumes: `runSlicePhase`, `resolveSlices`.
@@ -523,9 +523,9 @@ git commit -m "feat(pipeline): add sequential test-gated slice runner"
 - [ ] **Step 1: Write the failing tests**
 
 ```ts
-// tests/pipeline/sliced-pipeline.test.ts (fill deps from the shared pipeline test harness)
+// tests/runtime/pipeline/sliced-pipeline.test.ts (fill deps from the shared pipeline test harness)
 import { describe, it, expect } from "vitest";
-import { runPipeline } from "../../src/pipeline/pipeline-runtime.js";
+import { runPipeline } from "../../../src/pipeline/pipeline-runtime.js";
 
 describe("runPipeline with slices", () => {
   it("non-sliced spec behaves as today and returns slices: [] / haltedSliceIndex: null", async () => {
@@ -550,7 +550,7 @@ describe("runPipeline with slices", () => {
 
 - [ ] **Step 2: Run to verify it fails**
 
-Run: `npx vitest run tests/pipeline/sliced-pipeline.test.ts` — Expected: FAIL — `slices`/`haltedSliceIndex` absent on `PipelineResult`.
+Run: `npx vitest run tests/runtime/pipeline/sliced-pipeline.test.ts` — Expected: FAIL — `slices`/`haltedSliceIndex` absent on `PipelineResult`.
 
 - [ ] **Step 3: Implement the wiring**
 
@@ -561,14 +561,14 @@ Run: `npx vitest run tests/pipeline/sliced-pipeline.test.ts` — Expected: FAIL 
 
 - [ ] **Step 4: Run to verify it passes**
 
-Run: `npx vitest run tests/pipeline/sliced-pipeline.test.ts` — Expected: PASS.
+Run: `npx vitest run tests/runtime/pipeline/sliced-pipeline.test.ts` — Expected: PASS.
 Run: `npx vitest run` — Expected: full suite green (confirms non-sliced path unchanged).
 Run: `npx tsc --noEmit` — Expected: no errors.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/pipeline/pipeline-runtime.ts tests/pipeline/sliced-pipeline.test.ts
+git add src/pipeline/pipeline-runtime.ts tests/runtime/pipeline/sliced-pipeline.test.ts
 git commit -m "feat(pipeline): run test-gated slices before composed review with partial-halt handoff"
 ```
 
