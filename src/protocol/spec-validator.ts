@@ -8,6 +8,17 @@ const schemas = loadSchemas();
 export type ValidateResult =
   | { ok: true; spec: DelegationSpec }
   | { ok: false; errors: Array<{ path: string; message: string }> };
+
+function allowlistCovers(top: string[], glob: string): boolean {
+  return top.some(pattern => {
+    if (pattern === "**" || pattern === glob) return true;
+    if (!pattern.endsWith("/**")) return false;
+
+    const prefix = pattern.slice(0, -3);
+    return prefix === glob || glob.startsWith(`${prefix}/`);
+  });
+}
+
 // Test-only escape hatch: lets e2e suites exercise real timeout classification
 // without waiting out the production 10-minute edit floor.
 function resolveMinEditTimeoutMs(): number {
@@ -67,6 +78,35 @@ export function validateSpec(input: unknown): ValidateResult {
             message: "must be a repository-relative path that does not escape the checkout",
           }],
         };
+      }
+    }
+    for (const [sliceIndex, slice] of (spec.slices ?? []).entries()) {
+      for (const [globIndex, glob] of slice.writeAllowlist.entries()) {
+        if (!allowlistCovers(spec.writeAllowlist, glob)) {
+          return {
+            ok: false,
+            errors: [{
+              path: `/slices/${sliceIndex}/writeAllowlist/${globIndex}`,
+              message: "slice writeAllowlist glob must be within the spec writeAllowlist",
+            }],
+          };
+        }
+      }
+      for (const [commandIndex, command] of slice.verification.entries()) {
+        const normalizedCwd = path.posix.normalize(command.cwd);
+        if (
+          path.isAbsolute(command.cwd)
+          || normalizedCwd === ".."
+          || normalizedCwd.startsWith("../")
+        ) {
+          return {
+            ok: false,
+            errors: [{
+              path: `/slices/${sliceIndex}/verification/${commandIndex}/cwd`,
+              message: "must be a repository-relative path that does not escape the checkout",
+            }],
+          };
+        }
       }
     }
     return { ok: true, spec };
