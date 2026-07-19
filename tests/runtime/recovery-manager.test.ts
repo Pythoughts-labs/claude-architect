@@ -584,6 +584,7 @@ describe("recoverStaleRuns", () => {
       },
       isProcessAlive: probedPid => probedPid === pid,
       requestCooperativeTermination: cooperative,
+      async delayMs() {},
     })).resolves.toEqual({ recovered: [runId], quarantined: [] });
 
     expect(cooperative).not.toHaveBeenCalled();
