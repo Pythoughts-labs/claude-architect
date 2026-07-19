@@ -22,6 +22,7 @@ import { getPlatformServices } from "../../src/platform/select-platform.js";
 import type { AttemptResult, CandidateArtifact } from "../../src/protocol/attempt-result.js";
 import type { DelegationSpec } from "../../src/protocol/delegation-spec.js";
 import { PROTOCOL_VERSION } from "../../src/protocol/versions.js";
+import type { PipelineActiveMarker } from "../../src/runtime/artifact-store.js";
 import type { RunManifest } from "../../src/runtime/run-manifest.js";
 import { RuntimeError } from "../../src/util/errors.js";
 
@@ -136,6 +137,7 @@ const validSpec: DelegationSpec = {
 
 class FakeStore implements ToolArtifactStore {
   decision: RunDecision | null = null;
+  pipelineActiveMarker: PipelineActiveMarker | null = null;
 
   constructor(
     private readonly storedResult: AttemptResult = result,
@@ -163,6 +165,10 @@ class FakeStore implements ToolArtifactStore {
 
   async readDecision(_runId: string): Promise<RunDecision | null> {
     return this.decision;
+  }
+
+  async readPipelineActiveMarker(_runId: string): Promise<PipelineActiveMarker | null> {
+    return this.pipelineActiveMarker;
   }
 }
 
@@ -668,6 +674,55 @@ describe("MCP tool handlers", () => {
       deps,
     )).resolves.toEqual({ integration: "applied", detail: "candidate tree applied" });
     expect(integrationCalls).toBe(1);
+  });
+
+  it("refuses to decide while the delegation pipeline is active", async () => {
+    const store = new FakeStore();
+    store.pipelineActiveMarker = {
+      pid: process.pid,
+      processToken: null,
+      startedAt: "2026-07-18T12:00:00.000Z",
+    };
+
+    await expect(handleDecideCandidate(
+      "/canonical/repo",
+      "run-tools",
+      "accepted",
+      dependencies(store),
+    )).resolves.toEqual({
+      ok: false,
+      error: "pipeline-active",
+      diagnostic: "the delegation pipeline for this run is still active",
+    });
+    expect(store.decision).toBeNull();
+  });
+
+  it("refuses to integrate while the delegation pipeline is active", async () => {
+    const store = new FakeStore();
+    store.pipelineActiveMarker = {
+      pid: process.pid,
+      processToken: null,
+      startedAt: "2026-07-18T12:00:00.000Z",
+    };
+    store.decision = { decision: "accepted", recordedAt: "2026-07-18T12:01:00.000Z" };
+    const deps = dependencies(store);
+    let integrationCalls = 0;
+    deps.applyCandidateTree = async () => {
+      integrationCalls += 1;
+      return { integration: "applied", detail: "candidate tree applied" };
+    };
+
+    await expect(handleIntegrateCandidate(
+      "/canonical/repo",
+      "run-tools",
+      candidate.manifestHash,
+      deps,
+    )).resolves.toEqual({
+      ok: false,
+      error: "pipeline-active",
+      diagnostic: "the delegation pipeline for this run is still active",
+    });
+    expect(integrationCalls).toBe(0);
   });
 
   it("deletes the exact candidate anchor after recording rejection", async () => {

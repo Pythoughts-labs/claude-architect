@@ -19,6 +19,7 @@ import {
 } from "../protocol/versions.js";
 import {
   ArtifactStore,
+  type PipelineActiveMarker,
   type RunDecisionRecord,
   type RunDecisionValue,
 } from "../runtime/artifact-store.js";
@@ -39,6 +40,7 @@ export interface ToolArtifactStore {
   readManifest(runId: string): Promise<RunManifest | null>;
   writeDecision(record: RunDecision): Promise<void>;
   readDecision(runId: string): Promise<RunDecision | null>;
+  readPipelineActiveMarker(runId: string): Promise<PipelineActiveMarker | null>;
 }
 
 export interface ToolDependencies {
@@ -386,6 +388,12 @@ export async function handleDecideCandidate(
     const run = await loadArchivedRun(runId, deps);
     await requireMatchingCheckout(run, checkoutPath, deps);
     return await withRepoLock(run.lockKey, async () => {
+      if (await run.store.readPipelineActiveMarker(runId) !== null) {
+        throw runtimeError(
+          "the delegation pipeline for this run is still active",
+          "pipeline-active",
+        );
+      }
       if (decision === "accepted") requireVerifiedCandidate(run);
       const ps = services(deps);
       const lock = await ps.acquireCheckoutLock(run.repoRoot);
@@ -428,6 +436,12 @@ export async function handleIntegrateCandidate(
     const run = await loadArchivedRun(runId, deps);
     await requireMatchingCheckout(run, checkoutPath, deps);
     return await withRepoLock(run.lockKey, async () => {
+      if (await run.store.readPipelineActiveMarker(runId) !== null) {
+        throw runtimeError(
+          "the delegation pipeline for this run is still active",
+          "pipeline-active",
+        );
+      }
       const decision = await run.store.readDecision(runId);
       if (decision?.decision !== "accepted") {
         return { integration: "aborted", detail: "no-accepted-decision" };

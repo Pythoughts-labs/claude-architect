@@ -105,6 +105,113 @@ afterEach(async () => {
 });
 
 describe("recoverStaleRuns", () => {
+  it("cleans dead-owner pipeline worktrees for a terminal run", async () => {
+    const repo = await initRepo();
+    const runId = "run-dead-pipeline";
+    const store = await createUnfinishedRun(runId, repo.commonDir, null);
+    await store.writeResult({
+      resultVersion: "1",
+      runId,
+      status: "failed",
+      failure: "producer-failure",
+      summary: "pipeline failed",
+      producerSummary: null,
+      candidate: null,
+      requestedVerification: [],
+      executedVerification: [],
+      unresolvedIssues: [],
+      evidence: {},
+      logsRef: "logs/producer.log",
+      producerId: null,
+      producerVersion: null,
+      producerModel: null,
+      durationMs: 1,
+      sessionId: null,
+    });
+    const resultBefore = await readFile(path.join(store.runDirectory, "result.json"), "utf8");
+    const pipelineWorktree = await new WorktreeManager(
+      repo.directory,
+      `${runId}-pipeline`,
+    ).create(repo.head);
+    const verifyWorktree = await new WorktreeManager(
+      repo.directory,
+      `${runId}-verify`,
+    ).create(repo.head);
+    await store.writePipelineActiveMarker({
+      pid: 4242,
+      processToken: "darwin:dead",
+      startedAt: "2026-07-18T12:00:00.000Z",
+    });
+
+    await expect(recoverStaleRuns({
+      platformServices: {
+        os: "darwin",
+        async getProcessStartToken() { return null; },
+        async terminateProcessTreeByPid() {},
+      },
+      isProcessAlive: () => false,
+    })).resolves.toEqual({ recovered: [] });
+
+    await expectMissing(pipelineWorktree.path);
+    await expectMissing(verifyWorktree.path);
+    await expectMissing(path.join(store.runDirectory, "pipeline-active.json"));
+    await expect(readFile(path.join(store.runDirectory, "result.json"), "utf8"))
+      .resolves.toBe(resultBefore);
+  }, { timeout: 120_000 });
+
+  it("preserves live-owner pipeline worktrees for a terminal run", async () => {
+    const repo = await initRepo();
+    const runId = "run-live-pipeline";
+    const store = await createUnfinishedRun(runId, repo.commonDir, null);
+    await store.writeResult({
+      resultVersion: "1",
+      runId,
+      status: "failed",
+      failure: "producer-failure",
+      summary: "pipeline failed",
+      producerSummary: null,
+      candidate: null,
+      requestedVerification: [],
+      executedVerification: [],
+      unresolvedIssues: [],
+      evidence: {},
+      logsRef: "logs/producer.log",
+      producerId: null,
+      producerVersion: null,
+      producerModel: null,
+      durationMs: 1,
+      sessionId: null,
+    });
+    const pipelineWorktree = await new WorktreeManager(
+      repo.directory,
+      `${runId}-pipeline`,
+    ).create(repo.head);
+    const verifyWorktree = await new WorktreeManager(
+      repo.directory,
+      `${runId}-verify`,
+    ).create(repo.head);
+    const markerPath = path.join(store.runDirectory, "pipeline-active.json");
+    await store.writePipelineActiveMarker({
+      pid: 4242,
+      processToken: null,
+      startedAt: "2026-07-18T12:00:00.000Z",
+    });
+
+    await expect(recoverStaleRuns({
+      platformServices: {
+        os: "darwin",
+        async getProcessStartToken() { return null; },
+        async terminateProcessTreeByPid() {},
+      },
+      isProcessAlive: () => true,
+    })).resolves.toEqual({ recovered: [] });
+
+    await expect(access(pipelineWorktree.path)).resolves.toBeUndefined();
+    await expect(access(verifyWorktree.path)).resolves.toBeUndefined();
+    const preservedMarker = JSON.parse(await readFile(markerPath, "utf8")) as { pid?: unknown };
+    expect(preservedMarker.pid).toBe(4242);
+  }, { timeout: 120_000 });
+
   it("terminates and archives a stale run before removing its worktree, anchor, and lock", async () => {
     const repo = await initRepo();
     const runId = "run-stale";

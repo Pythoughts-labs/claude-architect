@@ -60,6 +60,12 @@ export interface RunDecisionRecord {
   recordedAt: string;
 }
 
+export interface PipelineActiveMarker {
+  pid: number;
+  processToken: string | null;
+  startedAt: string;
+}
+
 interface RunEntry {
   runId: string;
   directory: string;
@@ -832,6 +838,52 @@ export class ArtifactStore {
       if (isMissing(error)) return null;
       throw error;
     }
+  }
+
+  async writePipelineActiveMarker(marker: PipelineActiveMarker): Promise<void> {
+    if (typeof marker !== "object"
+      || marker === null
+      || !Number.isSafeInteger(marker.pid)
+      || marker.pid <= 1
+      || (marker.processToken !== null && typeof marker.processToken !== "string")
+      || typeof marker.startedAt !== "string"
+      || !Number.isFinite(Date.parse(marker.startedAt))) {
+      throw new RuntimeError("pipeline-active marker is invalid");
+    }
+    await this.replaceJson("pipeline-active.json", marker);
+  }
+
+  async readPipelineActiveMarker(runId: string): Promise<PipelineActiveMarker | null> {
+    validateComponent(runId, "run id");
+    const runDirectory = path.join(this.runsRoot, runId);
+    const validated = await this.ensureExistingRunDirectory(runDirectory);
+    if (validated === null) return null;
+    try {
+      const value = JSON.parse(await readRegularFile(
+        path.join(validated.path, "pipeline-active.json"),
+        validated.identity,
+      )) as Partial<PipelineActiveMarker>;
+      if (typeof value !== "object"
+        || value === null
+        || typeof value.pid !== "number"
+        || !Number.isSafeInteger(value.pid)
+        || value.pid <= 1
+        || (value.processToken !== null && typeof value.processToken !== "string")
+        || typeof value.startedAt !== "string"
+        || !Number.isFinite(Date.parse(value.startedAt))) {
+        throw new RuntimeError("archived pipeline-active marker is malformed");
+      }
+      return value as PipelineActiveMarker;
+    } catch (error) {
+      if (isMissing(error)) return null;
+      throw error;
+    }
+  }
+
+  async clearPipelineActiveMarker(): Promise<void> {
+    const directory = await this.ensureRunDirectory(false);
+    if (directory === null) return;
+    await rm(path.join(directory, "pipeline-active.json"), { force: true });
   }
 
   async list(): Promise<string[]> {

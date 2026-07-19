@@ -666,9 +666,28 @@ export async function recoverStaleRuns(
       const runStartText = await readBoundedRegularFile(path.join(runDirectory, "run-start.json"));
       if (runStartText === null) continue;
       const record = parseRunStart(runStartText, entry.name);
-      const result = await new ArtifactStore(entry.name).readResult(entry.name);
+      const store = new ArtifactStore(entry.name);
+      const result = await store.readResult(entry.name);
       if (result !== null) {
         validateTerminalResult(result, entry.name);
+        const marker = await store.readPipelineActiveMarker(entry.name);
+        if (marker !== null && !await lockOwnerIsLive(
+          { pid: marker.pid, processToken: marker.processToken },
+          isProcessAlive,
+          pid => ps.getProcessStartToken(pid),
+        )) {
+          const commonDir = await validateGitCommonDir(record.canonicalCommonDir);
+          for (const managedId of [
+            `${entry.name}-pipeline`,
+            `${entry.name}-verify`,
+          ]) {
+            const worktreePath = path.join(root, "worktrees", managedId);
+            if (await plainDirectoryIdentity(worktreePath) !== null) {
+              await new WorktreeManager(commonDir, managedId, ps).remove(worktreePath);
+            }
+          }
+          await store.clearPipelineActiveMarker();
+        }
         continue;
       }
       if (await lockIsOwnedByLiveProcess(

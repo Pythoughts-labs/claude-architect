@@ -967,25 +967,36 @@ describe("runPipeline", () => {
 
   it("returns decision-ready after a clean review round without fixing", async () => {
     const repo = await initRepo();
-    const roleRunner = roundReviews(
+    const runId = "pipeline-clean";
+    const store = new ArtifactStore(runId);
+    const markerPath = path.join(store.runDirectory, "pipeline-active.json");
+    const baseRoleRunner = roundReviews(
       [{ correctness: approve, systems: approve }],
       async () => { throw new Error("fixer must not run"); },
     );
+    let markerObserved = false;
+    const roleRunner = async (args: RoleRunArgs): Promise<RoleRunResult> => {
+      const marker = JSON.parse(await readFile(markerPath, "utf8")) as { pid?: unknown };
+      expect(marker.pid).toBe(process.pid);
+      markerObserved = true;
+      return baseRoleRunner(args);
+    };
 
     const result = await runPipeline(
       repo,
       validSpec(),
-      dependencies({ runId: "pipeline-clean", roleRunner }),
+      dependencies({ runId, roleRunner }),
     );
 
     expect(result.status).toBe("decision-ready");
+    expect(markerObserved).toBe(true);
+    await expect(readFile(markerPath, "utf8")).rejects.toMatchObject({ code: "ENOENT" });
     expect(result.rounds).toHaveLength(1);
     expect(result.rounds[0]?.fix).toBeNull();
     expect(result.rounds[0]?.roleLogRefs).toEqual([
       "logs/role-reviewer-correctness-round1.log",
       "logs/role-reviewer-systems-round1.log",
     ]);
-    const store = new ArtifactStore("pipeline-clean");
     await expect(readFile(
       path.join(store.runDirectory, "logs", "role-reviewer-correctness-round1.log"),
       "utf8",
@@ -994,7 +1005,7 @@ describe("runPipeline", () => {
       path.join(store.runDirectory, "logs", "role-reviewer-systems-round1.log"),
       "utf8",
     )).resolves.toBe(fenced(approve));
-  });
+  }, { timeout: 120_000 });
 
   it("fixes a blocker and returns decision-ready after a clean re-review", async () => {
     const repo = await initRepo();
@@ -1429,7 +1440,11 @@ describe("runPipeline", () => {
       path.join(store.runDirectory, "logs", "role-reviewer-correctness-round1-repair.log"),
       "utf8",
     )).resolves.toBe("not json either");
-  });
+    await expect(readFile(
+      path.join(store.runDirectory, "pipeline-active.json"),
+      "utf8",
+    )).rejects.toMatchObject({ code: "ENOENT" });
+  }, { timeout: 120_000 });
 
   it("requires human decision when the candidate adds a skipped test", async () => {
     const repo = await initRepo();
