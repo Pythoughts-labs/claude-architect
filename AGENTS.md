@@ -47,6 +47,7 @@ Before invoking **dynamic workflows**, **ultra code**, or any equivalent harness
 - Fix every lint failure, test failure, and flaky test discovered during the work, even when pre-existing or unrelated to the initial request.
 - If a required fix exceeds the authorized scope, stop and request expanded scope. Do not ignore the failure or report the task complete.
 - Prefer quality, simplicity, robustness, scalability, and long-term maintainability over short-term development cost.
+- **Never propose deferring an applicable issue or fix.** If a problem is real and a fix applies, do the fix now — even when it requires a redesign or significantly more work. "Defer", "follow-up later", "out of scope for now", and equivalents are prohibited recommendations; the only permitted alternative to fixing immediately is stopping to request expanded scope, then fixing.
 
 ## Non-negotiable trust invariants
 
