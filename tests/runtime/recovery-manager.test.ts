@@ -19,6 +19,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { git } from "../../src/git/git-exec.js";
 import { WorktreeManager } from "../../src/git/worktree-manager.js";
 import { start } from "../../src/mcp/server.js";
+import { CLEANUP_JOURNAL_LOCK_KEY } from "../../src/platform/posix-platform-services.js";
 import { ArtifactStore } from "../../src/runtime/artifact-store.js";
 import { recoverStaleRuns } from "../../src/runtime/recovery-manager.js";
 import { buildRunManifest } from "../../src/runtime/run-manifest.js";
@@ -1862,6 +1863,66 @@ describe("recoverStaleRuns", () => {
       isProcessAlive: () => false,
     });
 
+    await expectMissing(quarantinePath);
+    expect((await git(repo.directory, ["rev-parse", "--verify", "--quiet", backupRef])).exitCode)
+      .not.toBe(0);
+    const records = (await readFile(path.join(runsRoot, "cleanup.ndjson"), "utf8"))
+      .trim().split("\n").map(line => JSON.parse(line) as { event: string });
+    expect(records.map(record => record.event)).toEqual([
+      "prune-cleanup-intent",
+      "prune-cleanup-complete",
+    ]);
+  });
+
+  it("reclaims a dead-owner cleanup journal lock before replaying an interrupted prune", async () => {
+    const repo = await initRepo();
+    const runId = "run-prune-journal-locked";
+    const anchorRef = `refs/claude-architect/candidates/${runId}`;
+    const backupRef = `refs/claude-architect/prune-backups/${runId}`;
+    const quarantineName = `.prune-${runId}-00000000-0000-4000-8000-000000000007`;
+    const runsRoot = path.join(process.env.CLAUDE_PLUGIN_DATA!, "runs");
+    const runDirectory = path.join(runsRoot, runId);
+    const quarantinePath = path.join(runsRoot, quarantineName);
+    await mkdir(runDirectory, { recursive: true });
+    await writeFile(path.join(runDirectory, "result.json"), "{}\n");
+    await runGit(repo.directory, ["update-ref", backupRef, repo.head]);
+    await rename(runDirectory, quarantinePath);
+    await writeFile(path.join(runsRoot, "cleanup.ndjson"), `${JSON.stringify({
+      event: "prune-cleanup-intent",
+      runId,
+      reason: "max-age",
+      anchorCleanup: "pending",
+      archiveBytes: 3,
+      quarantineName,
+      repoRoot: repo.directory,
+      anchorRef,
+      backupRef,
+      candidateCommitOid: repo.head,
+      recordedAt: "2026-07-14T12:00:00.000Z",
+    })}\n{"event":"prune-cleanup-com`);
+
+    // A previous process crashed while holding the cleanup-journal mutex, leaving its
+    // lock file behind with a now-dead owner. Recovery must reclaim it before replay:
+    // otherwise replayInterruptedPrunes spins to its acquire deadline, throws, and aborts
+    // recovery before reclaimLocks runs — permanently blocking every future pass. Without
+    // the up-front reclaim this test throws "cleanup journal is locked" after ~2.5s.
+    const journalLockPath = path.join(
+      process.env.CLAUDE_PLUGIN_DATA!, "locks", `${CLEANUP_JOURNAL_LOCK_KEY}.lock`,
+    );
+    await mkdir(path.dirname(journalLockPath), { recursive: true });
+    await writeFile(journalLockPath, JSON.stringify({ pid: 999_999, processToken: null }));
+
+    await recoverStaleRuns({
+      platformServices: {
+        os: "darwin",
+        async getProcessStartToken() { return null; },
+        async terminateProcessTreeByPid() {},
+      },
+      isProcessAlive: () => false,
+    });
+
+    // The stale mutex is reclaimed and the prune it was blocking ran to completion.
+    await expectMissing(journalLockPath);
     await expectMissing(quarantinePath);
     expect((await git(repo.directory, ["rev-parse", "--verify", "--quiet", backupRef])).exitCode)
       .not.toBe(0);

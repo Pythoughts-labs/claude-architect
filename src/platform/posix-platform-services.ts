@@ -9,12 +9,18 @@ import { BoundedBuffer } from "../util/bounded-buffer.js";
 import { RuntimeError } from "../util/errors.js";
 import { logger } from "../util/logger.js";
 import type {
-  CanonicalPath, CheckoutLock, ExecutableRequest, PlatformServices, ResolvedExecutable,
+  CanonicalPath, CheckoutLock, ExecutableRequest, FileLock, PlatformServices, ResolvedExecutable,
   SpawnRequest, SupervisedExit, SupervisedProcess,
 } from "./platform-services.js";
 
 const LOCK_RETRY_MS = 30;
 const LOCK_TIMEOUT_MS = 2500;
+
+// Fixed 64-hex key for the state-dir-scoped cleanup-journal mutex. sha256 so it
+// matches the recovery lock-name pattern and is reclaimed like any dead lock, and
+// distinct (by domain prefix) from checkout locks keyed on a repository identity.
+export const CLEANUP_JOURNAL_LOCK_KEY =
+  createHash("sha256").update("claude-architect:cleanup-journal:v1").digest("hex");
 
 function errorCode(error: unknown): string | undefined {
   return typeof error === "object" && error !== null && "code" in error
@@ -186,6 +192,11 @@ export class PosixPlatformServices implements PlatformServices {
     const ownerToken = await this.getProcessStartToken(nodeProcess.pid);
     const lock = await acquireWxFileLock(key, `checkout is locked: ${checkout}`, ownerToken);
     return { ...lock, repositoryIdentity };
+  }
+
+  async acquireCleanupJournalLock(): Promise<FileLock> {
+    const ownerToken = await this.getProcessStartToken(nodeProcess.pid);
+    return acquireWxFileLock(CLEANUP_JOURNAL_LOCK_KEY, "cleanup journal is locked", ownerToken);
   }
 
   async createSecureTempDirectory(): Promise<string> {

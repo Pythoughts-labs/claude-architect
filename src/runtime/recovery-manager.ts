@@ -15,6 +15,7 @@ import nodeProcess from "node:process";
 import { git, type GitResult } from "../git/git-exec.js";
 import { WorktreeManager } from "../git/worktree-manager.js";
 import type { PlatformServices } from "../platform/platform-services.js";
+import { CLEANUP_JOURNAL_LOCK_KEY } from "../platform/posix-platform-services.js";
 import { getPlatformServices } from "../platform/select-platform.js";
 import type { AttemptResult } from "../protocol/attempt-result.js";
 import { RuntimeError } from "../util/errors.js";
@@ -1076,28 +1077,35 @@ async function createExactRef(repoRoot: string, ref: string, oid: string): Promi
 }
 
 async function appendCleanupRecord(runsRoot: string, record: CleanupRecord): Promise<void> {
-  const identity = await plainDirectoryIdentity(runsRoot);
-  if (identity === null) throw new RuntimeError("cleanup journal root disappeared");
-  const filename = path.join(runsRoot, "cleanup.ndjson");
-  const handle = await open(
-    filename,
-    constants.O_WRONLY | constants.O_CREAT | constants.O_APPEND | NO_FOLLOW,
-    0o600,
-  );
+  // Same shared-journal mutex the prune writer holds: a completion/rollback append
+  // can never interleave with a concurrent intent append or a torn-tail truncation.
+  const journalLock = await getPlatformServices().acquireCleanupJournalLock();
   try {
-    const metadata = await handle.stat();
-    const currentRoot = await lstat(runsRoot);
-    if (!metadata.isFile() || !isPlainDirectory(currentRoot) || !sameIdentity(currentRoot, identity)) {
-      throw new RuntimeError("cleanup journal identity changed during recovery");
+    const identity = await plainDirectoryIdentity(runsRoot);
+    if (identity === null) throw new RuntimeError("cleanup journal root disappeared");
+    const filename = path.join(runsRoot, "cleanup.ndjson");
+    const handle = await open(
+      filename,
+      constants.O_WRONLY | constants.O_CREAT | constants.O_APPEND | NO_FOLLOW,
+      0o600,
+    );
+    try {
+      const metadata = await handle.stat();
+      const currentRoot = await lstat(runsRoot);
+      if (!metadata.isFile() || !isPlainDirectory(currentRoot) || !sameIdentity(currentRoot, identity)) {
+        throw new RuntimeError("cleanup journal identity changed during recovery");
+      }
+      await handle.writeFile(`${JSON.stringify(record)}\n`, "utf8");
+      await handle.sync();
+    } finally {
+      await handle.close();
     }
-    await handle.writeFile(`${JSON.stringify(record)}\n`, "utf8");
-    await handle.sync();
+    const currentRoot = await lstat(runsRoot);
+    if (!isPlainDirectory(currentRoot) || !sameIdentity(currentRoot, identity)) {
+      throw new RuntimeError("cleanup journal root changed after recovery append");
+    }
   } finally {
-    await handle.close();
-  }
-  const currentRoot = await lstat(runsRoot);
-  if (!isPlainDirectory(currentRoot) || !sameIdentity(currentRoot, identity)) {
-    throw new RuntimeError("cleanup journal root changed after recovery append");
+    await journalLock.release();
   }
 }
 
@@ -1228,8 +1236,18 @@ async function replayInterruptedPrunes(
   runsRoot: string,
   ps: Pick<PlatformServices, "acquireCheckoutLock">,
 ): Promise<void> {
-  const { pending, tornTail } = await readPendingCleanupRecords(runsRoot);
-  if (tornTail) await truncateCleanupTornTail(path.join(runsRoot, "cleanup.ndjson"));
+  // Read the journal and repair a torn tail as one critical section under the shared
+  // journal mutex, so no concurrent append can land between the read and the truncate
+  // (which would otherwise be erased). Completion appends below re-take the same lock.
+  let pending: Map<string, CleanupRecord>;
+  const journalLock = await getPlatformServices().acquireCleanupJournalLock();
+  try {
+    const read = await readPendingCleanupRecords(runsRoot);
+    if (read.tornTail) await truncateCleanupTornTail(path.join(runsRoot, "cleanup.ndjson"));
+    pending = read.pending;
+  } finally {
+    await journalLock.release();
+  }
   for (const record of [...pending.values()].sort((left, right) =>
     left.runId.localeCompare(right.runId))) {
     // A repoRoot-less legacy intent has neither anchor nor repository to lock.
@@ -1993,7 +2011,19 @@ export async function recoverStaleRuns(
     const runsIdentity = await plainDirectoryIdentity(runsRoot);
     // The reconciler completes interrupted prunes under a per-repo checkout lease
     // rather than deferring them, so no run is skipped for a pending prune.
-    if (runsIdentity !== null) await replayInterruptedPrunes(runsRoot, ps);
+    if (runsIdentity !== null) {
+      // A crash can leave the cleanup-journal mutex held by a dead owner. That lock
+      // is a 64-hex leaf reclaimed by reclaimLocks() near the end of this body, but
+      // replayInterruptedPrunes acquires it first — so without an up-front reclaim a
+      // stale lock would make replay spin to its deadline and throw, aborting recovery
+      // before reclaimLocks ever runs and permanently blocking every future pass.
+      await reclaimDeadLock(
+        path.join(locksRoot, `${CLEANUP_JOURNAL_LOCK_KEY}.lock`),
+        isProcessAlive,
+        pid => ps.getProcessStartToken(pid),
+      );
+      await replayInterruptedPrunes(runsRoot, ps);
+    }
     const journaledQuarantines = runsIdentity === null
       ? new Set<string>()
       : (await readRecoveryQuarantineJournal(runsRoot)).runIds;

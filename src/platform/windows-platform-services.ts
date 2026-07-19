@@ -8,10 +8,10 @@ import { fileURLToPath } from "node:url";
 import { BoundedBuffer } from "../util/bounded-buffer.js";
 import { RuntimeError } from "../util/errors.js";
 import type {
-  CanonicalPath, CheckoutLock, ExecutableRequest, PlatformServices, ResolvedExecutable,
+  CanonicalPath, CheckoutLock, ExecutableRequest, FileLock, PlatformServices, ResolvedExecutable,
   SpawnRequest, SupervisedExit, SupervisedProcess,
 } from "./platform-services.js";
-import { acquireWxFileLock } from "./posix-platform-services.js";
+import { acquireWxFileLock, CLEANUP_JOURNAL_LOCK_KEY } from "./posix-platform-services.js";
 import { normalizeWindowsEnv } from "./windows-env.js";
 
 const childHandles = new WeakMap<SupervisedProcess, ChildProcess>();
@@ -310,6 +310,11 @@ export class WindowsPlatformServices implements PlatformServices {
     const ownerToken = await this.getProcessStartToken(nodeProcess.pid);
     const lock = await acquireWxFileLock(key, `checkout is locked: ${checkout}`, ownerToken);
     return { ...lock, repositoryIdentity };
+  }
+
+  async acquireCleanupJournalLock(): Promise<FileLock> {
+    const ownerToken = await this.getProcessStartToken(nodeProcess.pid);
+    return acquireWxFileLock(CLEANUP_JOURNAL_LOCK_KEY, "cleanup journal is locked", ownerToken);
   }
 
   async createSecureTempDirectory(): Promise<string> {

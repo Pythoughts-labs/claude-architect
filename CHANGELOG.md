@@ -6,6 +6,19 @@ All notable changes to Claude Architect are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.22.0] - 2026-07-19
+
+### Fixed
+
+- Crash-recovery cleanup journal: close a cross-process race where recovery's
+  torn-tail truncation could erase a cleanup intent a concurrent process had just
+  appended and fsynced. All journal appends (prune and recovery) and the torn-tail
+  repair now hold a new state-dir-scoped cross-process mutex
+  (`acquireCleanupJournalLock`), and recovery reads and repairs the journal as one
+  critical section under that mutex. The mutex is a leaf lock — never held while
+  acquiring the checkout lease or recovery lock, so ordering stays deadlock-free —
+  and is reclaimed like any other lock when its owner dies.
+
 ## [0.21.0] - 2026-07-19
 
 ### Added

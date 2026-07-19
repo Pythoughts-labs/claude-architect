@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { PosixPlatformServices } from "../../src/platform/posix-platform-services.js";
+import { CLEANUP_JOURNAL_LOCK_KEY, PosixPlatformServices } from "../../src/platform/posix-platform-services.js";
 import { getPlatformServices } from "../../src/platform/select-platform.js";
 import { resolveStateDir } from "../../src/runtime/state-dir.js";
 import { scrubbedGitEnv } from "./helpers/git-fixture-env.js";
@@ -106,6 +106,28 @@ describe("PosixPlatformServices", () => {
     ]);
     expect(lockB.key).toBe(lockA.key);
     await lockB.release();
+  });
+
+  it("serializes the cleanup journal lock on a fixed key and frees it on release", async () => {
+    const lockA = await ps.acquireCleanupJournalLock();
+    expect(lockA.key).toBe(CLEANUP_JOURNAL_LOCK_KEY);
+    const lockPath = path.join(resolveStateDir(), "locks", `${lockA.key}.lock`);
+    await expect(fs.readFile(lockPath, "utf8").then(contents => JSON.parse(contents))).resolves.toEqual({
+      pid: process.pid,
+      processToken: await ps.getProcessStartToken(process.pid),
+    });
+    let resolved = false;
+    const pendingLockB = ps.acquireCleanupJournalLock().then(lock => { resolved = true; return lock; });
+    await delay(100);
+    expect(resolved).toBe(false);
+    await lockA.release();
+    const lockB = await Promise.race([
+      pendingLockB,
+      delay(1000).then(() => { throw new Error("second cleanup journal lock did not resolve after release"); }),
+    ]);
+    expect(lockB.key).toBe(CLEANUP_JOURNAL_LOCK_KEY);
+    await lockB.release();
+    await expect(fs.access(lockPath)).rejects.toThrow();
   });
 
   it("returns the canonical repository identity used to derive its lock key", async () => {
