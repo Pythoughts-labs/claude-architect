@@ -13,12 +13,22 @@ export interface VerificationCommand {
   platform?: { os?: Array<"darwin" | "linux" | "win32">; arch?: string[] };
 }
 
+export interface Slice {
+  objective: string;
+  context: string;
+  writeAllowlist: string[];
+  forbiddenScope: string[];
+  successCriteria: string[];
+  verification: VerificationCommand[];
+}
+
 export type ReviewerKind = "correctness" | "systems";
 
 export interface ReviewConfig {
   reviewers: ReviewerKind[];
   maxRounds: number;
   focus?: string[];
+  perSlice?: boolean;
 }
 
 export interface ImplementationConfig {
@@ -49,6 +59,7 @@ export interface DelegationSpec {
   expectedOutput: "candidate-patch";         // P0 canonical output
   review?: ReviewConfig;
   implementation?: ImplementationConfig;
+  slices?: Slice[];
 }
 
 export function resolveReviewConfig(spec: DelegationSpec): ReviewConfig {
@@ -57,6 +68,10 @@ export function resolveReviewConfig(spec: DelegationSpec): ReviewConfig {
 
 export function resolveImplementationConfig(spec: DelegationSpec): ImplementationConfig {
   return spec.implementation ?? DEFAULT_IMPLEMENTATION_CONFIG;
+}
+
+export function resolveSlices(spec: DelegationSpec): Slice[] {
+  return spec.slices ?? [];
 }
 
 export const RUNTIME_MAX_TIMEOUT_MS = 1_800_000; // 30 min hard ceiling
