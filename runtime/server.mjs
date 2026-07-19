@@ -27870,13 +27870,21 @@ async function runAttempt(checkoutPath, spec, deps) {
   const runId = (deps.runId ?? randomUUID4)();
   const store = new ArtifactStore(runId);
   const canonical = await ps.canonicalizePath(checkoutPath);
-  let lock = null;
+  const repositoryIdentity = canonical.gitCommonDir ?? canonical.canonical;
+  if (deps.borrowedCheckoutLease !== void 0 && deps.borrowedCheckoutLease.repositoryIdentity !== repositoryIdentity) {
+    throw new RuntimeError("borrowed checkout lease repository identity mismatch");
+  }
+  let lock = deps.borrowedCheckoutLease?.lock ?? null;
+  let ownedLock = null;
   let worktree = null;
   let tempHome = null;
   let builtEnvironment = null;
   let primaryError;
   try {
-    lock = await ps.acquireCheckoutLock(canonical.canonical);
+    if (lock === null) {
+      ownedLock = await ps.acquireCheckoutLock(canonical.canonical);
+      lock = ownedLock;
+    }
     const preconditions = await checkPreconditions(canonical.canonical, {
       writeAllowlist: spec.writeAllowlist
     });
@@ -28210,7 +28218,7 @@ async function runAttempt(checkoutPath, spec, deps) {
       builtEnvironment,
       worktree,
       tempHome,
-      lock
+      lock: ownedLock
     });
     if (primaryError === void 0 && cleanupError !== null) throw cleanupError;
   }
@@ -29851,10 +29859,43 @@ async function verifyCandidate(args) {
   }
 }
 async function runPipeline(checkoutPath, spec, deps) {
+  const ps = deps.ps ?? getPlatformServices();
+  const canonical = await ps.canonicalizePath(checkoutPath);
+  const lock = await ps.acquireCheckoutLock(canonical.canonical);
+  const borrowedCheckoutLease = {
+    lock,
+    repositoryIdentity: canonical.gitCommonDir ?? canonical.canonical
+  };
+  let primaryError;
+  let hasPrimaryError = false;
+  try {
+    return await runPipelineWithLease(
+      checkoutPath,
+      spec,
+      deps,
+      ps,
+      borrowedCheckoutLease
+    );
+  } catch (error2) {
+    primaryError = error2;
+    hasPrimaryError = true;
+    throw error2;
+  } finally {
+    try {
+      await lock.release();
+    } catch (releaseError) {
+      if (!hasPrimaryError) throw releaseError;
+      throw new AggregateError(
+        [primaryError, releaseError],
+        "pipeline failed and its checkout lease could not be released"
+      );
+    }
+  }
+}
+async function runPipelineWithLease(checkoutPath, spec, deps, ps, borrowedCheckoutLease) {
   const runAttemptFn = deps.runAttempt ?? runAttempt;
   const slices = resolveSlices(spec);
   const initialSpec = slices.length === 0 ? spec : scopeSpecToSlice(spec, slices[0]);
-  const ps = deps.ps ?? getPlatformServices();
   const activeOwner = {
     pid: process.pid,
     processToken: await ps.getProcessStartToken(process.pid).catch(() => null),
@@ -29872,6 +29913,7 @@ async function runPipeline(checkoutPath, spec, deps) {
   const inheritedOnRunStart = deps.onRunStart;
   const attempt = await runAttemptFn(checkoutPath, initialSpec, {
     ...deps,
+    borrowedCheckoutLease,
     async onRunStart(context) {
       runStart = context;
       if (slices.length > 0) {

@@ -1,6 +1,7 @@
 import path from "node:path";
 import { git, type GitExecOptions, type GitResult } from "../git/git-exec.js";
 import { WorktreeManager } from "../git/worktree-manager.js";
+import type { PlatformServices } from "../platform/platform-services.js";
 import { getPlatformServices } from "../platform/select-platform.js";
 import type {
   CandidateArtifact,
@@ -21,6 +22,7 @@ import type { ProducerRegistry } from "../producers/producer-registry.js";
 import {
   runAttempt as defaultRunAttempt,
   type AttemptRuntimeDependencies,
+  type BorrowedCheckoutLease,
 } from "../runtime/attempt-runtime.js";
 import {
   ArtifactStore,
@@ -1123,10 +1125,50 @@ export async function runPipeline(
   spec: DelegationSpec,
   deps: PipelineDependencies,
 ): Promise<PipelineResult> {
+  const ps = deps.ps ?? getPlatformServices();
+  const canonical = await ps.canonicalizePath(checkoutPath);
+  const lock = await ps.acquireCheckoutLock(canonical.canonical);
+  const borrowedCheckoutLease: BorrowedCheckoutLease = {
+    lock,
+    repositoryIdentity: canonical.gitCommonDir ?? canonical.canonical,
+  };
+  let primaryError: unknown;
+  let hasPrimaryError = false;
+  try {
+    return await runPipelineWithLease(
+      checkoutPath,
+      spec,
+      deps,
+      ps,
+      borrowedCheckoutLease,
+    );
+  } catch (error) {
+    primaryError = error;
+    hasPrimaryError = true;
+    throw error;
+  } finally {
+    try {
+      await lock.release();
+    } catch (releaseError) {
+      if (!hasPrimaryError) throw releaseError;
+      throw new AggregateError(
+        [primaryError, releaseError],
+        "pipeline failed and its checkout lease could not be released",
+      );
+    }
+  }
+}
+
+async function runPipelineWithLease(
+  checkoutPath: string,
+  spec: DelegationSpec,
+  deps: PipelineDependencies,
+  ps: PlatformServices,
+  borrowedCheckoutLease: BorrowedCheckoutLease,
+): Promise<PipelineResult> {
   const runAttemptFn = deps.runAttempt ?? defaultRunAttempt;
   const slices = resolveSlices(spec);
   const initialSpec = slices.length === 0 ? spec : scopeSpecToSlice(spec, slices[0]!);
-  const ps = deps.ps ?? getPlatformServices();
   const activeOwner: PipelineActiveMarker = {
     pid: process.pid,
     processToken: await ps.getProcessStartToken(process.pid).catch(() => null),
@@ -1142,6 +1184,7 @@ export async function runPipeline(
   const inheritedOnRunStart = deps.onRunStart;
   const attempt = await runAttemptFn(checkoutPath, initialSpec, {
     ...deps,
+    borrowedCheckoutLease,
     async onRunStart(context) {
       runStart = context;
       if (slices.length > 0) {

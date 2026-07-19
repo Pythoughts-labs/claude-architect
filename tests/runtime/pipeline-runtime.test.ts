@@ -19,6 +19,10 @@ import {
   handleDecideCandidate,
   handleIntegrateCandidate,
 } from "../../src/mcp/tools.js";
+import type {
+  CheckoutLock,
+  PlatformServices,
+} from "../../src/platform/platform-services.js";
 import { getPlatformServices } from "../../src/platform/select-platform.js";
 import type {
   AttemptResult,
@@ -49,6 +53,7 @@ import { buildRunManifest } from "../../src/runtime/run-manifest.js";
 import type {
   AcceptanceVerifierLike,
   AttemptRuntimeDependencies,
+  BorrowedCheckoutLease,
 } from "../../src/runtime/attempt-runtime.js";
 import {
   clearRegisteredSecrets,
@@ -233,6 +238,82 @@ function attemptResult(runId: string, candidate: CandidateArtifact): AttemptResu
     producerModel: null,
     durationMs: 1,
     sessionId: null,
+  };
+}
+
+function failedAttemptResult(runId: string): AttemptResult {
+  return {
+    resultVersion: "1",
+    runId,
+    status: "failed",
+    failure: "verification-failure",
+    summary: "candidate did not pass independent verification",
+    producerSummary: "test producer",
+    candidate: null,
+    requestedVerification: [],
+    executedVerification: [],
+    unresolvedIssues: ["base-changed"],
+    evidence: { structural: { failures: ["base-changed"] } },
+    logsRef: "logs/producer.log",
+    producerId: "stub",
+    producerVersion: "1",
+    producerModel: null,
+    durationMs: 1,
+    sessionId: null,
+  };
+}
+
+async function checkoutLeaseHarness(
+  repo: string,
+  options: {
+    releaseError?: Error;
+    onRelease?: () => void | Promise<void>;
+  } = {},
+): Promise<{
+  ps: PlatformServices;
+  expectedRepositoryIdentity: string;
+  lock(): CheckoutLock;
+  held(): boolean;
+  acquireCalls(): number;
+  releaseCalls(): number;
+}> {
+  const platformServices = getPlatformServices();
+  const canonical = await platformServices.canonicalizePath(repo);
+  let lock: CheckoutLock | undefined;
+  let held = false;
+  let acquireCalls = 0;
+  let releaseCalls = 0;
+  const ps = Object.assign(Object.create(platformServices), {
+    async acquireCheckoutLock(checkout: string): Promise<CheckoutLock> {
+      acquireCalls += 1;
+      const ownedLock = await platformServices.acquireCheckoutLock(checkout);
+      held = true;
+      lock = {
+        key: ownedLock.key,
+        async release() {
+          releaseCalls += 1;
+          try {
+            await options.onRelease?.();
+            if (options.releaseError !== undefined) throw options.releaseError;
+          } finally {
+            await ownedLock.release();
+            held = false;
+          }
+        },
+      };
+      return lock;
+    },
+  }) as PlatformServices;
+  return {
+    ps,
+    expectedRepositoryIdentity: canonical.gitCommonDir ?? canonical.canonical,
+    lock: () => {
+      if (lock === undefined) throw new Error("checkout lock was not acquired");
+      return lock;
+    },
+    held: () => held,
+    acquireCalls: () => acquireCalls,
+    releaseCalls: () => releaseCalls,
   };
 }
 
@@ -705,6 +786,256 @@ describe("pipeline runtime namespaces", () => {
 });
 
 describe("runPipeline", () => {
+  it("holds one checkout lease through attempt, review, fix, verification, and marker cleanup", async () => {
+    const repo = await initRepo();
+    const runId = "pipeline-continuous-checkout-lease";
+    const spec = validSpec();
+    spec.implementation = { maxIncrements: 2 };
+    const store = new ArtifactStore(runId);
+    let releaseObservedLast = false;
+    let lease: Awaited<ReturnType<typeof checkoutLeaseHarness>>;
+    lease = await checkoutLeaseHarness(repo, {
+      onRelease: async () => {
+        expect(lease.held()).toBe(true);
+        await expect(store.readPipelineActiveMarker(runId)).resolves.toBeNull();
+        await expect(store.readPipelineArtifact(runId, "pipeline-result"))
+          .resolves.toMatchObject({ status: "decision-ready" });
+        releaseObservedLast = true;
+      },
+    });
+    const baseRoleRunner = roundReviews([
+      { correctness: blocker, systems: approve },
+      { correctness: approve, systems: approve },
+    ], async args => {
+      expect(lease.held()).toBe(true);
+      const commit = await commitFix(args, "lease-protected fix\n");
+      return success(fenced({
+        reportVersion: "1",
+        candidateCommit: commit,
+        dispositions: [{
+          findingId: "F-001",
+          disposition: "fixed",
+          evidence: "Committed under the pipeline lease.",
+          commit,
+        }],
+      }));
+    });
+    const roleRunner = async (args: RoleRunArgs): Promise<RoleRunResult> => {
+      expect(lease.held()).toBe(true);
+      if (args.role === "implementer") {
+        const candidateCommit = await commitIncrement(args, "lease-protected increment\n");
+        return success(fenced({
+          reportVersion: "1",
+          candidateCommit,
+          status: "complete",
+          summary: "increment complete",
+        }));
+      }
+      return baseRoleRunner(args);
+    };
+    const deps = dependencies({ runId, roleRunner });
+    deps.ps = lease.ps;
+    const initialRun = deps.runAttempt!;
+    let receivedLease: BorrowedCheckoutLease | undefined;
+    deps.runAttempt = async (checkoutPath, receivedSpec, attemptDeps) => {
+      expect(lease.held()).toBe(true);
+      receivedLease = attemptDeps.borrowedCheckoutLease;
+      return initialRun(checkoutPath, receivedSpec, attemptDeps);
+    };
+    const verify = AcceptanceVerifier.prototype.verify;
+    const verifySpy = vi.spyOn(AcceptanceVerifier.prototype, "verify")
+      .mockImplementation(function (args) {
+        expect(lease.held()).toBe(true);
+        return verify.call(this, args);
+      });
+    const clearMarker = ArtifactStore.prototype.clearPipelineActiveMarker;
+    const clearMarkerSpy = vi.spyOn(ArtifactStore.prototype, "clearPipelineActiveMarker")
+      .mockImplementation(function () {
+        expect(lease.held()).toBe(true);
+        return clearMarker.call(this);
+      });
+
+    const result = await runPipeline(repo, spec, deps);
+
+    expect(result.status).toBe("decision-ready");
+    expect(result.increments).toHaveLength(1);
+    expect(receivedLease).toEqual({
+      lock: lease.lock(),
+      repositoryIdentity: lease.expectedRepositoryIdentity,
+    });
+    expect(verifySpy).toHaveBeenCalled();
+    expect(clearMarkerSpy).toHaveBeenCalledOnce();
+    expect(lease.acquireCalls()).toBe(1);
+    expect(lease.releaseCalls()).toBe(1);
+    expect(lease.held()).toBe(false);
+    expect(releaseObservedLast).toBe(true);
+  }, { timeout: 120_000 });
+
+  it("holds the borrowed lease through the early sliced marker and temporary-ref cleanup", async () => {
+    const repo = await initSlicedRepo();
+    const runId = "pipeline-sliced-continuous-checkout-lease";
+    const store = new ArtifactStore(runId);
+    const temporaryRef = `refs/claude-architect/slices/${runId}/slice-2-attempt-0`;
+    let releaseObservedLast = false;
+    let lease: Awaited<ReturnType<typeof checkoutLeaseHarness>>;
+    lease = await checkoutLeaseHarness(repo, {
+      onRelease: async () => {
+        expect(lease.held()).toBe(true);
+        await expectRefMissing(repo, temporaryRef);
+        await expect(store.readPipelineActiveMarker(runId)).resolves.toBeNull();
+        await expect(store.readPipelineArtifact(runId, "pipeline-result"))
+          .resolves.toMatchObject({ status: "decision-ready" });
+        releaseObservedLast = true;
+      },
+    });
+    const deps = dependencies({
+      runId,
+      edit: async checkout => {
+        expect(lease.held()).toBe(true);
+        await expect(store.readPipelineActiveMarker(runId)).resolves.toMatchObject({
+          sliced: true,
+        });
+        await writeFile(path.join(checkout, "slice-one.txt"), "slice one candidate\n");
+      },
+      roleRunner: async args => {
+        expect(lease.held()).toBe(true);
+        if (args.role === "implementer") {
+          const candidateCommit = await commitRoleFile(
+            args,
+            "slice-two.txt",
+            "slice two candidate\n",
+          );
+          return success(fenced({
+            reportVersion: "1",
+            candidateCommit,
+            status: "complete",
+            summary: "slice complete",
+          }));
+        }
+        if (args.role === "reviewer-correctness") {
+          expect(await runGit(repo, ["rev-parse", "--verify", temporaryRef]))
+            .toMatch(/^[0-9a-f]{40}$/);
+          return success(fenced(approve));
+        }
+        throw new Error(`unexpected role ${args.role}`);
+      },
+    });
+    deps.ps = lease.ps;
+    const initialRun = deps.runAttempt!;
+    let receivedLease: BorrowedCheckoutLease | undefined;
+    deps.runAttempt = async (checkoutPath, receivedSpec, attemptDeps) => {
+      expect(lease.held()).toBe(true);
+      receivedLease = attemptDeps.borrowedCheckoutLease;
+      return initialRun(checkoutPath, receivedSpec, attemptDeps);
+    };
+    const verify = AcceptanceVerifier.prototype.verify;
+    vi.spyOn(AcceptanceVerifier.prototype, "verify").mockImplementation(function (args) {
+      expect(lease.held()).toBe(true);
+      return verify.call(this, args);
+    });
+
+    const result = await runPipeline(repo, slicedSpec(), deps);
+
+    expect(result.status).toBe("decision-ready");
+    expect(receivedLease).toEqual({
+      lock: lease.lock(),
+      repositoryIdentity: lease.expectedRepositoryIdentity,
+    });
+    expect(lease.acquireCalls()).toBe(1);
+    expect(lease.releaseCalls()).toBe(1);
+    expect(lease.held()).toBe(false);
+    expect(releaseObservedLast).toBe(true);
+  }, { timeout: 120_000 });
+
+  it("releases the checkout lease after a non-verified initial result", async () => {
+    const repo = await initRepo();
+    const lease = await checkoutLeaseHarness(repo);
+    const failing = failedAttemptResult("pipeline-attempt-lock-release");
+    let receivedLease: BorrowedCheckoutLease | undefined;
+
+    const result = await runPipeline(repo, validSpec(), {
+      verifier: passingVerifier,
+      ps: lease.ps,
+      registry: new ProducerRegistry([]),
+      roleRunner: async () => { throw new Error("role runner must not run"); },
+      runAttempt: async (_checkoutPath, _spec, attemptDeps) => {
+        expect(lease.held()).toBe(true);
+        receivedLease = attemptDeps.borrowedCheckoutLease;
+        return failing;
+      },
+    });
+
+    expect(result.status).toBe("failed");
+    expect(receivedLease?.lock).toBe(lease.lock());
+    expect(lease.acquireCalls()).toBe(1);
+    expect(lease.releaseCalls()).toBe(1);
+    expect(lease.held()).toBe(false);
+  });
+
+  it("releases the checkout lease when the initial attempt throws", async () => {
+    const repo = await initRepo();
+    const lease = await checkoutLeaseHarness(repo);
+
+    await expect(runPipeline(repo, validSpec(), {
+      verifier: passingVerifier,
+      ps: lease.ps,
+      registry: new ProducerRegistry([]),
+      roleRunner: async () => { throw new Error("role runner must not run"); },
+      runAttempt: async () => {
+        expect(lease.held()).toBe(true);
+        throw new Error("initial attempt failed");
+      },
+    })).rejects.toThrow("initial attempt failed");
+
+    expect(lease.acquireCalls()).toBe(1);
+    expect(lease.releaseCalls()).toBe(1);
+    expect(lease.held()).toBe(false);
+  });
+
+  it("reports a checkout lease release failure after an otherwise classified result", async () => {
+    const repo = await initRepo();
+    const releaseError = new Error("checkout lease release failed");
+    const lease = await checkoutLeaseHarness(repo, { releaseError });
+
+    await expect(runPipeline(repo, validSpec(), {
+      verifier: passingVerifier,
+      ps: lease.ps,
+      registry: new ProducerRegistry([]),
+      roleRunner: async () => { throw new Error("role runner must not run"); },
+      runAttempt: async () => failedAttemptResult("pipeline-release-failure"),
+    })).rejects.toBe(releaseError);
+
+    expect(lease.acquireCalls()).toBe(1);
+    expect(lease.releaseCalls()).toBe(1);
+    expect(lease.held()).toBe(false);
+  });
+
+  it("aggregates checkout lease release failure with the primary pipeline error", async () => {
+    const repo = await initRepo();
+    const primaryError = new Error("pipeline primary failure");
+    const releaseError = new Error("checkout lease release failed");
+    const lease = await checkoutLeaseHarness(repo, { releaseError });
+    let thrown: unknown;
+
+    try {
+      await runPipeline(repo, validSpec(), {
+        verifier: passingVerifier,
+        ps: lease.ps,
+        registry: new ProducerRegistry([]),
+        roleRunner: async () => { throw new Error("role runner must not run"); },
+        runAttempt: async () => { throw primaryError; },
+      });
+    } catch (error) {
+      thrown = error;
+    }
+
+    expect(thrown).toBeInstanceOf(AggregateError);
+    expect((thrown as AggregateError).errors).toEqual([primaryError, releaseError]);
+    expect(lease.acquireCalls()).toBe(1);
+    expect(lease.releaseCalls()).toBe(1);
+    expect(lease.held()).toBe(false);
+  });
+
   it("establishes sliced lifecycle authority before the initial candidate is created", async () => {
     const repo = await initSlicedRepo();
     const runId = "pipeline-slices-early-marker";

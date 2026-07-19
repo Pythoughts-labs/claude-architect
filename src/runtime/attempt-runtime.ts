@@ -109,6 +109,11 @@ export interface AcceptanceVerifierLike {
   verify(args: AcceptanceVerificationArgs): Promise<AcceptanceVerificationResult>;
 }
 
+export interface BorrowedCheckoutLease {
+  readonly lock: CheckoutLock;
+  readonly repositoryIdentity: string;
+}
+
 export interface AttemptRuntimeDependencies {
   verifier: AcceptanceVerifierLike;
   baselineVerifier?: typeof verifyBaseline;
@@ -124,6 +129,8 @@ export interface AttemptRuntimeDependencies {
     repoRoot: string,
     baseCommitOid: string,
   ) => Promise<ReproducibilityInputs>;
+  /** Trusted runtime handoff; never derived from the delegation specification. */
+  borrowedCheckoutLease?: BorrowedCheckoutLease;
   onRunStart?: (context: RunStartContext) => void | Promise<void>;
   /** Host progress reporting only; never awaited and never affects the attempt. */
   onPhase?: (phase: string) => void;
@@ -341,13 +348,22 @@ export async function runAttempt(
   const runId = (deps.runId ?? randomUUID)();
   const store = new ArtifactStore(runId);
   const canonical = await ps.canonicalizePath(checkoutPath);
-  let lock: CheckoutLock | null = null;
+  const repositoryIdentity = canonical.gitCommonDir ?? canonical.canonical;
+  if (deps.borrowedCheckoutLease !== undefined
+    && deps.borrowedCheckoutLease.repositoryIdentity !== repositoryIdentity) {
+    throw new RuntimeError("borrowed checkout lease repository identity mismatch");
+  }
+  let lock: CheckoutLock | null = deps.borrowedCheckoutLease?.lock ?? null;
+  let ownedLock: CheckoutLock | null = null;
   let worktree: { path: string; cleanup(): Promise<void> } | null = null;
   let tempHome: string | null = null;
   let builtEnvironment: BuiltEnvironment | null = null;
   let primaryError: unknown;
   try {
-    lock = await ps.acquireCheckoutLock(canonical.canonical);
+    if (lock === null) {
+      ownedLock = await ps.acquireCheckoutLock(canonical.canonical);
+      lock = ownedLock;
+    }
     const preconditions = await checkPreconditions(canonical.canonical, {
       writeAllowlist: spec.writeAllowlist,
     });
@@ -680,7 +696,7 @@ export async function runAttempt(
       builtEnvironment,
       worktree,
       tempHome,
-      lock,
+      lock: ownedLock,
     });
     if (primaryError === undefined && cleanupError !== null) throw cleanupError;
   }
