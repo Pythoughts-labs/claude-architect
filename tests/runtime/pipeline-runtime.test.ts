@@ -9,7 +9,7 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { git } from "../../src/git/git-exec.js";
 import { WorktreeManager } from "../../src/git/worktree-manager.js";
 import { applyCandidateTree } from "../../src/integrate/controlled-integrator.js";
@@ -20,16 +20,24 @@ import type {
   CandidateArtifact,
   ChangedPath,
 } from "../../src/protocol/attempt-result.js";
-import type { DelegationSpec } from "../../src/protocol/delegation-spec.js";
+import type { DelegationSpec, Slice } from "../../src/protocol/delegation-spec.js";
 import { ProducerRegistry } from "../../src/producers/producer-registry.js";
 import {
   composeProgressNotes,
   detectWeakenedTests,
+  runIncrement,
   runPipeline,
+  runReviews,
+  scopeSpecToSlice,
+  verifyCandidate,
   type PipelineDependencies,
 } from "../../src/pipeline/pipeline-runtime.js";
-import { resolveLinkedWorktreeWritableRoots } from "../../src/pipeline/git-writable-roots.js";
+import {
+  resolveLinkedWorktreeWritableRoots,
+  type LinkedWorktreeGitAccess,
+} from "../../src/pipeline/git-writable-roots.js";
 import type { IncrementReport, ReviewReport } from "../../src/pipeline/report-types.js";
+import type { RolePackage } from "../../src/pipeline/role-prompts.js";
 import type { RoleRunArgs, RoleRunResult } from "../../src/pipeline/role-runner.js";
 import { ArtifactStore } from "../../src/runtime/artifact-store.js";
 import { buildRunManifest } from "../../src/runtime/run-manifest.js";
@@ -39,6 +47,7 @@ import {
   registerSecretValue,
 } from "../../src/runtime/redaction.js";
 import { recoverStaleRuns } from "../../src/runtime/recovery-manager.js";
+import { AcceptanceVerifier } from "../../src/verify/acceptance-verifier.js";
 
 const temporaryPaths: string[] = [];
 let previousPluginData: string | undefined;
@@ -349,6 +358,7 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
+  vi.restoreAllMocks();
   clearRegisteredSecrets();
   if (previousPluginData === undefined) delete process.env.CLAUDE_PLUGIN_DATA;
   else process.env.CLAUDE_PLUGIN_DATA = previousPluginData;
@@ -399,6 +409,164 @@ describe("composeProgressNotes", () => {
 
     expect(notes).toHaveLength(8_000);
     expect(notes).toMatch(/\[progress notes truncated\]$/);
+  });
+});
+
+describe("scopeSpecToSlice", () => {
+  it("clones the parent with only slice-owned fields replaced and slices removed", async () => {
+    const slice: Slice = {
+      objective: "Implement only the first slice.",
+      context: "The slice context is authoritative.",
+      writeAllowlist: ["src/slice/**"],
+      forbiddenScope: ["src/slice/private/**"],
+      successCriteria: ["The slice is independently complete."],
+      verification: [{
+        id: "slice-check",
+        executable: "node",
+        args: ["-e", "process.exit(0)"],
+        cwd: ".",
+        environment: { SLICE_CHECK: "true" },
+        timeoutMs: 30_000,
+        network: "denied",
+        expectedExitCodes: [0],
+        platform: { os: ["darwin", "linux", "win32"] },
+      }],
+    };
+    const parent: DelegationSpec = {
+      ...validSpec({ reviewers: ["correctness"], maxRounds: 1, focus: ["security"] }),
+      objective: "Complete the whole delegation.",
+      context: "Parent context.",
+      writeAllowlist: ["src/**"],
+      forbiddenScope: ["src/private/**"],
+      successCriteria: ["The entire delegation is complete."],
+      producerOverrides: { model: "trusted-model", reasoningEffort: "high" },
+      implementation: { maxIncrements: 2 },
+      slices: [structuredClone(slice)],
+    };
+    const parentSnapshot = structuredClone(parent);
+    const sliceSnapshot = structuredClone(slice);
+
+    const scoped = scopeSpecToSlice(parent, slice);
+    const expected = structuredClone(parent);
+    Object.assign(expected, slice);
+    delete expected.slices;
+
+    expect(scoped).toEqual(expected);
+    expect(scoped).not.toHaveProperty("slices");
+    scoped.writeAllowlist.push("result-only/**");
+    scoped.verification[0]!.args.push("result-only");
+    scoped.producerPreferences.push("result-only");
+    expect(parent).toEqual(parentSnapshot);
+    expect(slice).toEqual(sliceSnapshot);
+  });
+});
+
+describe("pipeline runtime namespaces", () => {
+  it("derives distinct implementer and reviewer log names from a trusted namespace", async () => {
+    const runId = "pipeline-namespaced-roles";
+    const spec = implementationSpec(2);
+    const pkg: RolePackage = {
+      spec,
+      baselineCommit: "a".repeat(40),
+      candidateCommit: "b".repeat(40),
+      candidateDiff: "",
+      testEvidence: "[]",
+    };
+    const roleRunner = async (args: RoleRunArgs): Promise<RoleRunResult> => args.role === "implementer"
+      ? success(fenced({
+        reportVersion: "1",
+        candidateCommit: pkg.candidateCommit,
+        status: "complete",
+        summary: "slice complete",
+      }))
+      : success(fenced(approve));
+    const deps = dependencies({ runId, roleRunner });
+    const store = new ArtifactStore(runId);
+    const gitObjectAccess: LinkedWorktreeGitAccess = {
+      gitDir: "/git-dir",
+      privateObjectsDir: "/private-objects",
+      sharedObjectsDir: "/shared-objects",
+      writableRoots: [],
+    };
+    const increment = await runIncrement({
+      spec,
+      pkg,
+      worktreePath: "/worktree",
+      deps,
+      runId,
+      increment: 2,
+      store,
+      gitObjectAccess,
+      logNameNamespace: "slice1-attempt0",
+    });
+    const reviews = await runReviews({
+      reviewers: ["correctness"],
+      spec,
+      pkg,
+      worktreePath: "/worktree",
+      deps,
+      runId,
+      round: 1,
+      store,
+      logNameNamespace: "slice1-attempt1",
+    });
+
+    expect(increment.roleLogRefs).toEqual([
+      "logs/role-implementer-slice1-attempt0-increment2.log",
+    ]);
+    expect(reviews.roleLogRefs).toEqual([
+      "logs/role-reviewer-correctness-slice1-attempt1-round1.log",
+    ]);
+  });
+
+  it("derives verification worktree, verifier, and log identities from one namespace", async () => {
+    const repo = await initRepo();
+    const runId = "pipeline-namespaced-verification";
+    const baselineCommit = await runGit(repo, ["rev-parse", "HEAD"]);
+    await writeFile(path.join(repo, "a.txt"), "candidate\n");
+    await runGit(repo, ["add", "a.txt"]);
+    await runGit(repo, ["commit", "-q", "-m", "candidate"]);
+    const candidateCommit = await runGit(repo, ["rev-parse", "HEAD"]);
+    const candidate = await artifactFor(repo, runId, baselineCommit, candidateCommit);
+    const attempt = attemptResult(runId, candidate);
+    const spec = validSpec({ reviewers: ["correctness"], maxRounds: 1 });
+    spec.verification = [{
+      ...spec.verification[0]!,
+      args: [
+        "-e",
+        [
+          "const fs = require('node:fs');",
+          "const path = require('node:path');",
+          "process.stdout.write(fs.readdirSync(path.dirname(process.cwd())).sort().join('\\n'));",
+        ].join(" "),
+      ],
+    }];
+    const store = new ArtifactStore(runId);
+    const verifierSpy = vi.spyOn(AcceptanceVerifier.prototype, "verify");
+
+    const result = await verifyCandidate({
+      checkoutPath: repo,
+      spec,
+      deps: dependencies({
+        runId,
+        roleRunner: async () => { throw new Error("role runner must not run"); },
+      }),
+      attempt,
+      baselineCommit,
+      candidateCommit,
+      store,
+      namespace: "slice1-attempt0",
+    });
+    const stdoutRef = result.verification.evidence.commandOutcomes[0]?.stdoutRef;
+    const verifierArgs = verifierSpy.mock.calls[0]?.[0];
+
+    expect(stdoutRef).toBe("logs/slice1-attempt0-pipeline-verification-0-stdout.log");
+    expect(verifierArgs?.verificationId?.()).toBe(
+      `${runId}-slice1-attempt0-pipeline`,
+    );
+    const worktrees = (await readFile(path.join(store.runDirectory, stdoutRef!), "utf8"))
+      .split("\n");
+    expect(worktrees).toContain(`${runId}-slice1-attempt0-verify`);
   });
 });
 
@@ -989,6 +1157,8 @@ describe("runPipeline", () => {
     );
 
     expect(result.status).toBe("decision-ready");
+    expect(result.slices).toEqual([]);
+    expect(result.haltedSliceIndex).toBeNull();
     expect(markerObserved).toBe(true);
     await expect(readFile(markerPath, "utf8")).rejects.toMatchObject({ code: "ENOENT" });
     expect(result.rounds).toHaveLength(1);
@@ -1594,6 +1764,8 @@ describe("runPipeline", () => {
     });
 
     expect(result.status).toBe("failed");
+    expect(result.slices).toEqual([]);
+    expect(result.haltedSliceIndex).toBeNull();
     expect(result.failure).toBe("verification-failure");
     expect(result.gate.reasons).toContain("implement phase did not produce a verified candidate");
   });

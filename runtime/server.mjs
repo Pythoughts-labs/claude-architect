@@ -29067,12 +29067,14 @@ async function runStructuredRole(args) {
     roleLogRefs
   };
 }
-function failedResult(attempt, rounds, finalCandidateCommit, reason, failure2 = "producer-failure", increments = []) {
+function failedResult(attempt, rounds, finalCandidateCommit, reason, failure2 = "producer-failure", increments = [], slices = [], haltedSliceIndex = null) {
   return {
     runId: attempt.runId,
     status: "failed",
     attempt,
     increments,
+    slices,
+    haltedSliceIndex,
     rounds,
     verification: null,
     gate: {
@@ -29158,6 +29160,60 @@ async function candidateArtifact(args) {
     manifestHash: canonical.manifestHash
   };
 }
+async function promoteFinalCandidate(args) {
+  let canonicalCommit;
+  try {
+    const objectReadOptions = args.privateObjectAccess === void 0 ? void 0 : privateObjectReadOptions(args.privateObjectAccess);
+    const finalTree = (await checkedGit4(
+      args.checkoutPath,
+      ["rev-parse", `${args.candidateCommit}^{tree}`],
+      objectReadOptions
+    )).trim();
+    canonicalCommit = (await checkedGit4(args.checkoutPath, [
+      "commit-tree",
+      finalTree,
+      "-p",
+      args.baselineCommit,
+      "-m",
+      `candidate ${args.attempt.runId}`
+    ], objectReadOptions)).trim();
+    if (args.privateObjectAccess !== void 0) {
+      await importPromotedObjects({
+        checkoutPath: args.checkoutPath,
+        baselineCommit: args.baselineCommit,
+        promotedCommit: canonicalCommit,
+        access: args.privateObjectAccess
+      });
+    }
+  } catch {
+    return null;
+  }
+  await checkedGit4(args.checkoutPath, [
+    "update-ref",
+    args.initialCandidate.anchorRef,
+    canonicalCommit,
+    args.initialCandidate.candidateCommitOid
+  ]);
+  const diffText = await checkedGit4(
+    args.checkoutPath,
+    ["diff", `${args.baselineCommit}..${canonicalCommit}`]
+  );
+  const candidate = await candidateArtifact({
+    worktreePath: args.checkoutPath,
+    baselineCommit: args.baselineCommit,
+    candidateCommit: canonicalCommit,
+    anchorRef: args.initialCandidate.anchorRef,
+    diffText
+  });
+  const manifest = await args.store.readManifest(args.attempt.runId);
+  if (manifest === null) throw new RuntimeError("run manifest is missing during promotion");
+  const finalAttempt = { ...args.attempt, candidate };
+  await args.store.promoteTerminalArtifacts({
+    result: finalAttempt,
+    manifest: { ...manifest, candidateManifestHash: candidate.manifestHash }
+  });
+  return { attempt: finalAttempt, candidateCommit: canonicalCommit };
+}
 function detectWeakenedTests(diff) {
   let testsDeleted = 0;
   let testsSkipped = 0;
@@ -29175,12 +29231,13 @@ function detectWeakenedTests(diff) {
   return { testsDeleted, testsSkipped };
 }
 async function runReviews(args) {
+  const logNameNamespace = args.logNameNamespace === void 0 ? "" : `${args.logNameNamespace}-`;
   const outcomes = await Promise.all(args.reviewers.map(async (reviewer) => {
     const role = `reviewer-${reviewer}`;
     const outcome = await runStructuredRole({
       role,
       schema: schemas.reviewReport,
-      logName: `role-${role}-round${args.round}`,
+      logName: `role-${role}-${logNameNamespace}round${args.round}`,
       spec: args.spec,
       pkg: args.pkg,
       worktreePath: args.worktreePath,
@@ -29222,10 +29279,11 @@ async function runFix(args) {
   return outcome.ok ? { ok: true, fix: outcome.report, roleLogRefs: outcome.roleLogRefs } : outcome;
 }
 async function runIncrement(args) {
+  const logNameNamespace = args.logNameNamespace === void 0 ? "" : `${args.logNameNamespace}-`;
   return runStructuredRole({
     role: "implementer",
     schema: schemas.incrementReport,
-    logName: `role-implementer-increment${args.increment}`,
+    logName: `role-implementer-${logNameNamespace}increment${args.increment}`,
     spec: args.spec,
     pkg: args.pkg,
     worktreePath: args.worktreePath,
@@ -29338,9 +29396,10 @@ async function validateFixProvenance(args) {
 }
 async function verifyCandidate(args) {
   const ps = args.deps.ps ?? getPlatformServices();
+  const namespace = args.namespace === void 0 ? "" : `${args.namespace}-`;
   const manager = new WorktreeManager(
     args.checkoutPath,
-    `${args.attempt.runId}-verify`,
+    `${args.attempt.runId}-${namespace}verify`,
     ps
   );
   const fresh = await manager.create(args.candidateCommit);
@@ -29385,8 +29444,8 @@ async function verifyCandidate(args) {
       spec: args.spec,
       ps,
       artifactStore: args.store,
-      verificationId: () => `${args.attempt.runId}-pipeline`,
-      logNamePrefix: "pipeline-verification"
+      verificationId: () => `${args.attempt.runId}-${namespace}pipeline`,
+      logNamePrefix: `${namespace}pipeline-verification`
     });
     const changedPaths = nameOnly.split("\n").map((line) => line.trim()).filter(Boolean);
     const scopeViolations = changedPaths.filter((pathname) => !args.spec.writeAllowlist.some((pattern) => globMatches3(pattern, pathname)) || args.spec.forbiddenScope.some((pattern) => globMatches3(pattern, pathname)));
@@ -29743,29 +29802,16 @@ async function runPipeline(checkoutPath, spec, deps) {
             increments
           );
         }
-        let canonicalCommit;
-        try {
-          const privateObjects = privateObjectReadOptions(gitObjectAccess);
-          const finalTree = (await checkedGit4(
-            checkoutPath,
-            ["rev-parse", `${currentCandidateCommit}^{tree}`],
-            privateObjects
-          )).trim();
-          canonicalCommit = (await checkedGit4(checkoutPath, [
-            "commit-tree",
-            finalTree,
-            "-p",
-            baselineCommit,
-            "-m",
-            `candidate ${attempt.runId}`
-          ], privateObjects)).trim();
-          await importPromotedObjects({
-            checkoutPath,
-            baselineCommit,
-            promotedCommit: canonicalCommit,
-            access: gitObjectAccess
-          });
-        } catch {
+        const promoted = await promoteFinalCandidate({
+          checkoutPath,
+          attempt,
+          initialCandidate: attempt.candidate,
+          baselineCommit,
+          candidateCommit: currentCandidateCommit,
+          store,
+          privateObjectAccess: gitObjectAccess
+        });
+        if (promoted === null) {
           return failedResult(
             attempt,
             rounds,
@@ -29775,31 +29821,8 @@ async function runPipeline(checkoutPath, spec, deps) {
             increments
           );
         }
-        await checkedGit4(checkoutPath, [
-          "update-ref",
-          attempt.candidate.anchorRef,
-          canonicalCommit,
-          attempt.candidate.candidateCommitOid
-        ]);
-        currentCandidateCommit = canonicalCommit;
-        const diffText = await checkedGit4(
-          checkoutPath,
-          ["diff", `${baselineCommit}..${canonicalCommit}`]
-        );
-        const candidate = await candidateArtifact({
-          worktreePath: checkoutPath,
-          baselineCommit,
-          candidateCommit: canonicalCommit,
-          anchorRef: attempt.candidate.anchorRef,
-          diffText
-        });
-        const manifest = await store.readManifest(attempt.runId);
-        if (manifest === null) throw new RuntimeError("run manifest is missing during promotion");
-        finalAttempt = { ...attempt, candidate };
-        await store.promoteTerminalArtifacts({
-          result: finalAttempt,
-          manifest: { ...manifest, candidateManifestHash: candidate.manifestHash }
-        });
+        finalAttempt = promoted.attempt;
+        currentCandidateCommit = promoted.candidateCommit;
       }
     } catch (error2) {
       primaryError = error2;
@@ -29844,6 +29867,8 @@ async function runPipeline(checkoutPath, spec, deps) {
       status: gate.decisionReady ? "decision-ready" : "human-decision-required",
       attempt: finalAttempt,
       increments,
+      slices: [],
+      haltedSliceIndex: null,
       rounds,
       verification: verified.verification,
       gate,

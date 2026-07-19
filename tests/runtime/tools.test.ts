@@ -85,6 +85,8 @@ const pipelineResult: PipelineResult = {
   attempt: result,
   rounds: [],
   increments: [],
+  slices: [],
+  haltedSliceIndex: null,
   verification: null,
   gate: {
     decisionReady: true,

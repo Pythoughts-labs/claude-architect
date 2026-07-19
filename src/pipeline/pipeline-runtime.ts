@@ -13,6 +13,7 @@ import {
   resolveReviewConfig,
   type DelegationSpec,
   type ReviewerKind,
+  type Slice,
 } from "../protocol/delegation-spec.js";
 import { loadSchemas } from "../protocol/schema-loader.js";
 import type { ProducerRegistry } from "../producers/producer-registry.js";
@@ -42,6 +43,7 @@ import type {
   VerificationReport,
 } from "./report-types.js";
 import type { PipelineRole, RolePackage } from "./role-prompts.js";
+import type { PipelineSlice } from "./slice-runner.js";
 import {
   runRole as defaultRunRole,
   type RoleRunArgs,
@@ -72,6 +74,8 @@ export interface PipelineResult {
   status: "decision-ready" | "human-decision-required" | "failed";
   attempt: AttemptResult;
   increments: PipelineIncrement[];
+  slices: PipelineSlice[];
+  haltedSliceIndex: number | null;
   rounds: PipelineRound[];
   verification: PipelineVerificationReport | null;
   gate: GateResult;
@@ -131,6 +135,12 @@ const IGNORED_STRUCTURAL_FAILURES = new Set<StructuralFailure>([
   "artifact-divergence",
   "base-changed",
 ]);
+
+export function scopeSpecToSlice(spec: DelegationSpec, slice: Slice): DelegationSpec {
+  const scoped = structuredClone({ ...spec, ...slice });
+  delete scoped.slices;
+  return scoped;
+}
 
 function gitFailure(action: string, result: GitResult): RuntimeError {
   const diagnostic = (result.stderr || result.stdout).trim().slice(0, 2_000);
@@ -287,12 +297,16 @@ function failedResult(
   reason: string,
   failure: FailureClassification = "producer-failure",
   increments: PipelineIncrement[] = [],
+  slices: PipelineSlice[] = [],
+  haltedSliceIndex: number | null = null,
 ): PipelineResult {
   return {
     runId: attempt.runId,
     status: "failed",
     attempt,
     increments,
+    slices,
+    haltedSliceIndex,
     rounds,
     verification: null,
     gate: {
@@ -393,6 +407,71 @@ async function candidateArtifact(args: {
   };
 }
 
+async function promoteFinalCandidate(args: {
+  checkoutPath: string;
+  attempt: AttemptResult;
+  initialCandidate: CandidateArtifact;
+  baselineCommit: string;
+  candidateCommit: string;
+  store: ArtifactStore;
+  privateObjectAccess?: LinkedWorktreeGitAccess;
+}): Promise<{ attempt: AttemptResult; candidateCommit: string } | null> {
+  let canonicalCommit: string;
+  try {
+    const objectReadOptions = args.privateObjectAccess === undefined
+      ? undefined
+      : privateObjectReadOptions(args.privateObjectAccess);
+    const finalTree = (await checkedGit(
+      args.checkoutPath,
+      ["rev-parse", `${args.candidateCommit}^{tree}`],
+      objectReadOptions,
+    )).trim();
+    canonicalCommit = (await checkedGit(args.checkoutPath, [
+      "commit-tree",
+      finalTree,
+      "-p",
+      args.baselineCommit,
+      "-m",
+      `candidate ${args.attempt.runId}`,
+    ], objectReadOptions)).trim();
+    if (args.privateObjectAccess !== undefined) {
+      await importPromotedObjects({
+        checkoutPath: args.checkoutPath,
+        baselineCommit: args.baselineCommit,
+        promotedCommit: canonicalCommit,
+        access: args.privateObjectAccess,
+      });
+    }
+  } catch {
+    return null;
+  }
+  await checkedGit(args.checkoutPath, [
+    "update-ref",
+    args.initialCandidate.anchorRef,
+    canonicalCommit,
+    args.initialCandidate.candidateCommitOid,
+  ]);
+  const diffText = await checkedGit(
+    args.checkoutPath,
+    ["diff", `${args.baselineCommit}..${canonicalCommit}`],
+  );
+  const candidate = await candidateArtifact({
+    worktreePath: args.checkoutPath,
+    baselineCommit: args.baselineCommit,
+    candidateCommit: canonicalCommit,
+    anchorRef: args.initialCandidate.anchorRef,
+    diffText,
+  });
+  const manifest = await args.store.readManifest(args.attempt.runId);
+  if (manifest === null) throw new RuntimeError("run manifest is missing during promotion");
+  const finalAttempt = { ...args.attempt, candidate };
+  await args.store.promoteTerminalArtifacts({
+    result: finalAttempt,
+    manifest: { ...manifest, candidateManifestHash: candidate.manifestHash },
+  });
+  return { attempt: finalAttempt, candidateCommit: canonicalCommit };
+}
+
 export function detectWeakenedTests(diff: string): { testsDeleted: number; testsSkipped: number } {
   let testsDeleted = 0;
   let testsSkipped = 0;
@@ -410,7 +489,7 @@ export function detectWeakenedTests(diff: string): { testsDeleted: number; tests
   return { testsDeleted, testsSkipped };
 }
 
-async function runReviews(args: {
+export async function runReviews(args: {
   reviewers: ReviewerKind[];
   spec: DelegationSpec;
   pkg: RolePackage;
@@ -419,13 +498,17 @@ async function runReviews(args: {
   runId: string;
   round: number;
   store: ArtifactStore;
+  logNameNamespace?: string;
 }): Promise<ReviewRunResult> {
+  const logNameNamespace = args.logNameNamespace === undefined
+    ? ""
+    : `${args.logNameNamespace}-`;
   const outcomes = await Promise.all(args.reviewers.map(async reviewer => {
     const role = `reviewer-${reviewer}` as const;
     const outcome = await runStructuredRole<ReviewReport>({
       role,
       schema: schemas.reviewReport,
-      logName: `role-${role}-round${args.round}`,
+      logName: `role-${role}-${logNameNamespace}round${args.round}`,
       spec: args.spec,
       pkg: args.pkg,
       worktreePath: args.worktreePath,
@@ -480,7 +563,7 @@ async function runFix(args: {
     : outcome;
 }
 
-async function runIncrement(args: {
+export async function runIncrement(args: {
   spec: DelegationSpec;
   pkg: RolePackage;
   worktreePath: string;
@@ -490,11 +573,15 @@ async function runIncrement(args: {
   store: ArtifactStore;
   gitObjectAccess: LinkedWorktreeGitAccess;
   runStart?: RunStartContext;
+  logNameNamespace?: string;
 }): Promise<StructuredRoleRunResult<IncrementReport>> {
+  const logNameNamespace = args.logNameNamespace === undefined
+    ? ""
+    : `${args.logNameNamespace}-`;
   return runStructuredRole<IncrementReport>({
     role: "implementer",
     schema: schemas.incrementReport,
-    logName: `role-implementer-increment${args.increment}`,
+    logName: `role-implementer-${logNameNamespace}increment${args.increment}`,
     spec: args.spec,
     pkg: args.pkg,
     worktreePath: args.worktreePath,
@@ -629,7 +716,7 @@ async function validateFixProvenance(args: {
   return null;
 }
 
-async function verifyCandidate(args: {
+export async function verifyCandidate(args: {
   checkoutPath: string;
   spec: DelegationSpec;
   deps: PipelineDependencies;
@@ -637,11 +724,13 @@ async function verifyCandidate(args: {
   baselineCommit: string;
   candidateCommit: string;
   store: ArtifactStore;
+  namespace?: string;
 }): Promise<{ verification: PipelineVerificationReport; baselineDrift: boolean }> {
   const ps = args.deps.ps ?? getPlatformServices();
+  const namespace = args.namespace === undefined ? "" : `${args.namespace}-`;
   const manager = new WorktreeManager(
     args.checkoutPath,
-    `${args.attempt.runId}-verify`,
+    `${args.attempt.runId}-${namespace}verify`,
     ps,
   );
   const fresh = await manager.create(args.candidateCommit);
@@ -686,8 +775,8 @@ async function verifyCandidate(args: {
       spec: args.spec,
       ps,
       artifactStore: args.store,
-      verificationId: () => `${args.attempt.runId}-pipeline`,
-      logNamePrefix: "pipeline-verification",
+      verificationId: () => `${args.attempt.runId}-${namespace}pipeline`,
+      logNamePrefix: `${namespace}pipeline-verification`,
     });
     const changedPaths = nameOnly.split("\n").map(line => line.trim()).filter(Boolean);
     const scopeViolations = changedPaths.filter(pathname =>
@@ -1068,29 +1157,16 @@ export async function runPipeline(
             increments,
           );
         }
-        let canonicalCommit: string;
-        try {
-          const privateObjects = privateObjectReadOptions(gitObjectAccess);
-          const finalTree = (await checkedGit(
-            checkoutPath,
-            ["rev-parse", `${currentCandidateCommit}^{tree}`],
-            privateObjects,
-          )).trim();
-          canonicalCommit = (await checkedGit(checkoutPath, [
-            "commit-tree",
-            finalTree,
-            "-p",
-            baselineCommit,
-            "-m",
-            `candidate ${attempt.runId}`,
-          ], privateObjects)).trim();
-          await importPromotedObjects({
-            checkoutPath,
-            baselineCommit,
-            promotedCommit: canonicalCommit,
-            access: gitObjectAccess,
-          });
-        } catch {
+        const promoted = await promoteFinalCandidate({
+          checkoutPath,
+          attempt,
+          initialCandidate: attempt.candidate,
+          baselineCommit,
+          candidateCommit: currentCandidateCommit,
+          store,
+          privateObjectAccess: gitObjectAccess,
+        });
+        if (promoted === null) {
           return failedResult(
             attempt,
             rounds,
@@ -1100,31 +1176,8 @@ export async function runPipeline(
             increments,
           );
         }
-        await checkedGit(checkoutPath, [
-          "update-ref",
-          attempt.candidate.anchorRef,
-          canonicalCommit,
-          attempt.candidate.candidateCommitOid,
-        ]);
-        currentCandidateCommit = canonicalCommit;
-        const diffText = await checkedGit(
-          checkoutPath,
-          ["diff", `${baselineCommit}..${canonicalCommit}`],
-        );
-        const candidate = await candidateArtifact({
-          worktreePath: checkoutPath,
-          baselineCommit,
-          candidateCommit: canonicalCommit,
-          anchorRef: attempt.candidate.anchorRef,
-          diffText,
-        });
-        const manifest = await store.readManifest(attempt.runId);
-        if (manifest === null) throw new RuntimeError("run manifest is missing during promotion");
-        finalAttempt = { ...attempt, candidate };
-        await store.promoteTerminalArtifacts({
-          result: finalAttempt,
-          manifest: { ...manifest, candidateManifestHash: candidate.manifestHash },
-        });
+        finalAttempt = promoted.attempt;
+        currentCandidateCommit = promoted.candidateCommit;
       }
     } catch (error) {
       primaryError = error;
@@ -1170,6 +1223,8 @@ export async function runPipeline(
       status: gate.decisionReady ? "decision-ready" : "human-decision-required",
       attempt: finalAttempt,
       increments,
+      slices: [],
+      haltedSliceIndex: null,
       rounds,
       verification: verified.verification,
       gate,
