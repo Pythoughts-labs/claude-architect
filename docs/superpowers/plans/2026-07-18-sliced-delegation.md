@@ -8,7 +8,7 @@
 
 **Tech Stack:** TypeScript (Node ESM, `.js` import specifiers), Ajv JSON Schema, Vitest, git worktrees via `WorktreeManager`.
 
-## STATUS (2026-07-18) — engine complete (T1–T5), T6–T8 pending
+## STATUS — T1–T8 complete; shipped in v0.21.0 (updated 2026-07-19)
 
 Built by dogfooding the delegate pipeline (Codex, high effort). Each task independently reviewed/verified; full Vitest suite green after each.
 
@@ -19,13 +19,13 @@ Built by dogfooding the delegate pipeline (Codex, high effort). Each task indepe
 | T3 Slice validation (allowlist-subset + cwd-escape) | ✅ done | `8bd267c` |
 | T4 Deterministic wayfinder `routeSlice` | ✅ done | `ac15a0f` |
 | T5 Pure git-free orchestrator `runSlicePhase` | ✅ done | `156df05` |
-| T6 Wire into `runPipeline` (real `runSlice` + partial-halt) | ⛔ blocked | — |
-| T7 MCP surface + protocol bump `1.2.0`→`1.3.0` | pending | — |
-| T8 Skill prose + docs + version sync | pending | — |
+| T6 Wire into `runPipeline` (real `runSlice` + partial-halt) | ✅ done | feat branch integration; B1 halt fix `78f0e86` |
+| T7 MCP surface + protocol bump `1.2.0`→`1.3.0` | ✅ done | `6e8b608` |
+| T8 Skill prose + docs + version sync | ✅ done | `1ae71c6` |
 
 **T5 was redesigned from the original plan below:** it is now a *pure, git-free* orchestrator taking an injected `runSlice(slice, index, base, attempt) => Promise<SliceAttempt>` callback and composing `routeSlice`; fully unit-tested. All git coupling moved to T6. See `src/pipeline/slice-runner.ts` for the real exported shape (`PipelineSlice`, `SliceAttempt`, `SlicePhaseDeps`, `SlicePhaseResult`, `runSlicePhase`).
 
-**T6 was blocked** by a concurrent session continuously editing the same `pipeline-runtime.ts` (guaranteed conflict) and leaving the shared checkout dirty. Resume when that file is stable.
+**T6 was temporarily blocked** by a concurrent session continuously editing the same `pipeline-runtime.ts` (guaranteed conflict) and leaving the shared checkout dirty. Resolved: sliced execution landed on the feat branch (`pipeline-runtime.ts` integration tests) and the partial-halt result contract was corrected in `78f0e86` (advance-then-halt → `human-decision-required` with a promoted verified partial). Shipped in v0.21.0.
 
 ### Corrected T6 design (supersedes the stale Task 6 section below)
 

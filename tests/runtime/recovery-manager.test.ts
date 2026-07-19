@@ -1874,6 +1874,104 @@ describe("recoverStaleRuns", () => {
     ]);
   });
 
+  it("reclaims a repo-gone interrupted prune without aborting recovery", async () => {
+    const repo = await initRepo();
+    const runId = "run-prune-repo-gone-finish";
+    const anchorRef = `refs/claude-architect/candidates/${runId}`;
+    const backupRef = `refs/claude-architect/prune-backups/${runId}`;
+    const quarantineName = `.prune-${runId}-00000000-0000-4000-8000-000000000008`;
+    const runsRoot = path.join(process.env.CLAUDE_PLUGIN_DATA!, "runs");
+    const runDirectory = path.join(runsRoot, runId);
+    const quarantinePath = path.join(runsRoot, quarantineName);
+    await mkdir(runDirectory, { recursive: true });
+    await writeFile(path.join(runDirectory, "result.json"), "{}\n");
+    await rename(runDirectory, quarantinePath);
+    await writeFile(path.join(runsRoot, "cleanup.ndjson"), `${JSON.stringify({
+      event: "prune-cleanup-intent",
+      runId,
+      reason: "max-age",
+      anchorCleanup: "pending",
+      archiveBytes: 3,
+      quarantineName,
+      repoRoot: repo.directory,
+      anchorRef,
+      backupRef,
+      candidateCommitOid: repo.head,
+      recordedAt: "2026-07-14T12:00:00.000Z",
+    })}\n{"event":"prune-cleanup-com`);
+
+    // The repository this run was delegated from is deleted after the intent was
+    // written. Its anchor/backup refs are gone with it. Recovery must reconcile the
+    // quarantined archive without Git and converge — not throw in validateRepositoryRoot
+    // and abort the whole pass (a permanent block, since replay runs first every pass).
+    // Without the fix this test rejects with a realpath ENOENT before recovery completes.
+    await rm(repo.directory, { recursive: true, force: true });
+
+    await expect(recoverStaleRuns({
+      platformServices: {
+        os: "darwin",
+        async getProcessStartToken() { return null; },
+        async terminateProcessTreeByPid() {},
+      },
+      isProcessAlive: () => false,
+    })).resolves.toEqual({ recovered: [], quarantined: [] });
+
+    await expectMissing(quarantinePath);
+    const records = (await readFile(path.join(runsRoot, "cleanup.ndjson"), "utf8"))
+      .trim().split("\n").map(line => JSON.parse(line) as { event: string });
+    expect(records.map(record => record.event)).toEqual([
+      "prune-cleanup-intent",
+      "prune-cleanup-complete",
+    ]);
+  });
+
+  it("rolls back a repo-gone interrupted prune whose archive is still retained", async () => {
+    const repo = await initRepo();
+    const runId = "run-prune-repo-gone-rollback";
+    const anchorRef = `refs/claude-architect/candidates/${runId}`;
+    const backupRef = `refs/claude-architect/prune-backups/${runId}`;
+    const quarantineName = `.prune-${runId}-00000000-0000-4000-8000-000000000009`;
+    const runsRoot = path.join(process.env.CLAUDE_PLUGIN_DATA!, "runs");
+    const runDirectory = path.join(runsRoot, runId);
+    await mkdir(runDirectory, { recursive: true });
+    await writeFile(path.join(runDirectory, "result.json"), "{}\n");
+    await writeFile(path.join(runsRoot, "cleanup.ndjson"), `${JSON.stringify({
+      event: "prune-cleanup-intent",
+      runId,
+      reason: "max-bytes",
+      anchorCleanup: "pending",
+      archiveBytes: 3,
+      quarantineName,
+      repoRoot: repo.directory,
+      anchorRef,
+      backupRef,
+      candidateCommitOid: repo.head,
+      recordedAt: "2026-07-14T12:00:00.000Z",
+    })}\n`);
+
+    // The archive is still retained (prune crashed before quarantining) and the repo
+    // then vanished. Recovery rolls the intent back without Git and leaves the archive
+    // for a later prune's repo-gone path to reclaim — never throwing.
+    await rm(repo.directory, { recursive: true, force: true });
+
+    await expect(recoverStaleRuns({
+      platformServices: {
+        os: "darwin",
+        async getProcessStartToken() { return null; },
+        async terminateProcessTreeByPid() {},
+      },
+      isProcessAlive: () => false,
+    })).resolves.toEqual({ recovered: [], quarantined: [] });
+
+    await expect(access(path.join(runDirectory, "result.json"))).resolves.toBeUndefined();
+    const records = (await readFile(path.join(runsRoot, "cleanup.ndjson"), "utf8"))
+      .trim().split("\n").map(line => JSON.parse(line) as { event: string });
+    expect(records.map(record => record.event)).toEqual([
+      "prune-cleanup-intent",
+      "prune-cleanup-rollback",
+    ]);
+  });
+
   it("reclaims a dead-owner cleanup journal lock before replaying an interrupted prune", async () => {
     const repo = await initRepo();
     const runId = "run-prune-journal-locked";

@@ -21930,7 +21930,7 @@ var StdioServerTransport = class {
 var PROTOCOL_VERSION = "1.3.0";
 var DELEGATION_SPEC_VERSION = "1";
 var ATTEMPT_RESULT_VERSION = "1";
-var RUNTIME_VERSION = "0.22.0";
+var RUNTIME_VERSION = "0.23.0";
 
 // src/platform/posix-platform-services.ts
 import { spawn, execFile } from "node:child_process";
@@ -27310,6 +27310,48 @@ var ArtifactStore = class {
       }
     });
   }
+  // Reclaim a run whose delegating repository has been deleted. The intent is written
+  // before the archive is moved so a crash mid-removal is recoverable: recovery's
+  // repo-absent path finds the pending intent, sees the repository gone, and finishes the
+  // quarantine removal. No anchor fields are recorded — the repository's refs are gone, so
+  // recovery reconciles by disk state alone.
+  async reclaimRepoAbsentArchive(entry, reason, quarantineName, quarantinePath, repoRoot) {
+    await this.appendCleanupRecord({
+      event: "prune-cleanup-intent",
+      runId: entry.runId,
+      reason,
+      anchorCleanup: "pending",
+      archiveBytes: entry.bytes,
+      quarantineName,
+      repoRoot,
+      anchorRef: null,
+      backupRef: null,
+      candidateCommitOid: null,
+      recordedAt: (/* @__PURE__ */ new Date()).toISOString()
+    });
+    const runsRootIdentity = await ensurePlainDirectory(this.runsRoot);
+    await assertDirectoryIdentity(entry.directory, entry.identity);
+    await assertDirectoryIdentity(this.runsRoot, runsRootIdentity);
+    await rename(entry.directory, quarantinePath);
+    await syncDirectory(this.runsRoot);
+    await assertDirectoryIdentity(this.runsRoot, runsRootIdentity);
+    await assertDirectoryIdentity(quarantinePath, entry.identity);
+    await rm3(quarantinePath, { recursive: true, force: false });
+    await syncDirectory(this.runsRoot);
+    await this.appendCleanupRecord({
+      event: "prune-cleanup-complete",
+      runId: entry.runId,
+      reason,
+      anchorCleanup: "already-absent",
+      archiveBytes: entry.bytes,
+      quarantineName,
+      repoRoot,
+      anchorRef: null,
+      backupRef: null,
+      candidateCommitOid: null,
+      recordedAt: (/* @__PURE__ */ new Date()).toISOString()
+    });
+  }
   async prune(policy, dependencies = {}) {
     validatePruneLimit(policy.maxAgeMs, "maxAgeMs");
     validatePruneLimit(policy.maxBytes, "maxBytes");
@@ -27344,7 +27386,22 @@ var ArtifactStore = class {
           return;
         }
         const platformServices = dependencies.platformServices ?? getPlatformServices();
-        const canonical = await platformServices.canonicalizePath(initialManifest.repoRoot);
+        let canonical;
+        try {
+          canonical = await platformServices.canonicalizePath(initialManifest.repoRoot);
+        } catch (error2) {
+          if (errorCode2(error2) !== "ENOENT") throw error2;
+          await this.reclaimRepoAbsentArchive(
+            entry,
+            reason,
+            quarantineName,
+            quarantinePath,
+            initialManifest.repoRoot
+          );
+          removed.add(entry.runId);
+          retainedBytes -= entry.bytes;
+          return;
+        }
         const repositoryIdentity = canonical.gitCommonDir ?? canonical.canonical;
         lease = await platformServices.acquireCheckoutLock(canonical.canonical);
         if (lease.repositoryIdentity !== repositoryIdentity) {
@@ -32085,6 +32142,34 @@ async function truncateCleanupTornTail(filename) {
     await handle?.close();
   }
 }
+async function repositoryRootExists(repoRoot) {
+  try {
+    await realpath6(repoRoot);
+    return true;
+  } catch (error2) {
+    if (isMissing2(error2)) return false;
+    throw error2;
+  }
+}
+async function reconcileRepoAbsentPrune(runsRoot, record2) {
+  const runDirectory = path14.join(runsRoot, record2.runId);
+  const quarantinePath = path14.join(runsRoot, record2.quarantineName);
+  const runIdentity = await plainDirectoryIdentity(runDirectory);
+  const quarantineIdentity = await plainDirectoryIdentity(quarantinePath);
+  if (runIdentity !== null && quarantineIdentity !== null) {
+    throw new RuntimeError("both retained and quarantined run archives exist during recovery");
+  }
+  const action = runIdentity !== null ? "rollback" : "finish";
+  if (action === "finish" && quarantineIdentity !== null) {
+    await removePlainDirectory(quarantinePath, quarantineIdentity);
+  }
+  await appendCleanupRecord(runsRoot, {
+    ...record2,
+    event: action === "finish" ? "prune-cleanup-complete" : "prune-cleanup-rollback",
+    anchorCleanup: "already-absent",
+    recordedAt: (/* @__PURE__ */ new Date()).toISOString()
+  });
+}
 async function replayInterruptedPrunes(runsRoot, ps) {
   let pending;
   const journalLock = await getPlatformServices().acquireCleanupJournalLock();
@@ -32097,6 +32182,10 @@ async function replayInterruptedPrunes(runsRoot, ps) {
   }
   for (const record2 of [...pending.values()].sort((left, right) => left.runId.localeCompare(right.runId))) {
     if (record2.repoRoot === null) continue;
+    if (!await repositoryRootExists(record2.repoRoot)) {
+      await reconcileRepoAbsentPrune(runsRoot, record2);
+      continue;
+    }
     const repoRoot = await validateRepositoryRoot(record2.repoRoot);
     const commonResult = await git(repoRoot, [
       "rev-parse",

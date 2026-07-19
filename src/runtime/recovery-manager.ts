@@ -1232,6 +1232,48 @@ async function truncateCleanupTornTail(filename: string): Promise<void> {
   }
 }
 
+async function repositoryRootExists(repoRoot: string): Promise<boolean> {
+  try {
+    await realpath(repoRoot);
+    return true;
+  } catch (error) {
+    if (isMissing(error)) return false;
+    throw error;
+  }
+}
+
+// Complete an interrupted prune whose repository was deleted after the intent was
+// written. The candidate anchor and prune-backup refs died with the repository, so
+// there is nothing to reconcile in Git; only the archive must converge. The checkout
+// lease is intentionally skipped: it serializes Git-ref reconciliation, and this path
+// performs none — a vanished repository cannot host a racing integration, and recovery
+// already holds the global recovery lock. The per-intent quarantine name is unique, so a
+// concurrent normal prune reclaiming the same run cannot collide on this archive.
+async function reconcileRepoAbsentPrune(
+  runsRoot: string,
+  record: CleanupRecord,
+): Promise<void> {
+  const runDirectory = path.join(runsRoot, record.runId);
+  const quarantinePath = path.join(runsRoot, record.quarantineName);
+  const runIdentity = await plainDirectoryIdentity(runDirectory);
+  const quarantineIdentity = await plainDirectoryIdentity(quarantinePath);
+  if (runIdentity !== null && quarantineIdentity !== null) {
+    throw new RuntimeError("both retained and quarantined run archives exist during recovery");
+  }
+  // Same discriminator as the normal path: a retained run rolls back (nothing was
+  // removed), a quarantined run finishes (remove the archive that was moved aside).
+  const action = runIdentity !== null ? "rollback" : "finish";
+  if (action === "finish" && quarantineIdentity !== null) {
+    await removePlainDirectory(quarantinePath, quarantineIdentity);
+  }
+  await appendCleanupRecord(runsRoot, {
+    ...record,
+    event: action === "finish" ? "prune-cleanup-complete" : "prune-cleanup-rollback",
+    anchorCleanup: "already-absent",
+    recordedAt: new Date().toISOString(),
+  });
+}
+
 async function replayInterruptedPrunes(
   runsRoot: string,
   ps: Pick<PlatformServices, "acquireCheckoutLock">,
@@ -1252,6 +1294,14 @@ async function replayInterruptedPrunes(
     left.runId.localeCompare(right.runId))) {
     // A repoRoot-less legacy intent has neither anchor nor repository to lock.
     if (record.repoRoot === null) continue;
+    // A crash can strand a pending intent whose repository was deleted afterward.
+    // Reconcile its archive without Git and move on; otherwise validateRepositoryRoot
+    // below throws and aborts the entire recovery pass — a permanent block, because
+    // replayInterruptedPrunes runs before every other recovery step.
+    if (!(await repositoryRootExists(record.repoRoot))) {
+      await reconcileRepoAbsentPrune(runsRoot, record);
+      continue;
+    }
     // Serialize the archive/anchor reconciliation against the checkout
     // lifecycle: hold the repository's checkout lease exactly as prune did.
     const repoRoot = await validateRepositoryRoot(record.repoRoot);
