@@ -1627,7 +1627,7 @@ describe("recoverStaleRuns", () => {
       backupRef,
       candidateCommitOid: repo.head,
       recordedAt: "2026-07-14T12:00:00.000Z",
-    })}\n`);
+    })}\n{"event":"prune-cleanup-com`);
     const cleanupPath = path.join(runsRoot, "cleanup.ndjson");
     await writeFile(cleanupPath, cleanupBytes);
     const quarantineIdentity = await lstat(quarantinePath);
