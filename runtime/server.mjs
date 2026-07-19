@@ -31573,14 +31573,14 @@ async function recoverStaleRuns(dependencies = {}) {
             isProcessAlive,
             (pid) => ps.getProcessStartToken(pid)
           )) continue;
-          stale.push(record2);
+          stale.push({ record: record2, runStartText });
         } catch (error2) {
           await quarantineRun(runsRoot, entry.name, error2);
           quarantined.push(entry.name);
         }
       }
     }
-    for (const record2 of stale) {
+    for (const { record: record2, runStartText } of stale) {
       const checkoutLock = await acquireOwnedLock(
         path14.join(locksRoot, `${record2.lockKey}.lock`),
         ownerContents,
@@ -31590,16 +31590,33 @@ async function recoverStaleRuns(dependencies = {}) {
       if (checkoutLock === null) continue;
       let recoveryError;
       let recoveryFailed = false;
+      let becameTerminal = false;
       try {
-        await recoverRun(
-          record2,
-          root,
-          ps,
-          isProcessAlive,
-          requestCooperativeTermination,
-          delayMs,
-          graceMs
+        const lockedRunStartText = await readBoundedRegularFile(
+          path14.join(runsRoot, record2.runId, "run-start.json")
         );
+        if (lockedRunStartText === null) {
+          throw new RuntimeError("run-start recovery record disappeared before stale recovery");
+        }
+        const lockedRecord = parseRunStart(lockedRunStartText, record2.runId);
+        if (lockedRunStartText !== runStartText) {
+          throw new RuntimeError("run-start recovery record changed before stale recovery");
+        }
+        const lockedResult = await new ArtifactStore(record2.runId).readResult(record2.runId);
+        if (lockedResult !== null) {
+          validateTerminalResult(lockedResult, record2.runId);
+          becameTerminal = true;
+        } else {
+          await recoverRun(
+            lockedRecord,
+            root,
+            ps,
+            isProcessAlive,
+            requestCooperativeTermination,
+            delayMs,
+            graceMs
+          );
+        }
       } catch (error2) {
         recoveryError = error2;
         recoveryFailed = true;
@@ -31619,6 +31636,7 @@ async function recoverStaleRuns(dependencies = {}) {
         quarantined.push(record2.runId);
         continue;
       }
+      if (becameTerminal) continue;
       recovered.push(record2.runId);
     }
     await reclaimLocks(
