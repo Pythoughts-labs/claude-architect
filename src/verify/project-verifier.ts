@@ -289,9 +289,16 @@ export async function scanCommandMutations(args: {
     .filter(record => /^(?:S|[a-z]) /.test(record))
     .map(record => `index ${record}`);
   const records = [...statusRecords, ...hiddenIndexRecords];
-  const disallowedRecords = args.allowedMutations === "ignored-paths"
-    ? records.filter(record => !record.startsWith("! "))
-    : records;
+  // Verification runs in a DISPOSABLE worktree that is deleted after the scan.
+  // Writes to git-ignored paths (build caches, .venv, __pycache__, .pytest_cache)
+  // cannot reach the frozen candidate tree — integration applies the candidate
+  // commit, never the worktree's ignored files — and cannot escape to the primary
+  // checkout, so they are not verification-invalidating mutations. They are exempt
+  // by default. `allowedMutations: "none"` opts into strict scanning for commands
+  // that must be proven to write nothing at all.
+  const disallowedRecords = args.allowedMutations === "none"
+    ? records
+    : records.filter(record => !record.startsWith("! "));
   const headChanged = currentHead.trim() !== args.expectedHeadCommitOid;
   return { mutated: disallowedRecords.length > 0 || headChanged, records: disallowedRecords, headChanged };
 }

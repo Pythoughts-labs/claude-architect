@@ -21930,7 +21930,7 @@ var StdioServerTransport = class {
 var PROTOCOL_VERSION = "1.2.0";
 var DELEGATION_SPEC_VERSION = "1";
 var ATTEMPT_RESULT_VERSION = "1";
-var RUNTIME_VERSION = "0.19.0";
+var RUNTIME_VERSION = "0.20.0";
 
 // src/platform/posix-platform-services.ts
 import { spawn, execFile } from "node:child_process";
@@ -26027,7 +26027,7 @@ async function scanCommandMutations(args) {
   const statusRecords = status.split("\0").filter((record2) => record2.length > 0 && !(args.dependencyLink === "inherited" && /^[?!] node_modules\/?$/.test(record2)));
   const hiddenIndexRecords = indexEntries.split("\0").filter((record2) => /^(?:S|[a-z]) /.test(record2)).map((record2) => `index ${record2}`);
   const records = [...statusRecords, ...hiddenIndexRecords];
-  const disallowedRecords = args.allowedMutations === "ignored-paths" ? records.filter((record2) => !record2.startsWith("! ")) : records;
+  const disallowedRecords = args.allowedMutations === "none" ? records : records.filter((record2) => !record2.startsWith("! "));
   const headChanged = currentHead.trim() !== args.expectedHeadCommitOid;
   return { mutated: disallowedRecords.length > 0 || headChanged, records: disallowedRecords, headChanged };
 }
@@ -27641,6 +27641,22 @@ function withRunStartPidRecording(ps, context) {
 
 // src/runtime/attempt-runtime.ts
 var MAX_PRODUCER_OUTPUT_BYTES = 1e6;
+var MAX_SNAPSHOT_DIFF_BYTES = 1e5;
+async function captureWorktreeSnapshot(worktreePath) {
+  await git(worktreePath, ["add", "-A", "-N"]);
+  const [status, diff] = await Promise.all([
+    git(worktreePath, ["status", "--porcelain=v1", "--untracked-files=all"]),
+    git(worktreePath, ["-c", "core.quotepath=false", "diff", "--no-color", "--no-ext-diff"])
+  ]);
+  const rawDiff = diff.exitCode === 0 ? diff.stdout : "";
+  const bytes = Buffer.from(rawDiff);
+  const truncated = bytes.length > MAX_SNAPSHOT_DIFF_BYTES;
+  return {
+    status: redact(status.exitCode === 0 ? status.stdout : ""),
+    diff: redact(truncated ? bytes.subarray(0, MAX_SNAPSHOT_DIFF_BYTES).toString("utf8") : rawDiff),
+    truncated
+  };
+}
 function reportPhase(deps, phase) {
   try {
     deps.onPhase?.(phase);
@@ -28114,6 +28130,16 @@ async function runAttempt(checkoutPath, spec, deps) {
     if (!hasFailureSignal(signals) && candidate === null) {
       signals["verification-failure"] = true;
       unresolvedIssues.push("missing-candidate");
+    }
+    if (candidate === null && worktree !== null && (signals.timeout === true || signals.cancelled === true)) {
+      try {
+        evidence = { ...evidence, worktreeSnapshot: await captureWorktreeSnapshot(worktree.path) };
+      } catch (snapshotError) {
+        evidence = {
+          ...evidence,
+          worktreeSnapshotError: snapshotError instanceof Error ? snapshotError.message : String(snapshotError)
+        };
+      }
     }
     reportPhase(deps, "archiving result");
     return await archiveTerminal({
@@ -29392,7 +29418,8 @@ async function runPipeline(checkoutPath, spec, deps) {
       attempt,
       [],
       "",
-      "implement phase did not produce a verified candidate"
+      "implement phase did not produce a verified candidate",
+      attempt.failure ?? "producer-failure"
     );
   }
   const { reviewers, maxRounds } = resolveReviewConfig(spec);

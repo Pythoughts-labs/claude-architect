@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { rm } from "node:fs/promises";
 import { freezeCandidate } from "../git/candidate-tree.js";
+import { git } from "../git/git-exec.js";
 import { checkPreconditions } from "../git/repo-preconditions.js";
 import { WorktreeManager } from "../git/worktree-manager.js";
 import type {
@@ -62,6 +63,30 @@ import {
 } from "./run-start.js";
 
 const MAX_PRODUCER_OUTPUT_BYTES = 1_000_000;
+const MAX_SNAPSHOT_DIFF_BYTES = 100_000;
+
+// Best-effort salvage evidence for attempts that end without a frozen candidate
+// (timeout, cancellation) while producer work already sits in the worktree. The
+// worktree is deleted at cleanup, so a bounded, redacted status+diff snapshot is
+// the only trace of finished-but-discarded work. `-N` marks untracked files
+// intent-to-add so new files appear in the diff; the worktree is disposable.
+async function captureWorktreeSnapshot(
+  worktreePath: string,
+): Promise<{ status: string; diff: string; truncated: boolean }> {
+  await git(worktreePath, ["add", "-A", "-N"]);
+  const [status, diff] = await Promise.all([
+    git(worktreePath, ["status", "--porcelain=v1", "--untracked-files=all"]),
+    git(worktreePath, ["-c", "core.quotepath=false", "diff", "--no-color", "--no-ext-diff"]),
+  ]);
+  const rawDiff = diff.exitCode === 0 ? diff.stdout : "";
+  const bytes = Buffer.from(rawDiff);
+  const truncated = bytes.length > MAX_SNAPSHOT_DIFF_BYTES;
+  return {
+    status: redact(status.exitCode === 0 ? status.stdout : ""),
+    diff: redact(truncated ? bytes.subarray(0, MAX_SNAPSHOT_DIFF_BYTES).toString("utf8") : rawDiff),
+    truncated,
+  };
+}
 
 export interface AcceptanceVerificationResult {
   ok: boolean;
@@ -610,6 +635,17 @@ export async function runAttempt(
     if (!hasFailureSignal(signals) && candidate === null) {
       signals["verification-failure"] = true;
       unresolvedIssues.push("missing-candidate");
+    }
+
+    if (candidate === null && worktree !== null && (signals.timeout === true || signals.cancelled === true)) {
+      try {
+        evidence = { ...evidence, worktreeSnapshot: await captureWorktreeSnapshot(worktree.path) };
+      } catch (snapshotError) {
+        evidence = {
+          ...evidence,
+          worktreeSnapshotError: snapshotError instanceof Error ? snapshotError.message : String(snapshotError),
+        };
+      }
     }
 
     reportPhase(deps, "archiving result");

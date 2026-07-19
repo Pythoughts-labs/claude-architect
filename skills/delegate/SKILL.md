@@ -40,7 +40,7 @@ Construct a candidate spec with every required field:
 4. `writeAllowlist`: explicit repository-relative globs; use `["**"]` only for genuinely repository-wide work.
 5. `forbiddenScope`: explicit paths the Producer must never change.
 6. `successCriteria`: reviewable conditions.
-7. `verification`: Host-authorized command objects. Each verification command uses `args`, not `argv`; `network` is exactly `"denied"` or `"allowed"`; command `timeoutMs` must be 1..1800000; include a repository-relative `cwd`, expected exit codes, and optional platform filters.
+7. `verification`: Host-authorized command objects. Each verification command uses `args`, not `argv`; `network` is exactly `"denied"` or `"allowed"`; command `timeoutMs` must be 1..1800000; include a repository-relative `cwd`, expected exit codes, and optional platform filters. Verification runs in a disposable worktree, so writes to git-ignored paths (build caches, virtualenvs, `__pycache__`, `.pytest_cache`) are permitted by default and never fail a command; set the optional `allowedMutations: "none"` only when a command must be proven to write nothing at all.
 8. `executionMode: "edit"`; attempt `timeoutMs` must be 600000..1800000; `producerPreferences` is an ordered array of Producer id strings; use optional `producerOverrides: { model?, reasoningEffort? }`; and set `expectedOutput: "candidate-patch"`.
 
 **Acceptance criteria:**
@@ -54,7 +54,7 @@ Construct a candidate spec with every required field:
 - Keep observable outcomes in `successCriteria`. Put reviewer-only, non-commandable concerns in `review.focus`; when present, `review.focus` must be a non-empty array of non-empty strings. No undocumented review keys are accepted.
 - Prefer explicit test file paths in verification args; directory args can resolve differently between the Producer sandbox and clean-room verification.
 
-**Verification preflight:** The runtime runs every verification command against clean HEAD in a disposable worktree before dispatch. Repair the spec if a command cannot start. A baseline failure unrelated to the task is an environment defect the architect repairs centrally before dispatching; set `expectBaselineFailure: true` only on the individual verification command that intentionally reproduces the bug.
+**Verification preflight:** The runtime runs every verification command against clean HEAD in a disposable worktree before dispatch. Repair the spec if a command cannot start. A baseline failure unrelated to the task is an environment defect the architect repairs centrally before dispatching. Set `expectBaselineFailure: true` on any command that cannot pass at clean HEAD by design — one that reproduces the target bug, or one that exercises a file or test the candidate will create (it necessarily fails before that path exists).
 
 Resolve ambiguity before calling the runtime. Do not give the Producer credentials, hidden instructions, acceptance authority, or permission to expand scope.
 

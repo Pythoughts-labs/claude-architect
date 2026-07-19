@@ -1176,6 +1176,43 @@ describe("runPipeline", () => {
     expect((await git(repo, ["cat-file", "-e", `${privateCommit}^{commit}`])).exitCode)
       .not.toBe(0);
   });
+
+  it("propagates the attempt classification when the implement phase does not verify", async () => {
+    const repo = await initRepo();
+    const failing: AttemptResult = {
+      resultVersion: "1",
+      runId: "pipeline-attempt-classification",
+      status: "failed",
+      failure: "verification-failure",
+      summary: "candidate did not pass independent verification",
+      producerSummary: "test producer",
+      candidate: null,
+      requestedVerification: [],
+      executedVerification: [],
+      unresolvedIssues: ["base-changed"],
+      evidence: { structural: { failures: ["base-changed"] } },
+      logsRef: "logs/producer.log",
+      producerId: "stub",
+      producerVersion: "1",
+      producerModel: null,
+      durationMs: 1,
+      sessionId: null,
+    };
+
+    const result = await runPipeline(repo, validSpec(), {
+      verifier: passingVerifier,
+      ps: getPlatformServices(),
+      registry: new ProducerRegistry([]),
+      roleRunner: async () => {
+        throw new Error("roleRunner must not run for a non-verified implement phase");
+      },
+      runAttempt: async () => failing,
+    });
+
+    expect(result.status).toBe("failed");
+    expect(result.failure).toBe("verification-failure");
+    expect(result.gate.reasons).toContain("implement phase did not produce a verified candidate");
+  });
 });
 
 describe("detectWeakenedTests", () => {

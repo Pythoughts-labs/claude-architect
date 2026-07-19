@@ -53,6 +53,7 @@ interface FakeAdapterOptions {
   reason?: string | null;
   spawnFailure?: boolean;
   sleepMs?: number;
+  writeBeforeSleep?: { target: string; content: string };
   requiredEnv?: string[];
   isolationState?: ProducerConfigurationProfile["isolationState"];
   writeConfinementBackend?: string | null;
@@ -106,7 +107,11 @@ class FakeAdapter implements ProducerAdapter {
           this.options.content ?? "changed\n",
           String(this.options.exitCode ?? 0),
         ]
-        : [sleepFixturePath, "", "", String(this.options.sleepMs)],
+        : [
+          sleepFixturePath, "", "", String(this.options.sleepMs), "",
+          this.options.writeBeforeSleep?.target ?? "",
+          this.options.writeBeforeSleep?.content ?? "",
+        ],
       requiredEnv: [...(this.options.requiredEnv ?? [])],
       network: "denied",
     };
@@ -843,6 +848,32 @@ describe("runAttempt", () => {
     expect(result.status).toBe("failed");
     expect(result.failure).toBe("timeout");
     await expectAttemptResourcesCleaned("run-timeout");
+  }, 30_000);
+
+  it("salvages a bounded worktree snapshot when a timeout discards producer work", async () => {
+    const repoRoot = await initRepo();
+    const spec = validSpec();
+    spec.timeoutMs = 100;
+
+    const result = await runAttempt(
+      repoRoot,
+      spec,
+      dependencies(
+        new FakeAdapter({
+          sleepMs: 60_000,
+          writeBeforeSleep: { target: "salvage.txt", content: "finished work\n" },
+        }),
+        "run-timeout-salvage",
+      ),
+    );
+
+    expect(result.failure).toBe("timeout");
+    const snapshot = (result.evidence as { worktreeSnapshot?: { status: string; diff: string; truncated: boolean } })
+      .worktreeSnapshot;
+    expect(snapshot).toBeDefined();
+    expect(snapshot?.status).toContain("salvage.txt");
+    expect(snapshot?.diff).toContain("finished work");
+    await expectAttemptResourcesCleaned("run-timeout-salvage");
   }, 30_000);
 
   it("honors an AbortSignal that fired before the producer spawn", async () => {

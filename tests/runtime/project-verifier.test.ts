@@ -244,7 +244,7 @@ describe("projectVerify", () => {
     await expect(access(marker)).rejects.toMatchObject({ code: "ENOENT" });
   });
 
-  it("detects writes to ignored paths in the disposable materialization", async () => {
+  it("permits writes to ignored paths by default in the disposable materialization", async () => {
     const fixture = await frozenFixture();
 
     const result = await projectVerify({
@@ -252,6 +252,26 @@ describe("projectVerify", () => {
       artifact: fixture.artifact,
       commands: [command({
         id: "ignored-mutation",
+        args: [
+          "-e",
+          "require('node:fs').mkdirSync('ignored-output', { recursive: true }); require('node:fs').writeFileSync('ignored-output/result.txt', 'changed')",
+        ],
+      })],
+    });
+
+    expect(result.mutated).toBe(false);
+    expect(result.failures).toEqual([]);
+  });
+
+  it("detects writes to ignored paths under strict allowedMutations:none", async () => {
+    const fixture = await frozenFixture();
+
+    const result = await projectVerify({
+      repoRoot: fixture.repoRoot,
+      artifact: fixture.artifact,
+      commands: [command({
+        id: "ignored-mutation-strict",
+        allowedMutations: "none",
         args: [
           "-e",
           "require('node:fs').mkdirSync('ignored-output', { recursive: true }); require('node:fs').writeFileSync('ignored-output/result.txt', 'changed')",

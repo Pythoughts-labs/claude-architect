@@ -757,11 +757,16 @@ export async function runPipeline(
     },
   });
   if (attempt.status !== "verified-candidate" || attempt.candidate === null) {
+    // Propagate the attempt's own classification (e.g. verification-failure for a
+    // base-changed candidate, timeout, sandbox-violation) instead of flattening
+    // every non-verified implement phase to producer-failure. A blameless base
+    // movement is then triageable from `failure` alone, not only structural evidence.
     return failedResult(
       attempt,
       [],
       "",
       "implement phase did not produce a verified candidate",
+      attempt.failure ?? "producer-failure",
     );
   }
 

@@ -19,7 +19,7 @@ async function fixture(): Promise<{ repoRoot: string; headCommitOid: string }> {
     expect((await git(repoRoot, args)).exitCode).toBe(0);
   }
   await writeFile(join(repoRoot, "a.txt"), "baseline\n");
-  await writeFile(join(repoRoot, ".gitignore"), "node_modules/\n");
+  await writeFile(join(repoRoot, ".gitignore"), "node_modules/\n.cache/\n");
   await writeFile(join(repoRoot, "package-lock.json"), "{}\n");
   expect((await git(repoRoot, ["add", "-A"])).exitCode).toBe(0);
   expect((await git(repoRoot, ["commit", "-q", "-m", "initial"])).exitCode).toBe(0);
@@ -133,6 +133,23 @@ describe("verifyBaseline", () => {
       ok: false,
       mutation: { records: [expect.stringContaining("a.txt")], headChanged: false },
     }]);
+  });
+
+  it("keeps a command that only writes git-ignored paths ok in preflight", async () => {
+    const repo = await fixture();
+    const report = await verifyBaseline({
+      ...repo,
+      commands: [{
+        ...command(0),
+        id: "cache-writer",
+        args: [
+          "-e",
+          "require('node:fs').mkdirSync('.cache', { recursive: true }); require('node:fs').writeFileSync('.cache/build.log', 'noise\\n')",
+        ],
+      }],
+    });
+
+    expect(report.commands).toEqual([{ id: "cache-writer", exitCode: 0, ok: true }]);
   });
 
   it("cancels a running command and does not run remaining commands", async () => {

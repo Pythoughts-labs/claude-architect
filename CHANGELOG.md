@@ -6,8 +6,47 @@ All notable changes to Claude Architect are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.20.0] - 2026-07-18
+
+### Added
+
+- Fresh-context increment loop: `runPipeline` can drive multiple bounded
+  implementation increments, each in a fresh isolated worktree working from the
+  prior candidate toward a structured completion report, with every increment
+  independently frozen and verified and recorded in the pipeline result.
+
+### Changed
+
+- Candidate lifecycle MCP tools (`reviewCandidate`, `decideCandidate`,
+  `integrateCandidate`) now require an explicit `checkoutPath` whose canonical
+  git-common-dir identity must equal the run's repository, and fail closed with
+  `run-checkout-mismatch` otherwise. This closes a cross-project authority hole
+  in the shared plugin state directory where any session could review, reject,
+  accept, or integrate another project's candidate by run id alone. The MCP tool
+  protocol advances 1.1.0 to 1.2.0; `decideCandidate` now records its decision
+  under the cross-process checkout lock and `ArtifactStore.writeDecision` is an
+  atomic compare-and-set that rejects contradictory decisions.
+- Verification mutation scanning now permits writes to git-ignored paths by
+  default. Because verification runs in a disposable worktree, git-ignored
+  artifacts (build caches, virtualenvs, `__pycache__`, `.pytest_cache`) can
+  never reach the frozen candidate tree or the primary checkout, so they no
+  longer fail a command. This removes the recurring false-positive where a
+  `uv`/`pytest` verification command was marked `verification-mutated` despite
+  exiting 0. Strict all-mutations scanning remains available per command via
+  `allowedMutations: "none"`; tracked-file, untracked non-ignored, index, and
+  HEAD changes are still detected regardless.
+
 ### Fixed
 
+- A failed implement phase now surfaces the attempt's own failure
+  classification (for example `verification-failure` when a candidate is
+  invalidated by an external base change) instead of flattening every
+  non-verified implement phase to `producer-failure`, so a blameless checkout
+  drift is triageable from `failure` alone.
+- Attempts that end in a timeout or cancellation without a frozen candidate now
+  archive a bounded, redacted worktree status+diff snapshot into evidence
+  (`evidence.worktreeSnapshot`) before the disposable worktree is removed,
+  preserving salvage evidence of finished-but-discarded producer work.
 - The delegate skill now matches the closed Delegation Spec schema, documents
   exact command/network/timeout and Producer override fields, supports
   reviewer-only `review.focus`, and explains the clean-checkout precondition.
