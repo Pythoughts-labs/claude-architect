@@ -684,6 +684,7 @@ describe("MCP tool handlers", () => {
       pid: process.pid,
       processToken: null,
       startedAt: "2026-07-18T12:00:00.000Z",
+      sliced: true,
     };
 
     await expect(handleDecideCandidate(
@@ -705,6 +706,7 @@ describe("MCP tool handlers", () => {
       pid: process.pid,
       processToken: null,
       startedAt: "2026-07-18T12:00:00.000Z",
+      sliced: false,
     };
     store.decision = { decision: "accepted", recordedAt: "2026-07-18T12:01:00.000Z" };
     const deps = dependencies(store);

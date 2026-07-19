@@ -549,6 +549,67 @@ describe("ArtifactStore", () => {
     await expect(firstStore.readDecision(runId)).resolves.toEqual(records[winnerIndex]);
   });
 
+  it.each([true, false])("round-trips an explicit sliced=%s pipeline marker", async sliced => {
+    const runId = `run-pipeline-marker-${sliced}`;
+    const store = new ArtifactStore(runId);
+    const marker = {
+      pid: process.pid,
+      processToken: null,
+      startedAt: "2026-07-19T12:00:00.000Z",
+      sliced,
+    };
+    await store.writeLog("lifecycle", "create run directory\n");
+
+    await store.writePipelineActiveMarker(marker);
+
+    await expect(store.readPipelineActiveMarker(runId)).resolves.toEqual(marker);
+  });
+
+  it("normalizes a legacy pipeline marker without sliced to non-sliced", async () => {
+    const runId = "run-pipeline-marker-legacy";
+    const store = new ArtifactStore(runId);
+    await store.writeLog("lifecycle", "create run directory\n");
+    await writeFile(join(store.runDirectory, "pipeline-active.json"), `${JSON.stringify({
+      pid: process.pid,
+      processToken: null,
+      startedAt: "2026-07-19T12:00:00.000Z",
+    })}\n`);
+
+    await expect(store.readPipelineActiveMarker(runId)).resolves.toMatchObject({
+      sliced: false,
+    });
+  });
+
+  it.each([null, "true", 1, {}])(
+    "rejects a malformed present pipeline marker discriminator %#",
+    async sliced => {
+      const runId = "run-pipeline-marker-malformed";
+      const store = new ArtifactStore(runId);
+      await store.writeLog("lifecycle", "create run directory\n");
+      await writeFile(join(store.runDirectory, "pipeline-active.json"), `${JSON.stringify({
+        pid: process.pid,
+        processToken: null,
+        startedAt: "2026-07-19T12:00:00.000Z",
+        sliced,
+      })}\n`);
+
+      await expect(store.readPipelineActiveMarker(runId)).rejects.toThrow(
+        /pipeline-active marker is malformed/i,
+      );
+    },
+  );
+
+  it("rejects a newly written pipeline marker without an explicit discriminator", async () => {
+    const store = new ArtifactStore("run-pipeline-marker-missing-discriminator");
+    await store.writeLog("lifecycle", "create run directory\n");
+
+    await expect(store.writePipelineActiveMarker({
+      pid: process.pid,
+      processToken: null,
+      startedAt: "2026-07-19T12:00:00.000Z",
+    } as never)).rejects.toThrow(/pipeline-active marker is invalid/i);
+  });
+
   it("does not accept a forged result after a validated run directory is swapped", async () => {
     const runId = "run-read-swap";
     const store = new ArtifactStore(runId);

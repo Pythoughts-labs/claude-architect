@@ -27063,7 +27063,7 @@ var ArtifactStore = class {
     }
   }
   async writePipelineActiveMarker(marker) {
-    if (typeof marker !== "object" || marker === null || !Number.isSafeInteger(marker.pid) || marker.pid <= 1 || marker.processToken !== null && typeof marker.processToken !== "string" || typeof marker.startedAt !== "string" || !Number.isFinite(Date.parse(marker.startedAt))) {
+    if (typeof marker !== "object" || marker === null || !Number.isSafeInteger(marker.pid) || marker.pid <= 1 || marker.processToken !== null && typeof marker.processToken !== "string" || typeof marker.startedAt !== "string" || !Number.isFinite(Date.parse(marker.startedAt)) || typeof marker.sliced !== "boolean") {
       throw new RuntimeError("pipeline-active marker is invalid");
     }
     await this.replaceJson("pipeline-active.json", marker);
@@ -27078,10 +27078,13 @@ var ArtifactStore = class {
         path9.join(validated.path, "pipeline-active.json"),
         validated.identity
       ));
-      if (typeof value !== "object" || value === null || typeof value.pid !== "number" || !Number.isSafeInteger(value.pid) || value.pid <= 1 || value.processToken !== null && typeof value.processToken !== "string" || typeof value.startedAt !== "string" || !Number.isFinite(Date.parse(value.startedAt))) {
+      if (typeof value !== "object" || value === null || typeof value.pid !== "number" || !Number.isSafeInteger(value.pid) || value.pid <= 1 || value.processToken !== null && typeof value.processToken !== "string" || typeof value.startedAt !== "string" || !Number.isFinite(Date.parse(value.startedAt)) || value.sliced !== void 0 && typeof value.sliced !== "boolean") {
         throw new RuntimeError("archived pipeline-active marker is malformed");
       }
-      return value;
+      return {
+        ...value,
+        sliced: value.sliced ?? false
+      };
     } catch (error2) {
       if (isMissing(error2)) return null;
       throw error2;
@@ -28031,7 +28034,7 @@ async function runAttempt(checkoutPath, spec, deps) {
       startedAt: new Date(startedAtMs).toISOString()
     };
     const runStartContext = await initializeRunStart(store, runStart);
-    deps.onRunStart?.(runStartContext);
+    await deps.onRunStart?.(runStartContext);
     worktree = await new WorktreeManager(canonical.canonical, runId, ps).create(
       preconditions.baseCommitOid
     );
@@ -29816,6 +29819,13 @@ async function runPipeline(checkoutPath, spec, deps) {
   const runAttemptFn = deps.runAttempt ?? runAttempt;
   const slices = resolveSlices(spec);
   const initialSpec = slices.length === 0 ? spec : scopeSpecToSlice(spec, slices[0]);
+  const ps = deps.ps ?? getPlatformServices();
+  const activeOwner = {
+    pid: process.pid,
+    processToken: await ps.getProcessStartToken(process.pid).catch(() => null),
+    startedAt: (/* @__PURE__ */ new Date()).toISOString(),
+    sliced: slices.length > 0
+  };
   const notePhase = (phase) => {
     try {
       deps.onPhase?.(phase);
@@ -29823,15 +29833,22 @@ async function runPipeline(checkoutPath, spec, deps) {
     }
   };
   let runStart;
+  let slicedMarkerEstablished = false;
   const inheritedOnRunStart = deps.onRunStart;
   const attempt = await runAttemptFn(checkoutPath, initialSpec, {
     ...deps,
-    onRunStart(context) {
+    async onRunStart(context) {
       runStart = context;
-      inheritedOnRunStart?.(context);
+      if (slices.length > 0) {
+        await new ArtifactStore(context.record.runId).writePipelineActiveMarker(activeOwner);
+        slicedMarkerEstablished = true;
+      }
+      await inheritedOnRunStart?.(context);
     }
   });
+  const store = new ArtifactStore(attempt.runId);
   if (attempt.status !== "verified-candidate" || attempt.candidate === null) {
+    if (slicedMarkerEstablished) await store.clearPipelineActiveMarker();
     return failedResult(
       attempt,
       [],
@@ -29840,16 +29857,10 @@ async function runPipeline(checkoutPath, spec, deps) {
       attempt.failure ?? "producer-failure"
     );
   }
-  const store = new ArtifactStore(attempt.runId);
-  const ps = deps.ps ?? getPlatformServices();
-  const activeOwner = {
-    pid: process.pid,
-    processToken: await ps.getProcessStartToken(process.pid).catch(() => null),
-    startedAt: (/* @__PURE__ */ new Date()).toISOString()
-  };
-  await store.writePipelineActiveMarker(activeOwner);
+  if (slices.length === 0) await store.writePipelineActiveMarker(activeOwner);
   const temporarySliceRefs2 = [];
   let finalAttempt = attempt;
+  let authoritySafeToRelease = slices.length === 0;
   let pipelinePrimaryError;
   try {
     const reviewConfig = resolveReviewConfig(spec);
@@ -29869,6 +29880,7 @@ async function runPipeline(checkoutPath, spec, deps) {
         reason: args.reason,
         store
       });
+      if (slices.length > 0) authoritySafeToRelease = true;
       finalAttempt = failedAttempt;
       return failedResult(
         failedAttempt,
@@ -29912,6 +29924,7 @@ async function runPipeline(checkoutPath, spec, deps) {
           });
         } catch (error2) {
           const archived = await archiveSliceExecutionError({ error: error2, attempt, store });
+          authoritySafeToRelease = true;
           finalAttempt = archived.failedAttempt;
           if (error2 !== archived.sliceError) throw error2;
           const failed = failedResult(
@@ -30074,6 +30087,7 @@ async function runPipeline(checkoutPath, spec, deps) {
         });
       } catch (error2) {
         const archived = await archiveSliceExecutionError({ error: error2, attempt, store });
+        authoritySafeToRelease = true;
         finalAttempt = archived.failedAttempt;
         if (error2 !== archived.sliceError) throw error2;
         const failed = failedResult(
@@ -30099,6 +30113,7 @@ async function runPipeline(checkoutPath, spec, deps) {
           reason,
           store
         });
+        authoritySafeToRelease = true;
         finalAttempt = failedAttempt;
         const failed = failedResult(
           failedAttempt,
@@ -30444,6 +30459,7 @@ async function runPipeline(checkoutPath, spec, deps) {
       failure: null
     };
     await store.writePipelineArtifact("pipeline-result", result);
+    authoritySafeToRelease = true;
     return result;
   } catch (error2) {
     let terminalError = error2;
@@ -30455,6 +30471,7 @@ async function runPipeline(checkoutPath, spec, deps) {
           reason: "sliced pipeline terminated before completing trusted gates",
           store
         });
+        authoritySafeToRelease = true;
       } catch (archiveError) {
         terminalError = new AggregateError(
           [error2, archiveError],
@@ -30466,7 +30483,6 @@ async function runPipeline(checkoutPath, spec, deps) {
     throw terminalError;
   } finally {
     const cleanupErrors = await cleanupTemporarySliceRefs(checkoutPath, temporarySliceRefs2);
-    let canClearActiveMarker = true;
     if (cleanupErrors.length > 0 && slices.length > 0 && finalAttempt.status === "verified-candidate") {
       try {
         finalAttempt = await archiveSlicedFailure({
@@ -30475,12 +30491,12 @@ async function runPipeline(checkoutPath, spec, deps) {
           reason: "temporary slice ref cleanup did not complete",
           store
         });
+        authoritySafeToRelease = true;
       } catch (archiveError) {
         cleanupErrors.push(archiveError);
-        canClearActiveMarker = false;
       }
     }
-    if (canClearActiveMarker) {
+    if (cleanupErrors.length === 0 && authoritySafeToRelease) {
       try {
         await store.clearPipelineActiveMarker();
       } catch (cleanupError) {
@@ -31207,7 +31223,9 @@ async function temporarySliceRefs(repoRoot, runId, runGit) {
     if (fields[1] === void 0 || !OID.test(fields[1])) {
       throw new RuntimeError("temporary slice ref OID is malformed during recovery");
     }
-    const object3 = await runGit(repoRoot, ["cat-file", "-t", fields[1]]);
+    const object3 = await runGit(repoRoot, ["cat-file", "-t", fields[1]], {
+      env: { GIT_NO_REPLACE_OBJECTS: "1" }
+    });
     if (object3.exitCode !== 0 || object3.stdout.trim() !== "commit") {
       throw new RuntimeError("temporary slice ref does not identify a commit during recovery");
     }
@@ -31527,7 +31545,7 @@ async function recoverStaleRuns(dependencies = {}) {
           (pid) => ps.getProcessStartToken(pid)
         )) {
           const commonDir = await validateGitCommonDir(record2.canonicalCommonDir);
-          await archiveInterruptedPipeline(store, result);
+          if (marker.sliced) await archiveInterruptedPipeline(store, result);
           await cleanupManagedWorktrees(commonDir, root, entry.name, ps);
           await cleanupTemporarySliceRefs2(commonDir, entry.name, runGit);
           await store.clearPipelineActiveMarker();

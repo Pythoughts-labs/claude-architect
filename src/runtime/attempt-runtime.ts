@@ -124,7 +124,7 @@ export interface AttemptRuntimeDependencies {
     repoRoot: string,
     baseCommitOid: string,
   ) => Promise<ReproducibilityInputs>;
-  onRunStart?: (context: RunStartContext) => void;
+  onRunStart?: (context: RunStartContext) => void | Promise<void>;
   /** Host progress reporting only; never awaited and never affects the attempt. */
   onPhase?: (phase: string) => void;
 }
@@ -494,7 +494,7 @@ export async function runAttempt(
       startedAt: new Date(startedAtMs).toISOString(),
     };
     const runStartContext = await initializeRunStart(store, runStart);
-    deps.onRunStart?.(runStartContext);
+    await deps.onRunStart?.(runStartContext);
     worktree = await new WorktreeManager(canonical.canonical, runId, ps).create(
       preconditions.baseCommitOid,
     );

@@ -202,7 +202,7 @@ afterEach(async () => {
 });
 
 describe("recoverStaleRuns", () => {
-  it("downgrades a verified candidate before clearing a dead pipeline marker", async () => {
+  it("downgrades a verified candidate before clearing a dead sliced pipeline marker", async () => {
     const repo = await initRepo();
     const runId = "run-interrupted-pipeline-authority";
     const store = await createUnfinishedRun(runId, repo.commonDir, null);
@@ -211,6 +211,7 @@ describe("recoverStaleRuns", () => {
       pid: 4242,
       processToken: "darwin:dead",
       startedAt: "2026-07-18T12:00:00.000Z",
+      sliced: true,
     });
 
     await expect(recoverStaleRuns({
@@ -230,6 +231,61 @@ describe("recoverStaleRuns", () => {
       evidence: {
         pipelineRecovery: "interrupted-before-terminal-cleanup",
       },
+    });
+    await expectMissing(path.join(store.runDirectory, "pipeline-active.json"));
+  });
+
+  it("preserves a verified candidate while clearing a dead non-sliced pipeline marker", async () => {
+    const repo = await initRepo();
+    const runId = "run-interrupted-non-sliced-pipeline";
+    const store = await createUnfinishedRun(runId, repo.commonDir, null);
+    await writeVerifiedCandidate(store, runId, repo);
+    await store.writePipelineActiveMarker({
+      pid: 4242,
+      processToken: "darwin:dead",
+      startedAt: "2026-07-18T12:00:00.000Z",
+      sliced: false,
+    });
+
+    await expect(recoverStaleRuns({
+      platformServices: {
+        os: "darwin",
+        async getProcessStartToken() { return null; },
+        async terminateProcessTreeByPid() {},
+      },
+      isProcessAlive: () => false,
+    })).resolves.toEqual({ recovered: [] });
+
+    await expect(store.readResult(runId)).resolves.toMatchObject({
+      status: "verified-candidate",
+      failure: null,
+    });
+    await expectMissing(path.join(store.runDirectory, "pipeline-active.json"));
+  });
+
+  it("treats a legacy pipeline marker as non-sliced during recovery", async () => {
+    const repo = await initRepo();
+    const runId = "run-interrupted-legacy-pipeline";
+    const store = await createUnfinishedRun(runId, repo.commonDir, null);
+    await writeVerifiedCandidate(store, runId, repo);
+    await writeFile(path.join(store.runDirectory, "pipeline-active.json"), `${JSON.stringify({
+      pid: 4242,
+      processToken: "darwin:dead",
+      startedAt: "2026-07-18T12:00:00.000Z",
+    })}\n`);
+
+    await expect(recoverStaleRuns({
+      platformServices: {
+        os: "darwin",
+        async getProcessStartToken() { return null; },
+        async terminateProcessTreeByPid() {},
+      },
+      isProcessAlive: () => false,
+    })).resolves.toEqual({ recovered: [] });
+
+    await expect(store.readResult(runId)).resolves.toMatchObject({
+      status: "verified-candidate",
+      failure: null,
     });
     await expectMissing(path.join(store.runDirectory, "pipeline-active.json"));
   });
@@ -257,6 +313,7 @@ describe("recoverStaleRuns", () => {
       pid: 4242,
       processToken: "darwin:dead",
       startedAt: "2026-07-18T12:00:00.000Z",
+      sliced: true,
     });
 
     await expect(recoverStaleRuns({
@@ -366,6 +423,61 @@ describe("recoverStaleRuns", () => {
     await expect(store.readResult(runId)).resolves.toBeNull();
   });
 
+  it("rejects a non-commit slice ref even when a replacement object spoofs its type", async () => {
+    const repo = await initRepo();
+    const runId = "run-sliced-replacement-spoof";
+    await createUnfinishedRun(runId, repo.commonDir, null);
+    const sliceRef = `refs/claude-architect/slices/${runId}/slice-2-attempt-0`;
+    const treeOid = await runGit(repo.directory, ["rev-parse", `${repo.head}^{tree}`]);
+    await runGit(repo.directory, ["update-ref", sliceRef, treeOid]);
+    await runGit(repo.directory, ["update-ref", `refs/replace/${treeOid}`, repo.head]);
+    expect(await runGit(repo.directory, ["cat-file", "-t", treeOid])).toBe("commit");
+
+    await expect(recoverStaleRuns({
+      platformServices: {
+        os: "darwin",
+        async getProcessStartToken() { return null; },
+        async terminateProcessTreeByPid() {},
+      },
+      isProcessAlive: () => false,
+    })).rejects.toThrow("temporary slice ref does not identify a commit during recovery");
+
+    expect(await runGit(repo.directory, ["rev-parse", sliceRef])).toBe(treeOid);
+  });
+
+  it("disables replacement objects only for temporary-ref object type validation", async () => {
+    const repo = await initRepo();
+    const runId = "run-sliced-no-replace-scope";
+    await createUnfinishedRun(runId, repo.commonDir, null);
+    const sliceRef = `refs/claude-architect/slices/${runId}/slice-2-attempt-0`;
+    await runGit(repo.directory, ["update-ref", sliceRef, repo.head]);
+    const observed: Array<{ command: string; noReplace: string | undefined }> = [];
+
+    await expect(recoverStaleRuns({
+      platformServices: {
+        os: "darwin",
+        async getProcessStartToken() { return null; },
+        async terminateProcessTreeByPid() {},
+      },
+      isProcessAlive: () => false,
+      git: async (cwd, args, options) => {
+        observed.push({
+          command: args[0] ?? "",
+          noReplace: typeof options === "object"
+            ? options.env?.GIT_NO_REPLACE_OBJECTS
+            : undefined,
+        });
+        return git(cwd, args, options);
+      },
+    })).resolves.toEqual({ recovered: [runId] });
+
+    expect(observed.filter(call => call.command === "cat-file"))
+      .toEqual([{ command: "cat-file", noReplace: "1" }]);
+    expect(observed.filter(call => call.command !== "cat-file").every(
+      call => call.noReplace === undefined,
+    )).toBe(true);
+  });
+
   it("fails closed when a slice ref moves after recovery enumeration", async () => {
     const repo = await initRepo();
     const runId = "run-sliced-moved-ref";
@@ -439,6 +551,7 @@ describe("recoverStaleRuns", () => {
       pid: 4242,
       processToken: "darwin:dead",
       startedAt: "2026-07-18T12:00:00.000Z",
+      sliced: false,
     });
 
     await expect(recoverStaleRuns({
@@ -493,6 +606,7 @@ describe("recoverStaleRuns", () => {
       pid: 4242,
       processToken: null,
       startedAt: "2026-07-18T12:00:00.000Z",
+      sliced: false,
     });
 
     await expect(recoverStaleRuns({

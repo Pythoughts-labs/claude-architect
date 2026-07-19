@@ -419,7 +419,9 @@ async function temporarySliceRefs(
     if (fields[1] === undefined || !OID.test(fields[1])) {
       throw new RuntimeError("temporary slice ref OID is malformed during recovery");
     }
-    const object = await runGit(repoRoot, ["cat-file", "-t", fields[1]]);
+    const object = await runGit(repoRoot, ["cat-file", "-t", fields[1]], {
+      env: { GIT_NO_REPLACE_OBJECTS: "1" },
+    });
     if (object.exitCode !== 0 || object.stdout.trim() !== "commit") {
       throw new RuntimeError("temporary slice ref does not identify a commit during recovery");
     }
@@ -812,7 +814,7 @@ export async function recoverStaleRuns(
           pid => ps.getProcessStartToken(pid),
         )) {
           const commonDir = await validateGitCommonDir(record.canonicalCommonDir);
-          await archiveInterruptedPipeline(store, result);
+          if (marker.sliced) await archiveInterruptedPipeline(store, result);
           await cleanupManagedWorktrees(commonDir, root, entry.name, ps);
           await cleanupTemporarySliceRefs(commonDir, entry.name, runGit);
           await store.clearPipelineActiveMarker();

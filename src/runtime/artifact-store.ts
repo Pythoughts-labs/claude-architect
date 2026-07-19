@@ -65,6 +65,7 @@ export interface PipelineActiveMarker {
   pid: number;
   processToken: string | null;
   startedAt: string;
+  sliced: boolean;
 }
 
 interface RunEntry {
@@ -846,7 +847,8 @@ export class ArtifactStore {
       || marker.pid <= 1
       || (marker.processToken !== null && typeof marker.processToken !== "string")
       || typeof marker.startedAt !== "string"
-      || !Number.isFinite(Date.parse(marker.startedAt))) {
+      || !Number.isFinite(Date.parse(marker.startedAt))
+      || typeof marker.sliced !== "boolean") {
       throw new RuntimeError("pipeline-active marker is invalid");
     }
     await this.replaceJson("pipeline-active.json", marker);
@@ -869,10 +871,14 @@ export class ArtifactStore {
         || value.pid <= 1
         || (value.processToken !== null && typeof value.processToken !== "string")
         || typeof value.startedAt !== "string"
-        || !Number.isFinite(Date.parse(value.startedAt))) {
+        || !Number.isFinite(Date.parse(value.startedAt))
+        || (value.sliced !== undefined && typeof value.sliced !== "boolean")) {
         throw new RuntimeError("archived pipeline-active marker is malformed");
       }
-      return value as PipelineActiveMarker;
+      return {
+        ...value,
+        sliced: value.sliced ?? false,
+      } as PipelineActiveMarker;
     } catch (error) {
       if (isMissing(error)) return null;
       throw error;

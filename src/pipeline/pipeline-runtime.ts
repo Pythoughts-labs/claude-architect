@@ -1088,20 +1088,34 @@ export async function runPipeline(
   const runAttemptFn = deps.runAttempt ?? defaultRunAttempt;
   const slices = resolveSlices(spec);
   const initialSpec = slices.length === 0 ? spec : scopeSpecToSlice(spec, slices[0]!);
+  const ps = deps.ps ?? getPlatformServices();
+  const activeOwner: PipelineActiveMarker = {
+    pid: process.pid,
+    processToken: await ps.getProcessStartToken(process.pid).catch(() => null),
+    startedAt: new Date().toISOString(),
+    sliced: slices.length > 0,
+  };
   const notePhase = (phase: string): void => {
     // Best-effort progress; must never affect pipeline control flow.
     try { deps.onPhase?.(phase); } catch { /* progress reporting is advisory */ }
   };
   let runStart: RunStartContext | undefined;
+  let slicedMarkerEstablished = false;
   const inheritedOnRunStart = deps.onRunStart;
   const attempt = await runAttemptFn(checkoutPath, initialSpec, {
     ...deps,
-    onRunStart(context) {
+    async onRunStart(context) {
       runStart = context;
-      inheritedOnRunStart?.(context);
+      if (slices.length > 0) {
+        await new ArtifactStore(context.record.runId).writePipelineActiveMarker(activeOwner);
+        slicedMarkerEstablished = true;
+      }
+      await inheritedOnRunStart?.(context);
     },
   });
+  const store = new ArtifactStore(attempt.runId);
   if (attempt.status !== "verified-candidate" || attempt.candidate === null) {
+    if (slicedMarkerEstablished) await store.clearPipelineActiveMarker();
     // Propagate the attempt's own classification (e.g. verification-failure for a
     // base-changed candidate, timeout, sandbox-violation) instead of flattening
     // every non-verified implement phase to producer-failure. A blameless base
@@ -1115,16 +1129,10 @@ export async function runPipeline(
     );
   }
 
-  const store = new ArtifactStore(attempt.runId);
-  const ps = deps.ps ?? getPlatformServices();
-  const activeOwner: PipelineActiveMarker = {
-    pid: process.pid,
-    processToken: await ps.getProcessStartToken(process.pid).catch(() => null),
-    startedAt: new Date().toISOString(),
-  };
-  await store.writePipelineActiveMarker(activeOwner);
+  if (slices.length === 0) await store.writePipelineActiveMarker(activeOwner);
   const temporarySliceRefs: TemporarySliceRef[] = [];
   let finalAttempt = attempt;
+  let authoritySafeToRelease = slices.length === 0;
   let pipelinePrimaryError: unknown;
   try {
     const reviewConfig = resolveReviewConfig(spec);
@@ -1154,6 +1162,7 @@ export async function runPipeline(
           reason: args.reason,
           store,
         });
+      if (slices.length > 0) authoritySafeToRelease = true;
       finalAttempt = failedAttempt;
       return failedResult(
         failedAttempt,
@@ -1198,6 +1207,7 @@ export async function runPipeline(
           });
         } catch (error) {
           const archived = await archiveSliceExecutionError({ error, attempt, store });
+          authoritySafeToRelease = true;
           finalAttempt = archived.failedAttempt;
           if (error !== archived.sliceError) throw error;
           const failed = failedResult(
@@ -1366,6 +1376,7 @@ export async function runPipeline(
         });
       } catch (error) {
         const archived = await archiveSliceExecutionError({ error, attempt, store });
+        authoritySafeToRelease = true;
         finalAttempt = archived.failedAttempt;
         if (error !== archived.sliceError) throw error;
         const failed = failedResult(
@@ -1391,6 +1402,7 @@ export async function runPipeline(
           reason,
           store,
         });
+        authoritySafeToRelease = true;
         finalAttempt = failedAttempt;
         const failed = failedResult(
           failedAttempt,
@@ -1750,6 +1762,7 @@ export async function runPipeline(
       failure: null,
     };
     await store.writePipelineArtifact("pipeline-result", result);
+    authoritySafeToRelease = true;
     return result;
   } catch (error) {
     let terminalError = error;
@@ -1761,6 +1774,7 @@ export async function runPipeline(
           reason: "sliced pipeline terminated before completing trusted gates",
           store,
         });
+        authoritySafeToRelease = true;
       } catch (archiveError) {
         terminalError = new AggregateError(
           [error, archiveError],
@@ -1772,7 +1786,6 @@ export async function runPipeline(
     throw terminalError;
   } finally {
     const cleanupErrors = await cleanupTemporarySliceRefs(checkoutPath, temporarySliceRefs);
-    let canClearActiveMarker = true;
     if (cleanupErrors.length > 0
       && slices.length > 0
       && finalAttempt.status === "verified-candidate") {
@@ -1783,12 +1796,12 @@ export async function runPipeline(
           reason: "temporary slice ref cleanup did not complete",
           store,
         });
+        authoritySafeToRelease = true;
       } catch (archiveError) {
         cleanupErrors.push(archiveError);
-        canClearActiveMarker = false;
       }
     }
-    if (canClearActiveMarker) {
+    if (cleanupErrors.length === 0 && authoritySafeToRelease) {
       try {
         await store.clearPipelineActiveMarker();
       } catch (cleanupError) {

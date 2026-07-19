@@ -520,6 +520,37 @@ describe("runAttempt", () => {
     await expectAttemptResourcesCleaned(runId);
   });
 
+  it("awaits onRunStart after durably archiving run-start", async () => {
+    const repoRoot = await initRepo();
+    const runId = "run-start-callback";
+    let callbackAwaited = false;
+    let observedRunStart: Record<string, unknown> | undefined;
+    const callbackCompletion = {
+      then(resolve: () => void, reject: (error: unknown) => void): void {
+        callbackAwaited = true;
+        void archivedJson(runId, "run-start.json").then(record => {
+          observedRunStart = record;
+          resolve();
+        }, reject);
+      },
+    };
+
+    const result = await runAttempt(
+      repoRoot,
+      validSpec(),
+      dependencies(new FakeAdapter(), runId, {
+        onRunStart: () => callbackCompletion as unknown as Promise<void>,
+      }),
+    );
+
+    expect(result.status).toBe("verified-candidate");
+    expect(callbackAwaited).toBe(true);
+    expect(observedRunStart).toMatchObject({
+      runId,
+      pid: null,
+    });
+  });
+
   it("collects repository instructions and packaged verifier provenance by default", async () => {
     const repoRoot = await initRepo();
     const instructionContent = "# Repository instructions\nUse the committed policy.\n";
