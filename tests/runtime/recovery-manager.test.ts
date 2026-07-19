@@ -523,6 +523,85 @@ describe("recoverStaleRuns", () => {
     });
   });
 
+  it("archives byte-identical recovered results under different wall clocks", async () => {
+    const repo = await initRepo();
+    const runId = "run-deterministic-recovery-result";
+    const store = await createUnfinishedRun(runId, repo.commonDir, null);
+    const resultPath = path.join(store.runDirectory, "result.json");
+    const now = vi.spyOn(Date, "now");
+
+    try {
+      now.mockReturnValue(Date.parse("2026-07-15T12:00:00.000Z"));
+      await expect(recoverStaleRuns({
+        platformServices: {
+          os: "darwin",
+          async getProcessStartToken() { return null; },
+          async terminateProcessTreeByPid() {},
+        },
+        isProcessAlive: () => false,
+      })).resolves.toEqual({ recovered: [runId], quarantined: [] });
+      const firstResult = await readFile(resultPath);
+
+      await rm(resultPath);
+      now.mockReturnValue(Date.parse("2026-07-18T12:00:00.000Z"));
+      await expect(recoverStaleRuns({
+        platformServices: {
+          os: "darwin",
+          async getProcessStartToken() { return null; },
+          async terminateProcessTreeByPid() {},
+        },
+        isProcessAlive: () => false,
+      })).resolves.toEqual({ recovered: [runId], quarantined: [] });
+      const secondResult = await readFile(resultPath);
+
+      expect(secondResult.equals(firstResult)).toBe(true);
+      expect(JSON.parse(secondResult.toString("utf8"))).toMatchObject({ durationMs: 0 });
+    } finally {
+      now.mockRestore();
+    }
+  });
+
+  it("does not kill an alive pid when its recorded process token is null", async () => {
+    const repo = await initRepo();
+    const runId = "run-live-null-token";
+    const pid = 4242;
+    const store = await createUnfinishedRun(runId, repo.commonDir, pid, null);
+    const worktree = await new WorktreeManager(repo.directory, runId).create(repo.head);
+    const anchorRef = `refs/claude-architect/candidates/${runId}`;
+    await runGit(repo.directory, ["update-ref", anchorRef, repo.head]);
+    const cooperative = vi.fn();
+    const forced = vi.fn();
+    const tokenProbes: number[] = [];
+
+    await expect(recoverStaleRuns({
+      platformServices: {
+        os: "darwin",
+        async getProcessStartToken(probedPid) {
+          tokenProbes.push(probedPid);
+          return "darwin:live";
+        },
+        async terminateProcessTreeByPid(...args) { forced(...args); },
+      },
+      isProcessAlive: probedPid => probedPid === pid,
+      requestCooperativeTermination: cooperative,
+    })).resolves.toEqual({ recovered: [runId], quarantined: [] });
+
+    expect(cooperative).not.toHaveBeenCalled();
+    expect(forced).not.toHaveBeenCalled();
+    expect(tokenProbes).not.toContain(pid);
+    await expectMissing(worktree.path);
+    expect((await git(repo.directory, ["rev-parse", "--verify", "--quiet", anchorRef])).exitCode)
+      .not.toBe(0);
+    await expect(store.readResult(runId)).resolves.toMatchObject({
+      status: "cancelled",
+      evidence: {
+        recovery: "startup-stale-run",
+        originalStartedAt: "2026-07-14T12:00:00.000Z",
+        unverifiedLivePid: pid,
+      },
+    });
+  });
+
   it("preserves a checkout lock whose recorded owner pid is still alive", async () => {
     const lockKey = "a".repeat(64);
     const lockPath = path.join(process.env.CLAUDE_PLUGIN_DATA!, "locks", `${lockKey}.lock`);

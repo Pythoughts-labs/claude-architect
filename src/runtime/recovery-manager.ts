@@ -917,11 +917,11 @@ async function recoverRun(
   graceMs: number,
 ): Promise<void> {
   let escalation: "cooperative" | "forced" | undefined;
+  let unverifiedLivePid: number | undefined;
   if (record.pid !== null && isProcessAlive(record.pid)) {
-    const liveToken = record.processToken === null
-      ? null
-      : await ps.getProcessStartToken(record.pid);
-    if (record.processToken === null || liveToken === record.processToken) {
+    if (record.processToken === null) {
+      unverifiedLivePid = record.pid;
+    } else if (await ps.getProcessStartToken(record.pid) === record.processToken) {
       await requestCooperativeTermination(record.pid);
       await delayMs(graceMs);
       if (isProcessAlive(record.pid)) {
@@ -967,12 +967,13 @@ async function recoverRun(
       recovery: "startup-stale-run",
       originalStartedAt: record.startedAt,
       ...(escalation === undefined ? {} : { escalation }),
+      ...(unverifiedLivePid === undefined ? {} : { unverifiedLivePid }),
     },
     logsRef,
     producerId: null,
     producerVersion: null,
     producerModel: null,
-    durationMs: Math.max(0, Date.now() - Date.parse(record.startedAt)),
+    durationMs: 0,
     sessionId: null,
   });
 }
