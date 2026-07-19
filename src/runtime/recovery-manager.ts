@@ -1298,6 +1298,15 @@ async function replayInterruptedPrunes(
     // Reconcile its archive without Git and move on; otherwise validateRepositoryRoot
     // below throws and aborts the entire recovery pass — a permanent block, because
     // replayInterruptedPrunes runs before every other recovery step.
+    //
+    // The boundary is deliberately filesystem-definitive absence (realpath ENOENT), the
+    // expected "the user deleted their repo" lifecycle event. A repoRoot that still
+    // exists but is no longer the canonical repository (its .git removed, replaced by a
+    // file, moved so it is non-canonical, or a transient git error) is NOT treated as
+    // gone: it stays fail-closed through validateRepositoryRoot below, matching how every
+    // other anomalous cleanup record halts recovery for investigation. Widening this to
+    // "any validation failure" would fail open — a transient git hiccup would wrongly
+    // reclaim the archive and orphan a real repository's refs.
     if (!(await repositoryRootExists(record.repoRoot))) {
       await reconcileRepoAbsentPrune(runsRoot, record);
       continue;

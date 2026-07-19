@@ -1923,6 +1923,18 @@ describe("recoverStaleRuns", () => {
       "prune-cleanup-intent",
       "prune-cleanup-complete",
     ]);
+
+    // Recovery must be rerunnable: a second pass re-parses the repo-absent completion
+    // (non-null anchor fields + anchorCleanup "already-absent") and converges rather than
+    // rejecting the journal as malformed.
+    await expect(recoverStaleRuns({
+      platformServices: {
+        os: "darwin",
+        async getProcessStartToken() { return null; },
+        async terminateProcessTreeByPid() {},
+      },
+      isProcessAlive: () => false,
+    })).resolves.toEqual({ recovered: [], quarantined: [] });
   });
 
   it("rolls back a repo-gone interrupted prune whose archive is still retained", async () => {
@@ -1970,6 +1982,16 @@ describe("recoverStaleRuns", () => {
       "prune-cleanup-intent",
       "prune-cleanup-rollback",
     ]);
+
+    // Rerunnable: a second pass re-parses the repo-absent rollback and converges.
+    await expect(recoverStaleRuns({
+      platformServices: {
+        os: "darwin",
+        async getProcessStartToken() { return null; },
+        async terminateProcessTreeByPid() {},
+      },
+      isProcessAlive: () => false,
+    })).resolves.toEqual({ recovered: [], quarantined: [] });
   });
 
   it("reclaims a dead-owner cleanup journal lock before replaying an interrupted prune", async () => {
