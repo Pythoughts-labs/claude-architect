@@ -788,7 +788,20 @@ async function appendRecoveryQuarantineRecord(
   }
   const filename = path.join(runsRoot, "recovery-quarantine.ndjson");
   const snapshot = await readRecoveryQuarantineJournal(runsRoot);
-  if (snapshot.runIds.has(record.runId)) return;
+  if (snapshot.runIds.has(record.runId)) {
+    await syncRecoveryDirectory(runsRoot);
+    const settledSnapshot = await readRecoveryQuarantineJournal(runsRoot);
+    if (settledSnapshot.rootIdentity.dev !== snapshot.rootIdentity.dev
+      || settledSnapshot.rootIdentity.ino !== snapshot.rootIdentity.ino
+      || settledSnapshot.journalIdentity === null
+      || snapshot.journalIdentity === null
+      || settledSnapshot.journalIdentity.dev !== snapshot.journalIdentity.dev
+      || settledSnapshot.journalIdentity.ino !== snapshot.journalIdentity.ino
+      || !settledSnapshot.bytes.equals(snapshot.bytes)) {
+      throw new RuntimeError("recovery quarantine journal changed after retry sync");
+    }
+    return;
+  }
   const nextBytes = Buffer.concat([snapshot.bytes, Buffer.from(line, "utf8")]);
   if (nextBytes.byteLength > MAX_STATE_FILE_BYTES) {
     throw new RuntimeError("recovery quarantine journal exceeds its size limit");
