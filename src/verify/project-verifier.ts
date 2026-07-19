@@ -330,9 +330,10 @@ export async function projectVerify(args: ProjectVerifyArgs): Promise<ProjectVer
   const artifactRunId = args.artifact.anchorRef.startsWith(anchorPrefix)
     ? args.artifact.anchorRef.slice(anchorPrefix.length)
     : args.artifact.candidateCommitOid;
+  const verificationId = args.runId ?? args.verificationId?.() ?? artifactRunId;
   const manager = new WorktreeManager(
     args.repoRoot,
-    `verify-${args.runId ?? artifactRunId}`,
+    `verify-${verificationId}`,
     ps,
   );
   const materialized = await manager.create(args.artifact.candidateCommitOid);

@@ -347,6 +347,98 @@ async function commitIncrement(
   return runGit(args.worktreePath, ["rev-parse", "HEAD"], env);
 }
 
+async function initSlicedRepo(): Promise<string> {
+  const repo = await initRepo();
+  await writeFile(path.join(repo, "slice-one.txt"), "slice one base\n");
+  await writeFile(path.join(repo, "slice-two.txt"), "slice two base\n");
+  await runGit(repo, ["add", "slice-one.txt", "slice-two.txt"]);
+  await runGit(repo, ["commit", "-q", "-m", "slice fixtures"]);
+  return repo;
+}
+
+function fileVerification(
+  id: string,
+  expected: Record<string, string>,
+): Slice["verification"][number] {
+  return {
+    id,
+    executable: "node",
+    args: [
+      "-e",
+      [
+        "const fs = require('node:fs');",
+        `const expected = ${JSON.stringify(expected)};`,
+        "for (const [name, content] of Object.entries(expected)) {",
+        "  if (fs.readFileSync(name, 'utf8') !== content) process.exit(1);",
+        "}",
+        "process.stdout.write(process.cwd());",
+      ].join(" "),
+    ],
+    cwd: ".",
+    timeoutMs: 60_000,
+    network: "denied",
+    expectedExitCodes: [0],
+  };
+}
+
+function slicedSpec(perSlice = false): DelegationSpec {
+  const slices: Slice[] = [{
+    objective: "Implement slice one only.",
+    context: "slice-one.txt is the only writable path.",
+    writeAllowlist: ["slice-one.txt"],
+    forbiddenScope: [],
+    successCriteria: ["slice-one.txt contains the slice-one candidate."],
+    verification: [fileVerification("slice-one-check", {
+      "slice-one.txt": "slice one candidate\n",
+    })],
+  }, {
+    objective: "Implement slice two only.",
+    context: "Preserve slice one and update only slice-two.txt.",
+    writeAllowlist: ["slice-two.txt"],
+    forbiddenScope: [],
+    successCriteria: ["slice-two.txt contains the slice-two candidate."],
+    verification: [fileVerification("slice-two-check", {
+      "slice-one.txt": "slice one candidate\n",
+      "slice-two.txt": "slice two candidate\n",
+    })],
+  }];
+  return {
+    ...validSpec({
+      reviewers: ["correctness"],
+      maxRounds: 1,
+      ...(perSlice ? { perSlice: true } : {}),
+    }),
+    objective: "Implement both ordered slices.",
+    context: "Each slice has a disjoint write allowlist.",
+    writeAllowlist: ["slice-one.txt", "slice-two.txt"],
+    successCriteria: ["Both slice files contain their candidate content."],
+    verification: [fileVerification("final-check", {
+      "slice-one.txt": "slice one candidate\n",
+      "slice-two.txt": "slice two candidate\n",
+    })],
+    implementation: { maxIncrements: 2 },
+    slices,
+  };
+}
+
+async function commitRoleFile(
+  args: RoleRunArgs,
+  pathname: string,
+  content: string,
+): Promise<string> {
+  if (args.gitObjectAccess === undefined) {
+    throw new Error("implementer git object isolation is missing");
+  }
+  const env = {
+    GIT_OBJECT_DIRECTORY: args.gitObjectAccess.privateObjectsDir,
+    GIT_ALTERNATE_OBJECT_DIRECTORIES: args.gitObjectAccess.sharedObjectsDir,
+  };
+  await writeFile(path.join(args.worktreePath, pathname), content);
+  await runGit(args.worktreePath, ["add", pathname], env);
+  await runGit(args.worktreePath, ["commit", "-q", "-m", `update ${pathname}`], env);
+  return runGit(args.worktreePath, ["rev-parse", "HEAD"], env);
+}
+
 beforeEach(async () => {
   previousPluginData = process.env.CLAUDE_PLUGIN_DATA;
   previousNodeEnvironment = process.env.NODE_ENV;
@@ -571,6 +663,274 @@ describe("pipeline runtime namespaces", () => {
 });
 
 describe("runPipeline", () => {
+  it("advances disjoint slices through private provenance and composed gates", async () => {
+    const repo = await initSlicedRepo();
+    const runId = "pipeline-slices-advance";
+    const spec = slicedSpec();
+    const parentSnapshot = structuredClone(spec);
+    const initialRun = fakeAttempt(runId, async checkout => {
+      await writeFile(path.join(checkout, "slice-one.txt"), "slice one candidate\n");
+    });
+    let initialSpec: DelegationSpec | undefined;
+    let implementerArgs: RoleRunArgs | undefined;
+    const reviewArgs: RoleRunArgs[] = [];
+    const roleRunner = async (args: RoleRunArgs): Promise<RoleRunResult> => {
+      if (args.role === "implementer") {
+        implementerArgs = args;
+        expect(await readFile(path.join(args.worktreePath, "slice-one.txt"), "utf8"))
+          .toBe("slice one candidate\n");
+        const candidateCommit = await commitRoleFile(
+          args,
+          "slice-two.txt",
+          "slice two candidate\n",
+        );
+        return success(fenced({
+          reportVersion: "1",
+          candidateCommit,
+          status: "blocked",
+          summary: "Producer status must not control objective routing.",
+          blockers: "Untrusted Producer claim.",
+        }));
+      }
+      if (args.role === "reviewer-correctness") {
+        reviewArgs.push(args);
+        return success(fenced(approve));
+      }
+      throw new Error(`unexpected role ${args.role}`);
+    };
+    const deps = dependencies({ runId, roleRunner });
+    deps.runAttempt = async (checkoutPath, receivedSpec) => {
+      initialSpec = structuredClone(receivedSpec);
+      return initialRun(checkoutPath);
+    };
+    const acceptanceSpy = vi.spyOn(AcceptanceVerifier.prototype, "verify");
+
+    const result = await runPipeline(repo, spec, deps);
+
+    expect(initialSpec).toEqual(scopeSpecToSlice(parentSnapshot, parentSnapshot.slices![0]!));
+    expect(initialSpec).not.toHaveProperty("slices");
+    expect(spec).toEqual(parentSnapshot);
+    expect(implementerArgs?.baseSpec).toEqual(
+      scopeSpecToSlice(parentSnapshot, parentSnapshot.slices![1]!),
+    );
+    expect(implementerArgs?.pkg.spec).toEqual(implementerArgs?.baseSpec);
+    expect(implementerArgs?.pkg.baselineCommit).toBe(result.slices[0]?.candidateCommit);
+    expect(implementerArgs?.pkg.candidateCommit).toBe(result.slices[0]?.candidateCommit);
+    expect(implementerArgs?.pkg.candidateDiff).toBe("");
+    expect(implementerArgs?.pkg).not.toHaveProperty("progress");
+    expect(path.basename(implementerArgs?.worktreePath ?? "")).toBe(
+      `${runId}-slice-2-attempt-0`,
+    );
+
+    expect(reviewArgs).toHaveLength(1);
+    expect(reviewArgs[0]?.baseSpec).toEqual(parentSnapshot);
+    expect(reviewArgs[0]?.pkg.candidateDiff).toContain("slice one candidate");
+    expect(reviewArgs[0]?.pkg.candidateDiff).toContain("slice two candidate");
+    expect(reviewArgs[0]?.pkg.testEvidence).toContain('"sliceIndex":1');
+    expect(reviewArgs[0]?.pkg.testEvidence).toContain('"sliceIndex":2');
+    expect(path.basename(reviewArgs[0]?.worktreePath ?? "")).toBe(`${runId}-composed-review`);
+
+    expect(result).toMatchObject({
+      status: "decision-ready",
+      increments: [],
+      haltedSliceIndex: null,
+      failure: null,
+    });
+    expect(result.slices).toHaveLength(2);
+    expect(result.slices.map(slice => slice.route)).toEqual(["advance", "advance"]);
+    expect(result.slices[0]?.roleLogRefs).toEqual(["logs/producer.log"]);
+    expect(result.slices[1]?.roleLogRefs).toEqual([
+      "logs/role-implementer-slice-2-attempt-0-increment1.log",
+    ]);
+    expect(result.slices[1]?.verification?.scopeViolations).toEqual([]);
+    expect(result.rounds).toHaveLength(1);
+    expect(result.verification?.pass).toBe(true);
+
+    expect(acceptanceSpy.mock.calls.map(call => path.basename(call[0].worktreePath))).toEqual([
+      `${runId}-slice-1-attempt-0-verify`,
+      `${runId}-slice-2-attempt-0-verify`,
+      `${runId}-final-verify`,
+    ]);
+    const verificationIds = acceptanceSpy.mock.calls.map(call => call[0].verificationId?.());
+    expect(verificationIds).toEqual([
+      `${runId}-slice-1-attempt-0-pipeline`,
+      `${runId}-slice-2-attempt-0-pipeline`,
+      `${runId}-final-pipeline`,
+    ]);
+    const store = new ArtifactStore(runId);
+    const sliceOneStdout = result.slices[0]?.verification?.evidence.commandOutcomes[0]?.stdoutRef;
+    const sliceTwoStdout = result.slices[1]?.verification?.evidence.commandOutcomes[0]?.stdoutRef;
+    const finalStdout = result.verification?.evidence.commandOutcomes[0]?.stdoutRef;
+    expect([sliceOneStdout, sliceTwoStdout, finalStdout]).toEqual([
+      "logs/slice-1-attempt-0-pipeline-verification-0-stdout.log",
+      "logs/slice-2-attempt-0-pipeline-verification-0-stdout.log",
+      "logs/final-pipeline-verification-0-stdout.log",
+    ]);
+    const nestedWorktrees = await Promise.all(
+      [sliceOneStdout, sliceTwoStdout, finalStdout].map(async ref =>
+        path.basename(await readFile(path.join(store.runDirectory, ref!), "utf8"))),
+    );
+    expect(nestedWorktrees).toEqual([
+      `verify-${runId}-slice-1-attempt-0-pipeline`,
+      `verify-${runId}-slice-2-attempt-0-pipeline`,
+      `verify-${runId}-final-pipeline`,
+    ]);
+    expect(new Set([
+      implementerArgs?.worktreePath,
+      reviewArgs[0]?.worktreePath,
+      ...acceptanceSpy.mock.calls.map(call => call[0].worktreePath),
+      ...nestedWorktrees,
+    ]).size).toBe(8);
+
+    await expect(store.readPipelineArtifact(runId, "slice-1-attempt-0"))
+      .resolves.toMatchObject({ sliceIndex: 1, attempt: 0, route: "advance" });
+    await expect(store.readPipelineArtifact(runId, "slice-1"))
+      .resolves.toMatchObject({ index: 1, route: "advance" });
+    await expect(store.readPipelineArtifact(runId, "slice-2-attempt-0"))
+      .resolves.toMatchObject({ sliceIndex: 2, attempt: 0, route: "advance" });
+    await expect(store.readPipelineArtifact(runId, "slice-2"))
+      .resolves.toMatchObject({ index: 2, route: "advance" });
+    expect(result.attempt.candidate?.candidateCommitOid).toBe(result.finalCandidateCommit);
+    await expect(store.readResult(runId)).resolves.toMatchObject({
+      candidate: { candidateCommitOid: result.finalCandidateCommit },
+    });
+    expect(await runGit(repo, ["rev-parse", result.attempt.candidate!.anchorRef]))
+      .toBe(result.finalCandidateCommit);
+    expect(await runGit(repo, ["show", `${result.finalCandidateCommit}:slice-one.txt`]))
+      .toBe("slice one candidate");
+    expect(await runGit(repo, ["show", `${result.finalCandidateCommit}:slice-two.txt`]))
+      .toBe("slice two candidate");
+  }, { timeout: 120_000 });
+
+  it("runs independent per-slice reviewers with slice-local evidence and logs", async () => {
+    const repo = await initSlicedRepo();
+    const runId = "pipeline-slices-review";
+    const spec = slicedSpec(true);
+    const initialRun = fakeAttempt(runId, async checkout => {
+      await writeFile(path.join(checkout, "slice-one.txt"), "slice one candidate\n");
+    });
+    const reviewerArgs: RoleRunArgs[] = [];
+    const roleRunner = async (args: RoleRunArgs): Promise<RoleRunResult> => {
+      if (args.role === "implementer") {
+        const candidateCommit = await commitRoleFile(
+          args,
+          "slice-two.txt",
+          "slice two candidate\n",
+        );
+        return success(fenced({
+          reportVersion: "1",
+          candidateCommit,
+          status: "continue",
+          summary: "Producer continuation is non-authoritative.",
+          nextSteps: "Objective gates decide advancement.",
+        }));
+      }
+      if (args.role === "reviewer-correctness") {
+        reviewerArgs.push(args);
+        return success(fenced(approve));
+      }
+      throw new Error(`unexpected role ${args.role}`);
+    };
+    const deps = dependencies({ runId, roleRunner });
+    deps.runAttempt = async checkoutPath => initialRun(checkoutPath);
+
+    const result = await runPipeline(repo, spec, deps);
+
+    expect(result.status).toBe("decision-ready");
+    expect(result.slices).toHaveLength(2);
+    expect(reviewerArgs).toHaveLength(3);
+    expect(reviewerArgs.map(args => path.basename(args.worktreePath))).toEqual([
+      `${runId}-slice-1-attempt-0-review`,
+      `${runId}-slice-2-attempt-0-review`,
+      `${runId}-composed-review`,
+    ]);
+    expect(reviewerArgs[0]?.baseSpec.objective).toBe("Implement slice one only.");
+    expect(reviewerArgs[0]?.pkg.candidateDiff).toContain("slice one candidate");
+    expect(reviewerArgs[0]?.pkg.candidateDiff).not.toContain("slice two candidate");
+    expect(reviewerArgs[0]?.pkg.testEvidence).toContain('"slice-one-check"');
+    expect(reviewerArgs[1]?.baseSpec.objective).toBe("Implement slice two only.");
+    expect(reviewerArgs[1]?.pkg.candidateDiff).toContain("slice two candidate");
+    expect(reviewerArgs[1]?.pkg.candidateDiff).not.toContain("slice one candidate");
+    expect(reviewerArgs[1]?.pkg.testEvidence).toContain('"slice-two-check"');
+    expect(reviewerArgs[2]?.baseSpec.objective).toBe("Implement both ordered slices.");
+    expect(reviewerArgs[2]?.pkg.testEvidence).toContain('"sliceIndex":1');
+    expect(reviewerArgs[2]?.pkg.testEvidence).toContain('"sliceIndex":2');
+    expect(result.slices.map(slice => slice.perSliceReview)).toEqual([
+      { findings: [], contradictions: [] },
+      { findings: [], contradictions: [] },
+    ]);
+    expect(result.slices.map(slice => slice.roleLogRefs)).toEqual([
+      [
+        "logs/producer.log",
+        "logs/role-reviewer-correctness-slice-1-attempt-0-round1.log",
+      ],
+      [
+        "logs/role-implementer-slice-2-attempt-0-increment1.log",
+        "logs/role-reviewer-correctness-slice-2-attempt-0-round1.log",
+      ],
+    ]);
+  }, { timeout: 120_000 });
+
+  it("returns an explicit failed sliced result when objective routing halts", async () => {
+    const repo = await initSlicedRepo();
+    const runId = "pipeline-slices-halt";
+    const spec = slicedSpec();
+    spec.writeAllowlist.push("a.txt");
+    const initialRun = fakeAttempt(runId, async checkout => {
+      await writeFile(path.join(checkout, "a.txt"), "out of slice one scope\n");
+    });
+    let reviewerCalls = 0;
+    const roleRunner = async (args: RoleRunArgs): Promise<RoleRunResult> => {
+      if (args.role === "implementer") {
+        const candidateCommit = await commitRoleFile(
+          args,
+          "a.txt",
+          "still out of slice one scope\n",
+        );
+        return success(fenced({
+          reportVersion: "1",
+          candidateCommit,
+          status: "complete",
+          summary: "Untrusted repair remained outside the slice.",
+        }));
+      }
+      reviewerCalls += 1;
+      return success(fenced(approve));
+    };
+    const deps = dependencies({ runId, roleRunner });
+    deps.runAttempt = async checkoutPath => initialRun(checkoutPath);
+    const baselineCommit = await runGit(repo, ["rev-parse", "HEAD"]);
+
+    const result = await runPipeline(repo, spec, deps);
+
+    expect(result).toMatchObject({
+      status: "failed",
+      increments: [],
+      haltedSliceIndex: 1,
+      rounds: [],
+      verification: null,
+      finalCandidateCommit: baselineCommit,
+      failure: "verification-failure",
+    });
+    expect(result.slices).toHaveLength(1);
+    expect(result.slices[0]).toMatchObject({
+      index: 1,
+      route: "halt",
+      roundsUsed: 1,
+      reasons: ["slice verification failed", "out-of-scope diff: a.txt"],
+    });
+    expect(result.slices[0]?.attempts).toHaveLength(2);
+    expect(reviewerCalls).toBe(0);
+    expect(result.attempt.candidate?.candidateCommitOid).not.toBe(result.finalCandidateCommit);
+    const store = new ArtifactStore(runId);
+    await expect(store.readPipelineArtifact(runId, "slice-1-attempt-0"))
+      .resolves.toMatchObject({ route: "repair" });
+    await expect(store.readPipelineArtifact(runId, "slice-1-attempt-1"))
+      .resolves.toMatchObject({ route: "halt" });
+    await expect(store.readPipelineArtifact(runId, "slice-1"))
+      .resolves.toMatchObject({ route: "halt" });
+  }, { timeout: 120_000 });
+
   it("runs a completed increment, redacts and archives it, then reviews its diff", async () => {
     const repo = await initRepo();
     registerSecretValue("increment-secret-value");

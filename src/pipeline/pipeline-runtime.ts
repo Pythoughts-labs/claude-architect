@@ -11,6 +11,7 @@ import type {
 import {
   resolveImplementationConfig,
   resolveReviewConfig,
+  resolveSlices,
   type DelegationSpec,
   type ReviewerKind,
   type Slice,
@@ -43,7 +44,10 @@ import type {
   VerificationReport,
 } from "./report-types.js";
 import type { PipelineRole, RolePackage } from "./role-prompts.js";
-import type { PipelineSlice } from "./slice-runner.js";
+import {
+  runSlicePhase,
+  type PipelineSlice,
+} from "./slice-runner.js";
 import {
   runRole as defaultRunRole,
   type RoleRunArgs,
@@ -348,6 +352,72 @@ function testEvidence(attempt: AttemptResult): string {
   })));
 }
 
+function attemptLogRefs(attempt: AttemptResult): string[] {
+  return [...new Set([
+    attempt.logsRef,
+    ...attempt.executedVerification.flatMap(outcome => [outcome.stdoutRef, outcome.stderrRef]),
+  ])];
+}
+
+function verificationTestEvidence(verification: VerificationReport): Record<string, unknown> {
+  return {
+    pass: verification.pass,
+    commandResults: verification.commandResults.map(command => ({ ...command })),
+    workspaceClean: verification.workspaceClean,
+    testsDeleted: verification.testsDeleted,
+    testsSkipped: verification.testsSkipped,
+    scopeViolations: [...verification.scopeViolations],
+  };
+}
+
+function sliceTestEvidence(slices: PipelineSlice[]): string {
+  return JSON.stringify(slices.map(slice => ({
+    sliceIndex: slice.index,
+    verification: slice.verification === null
+      ? null
+      : verificationTestEvidence(slice.verification),
+    attempts: slice.attempts.map(attempt => ({
+      attempt: attempt.attempt,
+      verification: attempt.verification === null
+        ? null
+        : verificationTestEvidence(attempt.verification),
+    })),
+  })));
+}
+
+class SliceExecutionError extends RuntimeError {
+  constructor(message: string, readonly failure: FailureClassification) {
+    super(message);
+    this.name = "SliceExecutionError";
+  }
+}
+
+async function withManagedWorktree<T>(args: {
+  manager: WorktreeManager;
+  commit: string;
+  cleanupFailureMessage: string;
+  run: (worktreePath: string) => Promise<T>;
+}): Promise<T> {
+  const worktree = await args.manager.create(args.commit);
+  let primaryError: unknown;
+  try {
+    return await args.run(worktree.path);
+  } catch (error) {
+    primaryError = error;
+    throw error;
+  } finally {
+    try {
+      await worktree.cleanup();
+    } catch (cleanupError) {
+      if (primaryError === undefined) throw cleanupError;
+      throw new AggregateError(
+        [primaryError, cleanupError],
+        args.cleanupFailureMessage,
+      );
+    }
+  }
+}
+
 function escapeRegex(character: string): string {
   return /[\\^$.*+?()[\]{}|]/.test(character) ? `\\${character}` : character;
 }
@@ -532,6 +602,66 @@ export async function runReviews(args: {
     throw new Error("unreachable invalid review state");
   }
   return { ok: false, failedRoleLogRef: failed.initialLogRef, roleLogRefs };
+}
+
+async function runSliceReview(args: {
+  checkoutPath: string;
+  spec: DelegationSpec;
+  deps: PipelineDependencies;
+  runId: string;
+  baselineCommit: string;
+  candidateCommit: string;
+  namespace: string;
+  reviewers: ReviewerKind[];
+  verification: PipelineVerificationReport;
+  store: ArtifactStore;
+}): Promise<{ review: ConsolidationResult; roleLogRefs: string[] }> {
+  const ps = args.deps.ps ?? getPlatformServices();
+  return withManagedWorktree({
+    manager: new WorktreeManager(
+      args.checkoutPath,
+      `${args.runId}-${args.namespace}-review`,
+      ps,
+    ),
+    commit: args.candidateCommit,
+    cleanupFailureMessage: "slice review failed and its worktree could not be cleaned up",
+    run: async worktreePath => {
+      const diffText = await checkedGit(worktreePath, [
+        "diff",
+        `${args.baselineCommit}..${args.candidateCommit}`,
+      ]);
+      const reviewRun = await runReviews({
+        reviewers: args.reviewers,
+        spec: args.spec,
+        pkg: {
+          spec: args.spec,
+          baselineCommit: args.baselineCommit,
+          candidateCommit: args.candidateCommit,
+          candidateDiff: diffText,
+          testEvidence: JSON.stringify(verificationTestEvidence(args.verification)),
+        },
+        worktreePath,
+        deps: args.deps,
+        runId: args.runId,
+        round: 1,
+        store: args.store,
+        logNameNamespace: args.namespace,
+      });
+      if (!reviewRun.ok) {
+        throw new SliceExecutionError(
+          `slice review did not produce valid structured output (see ${reviewRun.failedRoleLogRef})`,
+          "producer-failure",
+        );
+      }
+      return {
+        review: consolidate(reviewRun.reviews.map(review => ({
+          reviewer: review.reviewer,
+          report: review.report,
+        }))),
+        roleLogRefs: reviewRun.roleLogRefs,
+      };
+    },
+  });
 }
 
 async function runFix(args: {
@@ -839,13 +969,15 @@ export async function runPipeline(
   deps: PipelineDependencies,
 ): Promise<PipelineResult> {
   const runAttemptFn = deps.runAttempt ?? defaultRunAttempt;
+  const slices = resolveSlices(spec);
+  const initialSpec = slices.length === 0 ? spec : scopeSpecToSlice(spec, slices[0]!);
   const notePhase = (phase: string): void => {
     // Best-effort progress; must never affect pipeline control flow.
     try { deps.onPhase?.(phase); } catch { /* progress reporting is advisory */ }
   };
   let runStart: RunStartContext | undefined;
   const inheritedOnRunStart = deps.onRunStart;
-  const attempt = await runAttemptFn(checkoutPath, spec, {
+  const attempt = await runAttemptFn(checkoutPath, initialSpec, {
     ...deps,
     onRunStart(context) {
       runStart = context;
@@ -876,18 +1008,223 @@ export async function runPipeline(
   await store.writePipelineActiveMarker(activeOwner);
   let pipelinePrimaryError: unknown;
   try {
-    const { reviewers, maxRounds } = resolveReviewConfig(spec);
-    const { maxIncrements } = resolveImplementationConfig(spec);
+    const reviewConfig = resolveReviewConfig(spec);
+    const { reviewers, maxRounds } = reviewConfig;
+    const maxIncrements = slices.length === 0
+      ? resolveImplementationConfig(spec).maxIncrements
+      : 1;
     let finalAttempt = attempt;
     const increments: PipelineIncrement[] = [];
     let incrementOutcome: IncrementOutcome | undefined;
     const rounds: PipelineRound[] = [];
     const baselineCommit = attempt.candidate.baseCommitOid;
     let currentCandidateCommit = attempt.candidate.candidateCommitOid;
-    const frozenTestEvidence = testEvidence(attempt);
+    let frozenTestEvidence = testEvidence(attempt);
+    let pipelineSlices: PipelineSlice[] = [];
+
+    if (slices.length > 0) {
+      const initialNamespace = "slice-1-attempt-0";
+      const initialVerification = await verifyCandidate({
+        checkoutPath,
+        spec: initialSpec,
+        deps,
+        attempt,
+        baselineCommit,
+        candidateCommit: currentCandidateCommit,
+        store,
+        namespace: initialNamespace,
+      });
+      let initialPerSliceReview: ConsolidationResult | null = null;
+      const initialRoleLogRefs = attemptLogRefs(attempt);
+      if (reviewConfig.perSlice === true) {
+        const reviewed = await runSliceReview({
+          checkoutPath,
+          spec: initialSpec,
+          deps,
+          runId: attempt.runId,
+          baselineCommit,
+          candidateCommit: currentCandidateCommit,
+          namespace: initialNamespace,
+          reviewers,
+          verification: initialVerification.verification,
+          store,
+        });
+        initialPerSliceReview = reviewed.review;
+        initialRoleLogRefs.push(...reviewed.roleLogRefs);
+      }
+
+      const completedSlices: PipelineSlice[] = [];
+      let phase: Awaited<ReturnType<typeof runSlicePhase>>;
+      try {
+        phase = await runSlicePhase(slices, baselineCommit, {
+          maxRounds,
+          initialAttempt: {
+            candidateCommit: currentCandidateCommit,
+            verification: initialVerification.verification,
+            perSliceReview: initialPerSliceReview,
+            roleLogRefs: initialRoleLogRefs,
+          },
+          runSlice: async (slice, index, base, sliceAttempt) => {
+            const namespace = `slice-${index}-attempt-${sliceAttempt}`;
+            const scopedSpec = scopeSpecToSlice(spec, slice);
+            return withManagedWorktree({
+              manager: new WorktreeManager(
+                checkoutPath,
+                `${attempt.runId}-${namespace}`,
+                ps,
+              ),
+              commit: base,
+              cleanupFailureMessage:
+                "slice implementation failed and its worktree could not be cleaned up",
+              run: async worktreePath => {
+                let gitObjectAccess: LinkedWorktreeGitAccess;
+                try {
+                  gitObjectAccess = await resolveLinkedWorktreeWritableRoots(worktreePath);
+                } catch {
+                  throw new SliceExecutionError(
+                    "slice implementer git object isolation could not be established",
+                    "sandbox-violation",
+                  );
+                }
+                const incrementRun = await runIncrement({
+                  spec: scopedSpec,
+                  pkg: {
+                    spec: scopedSpec,
+                    baselineCommit: base,
+                    candidateCommit: base,
+                    candidateDiff: "",
+                    testEvidence: completedSlices.length === 0
+                      ? testEvidence(attempt)
+                      : sliceTestEvidence(completedSlices),
+                  },
+                  worktreePath,
+                  deps,
+                  runId: attempt.runId,
+                  increment: sliceAttempt + 1,
+                  store,
+                  gitObjectAccess,
+                  ...(runStart === undefined ? {} : { runStart }),
+                  logNameNamespace: namespace,
+                });
+                if (!incrementRun.ok) {
+                  throw new SliceExecutionError(
+                    `slice implementer did not produce valid structured output (see ${incrementRun.failedRoleLogRef})`,
+                    incrementRun.failure,
+                  );
+                }
+
+                const candidateCommit = incrementRun.report.candidateCommit;
+                const provenanceFailure = await validateCandidateProvenance({
+                  worktreePath,
+                  previousCandidateCommit: base,
+                  candidateCommit,
+                  gitObjectAccess,
+                });
+                if (provenanceFailure !== null) {
+                  throw new SliceExecutionError(
+                    provenanceFailure.reason,
+                    provenanceFailure.failure,
+                  );
+                }
+                if (candidateCommit !== base) {
+                  try {
+                    await importPromotedObjects({
+                      checkoutPath,
+                      baselineCommit: base,
+                      promotedCommit: candidateCommit,
+                      access: gitObjectAccess,
+                    });
+                  } catch {
+                    throw new SliceExecutionError(
+                      "slice candidate objects could not be imported into the shared git object store",
+                      "sandbox-violation",
+                    );
+                  }
+                }
+
+                const verified = await verifyCandidate({
+                  checkoutPath,
+                  spec: scopedSpec,
+                  deps,
+                  attempt,
+                  baselineCommit: base,
+                  candidateCommit,
+                  store,
+                  namespace,
+                });
+                let perSliceReview: ConsolidationResult | null = null;
+                const roleLogRefs = [...incrementRun.roleLogRefs];
+                if (reviewConfig.perSlice === true) {
+                  const reviewed = await runSliceReview({
+                    checkoutPath,
+                    spec: scopedSpec,
+                    deps,
+                    runId: attempt.runId,
+                    baselineCommit: base,
+                    candidateCommit,
+                    namespace,
+                    reviewers,
+                    verification: verified.verification,
+                    store,
+                  });
+                  perSliceReview = reviewed.review;
+                  roleLogRefs.push(...reviewed.roleLogRefs);
+                }
+                return {
+                  candidateCommit,
+                  verification: verified.verification,
+                  perSliceReview,
+                  roleLogRefs,
+                };
+              },
+            });
+          },
+          onAttempt: evidence => store.writePipelineArtifact(
+            `slice-${evidence.sliceIndex}-attempt-${evidence.attempt}`,
+            evidence,
+          ),
+          onSlice: async slice => {
+            await store.writePipelineArtifact(`slice-${slice.index}`, slice);
+            completedSlices.push(structuredClone(slice));
+          },
+        });
+      } catch (error) {
+        if (!(error instanceof SliceExecutionError)) throw error;
+        const failed = failedResult(
+          attempt,
+          rounds,
+          completedSlices.at(-1)?.candidateCommit ?? baselineCommit,
+          error.message,
+          error.failure,
+          increments,
+          completedSlices,
+        );
+        await store.writePipelineArtifact("pipeline-result", failed);
+        return failed;
+      }
+      pipelineSlices = phase.slices;
+      currentCandidateCommit = phase.finalCandidateCommit;
+      if (phase.haltedSliceIndex !== null) {
+        const halted = phase.slices.at(-1);
+        const failed = failedResult(
+          attempt,
+          rounds,
+          currentCandidateCommit,
+          `slice phase halted at slice ${phase.haltedSliceIndex}: ${halted?.reasons.join("; ") ?? "objective gate failed"}`,
+          "verification-failure",
+          increments,
+          phase.slices,
+          phase.haltedSliceIndex,
+        );
+        await store.writePipelineArtifact("pipeline-result", failed);
+        return failed;
+      }
+      frozenTestEvidence = sliceTestEvidence(phase.slices);
+    }
+
     const candidateWorktree = await new WorktreeManager(
       checkoutPath,
-      `${attempt.runId}-pipeline`,
+      slices.length === 0 ? `${attempt.runId}-pipeline` : `${attempt.runId}-composed-review`,
       ps,
     ).create(currentCandidateCommit);
     let gitObjectAccess: LinkedWorktreeGitAccess | null = null;
@@ -904,6 +1241,7 @@ export async function runPipeline(
             "increment git object isolation could not be established",
             "sandbox-violation",
             increments,
+            pipelineSlices,
           );
         }
 
@@ -941,6 +1279,7 @@ export async function runPipeline(
                 `increment phase did not produce valid structured output (see ${incrementRun.failedRoleLogRef})`,
                 incrementRun.failure,
                 increments,
+                pipelineSlices,
               );
             }
 
@@ -960,6 +1299,7 @@ export async function runPipeline(
                 provenanceFailure.reason,
                 provenanceFailure.failure,
                 increments,
+                pipelineSlices,
               );
             }
 
@@ -993,6 +1333,7 @@ export async function runPipeline(
                   "increment objects could not be imported into the shared git object store",
                   "sandbox-violation",
                   increments,
+                  pipelineSlices,
                 );
               }
             }
@@ -1025,6 +1366,7 @@ export async function runPipeline(
             "increment phase failed unexpectedly",
             "producer-failure",
             increments,
+            pipelineSlices,
           );
         }
       }
@@ -1060,6 +1402,7 @@ export async function runPipeline(
             `review phase did not produce valid structured output (see ${reviewRun.failedRoleLogRef})`,
             "producer-failure",
             increments,
+            pipelineSlices,
           );
         }
 
@@ -1093,6 +1436,7 @@ export async function runPipeline(
             "fixer git object isolation could not be established",
             "sandbox-violation",
             increments,
+            pipelineSlices,
           );
         }
 
@@ -1116,6 +1460,7 @@ export async function runPipeline(
             `fix phase did not produce valid structured output (see ${fixRun.failedRoleLogRef})`,
             fixRun.failure,
             increments,
+            pipelineSlices,
           );
         }
         const { fix } = fixRun;
@@ -1134,6 +1479,7 @@ export async function runPipeline(
             provenanceFailure.reason,
             provenanceFailure.failure,
             increments,
+            pipelineSlices,
           );
         }
         currentCandidateCommit = fix.candidateCommit;
@@ -1147,7 +1493,7 @@ export async function runPipeline(
       }
 
       if (currentCandidateCommit !== attempt.candidate.candidateCommitOid) {
-        if (gitObjectAccess === null) {
+        if (gitObjectAccess === null && slices.length === 0) {
           return failedResult(
             attempt,
             rounds,
@@ -1155,6 +1501,7 @@ export async function runPipeline(
             "fixer git object isolation state is missing during promotion",
             "sandbox-violation",
             increments,
+            pipelineSlices,
           );
         }
         const promoted = await promoteFinalCandidate({
@@ -1164,16 +1511,19 @@ export async function runPipeline(
           baselineCommit,
           candidateCommit: currentCandidateCommit,
           store,
-          privateObjectAccess: gitObjectAccess,
+          ...(gitObjectAccess === null ? {} : { privateObjectAccess: gitObjectAccess }),
         });
         if (promoted === null) {
           return failedResult(
             attempt,
             rounds,
             currentCandidateCommit,
-            "fixer objects could not be imported into the shared git object store",
+            slices.length === 0
+              ? "fixer objects could not be imported into the shared git object store"
+              : "sliced candidate could not be promoted from the shared git object store",
             "sandbox-violation",
             increments,
+            pipelineSlices,
           );
         }
         finalAttempt = promoted.attempt;
@@ -1203,6 +1553,7 @@ export async function runPipeline(
       baselineCommit,
       candidateCommit: currentCandidateCommit,
       store,
+      ...(slices.length === 0 ? {} : { namespace: "final" }),
     });
     await store.writePipelineArtifact("verification", verified.verification);
     const lastRound = rounds.at(-1);
@@ -1223,7 +1574,7 @@ export async function runPipeline(
       status: gate.decisionReady ? "decision-ready" : "human-decision-required",
       attempt: finalAttempt,
       increments,
-      slices: [],
+      slices: pipelineSlices,
       haltedSliceIndex: null,
       rounds,
       verification: verified.verification,
