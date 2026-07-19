@@ -1114,6 +1114,55 @@ export class ArtifactStore {
     });
   }
 
+  // Reclaim a run whose delegating repository has been deleted. The intent is written
+  // before the archive is moved so a crash mid-removal is recoverable: recovery's
+  // repo-absent path finds the pending intent, sees the repository gone, and finishes the
+  // quarantine removal. No anchor fields are recorded — the repository's refs are gone, so
+  // recovery reconciles by disk state alone.
+  private async reclaimRepoAbsentArchive(
+    entry: RunEntry,
+    reason: PruneReason,
+    quarantineName: string,
+    quarantinePath: string,
+    repoRoot: string,
+  ): Promise<void> {
+    await this.appendCleanupRecord({
+      event: "prune-cleanup-intent",
+      runId: entry.runId,
+      reason,
+      anchorCleanup: "pending",
+      archiveBytes: entry.bytes,
+      quarantineName,
+      repoRoot,
+      anchorRef: null,
+      backupRef: null,
+      candidateCommitOid: null,
+      recordedAt: new Date().toISOString(),
+    });
+    const runsRootIdentity = await ensurePlainDirectory(this.runsRoot);
+    await assertDirectoryIdentity(entry.directory, entry.identity);
+    await assertDirectoryIdentity(this.runsRoot, runsRootIdentity);
+    await rename(entry.directory, quarantinePath);
+    await syncDirectory(this.runsRoot);
+    await assertDirectoryIdentity(this.runsRoot, runsRootIdentity);
+    await assertDirectoryIdentity(quarantinePath, entry.identity);
+    await rm(quarantinePath, { recursive: true, force: false });
+    await syncDirectory(this.runsRoot);
+    await this.appendCleanupRecord({
+      event: "prune-cleanup-complete",
+      runId: entry.runId,
+      reason,
+      anchorCleanup: "already-absent",
+      archiveBytes: entry.bytes,
+      quarantineName,
+      repoRoot,
+      anchorRef: null,
+      backupRef: null,
+      candidateCommitOid: null,
+      recordedAt: new Date().toISOString(),
+    });
+  }
+
   async prune(
     policy: PrunePolicy,
     dependencies: PruneDependencies = {},
@@ -1158,7 +1207,27 @@ export class ArtifactStore {
         // repository's checkout lease so recovery/integration cannot race a
         // prune that is deleting the same candidate anchors.
         const platformServices = dependencies.platformServices ?? getPlatformServices();
-        const canonical = await platformServices.canonicalizePath(initialManifest.repoRoot);
+        let canonical;
+        try {
+          canonical = await platformServices.canonicalizePath(initialManifest.repoRoot);
+        } catch (error) {
+          if (errorCode(error) !== "ENOENT") throw error;
+          // The repository this run was delegated from is gone. Its candidate/backup
+          // refs died with it and no live checkout can integrate from a vanished
+          // repository, so reclaim the archive directly — no lease, no Git — instead of
+          // retaining the run forever and blocking maxBytes/maxAge convergence. Any other
+          // canonicalization failure stays fail-closed (retained) via the outer catch.
+          // Tradeoff: a transiently-unmounted volume also reads as ENOENT, so a run on it
+          // may be reclaimed early. This is bounded — only maxAge/maxBytes-eligible runs
+          // reach here, and no Git runs, so the repository's refs survive a remount — and
+          // preferable to retaining unreclaimable runs forever.
+          await this.reclaimRepoAbsentArchive(
+            entry, reason, quarantineName, quarantinePath, initialManifest.repoRoot,
+          );
+          removed.add(entry.runId);
+          retainedBytes -= entry.bytes;
+          return;
+        }
         const repositoryIdentity = canonical.gitCommonDir ?? canonical.canonical;
         lease = await platformServices.acquireCheckoutLock(canonical.canonical);
         if (lease.repositoryIdentity !== repositoryIdentity) {

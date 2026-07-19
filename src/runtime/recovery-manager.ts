@@ -1232,6 +1232,63 @@ async function truncateCleanupTornTail(filename: string): Promise<void> {
   }
 }
 
+async function repositoryRootExists(repoRoot: string): Promise<boolean> {
+  // A non-absolute repoRoot is a malformed record, not a deleted repository: realpath
+  // would resolve it against the process CWD and could report a corrupt record as "gone",
+  // fail-open routing it into the repo-absent reconcile path. Report it present so it falls
+  // through to validateRepositoryRoot's absoluteness rejection and stays fail-closed,
+  // matching how every other anomalous cleanup record halts recovery for investigation.
+  if (!path.isAbsolute(repoRoot)) return true;
+  try {
+    await realpath(repoRoot);
+    return true;
+  } catch (error) {
+    if (isMissing(error)) return false;
+    throw error;
+  }
+}
+
+// Complete an interrupted prune whose repository was deleted after the intent was
+// written. The candidate anchor and prune-backup refs died with the repository, so
+// there is nothing to reconcile in Git; only the archive must converge. The checkout
+// lease is intentionally skipped: it serializes Git-ref reconciliation, and this path
+// performs none — a vanished repository cannot host a racing integration, and recovery
+// already holds the global recovery lock.
+//
+// Limit of the lease-skip: the normal path's per-repo checkout lease also guarantees at
+// most one pending intent per run, so a shadowed quarantine can never be orphaned. This
+// path drops that lease, so IF prune were ever wired to run concurrently across processes
+// (it has no such caller today — the checkout lease is prune's only cross-process guard),
+// two repo-gone intents for one run could interleave and a crash after the losing rename
+// could strand a quarantine dir that no surviving pending intent references. That is a
+// disk-only leak, never a double-free (rename is atomic) or fail-open. Closing it needs a
+// recovery sweep of `.prune-*` dirs unmatched by any pending intent; do that before wiring
+// concurrent multi-process prune, not before.
+async function reconcileRepoAbsentPrune(
+  runsRoot: string,
+  record: CleanupRecord,
+): Promise<void> {
+  const runDirectory = path.join(runsRoot, record.runId);
+  const quarantinePath = path.join(runsRoot, record.quarantineName);
+  const runIdentity = await plainDirectoryIdentity(runDirectory);
+  const quarantineIdentity = await plainDirectoryIdentity(quarantinePath);
+  if (runIdentity !== null && quarantineIdentity !== null) {
+    throw new RuntimeError("both retained and quarantined run archives exist during recovery");
+  }
+  // Same discriminator as the normal path: a retained run rolls back (nothing was
+  // removed), a quarantined run finishes (remove the archive that was moved aside).
+  const action = runIdentity !== null ? "rollback" : "finish";
+  if (action === "finish" && quarantineIdentity !== null) {
+    await removePlainDirectory(quarantinePath, quarantineIdentity);
+  }
+  await appendCleanupRecord(runsRoot, {
+    ...record,
+    event: action === "finish" ? "prune-cleanup-complete" : "prune-cleanup-rollback",
+    anchorCleanup: "already-absent",
+    recordedAt: new Date().toISOString(),
+  });
+}
+
 async function replayInterruptedPrunes(
   runsRoot: string,
   ps: Pick<PlatformServices, "acquireCheckoutLock">,
@@ -1252,6 +1309,23 @@ async function replayInterruptedPrunes(
     left.runId.localeCompare(right.runId))) {
     // A repoRoot-less legacy intent has neither anchor nor repository to lock.
     if (record.repoRoot === null) continue;
+    // A crash can strand a pending intent whose repository was deleted afterward.
+    // Reconcile its archive without Git and move on; otherwise validateRepositoryRoot
+    // below throws and aborts the entire recovery pass — a permanent block, because
+    // replayInterruptedPrunes runs before every other recovery step.
+    //
+    // The boundary is deliberately filesystem-definitive absence (realpath ENOENT), the
+    // expected "the user deleted their repo" lifecycle event. A repoRoot that still
+    // exists but is no longer the canonical repository (its .git removed, replaced by a
+    // file, moved so it is non-canonical, or a transient git error) is NOT treated as
+    // gone: it stays fail-closed through validateRepositoryRoot below, matching how every
+    // other anomalous cleanup record halts recovery for investigation. Widening this to
+    // "any validation failure" would fail open — a transient git hiccup would wrongly
+    // reclaim the archive and orphan a real repository's refs.
+    if (!(await repositoryRootExists(record.repoRoot))) {
+      await reconcileRepoAbsentPrune(runsRoot, record);
+      continue;
+    }
     // Serialize the archive/anchor reconciliation against the checkout
     // lifecycle: hold the repository's checkout lease exactly as prune did.
     const repoRoot = await validateRepositoryRoot(record.repoRoot);

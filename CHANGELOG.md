@@ -6,6 +6,23 @@ All notable changes to Claude Architect are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.23.0] - 2026-07-19
+
+### Fixed
+
+- Cleanup convergence when a delegating repository is deleted. Previously a
+  vanished `repoRoot` made `canonicalizePath` throw: normal-path prune caught it
+  and retained the run forever (its bytes never reclaimed, so `maxBytes`/`maxAge`
+  could not converge), and — more seriously — a repo-gone *pending* cleanup intent
+  made `validateRepositoryRoot` throw outside the per-record guard in
+  `replayInterruptedPrunes`, aborting the entire crash-recovery pass on every run
+  (a permanent block). Both paths now reconcile a repository-absent run without
+  Git: prune reclaims the archive directly (no lease, no ref cleanup — the
+  candidate and backup refs died with the repository, and no live checkout can
+  integrate from a vanished repository), and recovery detects the absent
+  repository before validation and completes or rolls back the archive by disk
+  state, converging instead of aborting.
+
 ## [0.22.0] - 2026-07-19
 
 ### Fixed

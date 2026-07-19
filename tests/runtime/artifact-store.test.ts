@@ -1037,6 +1037,35 @@ describe("ArtifactStore", () => {
     });
   });
 
+  it("reclaims a run whose repository was deleted so pruning converges", async () => {
+    const runId = "run-repo-gone-prune";
+    const store = new ArtifactStore(runId);
+    const repoRoot = await writePrunableResult(store, runId, sampleResult(runId));
+    await utimes(store.runDirectory, new Date(0), new Date(0));
+
+    // The delegating repository is deleted, so canonicalizePath(repoRoot) throws ENOENT.
+    // Without the fix the run is retained forever and its bytes never reclaimed; with it
+    // the archive is reclaimed directly and a repo-absent intent/complete pair is journaled.
+    await rm(repoRoot, { recursive: true, force: true });
+
+    const result = await store.prune({ maxAgeMs: 1_000, maxBytes: Number.MAX_SAFE_INTEGER });
+
+    expect(result.removed).toContain(runId);
+    await expect(stat(store.runDirectory)).rejects.toMatchObject({ code: "ENOENT" });
+    const records = (await readFile(
+      join(process.env.CLAUDE_PLUGIN_DATA!, "runs", "cleanup.ndjson"),
+      "utf8",
+    )).trim().split("\n").map(line => JSON.parse(line) as {
+      event: string; repoRoot: string; anchorRef: string | null; anchorCleanup: string;
+    });
+    expect(records.map(record => record.event)).toEqual([
+      "prune-cleanup-intent",
+      "prune-cleanup-complete",
+    ]);
+    expect(records[0]).toMatchObject({ repoRoot, anchorRef: null, anchorCleanup: "pending" });
+    expect(records[1]).toMatchObject({ anchorRef: null, anchorCleanup: "already-absent" });
+  });
+
   it("surfaces a checkout lease release failure after a committed removal", async () => {
     const runId = "run-prune-release-failure";
     const store = new ArtifactStore(runId);
