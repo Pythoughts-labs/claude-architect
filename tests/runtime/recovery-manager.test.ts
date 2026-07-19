@@ -1141,6 +1141,46 @@ describe("recoverStaleRuns", () => {
       .resolves.toEqual({ recovered: [historicalRunId], quarantined: [] });
   });
 
+  it("reuses an existing quarantine record when retrying the same run", async () => {
+    const runId = "run-quarantine-retry";
+    const missingCommonDir = path.join(process.env.CLAUDE_PLUGIN_DATA!, "missing-common-dir");
+    const store = await createUnfinishedRun(runId, missingCommonDir, null);
+    const runsRoot = path.dirname(store.runDirectory);
+    const journalPath = path.join(runsRoot, "recovery-quarantine.ndjson");
+    const journalBytes = Buffer.from(`${JSON.stringify({
+      event: "recovery-quarantine",
+      runId,
+      reason: "Error: prior publication completed",
+      recordedAt: "2026-07-19T00:00:00.000Z",
+    })}\n`);
+    await writeFile(journalPath, journalBytes);
+
+    await expect(recoverStaleRuns({ isProcessAlive: () => false }))
+      .resolves.toEqual({ recovered: [], quarantined: [runId] });
+
+    await expect(readFile(journalPath)).resolves.toEqual(journalBytes);
+    await expectMissing(store.runDirectory);
+    await expect(access(path.join(runsRoot, `.poisoned-${runId}`))).resolves.toBeUndefined();
+  });
+
+  it("fails closed for duplicate quarantine run ids", async () => {
+    const runId = "run-duplicate-quarantine";
+    const runsRoot = path.join(process.env.CLAUDE_PLUGIN_DATA!, "runs");
+    const record = {
+      event: "recovery-quarantine",
+      runId,
+      reason: "Error: poison",
+      recordedAt: "2026-07-19T00:00:00.000Z",
+    };
+    await mkdir(runsRoot, { recursive: true });
+    await writeFile(
+      path.join(runsRoot, "recovery-quarantine.ndjson"),
+      `${JSON.stringify(record)}\n${JSON.stringify(record)}\n`,
+    );
+
+    await expect(recoverStaleRuns()).rejects.toThrow(/duplicate.*quarantine/i);
+  });
+
   it.each([
     ["torn", "{\"event\":\"recovery-quarantine\"}"],
     ["malformed", `${JSON.stringify({
