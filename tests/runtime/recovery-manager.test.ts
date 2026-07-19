@@ -855,6 +855,29 @@ describe("recoverStaleRuns", () => {
     await expectMissing(path.join(runsRoot, `.poisoned-${runId}`));
   });
 
+  it("fails closed for a dangling quarantine journal symlink without creating its target", async ({
+    skip,
+  }) => {
+    const runsRoot = path.join(process.env.CLAUDE_PLUGIN_DATA!, "runs");
+    const externalPath = path.join(process.env.CLAUDE_PLUGIN_DATA!, "missing-external-target");
+    const journalPath = path.join(runsRoot, "recovery-quarantine.ndjson");
+    await mkdir(runsRoot, { recursive: true });
+    try {
+      await symlink(externalPath, journalPath, "file");
+    } catch (error) {
+      if (["EACCES", "EPERM", "ENOSYS"].includes(
+        (error as NodeJS.ErrnoException).code ?? "",
+      )) {
+        skip();
+        return;
+      }
+      throw error;
+    }
+
+    await expect(recoverStaleRuns()).rejects.toThrow();
+    await expectMissing(externalPath);
+  });
+
   it("fails closed for an unjournaled poisoned run directory", async () => {
     const runId = "run-unjournaled-poison";
     const runsRoot = path.join(process.env.CLAUDE_PLUGIN_DATA!, "runs");
