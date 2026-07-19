@@ -109,6 +109,9 @@ describe("recoverStaleRuns", () => {
     const repo = await initRepo();
     const runId = "run-live-recovery-mutex";
     const store = await createUnfinishedRun(runId, repo.commonDir, null);
+    const worktree = await new WorktreeManager(repo.directory, runId).create(repo.head);
+    const anchorRef = `refs/claude-architect/candidates/${runId}`;
+    await runGit(repo.directory, ["update-ref", anchorRef, repo.head]);
     const recoveryLockPath = path.join(
       process.env.CLAUDE_PLUGIN_DATA!,
       "locks",
@@ -130,8 +133,46 @@ describe("recoverStaleRuns", () => {
     })).resolves.toEqual({ recovered: [], quarantined: [] });
 
     await expect(store.readResult(runId)).resolves.toBeNull();
+    await expect(access(worktree.path)).resolves.toBeUndefined();
+    expect(await runGit(repo.directory, ["rev-parse", anchorRef])).toBe(repo.head);
     await expect(readFile(recoveryLockPath, "utf8"))
       .resolves.toBe(JSON.stringify(owner));
+  }, { timeout: 120_000 });
+
+  it("preserves a primary recovery error when lock releases also fail", async () => {
+    const repo = await initRepo();
+    const runId = "run-primary-and-release-failure";
+    await createUnfinishedRun(runId, repo.commonDir, 4242, "darwin:live");
+    const locksRoot = path.join(process.env.CLAUDE_PLUGIN_DATA!, "locks");
+    const primaryError = new Error("primary recovery failure");
+
+    let thrown: unknown;
+    try {
+      await recoverStaleRuns({
+        platformServices: {
+          os: "darwin",
+          async getProcessStartToken(pid) {
+            return pid === 4242 ? "darwin:live" : "darwin:self";
+          },
+          async terminateProcessTreeByPid() {},
+        },
+        isProcessAlive: () => true,
+        async requestCooperativeTermination() {
+          await rm(locksRoot, { recursive: true });
+          await writeFile(locksRoot, "blocks lock release");
+          throw primaryError;
+        },
+        graceMs: 0,
+      });
+    } catch (error) {
+      thrown = error;
+    }
+
+    expect(thrown).toBeInstanceOf(AggregateError);
+    const containedErrors = (error: unknown): unknown[] => error instanceof AggregateError
+      ? error.errors.flatMap(containedErrors)
+      : [error];
+    expect(containedErrors(thrown)).toContain(primaryError);
   }, { timeout: 120_000 });
 
   it("reclaims a dead recovery mutex before recovering stale runs", async () => {

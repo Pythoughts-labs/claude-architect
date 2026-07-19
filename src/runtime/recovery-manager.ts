@@ -1,7 +1,8 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { constants } from "node:fs";
 import {
   lstat,
+  link,
   mkdir,
   open,
   readdir,
@@ -686,31 +687,64 @@ async function createOwnedLock(
   lockPath: string,
   contents: Buffer,
 ): Promise<AcquiredLock | null> {
+  const temporaryPath = path.join(
+    path.dirname(lockPath),
+    `.recovery-lock-${randomUUID()}.tmp`,
+  );
   let handle;
+  let primaryError: unknown;
   try {
     handle = await open(
-      lockPath,
+      temporaryPath,
       constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | NO_FOLLOW,
       0o600,
     );
-  } catch (error) {
-    if (errorCode(error) === "EEXIST") return null;
-    throw error;
-  }
-  try {
     await handle.writeFile(contents);
     await handle.sync();
     const metadata = await handle.stat();
-    if (!metadata.isFile()) {
+    if (!metadata.isFile() || metadata.size !== contents.byteLength) {
       throw new RuntimeError("new recovery lock is not a regular file");
+    }
+    await handle.close();
+    handle = undefined;
+    try {
+      await link(temporaryPath, lockPath);
+    } catch (error) {
+      if (errorCode(error) === "EEXIST") return null;
+      throw error;
     }
     return {
       lockPath,
       identity: { dev: metadata.dev, ino: metadata.ino },
       contents,
     };
+  } catch (error) {
+    primaryError = error;
+    throw error;
   } finally {
-    await handle.close();
+    let cleanupError: unknown;
+    try {
+      await handle?.close();
+    } catch (error) {
+      cleanupError = error;
+    }
+    try {
+      await rm(temporaryPath, { force: true });
+    } catch (error) {
+      cleanupError = cleanupError === undefined
+        ? error
+        : new AggregateError(
+          [cleanupError, error],
+          "temporary recovery lock could not be closed or removed",
+        );
+    }
+    if (cleanupError !== undefined) {
+      if (primaryError === undefined) throw cleanupError;
+      throw new AggregateError(
+        [primaryError, cleanupError],
+        "recovery lock publication failed and its temporary file could not be cleaned up",
+      );
+    }
   }
 }
 
@@ -820,6 +854,7 @@ export async function recoverStaleRuns(
   );
   if (recoveryLock === null) return { recovered: [], quarantined: [] };
 
+  let primaryError: unknown;
   try {
     const runsRoot = path.join(root, "runs");
     const runsIdentity = await plainDirectoryIdentity(runsRoot);
@@ -877,6 +912,7 @@ export async function recoverStaleRuns(
         pid => ps.getProcessStartToken(pid),
       );
       if (checkoutLock === null) continue;
+      let primaryError: unknown;
       try {
         await recoverRun(
           record,
@@ -888,8 +924,19 @@ export async function recoverStaleRuns(
           graceMs,
         );
         recovered.push(record.runId);
+      } catch (error) {
+        primaryError = error;
+        throw error;
       } finally {
-        await releaseOwnedLock(checkoutLock);
+        try {
+          await releaseOwnedLock(checkoutLock);
+        } catch (cleanupError) {
+          if (primaryError === undefined) throw cleanupError;
+          throw new AggregateError(
+            [primaryError, cleanupError],
+            "stale-run recovery failed and its checkout lock could not be released",
+          );
+        }
       }
     }
     await reclaimLocks(
@@ -898,7 +945,18 @@ export async function recoverStaleRuns(
       pid => ps.getProcessStartToken(pid),
     );
     return { recovered, quarantined: [] };
+  } catch (error) {
+    primaryError = error;
+    throw error;
   } finally {
-    await releaseOwnedLock(recoveryLock);
+    try {
+      await releaseOwnedLock(recoveryLock);
+    } catch (cleanupError) {
+      if (primaryError === undefined) throw cleanupError;
+      throw new AggregateError(
+        [primaryError, cleanupError],
+        "startup recovery failed and its recovery lock could not be released",
+      );
+    }
   }
 }
