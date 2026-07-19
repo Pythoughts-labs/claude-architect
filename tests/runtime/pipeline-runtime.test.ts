@@ -11,6 +11,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { git } from "../../src/git/git-exec.js";
+import { WorktreeManager } from "../../src/git/worktree-manager.js";
 import { applyCandidateTree } from "../../src/integrate/controlled-integrator.js";
 import { delegatePipelineOutput } from "../../src/mcp/server.js";
 import { getPlatformServices } from "../../src/platform/select-platform.js";
@@ -37,6 +38,7 @@ import {
   clearRegisteredSecrets,
   registerSecretValue,
 } from "../../src/runtime/redaction.js";
+import { recoverStaleRuns } from "../../src/runtime/recovery-manager.js";
 
 const temporaryPaths: string[] = [];
 let previousPluginData: string | undefined;
@@ -632,6 +634,224 @@ describe("runPipeline", () => {
     expect(result.increments).toEqual([]);
   }, { timeout: 120_000 });
 
+  it("rejects an increment report whose candidate does not match worktree HEAD", async () => {
+    const repo = await initRepo();
+    let reviewerCalls = 0;
+    const scripted = incrementRoleRunner(async args => {
+      await commitIncrement(args, "real\n");
+      return success(fenced({
+        reportVersion: "1",
+        candidateCommit: args.pkg.candidateCommit,
+        status: "complete",
+        summary: "reported the stale candidate",
+      }));
+    });
+    const roleRunner = async (args: RoleRunArgs): Promise<RoleRunResult> => {
+      if (args.role === "reviewer-correctness") {
+        reviewerCalls += 1;
+        throw new Error("reviewer must not run after increment provenance failure");
+      }
+      return scripted(args);
+    };
+
+    const result = await runPipeline(
+      repo,
+      implementationSpec(2),
+      dependencies({ runId: "pipeline-increment-head-mismatch", roleRunner }),
+    );
+
+    expect(result.status).toBe("failed");
+    expect(result.failure).toBe("producer-failure");
+    expect(result.gate.reasons).toContain(
+      "fix phase reported a candidate commit that does not match its worktree HEAD",
+    );
+    expect(result.increments).toEqual([]);
+    expect(result.finalCandidateCommit).toBe(result.attempt.candidate?.candidateCommitOid);
+    expect(reviewerCalls).toBe(0);
+  }, { timeout: 120_000 });
+
+  it("rejects an increment report whose candidate commit does not exist", async () => {
+    const repo = await initRepo();
+    let reviewerCalls = 0;
+    const scripted = incrementRoleRunner(async () => success(fenced({
+      reportVersion: "1",
+      candidateCommit: "d".repeat(40),
+      status: "complete",
+      summary: "reported a nonexistent candidate",
+    })));
+    const roleRunner = async (args: RoleRunArgs): Promise<RoleRunResult> => {
+      if (args.role === "reviewer-correctness") {
+        reviewerCalls += 1;
+        throw new Error("reviewer must not run after increment provenance failure");
+      }
+      return scripted(args);
+    };
+
+    const result = await runPipeline(
+      repo,
+      implementationSpec(2),
+      dependencies({ runId: "pipeline-increment-missing", roleRunner }),
+    );
+
+    expect(result.status).toBe("failed");
+    expect(result.failure).toBe("producer-failure");
+    expect(result.gate.reasons).toContain("fix phase reported a missing candidate commit");
+    expect(result.increments).toEqual([]);
+    expect(result.finalCandidateCommit).toBe(result.attempt.candidate?.candidateCommitOid);
+    expect(reviewerCalls).toBe(0);
+  }, { timeout: 120_000 });
+
+  it("rejects an increment HEAD that is not descended from the reviewed candidate", async () => {
+    const repo = await initRepo();
+    let reviewerCalls = 0;
+    const scripted = incrementRoleRunner(async args => {
+      if (args.gitObjectAccess === undefined) {
+        throw new Error("implementer git object isolation is missing");
+      }
+      const env = {
+        GIT_OBJECT_DIRECTORY: args.gitObjectAccess.privateObjectsDir,
+        GIT_ALTERNATE_OBJECT_DIRECTORIES: args.gitObjectAccess.sharedObjectsDir,
+      };
+      const baselineTree = await runGit(
+        args.worktreePath,
+        ["rev-parse", `${args.pkg.baselineCommit}^{tree}`],
+        env,
+      );
+      const sibling = await runGit(args.worktreePath, [
+        "commit-tree",
+        baselineTree,
+        "-p",
+        args.pkg.baselineCommit,
+        "-m",
+        "discard reviewed candidate",
+      ], env);
+      await runGit(args.worktreePath, [
+        "update-ref",
+        "HEAD",
+        sibling,
+        args.pkg.candidateCommit,
+      ], env);
+      return success(fenced({
+        reportVersion: "1",
+        candidateCommit: sibling,
+        status: "complete",
+        summary: "replaced the reviewed lineage",
+      }));
+    });
+    const roleRunner = async (args: RoleRunArgs): Promise<RoleRunResult> => {
+      if (args.role === "reviewer-correctness") {
+        reviewerCalls += 1;
+        throw new Error("reviewer must not run after increment provenance failure");
+      }
+      return scripted(args);
+    };
+
+    const result = await runPipeline(
+      repo,
+      implementationSpec(2),
+      dependencies({ runId: "pipeline-increment-sibling", roleRunner }),
+    );
+
+    expect(result.status).toBe("failed");
+    expect(result.failure).toBe("sandbox-violation");
+    expect(result.gate.reasons).toContain(
+      "fix phase candidate commit is not descended from the reviewed candidate",
+    );
+    expect(result.increments).toEqual([]);
+    expect(result.finalCandidateCommit).toBe(result.attempt.candidate?.candidateCommitOid);
+    expect(reviewerCalls).toBe(0);
+  }, { timeout: 120_000 });
+
+  it("fails closed without review when implementer confinement is unavailable", async () => {
+    const repo = await initRepo();
+    let reviewerCalls = 0;
+    const scripted = incrementRoleRunner(async () => ({
+      ok: false,
+      rawOutput: "",
+      failure: "sandbox-violation",
+      producerId: "stub",
+    }));
+    const roleRunner = async (args: RoleRunArgs): Promise<RoleRunResult> => {
+      if (args.role === "reviewer-correctness") {
+        reviewerCalls += 1;
+        throw new Error("reviewer must not run after implementer confinement failure");
+      }
+      return scripted(args);
+    };
+
+    const result = await runPipeline(
+      repo,
+      implementationSpec(2),
+      dependencies({ runId: "pipeline-increment-no-confinement", roleRunner }),
+    );
+
+    expect(result.status).toBe("failed");
+    expect(result.failure).toBe("sandbox-violation");
+    expect(result.increments).toEqual([]);
+    expect(reviewerCalls).toBe(0);
+  }, { timeout: 120_000 });
+
+  it("stops before dispatching another increment when only the commit oid changes", async () => {
+    const repo = await initRepo();
+    let implementerCalls = 0;
+    const roleRunner = incrementRoleRunner(async (args, call) => {
+      implementerCalls += 1;
+      const commit = await commitIncrement(
+        args,
+        call === 1 ? "real progress\n" : "",
+        call === 2,
+      );
+      return success(fenced({
+        reportVersion: "1",
+        candidateCommit: commit,
+        status: "continue",
+        summary: `increment ${call}`,
+        nextSteps: "continue",
+      }));
+    });
+
+    const result = await runPipeline(
+      repo,
+      implementationSpec(4),
+      dependencies({ runId: "pipeline-increment-tree-progress", roleRunner }),
+    );
+
+    expect(result.increments.map(entry => entry.increment)).toEqual([2, 3]);
+    expect(implementerCalls).toBe(2);
+  }, { timeout: 120_000 });
+
+  it("redacts increment secrets from archives, progress notes, and results", async () => {
+    const repo = await initRepo();
+    const runId = "pipeline-increment-secret-hygiene";
+    const secret = "increment-secret-XYZ";
+    registerSecretValue(secret);
+    let incrementThreeProgress = "";
+    const roleRunner = incrementRoleRunner(async (args, call) => {
+      if (call === 2) incrementThreeProgress = args.pkg.progress ?? "";
+      const commit = await commitIncrement(args, `secret progress ${call}\n`);
+      return success(fenced({
+        reportVersion: "1",
+        candidateCommit: commit,
+        status: call === 1 ? "continue" : "complete",
+        summary: call === 1 ? `summary ${secret}` : "complete",
+        ...(call === 1 ? { nextSteps: `next ${secret}` } : {}),
+      }));
+    });
+
+    const result = await runPipeline(
+      repo,
+      implementationSpec(3),
+      dependencies({ runId, roleRunner }),
+    );
+
+    const store = new ArtifactStore(runId);
+    const archived = await store.readPipelineArtifact<IncrementReport>(runId, "increment-2");
+    expect(archived?.summary).not.toContain(secret);
+    expect(archived?.summary).toContain("[s]");
+    expect(incrementThreeProgress).not.toContain(secret);
+    expect(JSON.stringify(result)).not.toContain(secret);
+  }, { timeout: 120_000 });
+
   it("passes only the immediately previous increment as progress", async () => {
     const repo = await initRepo();
     let incrementFourProgress = "";
@@ -682,6 +902,67 @@ describe("runPipeline", () => {
     };
     expect(result.status).toBe("decision-ready");
     expect(JSON.stringify(result.gate)).toBe(JSON.stringify(preIncrementGate));
+  }, { timeout: 120_000 });
+
+  it("preserves and skips a terminal run recovered after an increment archive", async () => {
+    const repo = await initRepo();
+    const runId = "pipeline-increment-crash";
+    const baselineCommit = await runGit(repo, ["rev-parse", "HEAD"]);
+    await writeFile(path.join(repo, "a.txt"), "candidate before crash\n");
+    await runGit(repo, ["add", "a.txt"]);
+    await runGit(repo, ["commit", "-q", "-m", "candidate before crash"]);
+    const candidateCommit = await runGit(repo, ["rev-parse", "HEAD"]);
+    const candidate = await artifactFor(repo, runId, baselineCommit, candidateCommit);
+    const store = new ArtifactStore(runId);
+    await store.writeResult(attemptResult(runId, candidate));
+    const canonicalCommonDir = await realpath(path.join(repo, ".git"));
+    const lockKey = createHash("sha256").update(canonicalCommonDir).digest("hex");
+    const writerPid = 424_242;
+    await writeFile(path.join(store.runDirectory, "run-start.json"), `${JSON.stringify({
+      runId,
+      lockKey,
+      canonicalCommonDir,
+      pid: writerPid,
+      processToken: null,
+      startedAt: "2026-07-18T12:00:00.000Z",
+    })}\n`);
+    await new WorktreeManager(
+      repo,
+      `${runId}-pipeline`,
+      getPlatformServices(),
+    ).create(candidateCommit);
+    await store.writePipelineArtifact("increment-2", {
+      reportVersion: "1",
+      candidateCommit,
+      status: "continue",
+      summary: "increment two",
+    });
+    const terminated: number[] = [];
+
+    const recovery = await recoverStaleRuns({
+      platformServices: {
+        os: "darwin",
+        async getProcessStartToken() { return null; },
+        async terminateProcessTreeByPid(pid) { terminated.push(pid); },
+      },
+      isProcessAlive: () => false,
+    });
+
+    expect(recovery).toEqual({ recovered: [] });
+    expect(terminated).toEqual([]);
+    await expect(store.readResult(runId)).resolves.toMatchObject({
+      status: "verified-candidate",
+    });
+    const anchor = await git(repo, [
+      "rev-parse",
+      "--verify",
+      "--quiet",
+      `refs/claude-architect/candidates/${runId}^{commit}`,
+    ]);
+    expect(anchor.exitCode, anchor.stderr).toBe(0);
+    expect(anchor.stdout.trim()).toBe(candidateCommit);
+    await expect(store.readPipelineArtifact(runId, "increment-2"))
+      .resolves.toMatchObject({ summary: "increment two" });
   }, { timeout: 120_000 });
 
   it("returns decision-ready after a clean review round without fixing", async () => {
