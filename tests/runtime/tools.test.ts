@@ -16,9 +16,8 @@ import {
   type ToolArtifactStore,
   type ToolDependencies,
 } from "../../src/mcp/tools.js";
-import { withRepoLock } from "../../src/mcp/serialize.js";
 import type { PipelineResult } from "../../src/pipeline/pipeline-runtime.js";
-import type { PlatformServices } from "../../src/platform/platform-services.js";
+import type { CheckoutLock, PlatformServices } from "../../src/platform/platform-services.js";
 import { getPlatformServices } from "../../src/platform/select-platform.js";
 import type { AttemptResult, CandidateArtifact } from "../../src/protocol/attempt-result.js";
 import type { DelegationSpec } from "../../src/protocol/delegation-spec.js";
@@ -199,26 +198,6 @@ function fakePlatform(): PlatformServices {
   } as PlatformServices;
 }
 
-async function holdRepoLock(key: string): Promise<() => Promise<void>> {
-  let markHeld!: () => void;
-  let allowRelease!: () => void;
-  const held = new Promise<void>(resolve => { markHeld = resolve; });
-  const releaseAllowed = new Promise<void>(resolve => { allowRelease = resolve; });
-  const pending = withRepoLock(key, async () => {
-    markHeld();
-    await releaseAllowed;
-  });
-  await held;
-  return async () => {
-    allowRelease();
-    await pending;
-  };
-}
-
-async function waitForLockQueue(): Promise<void> {
-  await new Promise<void>(resolve => setImmediate(resolve));
-}
-
 function gitResult(stdout = "", exitCode = 0): GitResult {
   return { stdout, stderr: "", exitCode };
 }
@@ -247,6 +226,25 @@ function dependencies(
       detail: "candidate tree applied",
     }),
   };
+}
+
+type LifecycleOperation = "review" | "decide" | "integrate";
+
+function invokeLifecycle(
+  operation: LifecycleOperation,
+  checkoutPath: string,
+  deps: ToolDependencies,
+): Promise<unknown> {
+  if (operation === "review") return handleReviewCandidate(checkoutPath, "run-tools", deps);
+  if (operation === "decide") {
+    return handleDecideCandidate(checkoutPath, "run-tools", "accepted", deps);
+  }
+  return handleIntegrateCandidate(
+    checkoutPath,
+    "run-tools",
+    candidate.manifestHash,
+    deps,
+  );
 }
 
 async function git(cwd: string, args: string[]): Promise<string> {
@@ -519,25 +517,32 @@ describe("MCP tool handlers", () => {
   });
 
   it.each(["review", "decide", "integrate"] as const)(
-    "reloads the archive after a queued %s lifecycle request acquires the repository lock",
+    "reloads failed sliced authority after a queued %s acquires the checkout file lease",
     async operation => {
-      const store = new FakeStore();
+      const repoRoot = await createRepository();
+      const platformServices = getPlatformServices();
+      const store = new FakeStore(result, manifestFor(repoRoot));
       if (operation === "integrate") {
         store.decision = { decision: "accepted", recordedAt: "2026-07-19T00:00:00.000Z" };
       }
-      let markCallerCanonicalized!: () => void;
-      const callerCanonicalized = new Promise<void>(resolve => {
-        markCallerCanonicalized = resolve;
-      });
-      const basePlatform = fakePlatform();
-      const ps = {
-        ...basePlatform,
-        canonicalizePath: async (input: string) => {
-          const canonical = await basePlatform.canonicalizePath(input);
-          if (input === "/supplied/repo") markCallerCanonicalized();
-          return canonical;
+      let markAcquiring!: () => void;
+      const acquisitionStarted = new Promise<void>(resolve => { markAcquiring = resolve; });
+      let acquireCalls = 0;
+      let releaseCalls = 0;
+      const ps = Object.assign(Object.create(platformServices), {
+        async acquireCheckoutLock(checkout: string): Promise<CheckoutLock> {
+          acquireCalls += 1;
+          markAcquiring();
+          const lock = await platformServices.acquireCheckoutLock(checkout);
+          return {
+            ...lock,
+            async release() {
+              releaseCalls += 1;
+              await lock.release();
+            },
+          };
         },
-      } as PlatformServices;
+      }) as PlatformServices;
       const deps = dependencies(store, ps);
       let gitCalls = 0;
       let integrationCalls = 0;
@@ -550,24 +555,18 @@ describe("MCP tool handlers", () => {
         integrationCalls += 1;
         return { integration: "applied", detail: "candidate tree applied" };
       };
-      const releaseLock = await holdRepoLock("/canonical/repo/.git");
-      const pending = operation === "review"
-        ? handleReviewCandidate("/supplied/repo", "run-tools", deps)
-        : operation === "decide"
-          ? handleDecideCandidate("/supplied/repo", "run-tools", "accepted", deps)
-          : handleIntegrateCandidate(
-            "/supplied/repo",
-            "run-tools",
-            candidate.manifestHash,
-            deps,
-          );
-
-      await callerCanonicalized;
-      await waitForLockQueue();
+      const heldLock = await platformServices.acquireCheckoutLock(repoRoot);
+      const pending = invokeLifecycle(operation, repoRoot, deps);
+      const first = await Promise.race([
+        acquisitionStarted.then(() => "acquiring" as const),
+        pending.then(() => "settled" as const),
+      ]);
       store.storedResult = failedSlicedResult;
-      await releaseLock();
+      await heldLock.release();
+      const output = await pending;
 
-      await expect(pending).resolves.toEqual(operation === "review"
+      expect.soft(first).toBe("acquiring");
+      expect.soft(output).toEqual(operation === "review"
         ? {
           ok: false,
           error: "candidate-not-found",
@@ -578,56 +577,74 @@ describe("MCP tool handlers", () => {
           error: "candidate-not-verified",
           diagnostic: "candidate did not complete independent verification",
         });
-      expect(gitCalls).toBe(0);
-      expect(integrationCalls).toBe(0);
-      if (operation === "decide") expect(store.decision).toBeNull();
+      expect.soft(acquireCalls).toBe(1);
+      expect.soft(releaseCalls).toBe(1);
+      expect.soft(gitCalls).toBe(0);
+      expect.soft(integrationCalls).toBe(0);
+      if (operation === "decide") expect.soft(store.decision).toBeNull();
     },
   );
 
-  it("rejects an archived repository identity that changes before the queued archive load", async () => {
-    const repoA = "/canonical/repo-a";
-    const repoB = "/canonical/repo-b";
-    const callerPath = "/supplied/repo-a";
-    const store = new FakeStore(result, { ...manifest, repoRoot: repoA });
-    let markCallerCanonicalized!: () => void;
-    const callerCanonicalized = new Promise<void>(resolve => {
-      markCallerCanonicalized = resolve;
-    });
-    const ps = {
-      ...fakePlatform(),
-      canonicalizePath: async (input: string) => {
-        if (input === callerPath) {
-          markCallerCanonicalized();
-          return { input, canonical: repoA, gitCommonDir: `${repoA}/.git` };
-        }
-        if (input === repoA || input === repoB) {
-          return { input, canonical: input, gitCommonDir: `${input}/.git` };
-        }
-        throw new Error(`unexpected path: ${input}`);
-      },
-    } as PlatformServices;
-    const deps = dependencies(store, ps);
-    let gitCalls = 0;
-    const originalGit = deps.git!;
-    deps.git = async (cwd, args, indexFile) => {
-      gitCalls += 1;
-      return originalGit(cwd, args, indexFile);
-    };
-    const releaseLock = await holdRepoLock(`${repoA}/.git`);
-    const pending = handleReviewCandidate(callerPath, "run-tools", deps);
+  it.each(["review", "decide", "integrate"] as const)(
+    "rejects %s caller identity drift before loading archive authority",
+    async operation => {
+      const callerIdentity = "/canonical/repo-a/.git";
+      const acquisitionIdentity = "/canonical/repo-b/.git";
+      const store = new FakeStore();
+      if (operation === "integrate") {
+        store.decision = { decision: "accepted", recordedAt: "2026-07-19T00:00:00.000Z" };
+      }
+      let acquireCalls = 0;
+      let releaseCalls = 0;
+      let storeFactoryCalls = 0;
+      const ps = {
+        ...fakePlatform(),
+        canonicalizePath: async (input: string) => ({
+          input,
+          canonical: "/canonical/repo-a",
+          gitCommonDir: callerIdentity,
+        }),
+        acquireCheckoutLock: async (): Promise<CheckoutLock> => {
+          acquireCalls += 1;
+          return {
+            key: "acquisition-lock",
+            repositoryIdentity: acquisitionIdentity,
+            async release() { releaseCalls += 1; },
+          };
+        },
+      } as PlatformServices;
+      const deps = dependencies(store, ps);
+      deps.storeFactory = () => {
+        storeFactoryCalls += 1;
+        return store;
+      };
+      let gitCalls = 0;
+      let integrationCalls = 0;
+      const originalGit = deps.git!;
+      deps.git = async (cwd, args, indexFile) => {
+        gitCalls += 1;
+        return originalGit(cwd, args, indexFile);
+      };
+      deps.applyCandidateTree = async () => {
+        integrationCalls += 1;
+        return { integration: "applied", detail: "candidate tree applied" };
+      };
 
-    await callerCanonicalized;
-    await waitForLockQueue();
-    store.storedManifest = { ...manifest, repoRoot: repoB };
-    await releaseLock();
+      const output = await invokeLifecycle(operation, "/supplied/repo-a", deps);
 
-    await expect(pending).resolves.toEqual({
-      ok: false,
-      error: "run-checkout-mismatch",
-      diagnostic: "candidate run belongs to a different repository than the supplied checkoutPath",
-    });
-    expect(gitCalls).toBe(0);
-  });
+      expect.soft(output).toEqual({
+        ok: false,
+        error: "run-checkout-mismatch",
+        diagnostic: "supplied checkout repository identity changed before checkout lease acquisition",
+      });
+      expect.soft(acquireCalls).toBe(1);
+      expect.soft(releaseCalls).toBe(1);
+      expect.soft(storeFactoryCalls).toBe(0);
+      expect.soft(gitCalls).toBe(0);
+      expect.soft(integrationCalls).toBe(0);
+      if (operation === "decide") expect.soft(store.decision).toBeNull();
+    },
+  );
 
   it("holds the checkout file lock while recording a decision and releases it afterwards", async () => {
     const repoRoot = await createRepository();
@@ -784,7 +801,7 @@ describe("MCP tool handlers", () => {
     let integrationCalls = 0;
     deps.applyCandidateTree = async args => {
       integrationCalls += 1;
-      expect(args).toEqual({
+      expect(args).toMatchObject({
         repoRoot: "/canonical/repo",
         artifact: candidate,
         expectedArtifactHash: candidate.manifestHash,
@@ -819,55 +836,203 @@ describe("MCP tool handlers", () => {
     expect(integrationCalls).toBe(1);
   });
 
-  it("refuses to decide while the delegation pipeline is active", async () => {
+  it("passes the exact lifecycle checkout lease into integration without nested ownership", async () => {
     const store = new FakeStore();
-    store.pipelineActiveMarker = {
-      pid: process.pid,
-      processToken: null,
-      startedAt: "2026-07-18T12:00:00.000Z",
-      sliced: true,
-    };
-
-    await expect(handleDecideCandidate(
-      "/canonical/repo",
-      "run-tools",
-      "accepted",
-      dependencies(store),
-    )).resolves.toEqual({
-      ok: false,
-      error: "pipeline-active",
-      diagnostic: "the delegation pipeline for this run is still active",
-    });
-    expect(store.decision).toBeNull();
-  });
-
-  it("refuses to integrate while the delegation pipeline is active", async () => {
-    const store = new FakeStore();
-    store.pipelineActiveMarker = {
-      pid: process.pid,
-      processToken: null,
-      startedAt: "2026-07-18T12:00:00.000Z",
-      sliced: false,
-    };
     store.decision = { decision: "accepted", recordedAt: "2026-07-18T12:01:00.000Z" };
-    const deps = dependencies(store);
+    let held = false;
+    let acquireCalls = 0;
+    let releaseCalls = 0;
+    const checkoutLock: CheckoutLock = {
+      key: "handler-integration-lock",
+      repositoryIdentity: "/canonical/repo/.git",
+      async release() {
+        expect(held).toBe(true);
+        releaseCalls += 1;
+        held = false;
+      },
+    };
+    let ps: PlatformServices;
+    ps = {
+      ...fakePlatform(),
+      async acquireCheckoutLock() {
+        acquireCalls += 1;
+        held = true;
+        return checkoutLock;
+      },
+    } as PlatformServices;
+    const deps = dependencies(store, ps);
     let integrationCalls = 0;
-    deps.applyCandidateTree = async () => {
+    deps.applyCandidateTree = async args => {
       integrationCalls += 1;
+      expect(held).toBe(true);
+      expect(args.borrowedCheckoutLock).toBe(checkoutLock);
+      expect(args.platformServices).toBe(ps);
       return { integration: "applied", detail: "candidate tree applied" };
     };
 
-    await expect(handleIntegrateCandidate(
+    await expect(invokeLifecycle("integrate", "/canonical/repo", deps)).resolves.toEqual({
+      integration: "applied",
+      detail: "candidate tree applied",
+    });
+    expect(acquireCalls).toBe(1);
+    expect(releaseCalls).toBe(1);
+    expect(integrationCalls).toBe(1);
+    expect(held).toBe(false);
+  });
+
+  it.each(["review", "decide", "integrate"] as const)(
+    "refuses to %s an active pipeline while holding the checkout lease",
+    async operation => {
+      const store = new FakeStore();
+      store.pipelineActiveMarker = {
+        pid: process.pid,
+        processToken: null,
+        startedAt: "2026-07-18T12:00:00.000Z",
+        sliced: true,
+      };
+      if (operation === "integrate") {
+        store.decision = { decision: "accepted", recordedAt: "2026-07-18T12:01:00.000Z" };
+      }
+      let held = false;
+      let acquireCalls = 0;
+      let releaseCalls = 0;
+      let markerReads = 0;
+      const ps = {
+        ...fakePlatform(),
+        acquireCheckoutLock: async (): Promise<CheckoutLock> => {
+          acquireCalls += 1;
+          held = true;
+          return {
+            key: "active-pipeline-lock",
+            repositoryIdentity: "/canonical/repo/.git",
+            async release() {
+              expect(held).toBe(true);
+              releaseCalls += 1;
+              held = false;
+            },
+          };
+        },
+      } as PlatformServices;
+      store.readPipelineActiveMarker = async () => {
+        markerReads += 1;
+        expect(held).toBe(true);
+        return store.pipelineActiveMarker;
+      };
+      const deps = dependencies(store, ps);
+      let gitCalls = 0;
+      let integrationCalls = 0;
+      const originalGit = deps.git!;
+      deps.git = async (cwd, args, indexFile) => {
+        gitCalls += 1;
+        return originalGit(cwd, args, indexFile);
+      };
+      deps.applyCandidateTree = async () => {
+        integrationCalls += 1;
+        return { integration: "applied", detail: "candidate tree applied" };
+      };
+
+      await expect(invokeLifecycle(operation, "/canonical/repo", deps)).resolves.toEqual({
+        ok: false,
+        error: "pipeline-active",
+        diagnostic: "the delegation pipeline for this run is still active",
+      });
+      expect.soft(acquireCalls).toBe(1);
+      expect.soft(releaseCalls).toBe(1);
+      expect.soft(markerReads).toBe(1);
+      expect.soft(gitCalls).toBe(0);
+      expect.soft(integrationCalls).toBe(0);
+      expect.soft(held).toBe(false);
+      if (operation === "decide") expect.soft(store.decision).toBeNull();
+    },
+  );
+
+  it.each(["review", "decide"] as const)(
+    "reports %s checkout lease release failure after the action completes",
+    async operation => {
+      let releaseCalls = 0;
+      const ps = {
+        ...fakePlatform(),
+        acquireCheckoutLock: async (): Promise<CheckoutLock> => ({
+          key: "release-failure-lock",
+          repositoryIdentity: "/canonical/repo/.git",
+          async release() {
+            releaseCalls += 1;
+            throw new Error("lifecycle checkout release failed");
+          },
+        }),
+      } as PlatformServices;
+
+      await expect(invokeLifecycle(
+        operation,
+        "/canonical/repo",
+        dependencies(new FakeStore(), ps),
+      )).resolves.toEqual({
+        ok: false,
+        error: "runtime-error",
+        diagnostic: "lifecycle checkout release failed",
+      });
+      expect(releaseCalls).toBe(1);
+    },
+  );
+
+  it("preserves an applied integration result when lifecycle lease release fails", async () => {
+    const store = new FakeStore();
+    store.decision = { decision: "accepted", recordedAt: "2026-07-18T12:01:00.000Z" };
+    let releaseCalls = 0;
+    const ps = {
+      ...fakePlatform(),
+      acquireCheckoutLock: async (): Promise<CheckoutLock> => ({
+        key: "integration-release-failure-lock",
+        repositoryIdentity: "/canonical/repo/.git",
+        async release() {
+          releaseCalls += 1;
+          throw new Error("lifecycle checkout release failed");
+        },
+      }),
+    } as PlatformServices;
+
+    await expect(invokeLifecycle(
+      "integrate",
+      "/canonical/repo",
+      dependencies(store, ps),
+    )).resolves.toEqual({
+      integration: "applied",
+      detail: "candidate tree applied; checkout lock release failed",
+    });
+    expect(releaseCalls).toBe(1);
+  });
+
+  it("preserves the primary lifecycle classification when lease release also fails", async () => {
+    let acquireCalls = 0;
+    let releaseCalls = 0;
+    const ps = {
+      ...fakePlatform(),
+      acquireCheckoutLock: async (): Promise<CheckoutLock> => {
+        acquireCalls += 1;
+        return {
+          key: "primary-and-release-failure-lock",
+          repositoryIdentity: "/canonical/repo/.git",
+          async release() {
+            releaseCalls += 1;
+            throw new Error("lifecycle checkout release failed");
+          },
+        };
+      },
+    } as PlatformServices;
+    const deps = dependencies(new FakeStore(), ps);
+    deps.git = async () => gitResult("unexpected-object\n");
+
+    await expect(handleReviewCandidate(
       "/canonical/repo",
       "run-tools",
-      candidate.manifestHash,
       deps,
     )).resolves.toEqual({
       ok: false,
-      error: "pipeline-active",
-      diagnostic: "the delegation pipeline for this run is still active",
+      error: "candidate-anchor-mismatch",
+      diagnostic: "candidate anchor no longer matches the archive; checkout lock release failed",
     });
-    expect(integrationCalls).toBe(0);
+    expect(acquireCalls).toBe(1);
+    expect(releaseCalls).toBe(1);
   });
 
   it("deletes the exact candidate anchor after recording rejection", async () => {

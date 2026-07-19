@@ -24486,15 +24486,23 @@ function statusMatchesArtifact(output, changedPaths) {
   return changedPaths.every((change) => actual.get(change.path) === (change.changeType === "added" ? "A" : change.changeType === "deleted" ? "D" : "M"));
 }
 async function applyCandidateTree(args) {
-  const ps = getPlatformServices();
-  const { canonical } = await ps.canonicalizePath(args.repoRoot);
-  const lock = await ps.acquireCheckoutLock(canonical);
+  const ps = args.platformServices ?? getPlatformServices();
+  const canonicalPath = await ps.canonicalizePath(args.repoRoot);
+  const { canonical } = canonicalPath;
+  const repositoryIdentity = canonicalPath.gitCommonDir ?? canonicalPath.canonical;
+  let ownedLock = null;
+  const lock = args.borrowedCheckoutLock ?? await ps.acquireCheckoutLock(canonical);
+  if (args.borrowedCheckoutLock === void 0) ownedLock = lock;
   const terminal = { result: null };
   const finish = (result) => {
     terminal.result = result;
     return result;
   };
   try {
+    if (lock.repositoryIdentity !== repositoryIdentity) {
+      const ownership = ownedLock === null ? "borrowed" : "owned";
+      throw new RuntimeError(`${ownership} checkout lease repository identity mismatch`);
+    }
     const preconditions = await checkPreconditions(canonical);
     if (!preconditions.ok) return finish(aborted2(`precondition-failed:${preconditions.reason}`));
     if (preconditions.baseCommitOid !== args.artifact.baseCommitOid) {
@@ -24577,11 +24585,13 @@ async function applyCandidateTree(args) {
     }
     return finish({ integration: "applied", detail: "candidate tree applied" });
   } finally {
-    try {
-      await lock.release();
-    } catch (error2) {
-      if (terminal.result === null) throw error2;
-      terminal.result.detail = `${terminal.result.detail}; checkout lock release failed`;
+    if (ownedLock !== null) {
+      try {
+        await ownedLock.release();
+      } catch (error2) {
+        if (terminal.result === null) throw error2;
+        terminal.result.detail = `${terminal.result.detail}; checkout lock release failed`;
+      }
     }
   }
 }
@@ -30737,8 +30747,20 @@ function storeFor(runId, deps) {
 function runtimeError(message, error2) {
   return new RuntimeError(message, { toolError: error2 });
 }
+var LifecycleLockReleaseError = class extends AggregateError {
+  constructor(primaryError, releaseError) {
+    const primaryMessage = primaryError instanceof Error ? primaryError.message : String(primaryError);
+    super(
+      [primaryError, releaseError],
+      `${primaryMessage}; checkout lock release failed`
+    );
+    this.primaryError = primaryError;
+    this.name = "LifecycleLockReleaseError";
+  }
+};
 function errorResult(error2) {
-  const code = error2 instanceof RuntimeError && typeof error2.detail?.toolError === "string" ? error2.detail.toolError : "runtime-error";
+  const classified = error2 instanceof LifecycleLockReleaseError ? error2.primaryError : error2;
+  const code = classified instanceof RuntimeError && typeof classified.detail?.toolError === "string" ? classified.detail.toolError : "runtime-error";
   const diagnostic = error2 instanceof Error ? error2.message : String(error2);
   return { ok: false, error: code, diagnostic: redact(diagnostic) };
 }
@@ -30795,14 +30817,46 @@ function requireMatchingRepository(run, callerKey) {
     );
   }
 }
-async function withCurrentArchivedRun(checkoutPath, runId, deps, fn) {
-  const canonical = await services2(deps).canonicalizePath(checkoutPath);
+async function withCurrentArchivedRun(checkoutPath, runId, deps, fn, preserveResultOnReleaseFailure) {
+  const ps = services2(deps);
+  const canonical = await ps.canonicalizePath(checkoutPath);
   const callerKey = canonical.gitCommonDir ?? canonical.canonical;
   return withRepoLock(callerKey, async () => {
-    const run = await loadArchivedRun(runId, deps);
-    requireMatchingRepository(run, callerKey);
-    return fn(run);
+    const lock = await ps.acquireCheckoutLock(canonical.canonical);
+    let action;
+    try {
+      if (lock.repositoryIdentity !== callerKey) {
+        throw runtimeError(
+          "supplied checkout repository identity changed before checkout lease acquisition",
+          "run-checkout-mismatch"
+        );
+      }
+      const run = await loadArchivedRun(runId, deps);
+      requireMatchingRepository(run, lock.repositoryIdentity);
+      action = { ok: true, result: await fn(run, lock, ps) };
+    } catch (error2) {
+      action = { ok: false, error: error2 };
+    }
+    try {
+      await lock.release();
+    } catch (releaseError) {
+      if (!action.ok) throw new LifecycleLockReleaseError(action.error, releaseError);
+      if (preserveResultOnReleaseFailure !== void 0) {
+        return preserveResultOnReleaseFailure(action.result);
+      }
+      throw releaseError;
+    }
+    if (!action.ok) throw action.error;
+    return action.result;
   });
+}
+async function requireInactivePipeline(run, runId) {
+  if (await run.store.readPipelineActiveMarker(runId) !== null) {
+    throw runtimeError(
+      "the delegation pipeline for this run is still active",
+      "pipeline-active"
+    );
+  }
 }
 function schemaCompatibility(input) {
   if (isRecord4(input) && input.specVersion !== void 0 && input.specVersion !== DELEGATION_SPEC_VERSION) {
@@ -30921,6 +30975,7 @@ async function handleDelegatePipeline(checkoutPath, input, deps = {}) {
 async function handleReviewCandidate(checkoutPath, runId, deps = {}) {
   try {
     return await withCurrentArchivedRun(checkoutPath, runId, deps, async (run) => {
+      await requireInactivePipeline(run, runId);
       const candidate = requireCandidate(run);
       const git2 = deps.git ?? git;
       const anchor = await git2(run.repoRoot, [
@@ -30967,38 +31022,27 @@ async function handleReviewCandidate(checkoutPath, runId, deps = {}) {
 async function handleDecideCandidate(checkoutPath, runId, decision, deps = {}) {
   try {
     return await withCurrentArchivedRun(checkoutPath, runId, deps, async (run) => {
-      if (await run.store.readPipelineActiveMarker(runId) !== null) {
-        throw runtimeError(
-          "the delegation pipeline for this run is still active",
-          "pipeline-active"
-        );
-      }
+      await requireInactivePipeline(run, runId);
       if (decision === "accepted") requireVerifiedCandidate(run);
-      const ps = services2(deps);
-      const lock = await ps.acquireCheckoutLock(run.repoRoot);
-      try {
-        const record2 = {
-          decision,
-          recordedAt: (deps.now ?? (() => /* @__PURE__ */ new Date()))().toISOString()
-        };
-        await run.store.writeDecision(record2);
-        if (decision === "rejected" && run.result.candidate !== null) {
-          const candidate = run.result.candidate;
-          const deleted = await (deps.git ?? git)(run.repoRoot, [
-            "update-ref",
-            "--no-deref",
-            "-d",
-            candidate.anchorRef,
-            candidate.candidateCommitOid
-          ]);
-          if (deleted.exitCode !== 0) {
-            throw runtimeError("failed to delete rejected candidate anchor", "anchor-delete-failed");
-          }
+      const record2 = {
+        decision,
+        recordedAt: (deps.now ?? (() => /* @__PURE__ */ new Date()))().toISOString()
+      };
+      await run.store.writeDecision(record2);
+      if (decision === "rejected" && run.result.candidate !== null) {
+        const candidate = run.result.candidate;
+        const deleted = await (deps.git ?? git)(run.repoRoot, [
+          "update-ref",
+          "--no-deref",
+          "-d",
+          candidate.anchorRef,
+          candidate.candidateCommitOid
+        ]);
+        if (deleted.exitCode !== 0) {
+          throw runtimeError("failed to delete rejected candidate anchor", "anchor-delete-failed");
         }
-        return { recorded: true };
-      } finally {
-        await lock.release();
       }
+      return { recorded: true };
     });
   } catch (error2) {
     return errorResult(error2);
@@ -31006,13 +31050,8 @@ async function handleDecideCandidate(checkoutPath, runId, decision, deps = {}) {
 }
 async function handleIntegrateCandidate(checkoutPath, runId, expectedArtifactHash, deps = {}) {
   try {
-    return await withCurrentArchivedRun(checkoutPath, runId, deps, async (run) => {
-      if (await run.store.readPipelineActiveMarker(runId) !== null) {
-        throw runtimeError(
-          "the delegation pipeline for this run is still active",
-          "pipeline-active"
-        );
-      }
+    return await withCurrentArchivedRun(checkoutPath, runId, deps, async (run, lock, ps) => {
+      await requireInactivePipeline(run, runId);
       const decision = await run.store.readDecision(runId);
       if (decision?.decision !== "accepted") {
         return { integration: "aborted", detail: "no-accepted-decision" };
@@ -31020,9 +31059,14 @@ async function handleIntegrateCandidate(checkoutPath, runId, expectedArtifactHas
       return (deps.applyCandidateTree ?? applyCandidateTree)({
         repoRoot: run.repoRoot,
         artifact: requireVerifiedCandidate(run),
-        expectedArtifactHash
+        expectedArtifactHash,
+        borrowedCheckoutLock: lock,
+        platformServices: ps
       });
-    });
+    }, (result) => ({
+      ...result,
+      detail: `${result.detail}; checkout lock release failed`
+    }));
   } catch (error2) {
     return errorResult(error2);
   }

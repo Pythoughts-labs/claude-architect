@@ -1,13 +1,18 @@
 import { git, type GitResult } from "../git/git-exec.js";
 import { checkPreconditions } from "../git/repo-preconditions.js";
+import type { CheckoutLock, PlatformServices } from "../platform/platform-services.js";
 import { getPlatformServices } from "../platform/select-platform.js";
 import type { CandidateArtifact, ChangedPath } from "../protocol/attempt-result.js";
+import { RuntimeError } from "../util/errors.js";
 import { structuralVerify } from "../verify/structural-verifier.js";
 
 export interface ApplyCandidateTreeArgs {
   repoRoot: string;
   artifact: CandidateArtifact;
   expectedArtifactHash: string;
+  /** Trusted runtime handoff; never derived from candidate or MCP input. */
+  borrowedCheckoutLock?: CheckoutLock;
+  platformServices?: PlatformServices;
 }
 
 export interface IntegrationResult {
@@ -43,15 +48,23 @@ function statusMatchesArtifact(output: string, changedPaths: ChangedPath[]): boo
 }
 
 export async function applyCandidateTree(args: ApplyCandidateTreeArgs): Promise<IntegrationResult> {
-  const ps = getPlatformServices();
-  const { canonical } = await ps.canonicalizePath(args.repoRoot);
-  const lock = await ps.acquireCheckoutLock(canonical);
+  const ps = args.platformServices ?? getPlatformServices();
+  const canonicalPath = await ps.canonicalizePath(args.repoRoot);
+  const { canonical } = canonicalPath;
+  const repositoryIdentity = canonicalPath.gitCommonDir ?? canonicalPath.canonical;
+  let ownedLock: CheckoutLock | null = null;
+  const lock = args.borrowedCheckoutLock ?? await ps.acquireCheckoutLock(canonical);
+  if (args.borrowedCheckoutLock === undefined) ownedLock = lock;
   const terminal: { result: IntegrationResult | null } = { result: null };
   const finish = (result: IntegrationResult): IntegrationResult => {
     terminal.result = result;
     return result;
   };
   try {
+    if (lock.repositoryIdentity !== repositoryIdentity) {
+      const ownership = ownedLock === null ? "borrowed" : "owned";
+      throw new RuntimeError(`${ownership} checkout lease repository identity mismatch`);
+    }
     const preconditions = await checkPreconditions(canonical);
     if (!preconditions.ok) return finish(aborted(`precondition-failed:${preconditions.reason}`));
     if (preconditions.baseCommitOid !== args.artifact.baseCommitOid) {
@@ -145,11 +158,13 @@ export async function applyCandidateTree(args: ApplyCandidateTreeArgs): Promise<
     }
     return finish({ integration: "applied", detail: "candidate tree applied" });
   } finally {
-    try {
-      await lock.release();
-    } catch (error) {
-      if (terminal.result === null) throw error;
-      terminal.result.detail = `${terminal.result.detail}; checkout lock release failed`;
+    if (ownedLock !== null) {
+      try {
+        await ownedLock.release();
+      } catch (error) {
+        if (terminal.result === null) throw error;
+        terminal.result.detail = `${terminal.result.detail}; checkout lock release failed`;
+      }
     }
   }
 }
