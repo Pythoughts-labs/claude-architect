@@ -19,6 +19,14 @@ import type {
   CandidateArtifact,
   CommandOutcome,
 } from "../protocol/attempt-result.js";
+import type {
+  AutopilotCandidateDecisionV2,
+  AutopilotDecisionEligibilityV1,
+  CandidateDecision,
+  CandidateDecisionV2,
+  CandidateDecisionValue,
+  HumanCandidateDecisionV2,
+} from "../protocol/candidate-decision.js";
 import type { VerificationCommand } from "../protocol/delegation-spec.js";
 import { loadSchemas } from "../protocol/schema-loader.js";
 import { RuntimeError } from "../util/errors.js";
@@ -44,7 +52,9 @@ const PRUNE_BACKUP_REF_PREFIX = "refs/claude-architect/prune-backups/";
 const CLEANUP_JOURNAL = "cleanup.ndjson";
 const NO_FOLLOW = constants.O_NOFOLLOW ?? 0;
 const MAX_ARCHIVE_FILE_BYTES = 8_000_000;
-const attemptResultSchema = loadSchemas().attemptResult;
+const schemas = loadSchemas();
+const attemptResultSchema = schemas.attemptResult;
+const candidateDecisionSchema = schemas.candidateDecision;
 
 export interface PrunePolicy {
   maxAgeMs: number;
@@ -60,10 +70,17 @@ export interface PruneDependencies {
   platformServices?: Pick<PlatformServices, "acquireCheckoutLock" | "canonicalizePath">;
 }
 
-export type RunDecisionValue = "accepted" | "rejected" | "revision-requested";
+export type RunDecisionValue = CandidateDecisionValue;
 
-export interface RunDecisionRecord {
-  decision: RunDecisionValue;
+type HumanCandidateDecisionV2Input = Omit<
+  HumanCandidateDecisionV2,
+  "decisionVersion" | "authority"
+>;
+
+const SHA256 = /^[0-9a-f]{64}$/u;
+
+interface PersistedLegacyCandidateDecisionV1 {
+  decision: CandidateDecisionValue;
   recordedAt: string;
 }
 
@@ -514,6 +531,87 @@ function verifyAttemptResult(value: unknown, runId: string): AttemptResult {
   return result;
 }
 
+function isCandidateDecisionValue(value: unknown): value is CandidateDecisionValue {
+  return (["accepted", "rejected", "revision-requested"] as const)
+    .includes(value as CandidateDecisionValue);
+}
+
+function verifyCandidateDecisionV2(value: unknown): CandidateDecisionV2 {
+  if (!candidateDecisionSchema(value)) {
+    throw new RuntimeError("candidate decision is invalid");
+  }
+  return value as CandidateDecisionV2;
+}
+
+function parsePersistedDecision(value: unknown): CandidateDecision {
+  if (typeof value === "object"
+    && value !== null
+    && (value as { decisionVersion?: unknown }).decisionVersion === "2") {
+    try {
+      return verifyCandidateDecisionV2(value);
+    } catch {
+      throw new RuntimeError("archived run decision is malformed");
+    }
+  }
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new RuntimeError("archived run decision is malformed");
+  }
+  const legacy = value as Partial<PersistedLegacyCandidateDecisionV1>;
+  const keys = Object.keys(value);
+  if (keys.length !== 2
+    || !keys.includes("decision")
+    || !keys.includes("recordedAt")
+    || !isCandidateDecisionValue(legacy.decision)
+    || typeof legacy.recordedAt !== "string"
+    || !Number.isFinite(Date.parse(legacy.recordedAt))) {
+    throw new RuntimeError("archived run decision is malformed");
+  }
+  return {
+    decisionVersion: "1",
+    decision: legacy.decision,
+    authority: "human",
+    recordedAt: legacy.recordedAt,
+  };
+}
+
+function hasIdenticalDecisionProvenance(
+  existing: CandidateDecision,
+  attempted: CandidateDecision,
+): boolean {
+  if (existing.decisionVersion !== attempted.decisionVersion
+    || existing.decision !== attempted.decision
+    || existing.authority !== attempted.authority) {
+    return false;
+  }
+  if (existing.decisionVersion === "1" || attempted.decisionVersion === "1") {
+    return true;
+  }
+  return existing.candidateManifestHash === attempted.candidateManifestHash
+    && existing.evidenceHash === attempted.evidenceHash
+    && existing.policyVersion === attempted.policyVersion;
+}
+
+function verifyAutopilotEligibility(
+  candidate: CandidateArtifact,
+  eligibility: AutopilotDecisionEligibilityV1,
+): void {
+  const keys = Object.keys(eligibility);
+  if (keys.length !== 5
+    || !keys.includes("eligibilityVersion")
+    || !keys.includes("eligible")
+    || !keys.includes("candidateManifestHash")
+    || !keys.includes("evidenceHash")
+    || !keys.includes("policyVersion")
+    || eligibility.eligibilityVersion !== "1"
+    || eligibility.eligible !== true
+    || eligibility.policyVersion !== "1"
+    || !SHA256.test(eligibility.evidenceHash)
+    || eligibility.candidateManifestHash !== candidate.manifestHash
+    || candidate.manifestHash !== manifestHashOf(candidate.changedPaths)) {
+    throw new RuntimeError("autopilot decision eligibility is invalid");
+  }
+}
+
 export class ArtifactStore {
   readonly runDirectory: string;
   private readonly runsRoot: string;
@@ -735,7 +833,7 @@ export class ArtifactStore {
     if (args.manifest.runId !== this.runId) {
       throw new RuntimeError("run manifest id does not match artifact store");
     }
-    if (await this.readDecision(this.runId) !== null) {
+    if (await this.readCandidateDecision(this.runId) !== null) {
       throw new RuntimeError("terminal artifacts cannot be promoted after a decision");
     }
     const result = sanitizeAttemptResult(args.result);
@@ -804,46 +902,71 @@ export class ArtifactStore {
     }
   }
 
-  async writeDecision(record: RunDecisionRecord): Promise<void> {
-    if (!(["accepted", "rejected", "revision-requested"] as const).includes(record.decision)
-      || !Number.isFinite(Date.parse(record.recordedAt))) {
-      throw new RuntimeError("run decision is invalid");
-    }
+  async writeHumanDecision(record: HumanCandidateDecisionV2Input): Promise<void> {
+    const decision = verifyCandidateDecisionV2({
+      ...record,
+      decisionVersion: "2",
+      authority: "human",
+    });
+    await this.writeCandidateDecision(decision, decision);
+  }
+
+  async writeAutopilotDecision(
+    candidate: CandidateArtifact,
+    eligibility: AutopilotDecisionEligibilityV1,
+    recordedAt: string,
+  ): Promise<void> {
+    verifyAutopilotEligibility(candidate, eligibility);
+    const decision = verifyCandidateDecisionV2({
+      decisionVersion: "2",
+      decision: "accepted",
+      authority: "autopilot-policy",
+      candidateManifestHash: candidate.manifestHash,
+      evidenceHash: eligibility.evidenceHash,
+      policyVersion: eligibility.policyVersion,
+      recordedAt,
+    }) as AutopilotCandidateDecisionV2;
+    await this.writeCandidateDecision(decision, decision);
+  }
+
+  private async writeCandidateDecision(
+    persisted: CandidateDecisionV2,
+    normalized: CandidateDecision,
+  ): Promise<void> {
     try {
-      await this.writeJson("decision.json", record);
+      await this.writeJson("decision.json", persisted);
       return;
     } catch (error) {
-      const existing = await this.readDecision(this.runId);
+      const existing = await this.readCandidateDecision(this.runId);
       if (existing === null) throw error;
-      if (existing.decision === record.decision) return;
+      if (hasIdenticalDecisionProvenance(existing, normalized)) return;
       throw new RuntimeError(
-        `candidate decision conflict: recorded ${existing.decision}, attempted ${record.decision}`,
+        `candidate decision conflict: recorded ${existing.decision}, attempted ${normalized.decision}`,
         { toolError: "decision-conflict" },
       );
     }
   }
 
-  async readDecision(runId: string): Promise<RunDecisionRecord | null> {
+  async readCandidateDecision(runId: string): Promise<CandidateDecision | null> {
     validateComponent(runId, "run id");
     const runDirectory = path.join(this.runsRoot, runId);
     const validated = await this.ensureExistingRunDirectory(runDirectory);
     if (validated === null) return null;
     try {
-      const value = JSON.parse(await readRegularFile(
+      const value: unknown = JSON.parse(await readRegularFile(
         path.join(validated.path, "decision.json"),
         validated.identity,
-      )) as Partial<RunDecisionRecord>;
-      if (!(["accepted", "rejected", "revision-requested"] as const)
-        .includes(value.decision as RunDecisionValue)
-        || typeof value.recordedAt !== "string"
-        || !Number.isFinite(Date.parse(value.recordedAt))) {
-        throw new RuntimeError("archived run decision is malformed");
-      }
-      return value as RunDecisionRecord;
+      ));
+      return parsePersistedDecision(value);
     } catch (error) {
       if (isMissing(error)) return null;
       throw error;
     }
+  }
+
+
+  async readDecision(runId: string): Promise<CandidateDecision | null> {
+    return this.readCandidateDecision(runId);
   }
 
   async writePipelineActiveMarker(marker: PipelineActiveMarker): Promise<void> {

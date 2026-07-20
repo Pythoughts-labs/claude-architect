@@ -82,8 +82,8 @@ function dependencies(storedManifest: RunManifest): ToolDependencies {
   const store: ToolArtifactStore = {
     readResult: async () => result,
     readManifest: async () => storedManifest,
-    writeDecision: async () => {},
-    readDecision: async () => null,
+    writeHumanDecision: async () => {},
+    readCandidateDecision: async () => null,
     readPipelineActiveMarker: async () => null,
   };
   const ps = {

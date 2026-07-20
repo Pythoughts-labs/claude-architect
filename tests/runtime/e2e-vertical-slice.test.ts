@@ -281,7 +281,13 @@ describe("P0-A end-to-end vertical slice", () => {
       candidate!.manifestHash,
       deps,
     )).resolves.toEqual({ integration: "aborted", detail: "no-accepted-decision" });
-    await expect(handleDecideCandidate(repoRoot, runId, "accepted", deps)).resolves.toEqual({
+    await expect(handleDecideCandidate(
+      repoRoot,
+      runId,
+      "accepted",
+      candidate!.manifestHash,
+      deps,
+    )).resolves.toEqual({
       recorded: true,
     });
     await expect(handleIntegrateCandidate(

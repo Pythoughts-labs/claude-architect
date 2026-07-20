@@ -20,7 +20,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { AttemptResult } from "../../src/protocol/attempt-result.js";
+import type { AttemptResult, CandidateArtifact } from "../../src/protocol/attempt-result.js";
+import type { AutopilotDecisionEligibilityV1 } from "../../src/protocol/candidate-decision.js";
 import { ArtifactStore } from "../../src/runtime/artifact-store.js";
 import {
   buildRunManifest,
@@ -247,7 +248,13 @@ describe("ArtifactStore", () => {
       manifest: buildRunManifest(manifestArgs("different-run", "/repo")),
     })).rejects.toThrow(/manifest id/i);
 
-    await store.writeDecision({ decision: "accepted", recordedAt: new Date().toISOString() });
+    await store.writeHumanDecision({
+      decision: "accepted",
+      candidateManifestHash: "a".repeat(64),
+      evidenceHash: "b".repeat(64),
+      policyVersion: "1",
+      recordedAt: new Date().toISOString(),
+    });
     await expect(store.promoteTerminalArtifacts({
       result: { ...sampleResult(runId), summary: "too late" },
       manifest,
@@ -494,20 +501,29 @@ describe("ArtifactStore", () => {
     },
   );
 
-  it("persists the first decision, treats the same decision as idempotent, and rejects conflicts", async () => {
+  it("does not expose a production writer for new legacy decisions", () => {
+    expect("writeDecision" in new ArtifactStore("run-no-legacy-writer")).toBe(false);
+  });
+
+  it("persists the first v2 decision, treats identical provenance as idempotent, and rejects conflicts", async () => {
     const runId = "run-decision";
     const store = new ArtifactStore(runId);
     await store.writeResult(sampleResult(runId));
-
-    await store.writeDecision({
-      decision: "revision-requested",
+    const first = {
+      decision: "revision-requested" as const,
+      candidateManifestHash: "a".repeat(64),
+      evidenceHash: "b".repeat(64),
+      policyVersion: "1" as const,
       recordedAt: "2026-07-14T12:00:00.000Z",
-    });
-    await store.writeDecision({
-      decision: "revision-requested",
+    };
+
+    await store.writeHumanDecision(first);
+    await store.writeHumanDecision({
+      ...first,
       recordedAt: "2026-07-14T12:01:00.000Z",
     });
-    await expect(store.writeDecision({
+    await expect(store.writeHumanDecision({
+      ...first,
       decision: "accepted",
       recordedAt: "2026-07-14T12:02:00.000Z",
     })).rejects.toMatchObject({
@@ -515,15 +531,170 @@ describe("ArtifactStore", () => {
       detail: { toolError: "decision-conflict" },
     });
 
-    await expect(store.readDecision(runId)).resolves.toEqual({
-      decision: "revision-requested",
-      recordedAt: "2026-07-14T12:00:00.000Z",
+    await expect(store.readCandidateDecision(runId)).resolves.toEqual({
+      ...first,
+      decisionVersion: "2",
+      authority: "human",
     });
     const stored = JSON.parse(await readFile(join(store.runDirectory, "decision.json"), "utf8"));
     expect(stored).toEqual({
-      decision: "revision-requested",
-      recordedAt: "2026-07-14T12:00:00.000Z",
+      ...first,
+      decisionVersion: "2",
+      authority: "human",
     });
+  });
+
+  it("reads a legacy decision in memory without rewriting its archived bytes", async () => {
+    const runId = "run-legacy-decision";
+    const store = new ArtifactStore(runId);
+    await store.writeResult(sampleResult(runId));
+    const legacy = {
+      decision: "accepted" as const,
+      recordedAt: "2026-07-14T12:00:00.000Z",
+    };
+    const decisionPath = join(store.runDirectory, "decision.json");
+    await writeFile(decisionPath, `${JSON.stringify(legacy)}\n`);
+    const before = await readFile(decisionPath, "utf8");
+
+    await expect(store.readCandidateDecision(runId)).resolves.toEqual({
+      decisionVersion: "1",
+      decision: "accepted",
+      authority: "human",
+      recordedAt: legacy.recordedAt,
+    });
+    await expect(store.writeHumanDecision({
+      decision: "accepted",
+      candidateManifestHash: "a".repeat(64),
+      evidenceHash: "b".repeat(64),
+      policyVersion: "1",
+      recordedAt: "2026-07-14T12:01:00.000Z",
+    })).rejects.toMatchObject({
+      detail: { toolError: "decision-conflict" },
+    });
+    expect(await readFile(decisionPath, "utf8")).toBe(before);
+    expect(JSON.parse(before)).toEqual(legacy);
+  });
+
+  it("writes human decisions as v2 and requires identical provenance for idempotence", async () => {
+    const runId = "run-human-decision-v2";
+    const store = new ArtifactStore(runId);
+    const first = {
+      decision: "accepted" as const,
+      candidateManifestHash: "a".repeat(64),
+      evidenceHash: "b".repeat(64),
+      policyVersion: "1" as const,
+      recordedAt: "2026-07-14T12:00:00.000Z",
+    };
+    await store.writeHumanDecision(first);
+    await store.writeHumanDecision({
+      ...first,
+      recordedAt: "2026-07-14T12:01:00.000Z",
+    });
+
+    for (const conflicting of [
+      { ...first, decision: "rejected" as const },
+      { ...first, candidateManifestHash: "c".repeat(64) },
+      { ...first, evidenceHash: "d".repeat(64) },
+    ]) {
+      await expect(store.writeHumanDecision(conflicting)).rejects.toMatchObject({
+        detail: { toolError: "decision-conflict" },
+      });
+    }
+    const expected = {
+      ...first,
+      decisionVersion: "2",
+      authority: "human",
+    };
+    await expect(store.readCandidateDecision(runId)).resolves.toEqual(expected);
+    expect(JSON.parse(await readFile(join(store.runDirectory, "decision.json"), "utf8")))
+      .toEqual(expected);
+  });
+
+  it("writes accepted autopilot decisions from validated candidate and eligibility records", async () => {
+    const runId = "run-autopilot-decision-v2";
+    const store = new ArtifactStore(runId);
+    await store.writeResult(sampleResult(runId));
+    const candidate: CandidateArtifact = {
+      baseCommitOid: "a".repeat(40),
+      candidateTreeOid: "b".repeat(40),
+      candidateCommitOid: "c".repeat(40),
+      anchorRef: `refs/claude-architect/candidates/${runId}`,
+      manifestHash: emptyCandidateManifestHash,
+      changedPaths: [],
+      patch: "",
+    };
+    const eligibility: AutopilotDecisionEligibilityV1 = {
+      eligibilityVersion: "1",
+      eligible: true,
+      candidateManifestHash: candidate.manifestHash,
+      evidenceHash: "b".repeat(64),
+      policyVersion: "1",
+    };
+    const persisted = {
+      decisionVersion: "2",
+      decision: "accepted",
+      authority: "autopilot-policy",
+      candidateManifestHash: candidate.manifestHash,
+      evidenceHash: eligibility.evidenceHash,
+      policyVersion: "1",
+      recordedAt: "2026-07-14T12:00:00.000Z",
+    };
+    await store.writeAutopilotDecision(candidate, eligibility, persisted.recordedAt);
+    await store.writeAutopilotDecision(
+      candidate,
+      eligibility,
+      "2026-07-14T12:01:00.000Z",
+    );
+
+    await expect(store.readCandidateDecision(runId)).resolves.toEqual(persisted);
+    expect(JSON.parse(await readFile(join(store.runDirectory, "decision.json"), "utf8")))
+      .toEqual(persisted);
+
+    await expect(store.writeAutopilotDecision(candidate, {
+      ...eligibility,
+      evidenceHash: "c".repeat(64),
+    }, "2026-07-14T12:02:00.000Z")).rejects.toMatchObject({
+      detail: { toolError: "decision-conflict" },
+    });
+  });
+
+  it("rejects forged or ineligible autopilot provenance", async () => {
+    const runId = "run-autopilot-forgery";
+    const store = new ArtifactStore(runId);
+    const candidate: CandidateArtifact = {
+      baseCommitOid: "a".repeat(40),
+      candidateTreeOid: "b".repeat(40),
+      candidateCommitOid: "c".repeat(40),
+      anchorRef: `refs/claude-architect/candidates/${runId}`,
+      manifestHash: emptyCandidateManifestHash,
+      changedPaths: [],
+      patch: "",
+    };
+    const eligibility: AutopilotDecisionEligibilityV1 = {
+      eligibilityVersion: "1",
+      eligible: true,
+      candidateManifestHash: candidate.manifestHash,
+      evidenceHash: "b".repeat(64),
+      policyVersion: "1",
+    };
+
+    await expect(store.writeAutopilotDecision(candidate, {
+      ...eligibility,
+      candidateManifestHash: "f".repeat(64),
+    }, "2026-07-14T12:00:00.000Z")).rejects.toThrow(/eligibility is invalid/u);
+    await expect(store.writeAutopilotDecision({
+      ...candidate,
+      manifestHash: "f".repeat(64),
+    }, {
+      ...eligibility,
+      candidateManifestHash: "f".repeat(64),
+    }, "2026-07-14T12:00:00.000Z")).rejects.toThrow(/eligibility is invalid/u);
+    await expect(store.writeAutopilotDecision(candidate, {
+      ...eligibility,
+      eligible: false,
+    } as unknown as AutopilotDecisionEligibilityV1, "2026-07-14T12:00:00.000Z"))
+      .rejects.toThrow(/eligibility is invalid/u);
+    await expect(store.readCandidateDecision(runId)).resolves.toBeNull();
   });
 
   it("atomically preserves one decision when conflicting writers race", async () => {
@@ -533,9 +704,15 @@ describe("ArtifactStore", () => {
     await firstStore.writeResult(sampleResult(runId));
     const records = [{
       decision: "accepted" as const,
+      candidateManifestHash: "a".repeat(64),
+      evidenceHash: "b".repeat(64),
+      policyVersion: "1" as const,
       recordedAt: "2026-07-14T12:00:00.000Z",
     }, {
       decision: "rejected" as const,
+      candidateManifestHash: "a".repeat(64),
+      evidenceHash: "b".repeat(64),
+      policyVersion: "1" as const,
       recordedAt: "2026-07-14T12:01:00.000Z",
     }] as const;
     let arrivals = 0;
@@ -551,8 +728,8 @@ describe("ArtifactStore", () => {
     };
 
     const pending = [
-      firstStore.writeDecision(records[0]),
-      secondStore.writeDecision(records[1]),
+      firstStore.writeHumanDecision(records[0]),
+      secondStore.writeHumanDecision(records[1]),
     ];
     await ready;
     releaseWriters();
@@ -564,7 +741,11 @@ describe("ArtifactStore", () => {
     expect(rejected).toMatchObject({
       reason: { detail: { toolError: "decision-conflict" } },
     });
-    await expect(firstStore.readDecision(runId)).resolves.toEqual(records[winnerIndex]);
+    await expect(firstStore.readCandidateDecision(runId)).resolves.toEqual({
+      decisionVersion: "2",
+      ...records[winnerIndex],
+      authority: "human",
+    });
   });
 
   it.each([true, false])("round-trips an explicit sliced=%s pipeline marker", async sliced => {

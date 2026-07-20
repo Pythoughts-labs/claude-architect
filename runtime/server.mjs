@@ -4338,15 +4338,15 @@ var require_core = __commonJS({
         }
         return metaSchema;
       }
-      _removeAllSchemas(schemas3, regex) {
-        for (const keyRef in schemas3) {
-          const sch = schemas3[keyRef];
+      _removeAllSchemas(schemas4, regex) {
+        for (const keyRef in schemas4) {
+          const sch = schemas4[keyRef];
           if (!regex || regex.test(keyRef)) {
             if (typeof sch == "string") {
-              delete schemas3[keyRef];
+              delete schemas4[keyRef];
             } else if (sch && !sch.meta) {
               this._cache.delete(sch.schema);
-              delete schemas3[keyRef];
+              delete schemas4[keyRef];
             }
           }
         }
@@ -10768,12 +10768,12 @@ var ZodTuple = class _ZodTuple extends ZodType {
     });
   }
 };
-ZodTuple.create = (schemas3, params) => {
-  if (!Array.isArray(schemas3)) {
+ZodTuple.create = (schemas4, params) => {
+  if (!Array.isArray(schemas4)) {
     throw new Error("You must pass an array of schemas to z.tuple([ ... ])");
   }
   return new ZodTuple({
-    items: schemas3,
+    items: schemas4,
     typeName: ZodFirstPartyTypeKind.ZodTuple,
     rest: null,
     ...processCreateParams(params)
@@ -15436,7 +15436,7 @@ function toJSONSchema(input, _params) {
       const [_, schema] = entry;
       gen2.process(schema);
     }
-    const schemas3 = {};
+    const schemas4 = {};
     const external = {
       registry: input,
       uri: _params?.uri,
@@ -15444,18 +15444,18 @@ function toJSONSchema(input, _params) {
     };
     for (const entry of input._idmap.entries()) {
       const [key, schema] = entry;
-      schemas3[key] = gen2.emit(schema, {
+      schemas4[key] = gen2.emit(schema, {
         ..._params,
         external
       });
     }
     if (Object.keys(defs).length > 0) {
       const defsSegment = gen2.target === "draft-2020-12" ? "$defs" : "definitions";
-      schemas3.__shared = {
+      schemas4.__shared = {
         [defsSegment]: defs
       };
     }
-    return { schemas: schemas3 };
+    return { schemas: schemas4 };
   }
   const gen = new JSONSchemaGenerator(_params);
   gen.process(input);
@@ -25221,6 +25221,77 @@ var autopilot_spec_v1_default = {
   }
 };
 
+// runtime/schemas/candidate-decision.v2.json
+var candidate_decision_v2_default = {
+  $schema: "https://json-schema.org/draft/2020-12/schema",
+  $id: "candidate-decision.v2.json",
+  type: "object",
+  additionalProperties: false,
+  required: [
+    "decisionVersion",
+    "decision",
+    "authority",
+    "candidateManifestHash",
+    "evidenceHash",
+    "policyVersion",
+    "recordedAt"
+  ],
+  properties: {
+    decisionVersion: {
+      const: "2"
+    },
+    decision: {
+      enum: [
+        "accepted",
+        "rejected",
+        "revision-requested"
+      ]
+    },
+    authority: {
+      enum: [
+        "human",
+        "autopilot-policy"
+      ]
+    },
+    candidateManifestHash: {
+      type: "string",
+      pattern: "^[0-9a-f]{64}$"
+    },
+    evidenceHash: {
+      type: "string",
+      pattern: "^[0-9a-f]{64}$"
+    },
+    policyVersion: {
+      const: "1"
+    },
+    recordedAt: {
+      type: "string",
+      format: "date-time"
+    }
+  },
+  allOf: [
+    {
+      if: {
+        properties: {
+          authority: {
+            const: "autopilot-policy"
+          }
+        },
+        required: [
+          "authority"
+        ]
+      },
+      then: {
+        properties: {
+          decision: {
+            const: "accepted"
+          }
+        }
+      }
+    }
+  ]
+};
+
 // runtime/schemas/attempt-result.v1.json
 var attempt_result_v1_default = {
   $schema: "https://json-schema.org/draft/2020-12/schema",
@@ -25553,8 +25624,23 @@ var verification_report_v1_default = {
 
 // src/protocol/schema-loader.ts
 var DELEGATION_SPEC_SCHEMA_KEY = "delegation-spec.v1.json";
+var ISO_DATE_TIME = /^([0-9]{4})-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])T(?:[01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9](?:\.[0-9]+)?(?:Z|[+-](?:[01][0-9]|2[0-3]):[0-5][0-9])$/u;
+function isIsoDateTime(value) {
+  const match = ISO_DATE_TIME.exec(value);
+  if (match === null || !Number.isFinite(Date.parse(value))) return false;
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  const leapYear = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
+  const daysInMonth = [31, leapYear ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+  return day <= daysInMonth[month - 1];
+}
 function loadSchemas() {
   const ajv = new import__.Ajv2020({ allErrors: true, strict: false });
+  ajv.addFormat("date-time", {
+    type: "string",
+    validate: isIsoDateTime
+  });
   ajv.addSchema(delegation_spec_v1_default, DELEGATION_SPEC_SCHEMA_KEY);
   const delegationSpec = ajv.getSchema(DELEGATION_SPEC_SCHEMA_KEY);
   if (delegationSpec === void 0) {
@@ -25563,6 +25649,7 @@ function loadSchemas() {
   return {
     delegationSpec,
     autopilotSpec: ajv.compile(autopilot_spec_v1_default),
+    candidateDecision: ajv.compile(candidate_decision_v2_default),
     attemptResult: ajv.compile(attempt_result_v1_default),
     reviewReport: ajv.compile(review_report_v1_default),
     fixReport: ajv.compile(fix_report_v1_default),
@@ -26855,7 +26942,10 @@ var PRUNE_BACKUP_REF_PREFIX = "refs/claude-architect/prune-backups/";
 var CLEANUP_JOURNAL = "cleanup.ndjson";
 var NO_FOLLOW2 = constants3.O_NOFOLLOW ?? 0;
 var MAX_ARCHIVE_FILE_BYTES = 8e6;
-var attemptResultSchema = loadSchemas().attemptResult;
+var schemas = loadSchemas();
+var attemptResultSchema = schemas.attemptResult;
+var candidateDecisionSchema = schemas.candidateDecision;
+var SHA256 = /^[0-9a-f]{64}$/u;
 var cleanupJournalTail = Promise.resolve();
 function isSafeComponent(value) {
   const base = value.split(".", 1)[0] ?? value;
@@ -27186,6 +27276,53 @@ function verifyAttemptResult(value, runId) {
   }
   return result;
 }
+function isCandidateDecisionValue(value) {
+  return ["accepted", "rejected", "revision-requested"].includes(value);
+}
+function verifyCandidateDecisionV2(value) {
+  if (!candidateDecisionSchema(value)) {
+    throw new RuntimeError("candidate decision is invalid");
+  }
+  return value;
+}
+function parsePersistedDecision(value) {
+  if (typeof value === "object" && value !== null && value.decisionVersion === "2") {
+    try {
+      return verifyCandidateDecisionV2(value);
+    } catch {
+      throw new RuntimeError("archived run decision is malformed");
+    }
+  }
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new RuntimeError("archived run decision is malformed");
+  }
+  const legacy = value;
+  const keys = Object.keys(value);
+  if (keys.length !== 2 || !keys.includes("decision") || !keys.includes("recordedAt") || !isCandidateDecisionValue(legacy.decision) || typeof legacy.recordedAt !== "string" || !Number.isFinite(Date.parse(legacy.recordedAt))) {
+    throw new RuntimeError("archived run decision is malformed");
+  }
+  return {
+    decisionVersion: "1",
+    decision: legacy.decision,
+    authority: "human",
+    recordedAt: legacy.recordedAt
+  };
+}
+function hasIdenticalDecisionProvenance(existing, attempted) {
+  if (existing.decisionVersion !== attempted.decisionVersion || existing.decision !== attempted.decision || existing.authority !== attempted.authority) {
+    return false;
+  }
+  if (existing.decisionVersion === "1" || attempted.decisionVersion === "1") {
+    return true;
+  }
+  return existing.candidateManifestHash === attempted.candidateManifestHash && existing.evidenceHash === attempted.evidenceHash && existing.policyVersion === attempted.policyVersion;
+}
+function verifyAutopilotEligibility(candidate, eligibility) {
+  const keys = Object.keys(eligibility);
+  if (keys.length !== 5 || !keys.includes("eligibilityVersion") || !keys.includes("eligible") || !keys.includes("candidateManifestHash") || !keys.includes("evidenceHash") || !keys.includes("policyVersion") || eligibility.eligibilityVersion !== "1" || eligibility.eligible !== true || eligibility.policyVersion !== "1" || !SHA256.test(eligibility.evidenceHash) || eligibility.candidateManifestHash !== candidate.manifestHash || candidate.manifestHash !== manifestHashOf(candidate.changedPaths)) {
+    throw new RuntimeError("autopilot decision eligibility is invalid");
+  }
+}
 var ArtifactStore = class {
   runDirectory;
   runsRoot;
@@ -27387,7 +27524,7 @@ var ArtifactStore = class {
     if (args.manifest.runId !== this.runId) {
       throw new RuntimeError("run manifest id does not match artifact store");
     }
-    if (await this.readDecision(this.runId) !== null) {
+    if (await this.readCandidateDecision(this.runId) !== null) {
       throw new RuntimeError("terminal artifacts cannot be promoted after a decision");
     }
     const result = sanitizeAttemptResult(args.result);
@@ -27452,24 +27589,42 @@ var ArtifactStore = class {
       throw error2;
     }
   }
-  async writeDecision(record2) {
-    if (!["accepted", "rejected", "revision-requested"].includes(record2.decision) || !Number.isFinite(Date.parse(record2.recordedAt))) {
-      throw new RuntimeError("run decision is invalid");
-    }
+  async writeHumanDecision(record2) {
+    const decision = verifyCandidateDecisionV2({
+      ...record2,
+      decisionVersion: "2",
+      authority: "human"
+    });
+    await this.writeCandidateDecision(decision, decision);
+  }
+  async writeAutopilotDecision(candidate, eligibility, recordedAt) {
+    verifyAutopilotEligibility(candidate, eligibility);
+    const decision = verifyCandidateDecisionV2({
+      decisionVersion: "2",
+      decision: "accepted",
+      authority: "autopilot-policy",
+      candidateManifestHash: candidate.manifestHash,
+      evidenceHash: eligibility.evidenceHash,
+      policyVersion: eligibility.policyVersion,
+      recordedAt
+    });
+    await this.writeCandidateDecision(decision, decision);
+  }
+  async writeCandidateDecision(persisted, normalized) {
     try {
-      await this.writeJson("decision.json", record2);
+      await this.writeJson("decision.json", persisted);
       return;
     } catch (error2) {
-      const existing = await this.readDecision(this.runId);
+      const existing = await this.readCandidateDecision(this.runId);
       if (existing === null) throw error2;
-      if (existing.decision === record2.decision) return;
+      if (hasIdenticalDecisionProvenance(existing, normalized)) return;
       throw new RuntimeError(
-        `candidate decision conflict: recorded ${existing.decision}, attempted ${record2.decision}`,
+        `candidate decision conflict: recorded ${existing.decision}, attempted ${normalized.decision}`,
         { toolError: "decision-conflict" }
       );
     }
   }
-  async readDecision(runId) {
+  async readCandidateDecision(runId) {
     validateComponent(runId, "run id");
     const runDirectory = path11.join(this.runsRoot, runId);
     const validated = await this.ensureExistingRunDirectory(runDirectory);
@@ -27479,14 +27634,14 @@ var ArtifactStore = class {
         path11.join(validated.path, "decision.json"),
         validated.identity
       ));
-      if (!["accepted", "rejected", "revision-requested"].includes(value.decision) || typeof value.recordedAt !== "string" || !Number.isFinite(Date.parse(value.recordedAt))) {
-        throw new RuntimeError("archived run decision is malformed");
-      }
-      return value;
+      return parsePersistedDecision(value);
     } catch (error2) {
       if (isMissing(error2)) return null;
       throw error2;
     }
+  }
+  async readDecision(runId) {
+    return this.readCandidateDecision(runId);
   }
   async writePipelineActiveMarker(marker) {
     if (typeof marker !== "object" || marker === null || !Number.isSafeInteger(marker.pid) || marker.pid <= 1 || marker.processToken !== null && typeof marker.processToken !== "string" || typeof marker.startedAt !== "string" || !Number.isFinite(Date.parse(marker.startedAt)) || typeof marker.sliced !== "boolean") {
@@ -29627,7 +29782,7 @@ async function parseStructuredReport(raw, validate, repair) {
 }
 
 // src/pipeline/pipeline-runtime.ts
-var schemas = loadSchemas();
+var schemas2 = loadSchemas();
 var IGNORED_STRUCTURAL_FAILURES = /* @__PURE__ */ new Set([
   "artifact-divergence",
   "base-changed"
@@ -30128,7 +30283,7 @@ async function runReviews(args) {
     const role = `reviewer-${reviewer}`;
     const outcome = await runStructuredRole({
       role,
-      schema: schemas.reviewReport,
+      schema: schemas2.reviewReport,
       logName: `role-${role}-${logNameNamespace}round${args.round}`,
       spec: args.spec,
       pkg: args.pkg,
@@ -30205,7 +30360,7 @@ async function runSliceReview(args) {
 async function runFix(args) {
   const outcome = await runStructuredRole({
     role: "fixer",
-    schema: schemas.fixReport,
+    schema: schemas2.fixReport,
     logName: `role-fixer-round${args.round}`,
     spec: args.spec,
     pkg: args.pkg,
@@ -30222,7 +30377,7 @@ async function runIncrement(args) {
   const logNameNamespace = args.logNameNamespace === void 0 ? "" : `${args.logNameNamespace}-`;
   return runStructuredRole({
     role: "implementer",
-    schema: schemas.incrementReport,
+    schema: schemas2.incrementReport,
     logName: `role-implementer-${logNameNamespace}increment${args.increment}`,
     spec: args.spec,
     pkg: args.pkg,
@@ -31258,7 +31413,7 @@ async function runPipelineWithLease(checkoutPath, spec, deps, ps, borrowedChecko
 
 // src/protocol/spec-validator.ts
 import path15 from "node:path";
-var schemas2 = loadSchemas();
+var schemas3 = loadSchemas();
 function allowlistCovers(top, glob) {
   return top.some((pattern) => {
     if (pattern === "**" || pattern === glob) return true;
@@ -31305,7 +31460,7 @@ function validateSpec(input) {
   }
   const allowsTestFloor = minEditTimeoutMs < RUNTIME_MIN_EDIT_TIMEOUT_MS && typeof input === "object" && input !== null && "executionMode" in input && input.executionMode === "edit" && "timeoutMs" in input && typeof input.timeoutMs === "number" && Number.isInteger(input.timeoutMs) && input.timeoutMs >= minEditTimeoutMs && input.timeoutMs < RUNTIME_MIN_EDIT_TIMEOUT_MS;
   const schemaInput = allowsTestFloor ? { ...input, timeoutMs: RUNTIME_MIN_EDIT_TIMEOUT_MS } : input;
-  const schemaValid = schemas2.delegationSpec(schemaInput);
+  const schemaValid = schemas3.delegationSpec(schemaInput);
   if (schemaValid) {
     const spec = input;
     const topLevelDeletionError = validateAllowedTestDeletions(
@@ -31357,7 +31512,7 @@ function validateSpec(input) {
     }
     return { ok: true, spec };
   }
-  const validationErrors = (schemas2.delegationSpec.errors ?? []).map((e) => {
+  const validationErrors = (schemas3.delegationSpec.errors ?? []).map((e) => {
     let message = e.message ?? "invalid";
     const allowed = e.params?.allowedValues;
     if (Array.isArray(allowed)) {
@@ -31643,76 +31798,133 @@ async function handleDelegatePipeline(checkoutPath, input, deps = {}) {
     return errorResult(error2);
   }
 }
+async function regenerateReviewSnapshot(run, deps, allowMissingAnchor = false) {
+  const candidate = requireCandidate(run);
+  const git2 = deps.git ?? git;
+  const anchor = await git2(run.repoRoot, [
+    "rev-parse",
+    "--verify",
+    "--quiet",
+    `${candidate.anchorRef}^{commit}`
+  ]);
+  const tree = await git2(run.repoRoot, [
+    "rev-parse",
+    "--verify",
+    `${candidate.candidateCommitOid}^{tree}`
+  ]);
+  const anchorMissing = allowMissingAnchor && anchor.exitCode === 1 && anchor.stdout.trim().length === 0;
+  if (!anchorMissing && (anchor.exitCode !== 0 || anchor.stdout.trim() !== candidate.candidateCommitOid) || tree.exitCode !== 0 || tree.stdout.trim() !== candidate.candidateTreeOid) {
+    throw runtimeError("candidate anchor no longer matches the archive", "candidate-anchor-mismatch");
+  }
+  const patch = await git2(run.repoRoot, [
+    "diff",
+    "--no-ext-diff",
+    "--no-textconv",
+    "--binary",
+    "--full-index",
+    candidate.baseCommitOid,
+    candidate.candidateTreeOid,
+    "--"
+  ]);
+  if (patch.exitCode !== 0 || patch.truncated?.stdout === true) {
+    throw runtimeError("failed to regenerate candidate patch", "candidate-review-failed");
+  }
+  return boundIgnoredPathEvidence({
+    manifestHash: candidate.manifestHash,
+    patch: patch.stdout,
+    changedPaths: candidate.changedPaths.map((change) => ({ ...change })),
+    evidence: structuredClone(run.result.evidence),
+    executedVerification: run.result.executedVerification.map((outcome) => ({
+      ...outcome,
+      args: [...outcome.args]
+    }))
+  });
+}
+function isIdenticalHumanDecision(existing, attempted) {
+  return existing.decisionVersion === "2" && existing.authority === "human" && existing.decision === attempted.decision && existing.candidateManifestHash === attempted.candidateManifestHash && existing.evidenceHash === attempted.evidenceHash && existing.policyVersion === attempted.policyVersion;
+}
+async function deleteRejectedCandidateAnchor(run, candidate, deps, allowAlreadyAbsent = false) {
+  const git2 = deps.git ?? git;
+  if (allowAlreadyAbsent) {
+    const current = await git2(run.repoRoot, [
+      "show-ref",
+      "--verify",
+      "--hash",
+      candidate.anchorRef
+    ]);
+    if (current.exitCode === 1 && current.stdout.trim().length === 0) return;
+    if (current.exitCode !== 0 || current.stdout.trim() !== candidate.candidateCommitOid) {
+      throw runtimeError("rejected candidate anchor changed identity", "anchor-delete-failed");
+    }
+  }
+  const deleted = await git2(run.repoRoot, [
+    "update-ref",
+    "--no-deref",
+    "-d",
+    candidate.anchorRef,
+    candidate.candidateCommitOid
+  ]);
+  if (deleted.exitCode !== 0) {
+    throw runtimeError("failed to delete rejected candidate anchor", "anchor-delete-failed");
+  }
+}
 async function handleReviewCandidate(checkoutPath, runId, deps = {}) {
   try {
     return await withCurrentArchivedRun(checkoutPath, runId, deps, async (run) => {
       await requireInactivePipeline(run, runId);
-      const candidate = requireCandidate(run);
-      const git2 = deps.git ?? git;
-      const anchor = await git2(run.repoRoot, [
-        "rev-parse",
-        "--verify",
-        "--quiet",
-        `${candidate.anchorRef}^{commit}`
-      ]);
-      const tree = await git2(run.repoRoot, [
-        "rev-parse",
-        "--verify",
-        `${candidate.candidateCommitOid}^{tree}`
-      ]);
-      if (anchor.exitCode !== 0 || anchor.stdout.trim() !== candidate.candidateCommitOid || tree.exitCode !== 0 || tree.stdout.trim() !== candidate.candidateTreeOid) {
-        throw runtimeError("candidate anchor no longer matches the archive", "candidate-anchor-mismatch");
-      }
-      const patch = await git2(run.repoRoot, [
-        "diff",
-        "--no-ext-diff",
-        "--no-textconv",
-        "--binary",
-        "--full-index",
-        candidate.baseCommitOid,
-        candidate.candidateTreeOid,
-        "--"
-      ]);
-      if (patch.exitCode !== 0 || patch.truncated?.stdout === true) {
-        throw runtimeError("failed to regenerate candidate patch", "candidate-review-failed");
-      }
-      return boundIgnoredPathEvidence({
-        manifestHash: candidate.manifestHash,
-        patch: patch.stdout,
-        changedPaths: candidate.changedPaths.map((change) => ({ ...change })),
-        evidence: structuredClone(run.result.evidence),
-        executedVerification: run.result.executedVerification.map((outcome) => ({
-          ...outcome,
-          args: [...outcome.args]
-        }))
-      });
+      return regenerateReviewSnapshot(run, deps);
     });
   } catch (error2) {
     return errorResult(error2);
   }
 }
-async function handleDecideCandidate(checkoutPath, runId, decision, deps = {}) {
+async function handleDecideCandidate(checkoutPath, runId, decision, expectedArtifactHash, deps = {}) {
   try {
     return await withCurrentArchivedRun(checkoutPath, runId, deps, async (run) => {
       await requireInactivePipeline(run, runId);
-      if (decision === "accepted") requireVerifiedCandidate(run);
+      const candidate = decision === "accepted" ? requireVerifiedCandidate(run) : requireCandidate(run);
+      if (expectedArtifactHash !== run.manifest.candidateManifestHash) {
+        throw runtimeError(
+          "expected artifact hash does not match archived candidate manifest hash",
+          "artifact-hash-mismatch"
+        );
+      }
+      const existing = await run.store.readCandidateDecision(runId);
+      if (existing !== null) {
+        if (existing.decisionVersion !== "2" || existing.authority !== "human" || existing.decision !== decision || existing.candidateManifestHash !== candidate.manifestHash || existing.policyVersion !== "1") {
+          throw runtimeError(
+            `candidate decision conflict: recorded ${existing.decision}, attempted ${decision}`,
+            "decision-conflict"
+          );
+        }
+      }
+      const reviewSnapshot = await regenerateReviewSnapshot(
+        run,
+        deps,
+        existing !== null && decision === "rejected"
+      );
       const record2 = {
         decision,
+        candidateManifestHash: candidate.manifestHash,
+        evidenceHash: createHash5("sha256").update(JSON.stringify(reviewSnapshot)).digest("hex"),
+        policyVersion: "1",
         recordedAt: (deps.now ?? (() => /* @__PURE__ */ new Date()))().toISOString()
       };
-      await run.store.writeDecision(record2);
-      if (decision === "rejected" && run.result.candidate !== null) {
-        const candidate = run.result.candidate;
-        const deleted = await (deps.git ?? git)(run.repoRoot, [
-          "update-ref",
-          "--no-deref",
-          "-d",
-          candidate.anchorRef,
-          candidate.candidateCommitOid
-        ]);
-        if (deleted.exitCode !== 0) {
-          throw runtimeError("failed to delete rejected candidate anchor", "anchor-delete-failed");
+      if (existing !== null) {
+        if (!isIdenticalHumanDecision(existing, record2)) {
+          throw runtimeError(
+            `candidate decision conflict: recorded ${existing.decision}, attempted ${decision}`,
+            "decision-conflict"
+          );
         }
+        if (decision === "rejected") {
+          await deleteRejectedCandidateAnchor(run, candidate, deps, true);
+        }
+        return { recorded: true };
+      }
+      await run.store.writeHumanDecision(record2);
+      if (decision === "rejected") {
+        await deleteRejectedCandidateAnchor(run, candidate, deps);
       }
       return { recorded: true };
     });
@@ -31724,7 +31936,7 @@ async function handleIntegrateCandidate(checkoutPath, runId, expectedArtifactHas
   try {
     return await withCurrentArchivedRun(checkoutPath, runId, deps, async (run, lock, ps) => {
       await requireInactivePipeline(run, runId);
-      const decision = await run.store.readDecision(runId);
+      const decision = await run.store.readCandidateDecision(runId);
       if (decision?.decision !== "accepted") {
         return { integration: "aborted", detail: "no-accepted-decision" };
       }
@@ -33596,7 +33808,8 @@ var reviewCandidateInputSchema = external_exports.object({
 var decideCandidateInputSchema = external_exports.object({
   checkoutPath: external_exports.string(),
   runId: external_exports.string(),
-  decision: external_exports.enum(["accepted", "rejected", "revision-requested"])
+  decision: external_exports.enum(["accepted", "rejected", "revision-requested"]),
+  expectedArtifactHash: external_exports.string().regex(/^[0-9a-f]{64}$/u)
 }).strict();
 var integrateCandidateInputSchema = external_exports.object({
   checkoutPath: external_exports.string(),
@@ -33726,10 +33939,11 @@ async function start(dependencies = {}) {
       inputSchema: decideCandidateInputSchema,
       outputSchema: decisionOutput
     },
-    async ({ checkoutPath, runId, decision }) => toolOutput(await handleDecideCandidate(
+    async ({ checkoutPath, runId, decision, expectedArtifactHash }) => toolOutput(await handleDecideCandidate(
       checkoutPath,
       runId,
       decision,
+      expectedArtifactHash,
       dependencies
     ))
   );

@@ -130,6 +130,7 @@ export const decideCandidateInputSchema = z.object({
   checkoutPath: z.string(),
   runId: z.string(),
   decision: z.enum(["accepted", "rejected", "revision-requested"]),
+  expectedArtifactHash: z.string().regex(/^[0-9a-f]{64}$/u),
 }).strict();
 
 export const integrateCandidateInputSchema = z.object({
@@ -270,10 +271,11 @@ export async function start(dependencies: ServerDependencies = {}): Promise<void
       inputSchema: decideCandidateInputSchema,
       outputSchema: decisionOutput,
     },
-    async ({ checkoutPath, runId, decision }) => toolOutput(await handleDecideCandidate(
+    async ({ checkoutPath, runId, decision, expectedArtifactHash }) => toolOutput(await handleDecideCandidate(
       checkoutPath,
       runId,
       decision,
+      expectedArtifactHash,
       dependencies,
     )),
   );

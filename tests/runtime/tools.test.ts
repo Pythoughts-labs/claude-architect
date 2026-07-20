@@ -12,6 +12,7 @@ import {
   handleDelegatePipeline,
   handleIntegrateCandidate,
   handleReviewCandidate,
+  type HumanDecisionRecord,
   type RunDecision,
   type ToolArtifactStore,
   type ToolDependencies,
@@ -79,12 +80,31 @@ const result: AttemptResult = {
   sessionId: null,
 };
 
+const expectedReviewSnapshot = {
+  manifestHash: candidate.manifestHash,
+  patch: "exact unredacted patch\n",
+  changedPaths,
+  evidence: result.evidence,
+  executedVerification: result.executedVerification,
+};
+
+const expectedReviewEvidenceHash = createHash("sha256")
+  .update(JSON.stringify(expectedReviewSnapshot))
+  .digest("hex");
+
 const failedSlicedResult: AttemptResult = {
   ...result,
   status: "failed",
   failure: "producer-failure",
   summary: "sliced pipeline failed",
   candidate: null,
+};
+
+const unverifiedCandidateResult: AttemptResult = {
+  ...result,
+  status: "failed",
+  failure: "verification-failure",
+  summary: "candidate verification failed",
 };
 
 const pipelineResult: PipelineResult = {
@@ -162,24 +182,42 @@ class FakeStore implements ToolArtifactStore {
     return this.storedManifest;
   }
 
-  async writeDecision(decision: RunDecision): Promise<void> {
-    if (this.decision?.decision === decision.decision) return;
+  async writeHumanDecision(decision: HumanDecisionRecord): Promise<void> {
+    if (this.decision?.decisionVersion === "2"
+      && this.decision.authority === "human"
+      && this.decision.decision === decision.decision
+      && this.decision.candidateManifestHash === decision.candidateManifestHash
+      && this.decision.evidenceHash === decision.evidenceHash
+      && this.decision.policyVersion === decision.policyVersion) return;
     if (this.decision !== null) {
       throw new RuntimeError(
         `candidate decision conflict: recorded ${this.decision.decision}, attempted ${decision.decision}`,
         { toolError: "decision-conflict" },
       );
     }
-    this.decision = decision;
+    this.decision = {
+      ...decision,
+      decisionVersion: "2",
+      authority: "human",
+    };
   }
 
-  async readDecision(_runId: string): Promise<RunDecision | null> {
+  async readCandidateDecision(_runId: string): Promise<RunDecision | null> {
     return this.decision;
   }
 
   async readPipelineActiveMarker(_runId: string): Promise<PipelineActiveMarker | null> {
     return this.pipelineActiveMarker;
   }
+}
+
+function legacyAcceptedDecision(recordedAt: string): RunDecision {
+  return {
+    decisionVersion: "1",
+    decision: "accepted",
+    authority: "human",
+    recordedAt,
+  };
 }
 
 function fakePlatform(): PlatformServices {
@@ -237,7 +275,13 @@ function invokeLifecycle(
 ): Promise<unknown> {
   if (operation === "review") return handleReviewCandidate(checkoutPath, "run-tools", deps);
   if (operation === "decide") {
-    return handleDecideCandidate(checkoutPath, "run-tools", "accepted", deps);
+    return handleDecideCandidate(
+      checkoutPath,
+      "run-tools",
+      "accepted",
+      candidate.manifestHash,
+      deps,
+    );
   }
   return handleIntegrateCandidate(
     checkoutPath,
@@ -488,6 +532,7 @@ describe("MCP tool handlers", () => {
         checkoutPath,
         "run-tools",
         "accepted",
+        candidate.manifestHash,
         deps,
       )).resolves.toEqual({ recorded: true });
       await expect(handleIntegrateCandidate(
@@ -529,6 +574,7 @@ describe("MCP tool handlers", () => {
       repoB,
       "run-tools",
       "rejected",
+      archivedCandidate.manifestHash,
       deps,
     )).resolves.toEqual(mismatch);
     await expect(handleIntegrateCandidate(
@@ -549,7 +595,7 @@ describe("MCP tool handlers", () => {
       const platformServices = getPlatformServices();
       const store = new FakeStore(result, manifestFor(repoRoot));
       if (operation === "integrate") {
-        store.decision = { decision: "accepted", recordedAt: "2026-07-19T00:00:00.000Z" };
+        store.decision = legacyAcceptedDecision("2026-07-19T00:00:00.000Z");
       }
       let markAcquiring!: () => void;
       const acquisitionStarted = new Promise<void>(resolve => { markAcquiring = resolve; });
@@ -618,7 +664,7 @@ describe("MCP tool handlers", () => {
       const acquisitionIdentity = "/canonical/repo-b/.git";
       const store = new FakeStore();
       if (operation === "integrate") {
-        store.decision = { decision: "accepted", recordedAt: "2026-07-19T00:00:00.000Z" };
+        store.decision = legacyAcceptedDecision("2026-07-19T00:00:00.000Z");
       }
       let acquireCalls = 0;
       let releaseCalls = 0;
@@ -680,15 +726,20 @@ describe("MCP tool handlers", () => {
     let allowWrite!: () => void;
     const entered = new Promise<void>(resolve => { markEntered = resolve; });
     const writeAllowed = new Promise<void>(resolve => { allowWrite = resolve; });
-    store.writeDecision = async record => {
+    store.writeHumanDecision = async record => {
       markEntered();
       await writeAllowed;
-      store.decision = record;
+      store.decision = {
+        ...record,
+        decisionVersion: "2",
+        authority: "human",
+      };
     };
     const pending = handleDecideCandidate(
       repoRoot,
       "run-tools",
       "accepted",
+      candidate.manifestHash,
       dependencies(store, ps),
     );
     await entered;
@@ -710,17 +761,20 @@ describe("MCP tool handlers", () => {
     const deleting = new Promise<void>(resolve => { markDeleting = resolve; });
     const deleteAllowed = new Promise<void>(resolve => { allowDelete = resolve; });
     const deps = dependencies(store, ps);
-    deps.git = async (_cwd, args) => {
+    const originalGit = deps.git!;
+    deps.git = async (cwd, args, indexFile) => {
       if (args[0] === "update-ref") {
         markDeleting();
         await deleteAllowed;
+        return gitResult();
       }
-      return gitResult();
+      return originalGit(cwd, args, indexFile);
     };
     const pending = handleDecideCandidate(
       repoRoot,
       "run-tools",
       "rejected",
+      candidate.manifestHash,
       deps,
     );
     await deleting;
@@ -747,16 +801,23 @@ describe("MCP tool handlers", () => {
       "/canonical/repo",
       "run-tools",
       "accepted",
+      candidate.manifestHash,
       deps,
     )).resolves.toEqual({ recorded: true });
     await expect(handleDecideCandidate(
       "/canonical/repo",
       "run-tools",
       "accepted",
+      candidate.manifestHash,
       deps,
     )).resolves.toEqual({ recorded: true });
     expect(store.decision).toEqual({
+      decisionVersion: "2",
       decision: "accepted",
+      authority: "human",
+      candidateManifestHash: candidate.manifestHash,
+      evidenceHash: expectedReviewEvidenceHash,
+      policyVersion: "1",
       recordedAt: "2026-07-18T12:00:00.000Z",
     });
 
@@ -764,6 +825,7 @@ describe("MCP tool handlers", () => {
       "/canonical/repo",
       "run-tools",
       "revision-requested",
+      candidate.manifestHash,
       deps,
     )).resolves.toEqual({
       ok: false,
@@ -771,10 +833,120 @@ describe("MCP tool handlers", () => {
       diagnostic: "candidate decision conflict: recorded accepted, attempted revision-requested",
     });
     expect(store.decision).toEqual({
+      decisionVersion: "2",
       decision: "accepted",
+      authority: "human",
+      candidateManifestHash: candidate.manifestHash,
+      evidenceHash: expectedReviewEvidenceHash,
+      policyVersion: "1",
       recordedAt: "2026-07-18T12:00:00.000Z",
     });
   });
+
+  it("rejects same-decision idempotence when the regenerated evidence hash differs", async () => {
+    const store = new FakeStore();
+    store.decision = {
+      decisionVersion: "2",
+      decision: "accepted",
+      authority: "human",
+      candidateManifestHash: candidate.manifestHash,
+      evidenceHash: "0".repeat(64),
+      policyVersion: "1",
+      recordedAt: "2026-07-18T12:00:00.000Z",
+    };
+    const deps = dependencies(store);
+    let gitCalls = 0;
+    const originalGit = deps.git!;
+    deps.git = async (cwd, args, indexFile) => {
+      gitCalls += 1;
+      return originalGit(cwd, args, indexFile);
+    };
+
+    await expect(handleDecideCandidate(
+      "/canonical/repo",
+      "run-tools",
+      "accepted",
+      candidate.manifestHash,
+      deps,
+    )).resolves.toEqual({
+      ok: false,
+      error: "decision-conflict",
+      diagnostic: "candidate decision conflict: recorded accepted, attempted accepted",
+    });
+    expect(gitCalls).toBe(3);
+    expect(store.decision).toMatchObject({ evidenceHash: "0".repeat(64) });
+  });
+
+  it("rejects an artifact hash mismatch without regenerating or recording a decision", async () => {
+    const store = new FakeStore();
+    const deps = dependencies(store);
+    let gitCalls = 0;
+    deps.git = async () => {
+      gitCalls += 1;
+      return gitResult();
+    };
+
+    await expect(handleDecideCandidate(
+      "/canonical/repo",
+      "run-tools",
+      "accepted",
+      "f".repeat(64),
+      deps,
+    )).resolves.toEqual({
+      ok: false,
+      error: "artifact-hash-mismatch",
+      diagnostic: "expected artifact hash does not match archived candidate manifest hash",
+    });
+    expect(store.decision).toBeNull();
+    expect(gitCalls).toBe(0);
+  });
+
+  it("classifies an unverified archived run before checking its artifact hash", async () => {
+    const store = new FakeStore(failedSlicedResult);
+    const deps = dependencies(store);
+    let gitCalls = 0;
+    deps.git = async () => {
+      gitCalls += 1;
+      return gitResult();
+    };
+
+    await expect(handleDecideCandidate(
+      "/canonical/repo",
+      "run-tools",
+      "accepted",
+      "f".repeat(64),
+      deps,
+    )).resolves.toEqual({
+      ok: false,
+      error: "candidate-not-verified",
+      diagnostic: "candidate did not complete independent verification",
+    });
+    expect(store.decision).toBeNull();
+    expect(gitCalls).toBe(0);
+  });
+
+  it.each(["rejected", "revision-requested"] as const)(
+    "records an evidence-bound %s decision for an unverified candidate",
+    async decision => {
+      const store = new FakeStore(unverifiedCandidateResult);
+
+      await expect(handleDecideCandidate(
+        "/canonical/repo",
+        "run-tools",
+        decision,
+        candidate.manifestHash,
+        dependencies(store),
+      )).resolves.toEqual({ recorded: true });
+      expect(store.decision).toMatchObject({
+        decisionVersion: "2",
+        decision,
+        authority: "human",
+        candidateManifestHash: candidate.manifestHash,
+        evidenceHash: expectedReviewEvidenceHash,
+        policyVersion: "1",
+      });
+    },
+  );
 
   it("regenerates an unredacted review patch from the anchored tree", async () => {
     const deps = dependencies();
@@ -848,6 +1020,7 @@ describe("MCP tool handlers", () => {
       "/canonical/repo",
       "run-tools",
       "accepted",
+      candidate.manifestHash,
       deps,
     )).resolves.toEqual({
       recorded: true,
@@ -865,7 +1038,7 @@ describe("MCP tool handlers", () => {
 
   it("passes the exact lifecycle checkout lease into integration without nested ownership", async () => {
     const store = new FakeStore();
-    store.decision = { decision: "accepted", recordedAt: "2026-07-18T12:01:00.000Z" };
+    store.decision = legacyAcceptedDecision("2026-07-18T12:01:00.000Z");
     let held = false;
     let acquireCalls = 0;
     let releaseCalls = 0;
@@ -918,7 +1091,7 @@ describe("MCP tool handlers", () => {
         sliced: true,
       };
       if (operation === "integrate") {
-        store.decision = { decision: "accepted", recordedAt: "2026-07-18T12:01:00.000Z" };
+        store.decision = legacyAcceptedDecision("2026-07-18T12:01:00.000Z");
       }
       let held = false;
       let acquireCalls = 0;
@@ -1004,7 +1177,7 @@ describe("MCP tool handlers", () => {
 
   it("preserves an applied integration result when lifecycle lease release fails", async () => {
     const store = new FakeStore();
-    store.decision = { decision: "accepted", recordedAt: "2026-07-18T12:01:00.000Z" };
+    store.decision = legacyAcceptedDecision("2026-07-18T12:01:00.000Z");
     let releaseCalls = 0;
     const ps = {
       ...fakePlatform(),
@@ -1062,32 +1235,91 @@ describe("MCP tool handlers", () => {
     expect(releaseCalls).toBe(1);
   });
 
-  it("deletes the exact candidate anchor after recording rejection", async () => {
+  it("deletes the exact candidate anchor and idempotently retries rejection", async () => {
     const store = new FakeStore();
     const deps = dependencies(store);
     const gitCalls: string[][] = [];
-    deps.git = async (_cwd, args) => {
+    const originalGit = deps.git!;
+    let anchorPresent = true;
+    deps.git = async (cwd, args, indexFile) => {
       gitCalls.push(args);
-      return gitResult();
+      if (args[0] === "show-ref") {
+        return anchorPresent
+          ? gitResult(`${candidate.candidateCommitOid}\n`)
+          : gitResult("", 1);
+      }
+      if (args.includes(`${candidate.anchorRef}^{commit}`) && !anchorPresent) {
+        return gitResult("", 1);
+      }
+      const output = await originalGit(cwd, args, indexFile);
+      if (args[0] === "update-ref") anchorPresent = false;
+      return output;
     };
 
     await expect(handleDecideCandidate(
       "/canonical/repo",
       "run-tools",
       "rejected",
+      candidate.manifestHash,
+      deps,
+    )).resolves.toEqual({
+      recorded: true,
+    });
+    await expect(handleDecideCandidate(
+      "/canonical/repo",
+      "run-tools",
+      "rejected",
+      candidate.manifestHash,
       deps,
     )).resolves.toEqual({
       recorded: true,
     });
 
     expect(store.decision).toMatchObject({ decision: "rejected" });
-    expect(gitCalls).toEqual([[
-      "update-ref",
-      "--no-deref",
-      "-d",
-      candidate.anchorRef,
-      candidate.candidateCommitOid,
-    ]]);
+    expect(gitCalls).toEqual([
+      ["rev-parse", "--verify", "--quiet", `${candidate.anchorRef}^{commit}`],
+      ["rev-parse", "--verify", `${candidate.candidateCommitOid}^{tree}`],
+      [
+        "diff",
+        "--no-ext-diff",
+        "--no-textconv",
+        "--binary",
+        "--full-index",
+        candidate.baseCommitOid,
+        candidate.candidateTreeOid,
+        "--",
+      ],
+      [
+        "update-ref",
+        "--no-deref",
+        "-d",
+        candidate.anchorRef,
+        candidate.candidateCommitOid,
+      ],
+      [
+        "rev-parse",
+        "--verify",
+        "--quiet",
+        `${candidate.anchorRef}^{commit}`,
+      ],
+      ["rev-parse", "--verify", `${candidate.candidateCommitOid}^{tree}`],
+      [
+        "diff",
+        "--no-ext-diff",
+        "--no-textconv",
+        "--binary",
+        "--full-index",
+        candidate.baseCommitOid,
+        candidate.candidateTreeOid,
+        "--",
+      ],
+      [
+        "show-ref",
+        "--verify",
+        "--hash",
+        candidate.anchorRef,
+      ],
+    ]);
     await expect(handleIntegrateCandidate(
       "/canonical/repo",
       "run-tools",
@@ -1110,13 +1342,14 @@ describe("MCP tool handlers", () => {
       "/canonical/repo",
       "run-tools",
       "accepted",
+      candidate.manifestHash,
       deps,
     )).resolves.toEqual({
       ok: false,
       error: "candidate-not-verified",
       diagnostic: "candidate did not complete independent verification",
     });
-    store.decision = { decision: "accepted", recordedAt: "2026-07-14T00:00:00.000Z" };
+    store.decision = legacyAcceptedDecision("2026-07-14T00:00:00.000Z");
     await expect(handleIntegrateCandidate(
       "/canonical/repo",
       "run-tools",

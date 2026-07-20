@@ -10,6 +10,10 @@ import {
 } from "../pipeline/pipeline-runtime.js";
 import { registry } from "../producers/producer-registry.js";
 import type { AttemptResult, CandidateArtifact } from "../protocol/attempt-result.js";
+import type {
+  CandidateDecision,
+  HumanCandidateDecisionV2,
+} from "../protocol/candidate-decision.js";
 import type { DelegationSpec } from "../protocol/delegation-spec.js";
 import { checkVersionCompat } from "../protocol/schema-loader.js";
 import { validateSpec } from "../protocol/spec-validator.js";
@@ -20,7 +24,6 @@ import {
 import {
   ArtifactStore,
   type PipelineActiveMarker,
-  type RunDecisionRecord,
   type RunDecisionValue,
 } from "../runtime/artifact-store.js";
 import {
@@ -33,13 +36,18 @@ import { NestedDelegationError, RuntimeError } from "../util/errors.js";
 import { AcceptanceVerifier } from "../verify/acceptance-verifier.js";
 import { boundIgnoredPathEvidence, withRepoLock } from "./serialize.js";
 
-export type RunDecision = RunDecisionRecord;
+export type RunDecision = CandidateDecision;
+
+export type HumanDecisionRecord = Omit<
+  HumanCandidateDecisionV2,
+  "decisionVersion" | "authority"
+>;
 
 export interface ToolArtifactStore {
   readResult(runId: string): Promise<AttemptResult | null>;
   readManifest(runId: string): Promise<RunManifest | null>;
-  writeDecision(record: RunDecision): Promise<void>;
-  readDecision(runId: string): Promise<RunDecision | null>;
+  writeHumanDecision(record: HumanDecisionRecord): Promise<void>;
+  readCandidateDecision(runId: string): Promise<RunDecision | null>;
   readPipelineActiveMarker(runId: string): Promise<PipelineActiveMarker | null>;
 }
 
@@ -372,65 +380,118 @@ export async function handleDelegatePipeline(
   }
 }
 
+interface ReviewCandidateSnapshot {
+  manifestHash: string;
+  patch: string;
+  changedPaths: CandidateArtifact["changedPaths"];
+  evidence: AttemptResult["evidence"];
+  executedVerification: AttemptResult["executedVerification"];
+}
+
+async function regenerateReviewSnapshot(
+  run: ArchivedRun,
+  deps: ToolDependencies,
+  allowMissingAnchor = false,
+): Promise<ReviewCandidateSnapshot> {
+  const candidate = requireCandidate(run);
+  const git = deps.git ?? runGit;
+  const anchor = await git(run.repoRoot, [
+    "rev-parse",
+    "--verify",
+    "--quiet",
+    `${candidate.anchorRef}^{commit}`,
+  ]);
+  const tree = await git(run.repoRoot, [
+    "rev-parse",
+    "--verify",
+    `${candidate.candidateCommitOid}^{tree}`,
+  ]);
+  const anchorMissing = allowMissingAnchor
+    && anchor.exitCode === 1
+    && anchor.stdout.trim().length === 0;
+  if ((!anchorMissing && (anchor.exitCode !== 0
+    || anchor.stdout.trim() !== candidate.candidateCommitOid))
+    || tree.exitCode !== 0
+    || tree.stdout.trim() !== candidate.candidateTreeOid) {
+    throw runtimeError("candidate anchor no longer matches the archive", "candidate-anchor-mismatch");
+  }
+  const patch = await git(run.repoRoot, [
+    "diff",
+    "--no-ext-diff",
+    "--no-textconv",
+    "--binary",
+    "--full-index",
+    candidate.baseCommitOid,
+    candidate.candidateTreeOid,
+    "--",
+  ]);
+  if (patch.exitCode !== 0 || patch.truncated?.stdout === true) {
+    throw runtimeError("failed to regenerate candidate patch", "candidate-review-failed");
+  }
+  return boundIgnoredPathEvidence({
+    manifestHash: candidate.manifestHash,
+    patch: patch.stdout,
+    changedPaths: candidate.changedPaths.map(change => ({ ...change })),
+    evidence: structuredClone(run.result.evidence),
+    executedVerification: run.result.executedVerification.map(outcome => ({
+      ...outcome,
+      args: [...outcome.args],
+    })),
+  });
+}
+
+function isIdenticalHumanDecision(
+  existing: CandidateDecision,
+  attempted: HumanDecisionRecord,
+): boolean {
+  return existing.decisionVersion === "2"
+    && existing.authority === "human"
+    && existing.decision === attempted.decision
+    && existing.candidateManifestHash === attempted.candidateManifestHash
+    && existing.evidenceHash === attempted.evidenceHash
+    && existing.policyVersion === attempted.policyVersion;
+}
+
+async function deleteRejectedCandidateAnchor(
+  run: ArchivedRun,
+  candidate: CandidateArtifact,
+  deps: ToolDependencies,
+  allowAlreadyAbsent = false,
+): Promise<void> {
+  const git = deps.git ?? runGit;
+  if (allowAlreadyAbsent) {
+    const current = await git(run.repoRoot, [
+      "show-ref",
+      "--verify",
+      "--hash",
+      candidate.anchorRef,
+    ]);
+    if (current.exitCode === 1 && current.stdout.trim().length === 0) return;
+    if (current.exitCode !== 0 || current.stdout.trim() !== candidate.candidateCommitOid) {
+      throw runtimeError("rejected candidate anchor changed identity", "anchor-delete-failed");
+    }
+  }
+  const deleted = await git(run.repoRoot, [
+    "update-ref",
+    "--no-deref",
+    "-d",
+    candidate.anchorRef,
+    candidate.candidateCommitOid,
+  ]);
+  if (deleted.exitCode !== 0) {
+    throw runtimeError("failed to delete rejected candidate anchor", "anchor-delete-failed");
+  }
+}
+
 export async function handleReviewCandidate(
   checkoutPath: string,
   runId: string,
   deps: ToolDependencies = {},
-): Promise<
-  | {
-    manifestHash: string;
-    patch: string;
-    changedPaths: CandidateArtifact["changedPaths"];
-    evidence: AttemptResult["evidence"];
-    executedVerification: AttemptResult["executedVerification"];
-  }
-  | ToolErrorResult
-> {
+): Promise<ReviewCandidateSnapshot | ToolErrorResult> {
   try {
     return await withCurrentArchivedRun(checkoutPath, runId, deps, async run => {
       await requireInactivePipeline(run, runId);
-      const candidate = requireCandidate(run);
-      const git = deps.git ?? runGit;
-      const anchor = await git(run.repoRoot, [
-        "rev-parse",
-        "--verify",
-        "--quiet",
-        `${candidate.anchorRef}^{commit}`,
-      ]);
-      const tree = await git(run.repoRoot, [
-        "rev-parse",
-        "--verify",
-        `${candidate.candidateCommitOid}^{tree}`,
-      ]);
-      if (anchor.exitCode !== 0
-        || anchor.stdout.trim() !== candidate.candidateCommitOid
-        || tree.exitCode !== 0
-        || tree.stdout.trim() !== candidate.candidateTreeOid) {
-        throw runtimeError("candidate anchor no longer matches the archive", "candidate-anchor-mismatch");
-      }
-      const patch = await git(run.repoRoot, [
-        "diff",
-        "--no-ext-diff",
-        "--no-textconv",
-        "--binary",
-        "--full-index",
-        candidate.baseCommitOid,
-        candidate.candidateTreeOid,
-        "--",
-      ]);
-      if (patch.exitCode !== 0 || patch.truncated?.stdout === true) {
-        throw runtimeError("failed to regenerate candidate patch", "candidate-review-failed");
-      }
-      return boundIgnoredPathEvidence({
-        manifestHash: candidate.manifestHash,
-        patch: patch.stdout,
-        changedPaths: candidate.changedPaths.map(change => ({ ...change })),
-        evidence: structuredClone(run.result.evidence),
-        executedVerification: run.result.executedVerification.map(outcome => ({
-          ...outcome,
-          args: [...outcome.args],
-        })),
-      });
+      return regenerateReviewSnapshot(run, deps);
     });
   } catch (error) {
     return errorResult(error);
@@ -441,29 +502,63 @@ export async function handleDecideCandidate(
   checkoutPath: string,
   runId: string,
   decision: RunDecisionValue,
+  expectedArtifactHash: string,
   deps: ToolDependencies = {},
 ): Promise<{ recorded: true } | ToolErrorResult> {
   try {
     return await withCurrentArchivedRun(checkoutPath, runId, deps, async run => {
       await requireInactivePipeline(run, runId);
-      if (decision === "accepted") requireVerifiedCandidate(run);
-      const record: RunDecision = {
+      const candidate = decision === "accepted"
+        ? requireVerifiedCandidate(run)
+        : requireCandidate(run);
+      if (expectedArtifactHash !== run.manifest.candidateManifestHash) {
+        throw runtimeError(
+          "expected artifact hash does not match archived candidate manifest hash",
+          "artifact-hash-mismatch",
+        );
+      }
+      const existing = await run.store.readCandidateDecision(runId);
+      if (existing !== null) {
+        if (existing.decisionVersion !== "2"
+          || existing.authority !== "human"
+          || existing.decision !== decision
+          || existing.candidateManifestHash !== candidate.manifestHash
+          || existing.policyVersion !== "1") {
+          throw runtimeError(
+            `candidate decision conflict: recorded ${existing.decision}, attempted ${decision}`,
+            "decision-conflict",
+          );
+        }
+      }
+      const reviewSnapshot = await regenerateReviewSnapshot(
+        run,
+        deps,
+        existing !== null && decision === "rejected",
+      );
+      const record: HumanDecisionRecord = {
         decision,
+        candidateManifestHash: candidate.manifestHash,
+        evidenceHash: createHash("sha256")
+          .update(JSON.stringify(reviewSnapshot))
+          .digest("hex"),
+        policyVersion: "1",
         recordedAt: (deps.now ?? (() => new Date()))().toISOString(),
       };
-      await run.store.writeDecision(record);
-      if (decision === "rejected" && run.result.candidate !== null) {
-        const candidate = run.result.candidate;
-        const deleted = await (deps.git ?? runGit)(run.repoRoot, [
-          "update-ref",
-          "--no-deref",
-          "-d",
-          candidate.anchorRef,
-          candidate.candidateCommitOid,
-        ]);
-        if (deleted.exitCode !== 0) {
-          throw runtimeError("failed to delete rejected candidate anchor", "anchor-delete-failed");
+      if (existing !== null) {
+        if (!isIdenticalHumanDecision(existing, record)) {
+          throw runtimeError(
+            `candidate decision conflict: recorded ${existing.decision}, attempted ${decision}`,
+            "decision-conflict",
+          );
         }
+        if (decision === "rejected") {
+          await deleteRejectedCandidateAnchor(run, candidate, deps, true);
+        }
+        return { recorded: true };
+      }
+      await run.store.writeHumanDecision(record);
+      if (decision === "rejected") {
+        await deleteRejectedCandidateAnchor(run, candidate, deps);
       }
       return { recorded: true };
     });
@@ -481,7 +576,7 @@ export async function handleIntegrateCandidate(
   try {
     return await withCurrentArchivedRun(checkoutPath, runId, deps, async (run, lock, ps) => {
       await requireInactivePipeline(run, runId);
-      const decision = await run.store.readDecision(runId);
+      const decision = await run.store.readCandidateDecision(runId);
       if (decision?.decision !== "accepted") {
         return { integration: "aborted", detail: "no-accepted-decision" };
       }
