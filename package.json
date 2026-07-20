@@ -21,6 +21,6 @@
     "@typescript/native-preview": "^7.0.0-dev.20260707.2",
     "esbuild": "0.24.2",
     "typescript": "5.9.3",
-    "vitest": "2.1.9"
+    "vitest": "4.1.10"
   }
 }
