@@ -21930,7 +21930,7 @@ var StdioServerTransport = class {
 };
 
 // src/protocol/versions.ts
-var PROTOCOL_VERSION = "1.3.0";
+var PROTOCOL_VERSION = "2.0.0";
 var DELEGATION_SPEC_VERSION = "1";
 var ATTEMPT_RESULT_VERSION = "1";
 var RUNTIME_VERSION = "0.26.0";
@@ -25100,6 +25100,127 @@ var delegation_spec_v1_default = {
   ]
 };
 
+// runtime/schemas/autopilot-spec.v1.json
+var autopilot_spec_v1_default = {
+  $schema: "https://json-schema.org/draft/2020-12/schema",
+  $id: "autopilot-spec.v1.json",
+  type: "object",
+  additionalProperties: false,
+  required: [
+    "specVersion",
+    "topic",
+    "base",
+    "tasks",
+    "finalSuccessCriteria",
+    "finalVerification",
+    "shipping"
+  ],
+  properties: {
+    specVersion: {
+      const: "1"
+    },
+    topic: {
+      type: "string",
+      pattern: "^[a-z0-9](?:[a-z0-9-]{1,46}[a-z0-9])$"
+    },
+    base: {
+      type: "object",
+      additionalProperties: false,
+      required: [
+        "remote",
+        "branch"
+      ],
+      properties: {
+        remote: {
+          const: "origin"
+        },
+        branch: {
+          const: "main"
+        }
+      }
+    },
+    tasks: {
+      type: "array",
+      minItems: 1,
+      maxItems: 32,
+      items: {
+        type: "object",
+        additionalProperties: false,
+        required: [
+          "id",
+          "commitMessage",
+          "delegation"
+        ],
+        properties: {
+          id: {
+            type: "string",
+            minLength: 1,
+            maxLength: 128
+          },
+          commitMessage: {
+            type: "string",
+            minLength: 1,
+            maxLength: 200
+          },
+          delegation: {
+            $ref: "delegation-spec.v1.json"
+          }
+        }
+      }
+    },
+    finalSuccessCriteria: {
+      type: "array",
+      minItems: 1,
+      items: {
+        type: "string",
+        minLength: 1,
+        maxLength: 4e3
+      }
+    },
+    finalVerification: {
+      $ref: "delegation-spec.v1.json#/properties/verification"
+    },
+    shipping: {
+      type: "object",
+      additionalProperties: false,
+      required: [
+        "provider",
+        "draft",
+        "markReadyWhenRequiredChecksPass",
+        "requiredChecksTimeoutMs",
+        "pullRequestTitle",
+        "pullRequestBody"
+      ],
+      properties: {
+        provider: {
+          const: "github"
+        },
+        draft: {
+          const: true
+        },
+        markReadyWhenRequiredChecksPass: {
+          const: true
+        },
+        requiredChecksTimeoutMs: {
+          type: "integer",
+          minimum: 6e5,
+          maximum: 36e5
+        },
+        pullRequestTitle: {
+          type: "string",
+          minLength: 1,
+          maxLength: 256
+        },
+        pullRequestBody: {
+          type: "string",
+          minLength: 1,
+          maxLength: 4e3
+        }
+      }
+    }
+  }
+};
+
 // runtime/schemas/attempt-result.v1.json
 var attempt_result_v1_default = {
   $schema: "https://json-schema.org/draft/2020-12/schema",
@@ -25431,10 +25552,17 @@ var verification_report_v1_default = {
 };
 
 // src/protocol/schema-loader.ts
+var DELEGATION_SPEC_SCHEMA_KEY = "delegation-spec.v1.json";
 function loadSchemas() {
   const ajv = new import__.Ajv2020({ allErrors: true, strict: false });
+  ajv.addSchema(delegation_spec_v1_default, DELEGATION_SPEC_SCHEMA_KEY);
+  const delegationSpec = ajv.getSchema(DELEGATION_SPEC_SCHEMA_KEY);
+  if (delegationSpec === void 0) {
+    throw new Error("failed to register the canonical Delegation Spec schema");
+  }
   return {
-    delegationSpec: ajv.compile(delegation_spec_v1_default),
+    delegationSpec,
+    autopilotSpec: ajv.compile(autopilot_spec_v1_default),
     attemptResult: ajv.compile(attempt_result_v1_default),
     reviewReport: ajv.compile(review_report_v1_default),
     fixReport: ajv.compile(fix_report_v1_default),

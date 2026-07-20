@@ -40,6 +40,17 @@ describe.each([
     expect(result.success).toBe(false);
     if (!result.success) expect(result.error.issues[0]?.code).toBe("unrecognized_keys");
   });
+
+  it("diagnoses the previous 1.3.0 protocol and names expected 2.0.0", () => {
+    const result = schema.safeParse({ ...validInput, protocolVersion: "1.3.0" });
+
+    expect(result.success).toBe(false);
+    if (result.success) return;
+    const diagnostic = result.error.issues.map(issue => issue.message).join("\n");
+    expect(diagnostic).toContain("protocol version mismatch");
+    expect(diagnostic).toContain("received 1.3.0");
+    expect(diagnostic).toContain("expected 2.0.0");
+  }, 5_000);
 });
 
 describe.each([

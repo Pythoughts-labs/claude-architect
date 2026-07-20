@@ -78,7 +78,7 @@ describe("MCP server handshake", () => {
       }
     });
 
-    const request = async (id: number, method: string, params: Record<string, unknown>) => {
+    const requestRaw = async (id: number, method: string, params: Record<string, unknown>) => {
       const response = responses.get(id) ?? await new Promise<JsonRpcResponse>((resolve, reject) => {
         const timeout = setTimeout(() => {
           waiters.delete(id);
@@ -90,6 +90,10 @@ describe("MCP server handshake", () => {
         });
         child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id, method, params })}\n`);
       });
+      return response;
+    };
+    const request = async (id: number, method: string, params: Record<string, unknown>) => {
+      const response = await requestRaw(id, method, params);
       if (response.error !== undefined) throw new Error(JSON.stringify(response.error));
       return response.result ?? {};
     };
@@ -120,6 +124,15 @@ describe("MCP server handshake", () => {
         name: "doctor",
         arguments: {},
       });
+      const mismatched = await requestRaw(5, "tools/call", {
+        name: "delegate",
+        arguments: {
+          checkoutPath: "/unused-invalid-spec",
+          protocolVersion: "1.3.0",
+          spec: { specVersion: "1" },
+        },
+      });
+      const mismatchDiagnostic = JSON.stringify(mismatched);
 
       expect(names).toEqual([
         "decideCandidate",
@@ -145,6 +158,9 @@ describe("MCP server handshake", () => {
         producers: expect.any(Array),
         issues: expect.any(Array),
       });
+      expect(mismatchDiagnostic).toContain("protocol version mismatch");
+      expect(mismatchDiagnostic).toContain("received 1.3.0");
+      expect(mismatchDiagnostic).toContain("expected 2.0.0");
       expect(stdout.trim().split(/\r?\n/).every(line => {
         try {
           JSON.parse(line);
