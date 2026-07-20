@@ -243,7 +243,7 @@ export async function verifyBaseline(args: BaselineVerifyArgs): Promise<Baseline
         exitCode: executed.outcome.exitCode,
         ok: (!executed.failed || command.expectBaselineFailure === true)
           && !mutation.mutated
-          && !noTestsCollected,
+          && (!noTestsCollected || command.expectBaselineFailure === true),
         ...(noTestsCollected ? { classification: "no-tests-collected" as const } : {}),
         ...(mutation.mutated
           ? { mutation: { records: mutation.records, headChanged: mutation.headChanged } }

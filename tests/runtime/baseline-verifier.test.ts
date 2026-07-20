@@ -151,6 +151,42 @@ describe("verifyBaseline", () => {
     ]);
   });
 
+  it("tolerates no tests only for an expected baseline failure", async () => {
+    const repo = await fixture();
+    const report = await verifyBaseline({
+      ...repo,
+      ps: platformWithCommandOutput(
+        "process.stdout.write('No test files found, exiting with code 0')",
+        ["vitest"],
+      ),
+      commands: [
+        {
+          ...command(0),
+          id: "expected-empty",
+          executable: "vitest",
+          args: [],
+          expectBaselineFailure: true,
+        },
+        { ...command(0), id: "unexpected-empty", executable: "vitest", args: [] },
+      ],
+    });
+
+    expect(report.commands).toEqual([
+      {
+        id: "expected-empty",
+        exitCode: 0,
+        ok: true,
+        classification: "no-tests-collected",
+      },
+      {
+        id: "unexpected-empty",
+        exitCode: 0,
+        ok: false,
+        classification: "no-tests-collected",
+      },
+    ]);
+  });
+
   it("does not classify a collecting vitest run or non-vitest output as empty", async () => {
     const repo = await fixture();
     const report = await verifyBaseline({

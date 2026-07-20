@@ -26504,7 +26504,7 @@ async function verifyBaseline(args) {
       commands.push({
         id: executed.outcome.id,
         exitCode: executed.outcome.exitCode,
-        ok: (!executed.failed || command.expectBaselineFailure === true) && !mutation.mutated && !noTestsCollected,
+        ok: (!executed.failed || command.expectBaselineFailure === true) && !mutation.mutated && (!noTestsCollected || command.expectBaselineFailure === true),
         ...noTestsCollected ? { classification: "no-tests-collected" } : {},
         ...mutation.mutated ? { mutation: { records: mutation.records, headChanged: mutation.headChanged } } : {}
       });
