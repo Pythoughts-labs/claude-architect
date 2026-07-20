@@ -12,7 +12,7 @@
       "name": "claude-architect",
       "displayName": "Claude Architect",
       "source": "./",
-      "version": "0.23.0",
+      "version": "0.24.0",
       "description": "Verified P0-A MCP delegation with macOS arm64 certified; Linux tested; native Windows pending. Codex edit eligibility requires its proven native sandbox.",
       "author": {
         "name": "elkaix",

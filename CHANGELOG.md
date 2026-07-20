@@ -6,6 +6,8 @@ All notable changes to Claude Architect are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.24.0] - 2026-07-19
+
 ### Added
 
 - Optional top-level and per-slice `allowedTestDeletions` globs let architects
