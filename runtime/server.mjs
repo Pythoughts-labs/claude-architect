@@ -24710,6 +24710,13 @@ var delegation_spec_v1_default = {
       },
       minItems: 1
     },
+    allowedTestDeletions: {
+      type: "array",
+      items: {
+        type: "string",
+        minLength: 1
+      }
+    },
     forbiddenScope: {
       type: "array",
       items: {
@@ -24840,6 +24847,13 @@ var delegation_spec_v1_default = {
               type: "string"
             },
             minItems: 1
+          },
+          allowedTestDeletions: {
+            type: "array",
+            items: {
+              type: "string",
+              minLength: 1
+            }
           },
           forbiddenScope: {
             type: "array",
@@ -29663,21 +29677,61 @@ async function promoteFinalCandidate(args) {
   });
   return { attempt: finalAttempt, candidateCommit: canonicalCommit };
 }
-function detectWeakenedTests(diff) {
+function analyzeWeakenedTests(diff, allowedTestDeletions = [], deletedPaths) {
   let testsDeleted = 0;
   let testsSkipped = 0;
+  const authorizedTestDeletions = [];
   let currentFileIsTest = false;
+  let currentPath = null;
   for (const line of diff.split("\n")) {
-    if (/^deleted file mode/.test(line)) {
-      if (currentFileIsTest) testsDeleted++;
+    if (deletedPaths === void 0 && /^deleted file mode/.test(line)) {
+      if (currentFileIsTest && currentPath !== null) {
+        const deletedPath = currentPath;
+        if (allowedTestDeletions.some((pattern) => globMatches3(pattern, deletedPath))) {
+          authorizedTestDeletions.push(deletedPath);
+        } else {
+          testsDeleted++;
+        }
+      }
     }
-    if (/^diff --git a\/(\S+)/.test(line)) {
+    const diffHeader = /^diff --git a\/(\S+) b\/\S+$/.exec(line);
+    if (diffHeader !== null) {
+      currentPath = diffHeader[1] ?? null;
+      currentFileIsTest = currentPath !== null && /(^|\/)tests?\/|\.test\.|\.spec\./.test(currentPath);
+    } else if (/^diff --git /.test(line)) {
+      currentPath = null;
       currentFileIsTest = /(^|\/)tests?\/|\.test\.|\.spec\./.test(line);
     }
     if (currentFileIsTest && /^\+.*\b(it|test|describe)\.(skip|todo)\(/.test(line)) testsSkipped++;
     if (currentFileIsTest && /^\+.*\bxit\(|^\+.*\bxdescribe\(/.test(line)) testsSkipped++;
   }
-  return { testsDeleted, testsSkipped };
+  for (const deletedPath of deletedPaths ?? []) {
+    if (!/(^|\/)tests?\/|\.test\.|\.spec\./.test(deletedPath)) continue;
+    if (allowedTestDeletions.some((pattern) => globMatches3(pattern, deletedPath))) {
+      authorizedTestDeletions.push(deletedPath);
+    } else {
+      testsDeleted++;
+    }
+  }
+  return { testsDeleted, testsSkipped, authorizedTestDeletions };
+}
+function parseDeletedPaths(nameStatus) {
+  const fields = nameStatus.split("\0");
+  const deletedPaths = [];
+  for (let index = 0; index < fields.length; index += 1) {
+    const entry = fields[index] ?? "";
+    if (entry === "D") {
+      const pathname = fields[index + 1];
+      if (pathname !== void 0 && pathname !== "") deletedPaths.push(pathname);
+      index += 1;
+      continue;
+    }
+    const separator = entry.indexOf("	");
+    if (separator >= 0 && entry.slice(0, separator) === "D") {
+      deletedPaths.push(entry.slice(separator + 1));
+    }
+  }
+  return deletedPaths;
 }
 async function runReviews(args) {
   const logNameNamespace = args.logNameNamespace === void 0 ? "" : `${args.logNameNamespace}-`;
@@ -29903,11 +29957,18 @@ async function verifyCandidate(args) {
   const fresh = await manager.create(args.candidateCommit);
   let primaryError;
   try {
-    const [diffText, nameOnly, status, ancestry] = await Promise.all([
+    const [diffText, nameOnly, nameStatus, status, ancestry] = await Promise.all([
       checkedGit4(fresh.path, ["diff", `${args.baselineCommit}..${args.candidateCommit}`]),
       checkedGit4(fresh.path, [
         "diff",
         "--name-only",
+        `${args.baselineCommit}..${args.candidateCommit}`
+      ]),
+      checkedGit4(fresh.path, [
+        "diff",
+        "--name-status",
+        "--no-renames",
+        "-z",
         `${args.baselineCommit}..${args.candidateCommit}`
       ]),
       checkedGit4(fresh.path, ["status", "--porcelain"]),
@@ -29947,7 +30008,11 @@ async function verifyCandidate(args) {
     });
     const changedPaths = nameOnly.split("\n").map((line) => line.trim()).filter(Boolean);
     const scopeViolations = changedPaths.filter((pathname) => !args.spec.writeAllowlist.some((pattern) => globMatches3(pattern, pathname)) || args.spec.forbiddenScope.some((pattern) => globMatches3(pattern, pathname)));
-    const weakened = detectWeakenedTests(diffText);
+    const weakened = analyzeWeakenedTests(
+      diffText,
+      args.spec.allowedTestDeletions,
+      parseDeletedPaths(nameStatus)
+    );
     const workspaceClean = status === "";
     const verificationCommands = new Map(
       args.spec.verification.map((command) => [command.id, command])
@@ -29973,7 +30038,8 @@ async function verifyCandidate(args) {
           commandOutcomes: acceptance.commandOutcomes.map((outcome) => ({
             ...outcome,
             args: [...outcome.args]
-          }))
+          })),
+          ...args.spec.allowedTestDeletions === void 0 ? {} : { authorizedTestDeletions: [...weakened.authorizedTestDeletions] }
         }
       },
       baselineDrift: ancestry.exitCode !== 0
@@ -30812,6 +30878,23 @@ function allowlistCovers(top, glob) {
     return prefix === glob || glob.startsWith(`${prefix}/`);
   });
 }
+function isSafeRepositoryGlob(glob) {
+  return glob.length > 0 && !path13.posix.isAbsolute(glob) && !path13.win32.isAbsolute(glob) && !glob.split(/[\\/]/).includes("..");
+}
+function validateAllowedTestDeletions(globs, basePath) {
+  for (const [index, glob] of (globs ?? []).entries()) {
+    if (!isSafeRepositoryGlob(glob)) {
+      return {
+        ok: false,
+        errors: [{
+          path: `${basePath}/${index}`,
+          message: "must be a non-empty repository-relative glob without traversal"
+        }]
+      };
+    }
+  }
+  return null;
+}
 function resolveMinEditTimeoutMs() {
   const raw = process.env.CLAUDE_ARCHITECT_MIN_EDIT_TIMEOUT_MS;
   if (process.env.NODE_ENV === "test" && raw !== void 0) {
@@ -30836,6 +30919,11 @@ function validateSpec(input) {
   const schemaValid = schemas2.delegationSpec(schemaInput);
   if (schemaValid) {
     const spec = input;
+    const topLevelDeletionError = validateAllowedTestDeletions(
+      spec.allowedTestDeletions,
+      "/allowedTestDeletions"
+    );
+    if (topLevelDeletionError !== null) return topLevelDeletionError;
     for (const [index, command] of spec.verification.entries()) {
       const normalizedCwd = path13.posix.normalize(command.cwd);
       if (path13.isAbsolute(command.cwd) || normalizedCwd === ".." || normalizedCwd.startsWith("../")) {
@@ -30849,6 +30937,11 @@ function validateSpec(input) {
       }
     }
     for (const [sliceIndex, slice] of (spec.slices ?? []).entries()) {
+      const sliceDeletionError = validateAllowedTestDeletions(
+        slice.allowedTestDeletions,
+        `/slices/${sliceIndex}/allowedTestDeletions`
+      );
+      if (sliceDeletionError !== null) return sliceDeletionError;
       for (const [globIndex, glob] of slice.writeAllowlist.entries()) {
         if (!allowlistCovers(spec.writeAllowlist, glob)) {
           return {

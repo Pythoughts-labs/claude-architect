@@ -33,6 +33,13 @@
       },
       "minItems": 1
     },
+    "allowedTestDeletions": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
     "forbiddenScope": {
       "type": "array",
       "items": {
@@ -163,6 +170,13 @@
               "type": "string"
             },
             "minItems": 1
+          },
+          "allowedTestDeletions": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
           },
           "forbiddenScope": {
             "type": "array",

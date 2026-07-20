@@ -671,6 +671,35 @@ describe("scopeSpecToSlice", () => {
     expect(parent).toEqual(parentSnapshot);
     expect(slice).toEqual(sliceSnapshot);
   });
+
+  it("inherits parent test-deletion globs unless the slice overrides them", () => {
+    const parent = validSpec();
+    parent.allowedTestDeletions = ["tests/inherited/**"];
+    const inheritedSlice: Slice = {
+      objective: "Inherited deletion scope.",
+      context: "Use the parent deletion authority.",
+      writeAllowlist: ["a.txt"],
+      forbiddenScope: [],
+      successCriteria: ["Done."],
+      verification: parent.verification,
+    };
+    const overrideSlice: Slice = {
+      ...inheritedSlice,
+      allowedTestDeletions: ["tests/override/**"],
+    };
+
+    const inherited = scopeSpecToSlice(parent, inheritedSlice);
+    const overridden = scopeSpecToSlice(parent, overrideSlice);
+    expect(inherited.allowedTestDeletions).toEqual(["tests/inherited/**"]);
+    expect(overridden.allowedTestDeletions).toEqual(["tests/override/**"]);
+
+    const diff = [
+      "diff --git a/tests/inherited/old.test.ts b/tests/inherited/old.test.ts",
+      "deleted file mode 100644",
+    ].join("\n");
+    expect(detectWeakenedTests(diff, inherited.allowedTestDeletions).testsDeleted).toBe(0);
+    expect(detectWeakenedTests(diff, overridden.allowedTestDeletions).testsDeleted).toBe(1);
+  });
 });
 
 describe("pipeline runtime namespaces", () => {
@@ -3142,6 +3171,48 @@ describe("runPipeline", () => {
     expect(result.verification?.testsSkipped).toBeGreaterThan(0);
   });
 
+  it("passes an architect-authorized test deletion and records its evidence", async () => {
+    const repo = await initRepo();
+    await mkdir(path.join(repo, "tests"));
+    await writeFile(path.join(repo, "tests", "obsolete.test.ts"), "it('works', () => {});\n");
+    await runGit(repo, ["add", "tests/obsolete.test.ts"]);
+    await runGit(repo, [
+      "-c",
+      "user.name=Claude Architect Test",
+      "-c",
+      "user.email=claude-architect@example.invalid",
+      "commit",
+      "-q",
+      "-m",
+      "add obsolete test",
+    ]);
+    const spec = validSpec();
+    spec.writeAllowlist = ["a.txt", "tests/**"];
+    spec.allowedTestDeletions = ["tests/obsolete.test.ts"];
+    const roleRunner = roundReviews(
+      [{ correctness: approve, systems: approve }],
+      async () => { throw new Error("fixer must not run"); },
+    );
+
+    const result = await runPipeline(
+      repo,
+      spec,
+      dependencies({
+        runId: "pipeline-authorized-test-deletion",
+        roleRunner,
+        edit: async checkout => {
+          await writeFile(path.join(checkout, "a.txt"), "candidate\n");
+          await rm(path.join(checkout, "tests", "obsolete.test.ts"));
+        },
+      }),
+    );
+
+    expect(result.status).toBe("decision-ready");
+    expect(result.verification?.testsDeleted).toBe(0);
+    expect(result.verification?.evidence.authorizedTestDeletions)
+      .toEqual(["tests/obsolete.test.ts"]);
+  }, { timeout: 120_000 });
+
   it("persists round and verification artifacts", async () => {
     const repo = await initRepo();
     const runId = "pipeline-artifacts";
@@ -3150,7 +3221,9 @@ describe("runPipeline", () => {
       async () => { throw new Error("fixer must not run"); },
     );
 
-    await runPipeline(repo, validSpec(), dependencies({ runId, roleRunner }));
+    const result = await runPipeline(repo, validSpec(), dependencies({ runId, roleRunner }));
+
+    expect(result.verification?.evidence).not.toHaveProperty("authorizedTestDeletions");
 
     const store = new ArtifactStore(runId);
     await expect(store.readPipelineArtifact(runId, "round-1-review-correctness"))
@@ -3159,8 +3232,10 @@ describe("runPipeline", () => {
       .resolves.toEqual(approve);
     await expect(store.readPipelineArtifact(runId, "round-1-consolidated"))
       .resolves.toMatchObject({ findings: [], contradictions: [] });
-    await expect(store.readPipelineArtifact(runId, "verification"))
-      .resolves.toMatchObject({
+    const persistedVerification = await store.readPipelineArtifact(runId, "verification");
+    expect(persistedVerification.evidence).not.toHaveProperty("authorizedTestDeletions");
+    expect(persistedVerification)
+      .toMatchObject({
         pass: true,
         workspaceClean: true,
         evidence: {
@@ -3284,5 +3359,36 @@ describe("detectWeakenedTests", () => {
   it("ignores skips in non-test files", () => {
     const diff = ["diff --git a/src/foo.ts b/src/foo.ts", "+it.skip(", ""].join("\n");
     expect(detectWeakenedTests(diff)).toEqual({ testsDeleted: 0, testsSkipped: 0 });
+  });
+
+  it("excludes only authorized deleted tests and records their paths", () => {
+    const diff = [
+      "diff --git a/tests/authorized.test.ts b/tests/authorized.test.ts",
+      "deleted file mode 100644",
+      "diff --git a/tests/unauthorized.test.ts b/tests/unauthorized.test.ts",
+      "deleted file mode 100644",
+    ].join("\n");
+
+    expect(detectWeakenedTests(diff, ["tests/authorized.*"])).toEqual({
+      testsDeleted: 1,
+      testsSkipped: 0,
+    });
+    expect(detectWeakenedTests(diff, [])).toEqual({
+      testsDeleted: 2,
+      testsSkipped: 0,
+    });
+  });
+
+  it("judges NUL-safe deleted paths without relying on quoted patch headers", () => {
+    const diff = 'diff --git "a/tests/old test.test.ts" "b/tests/old test.test.ts"';
+
+    expect(detectWeakenedTests(
+      diff,
+      ["tests/old *.test.ts"],
+      ["tests/old test.test.ts", "tests/not-authorized.test.ts"],
+    )).toEqual({
+      testsDeleted: 1,
+      testsSkipped: 0,
+    });
   });
 });

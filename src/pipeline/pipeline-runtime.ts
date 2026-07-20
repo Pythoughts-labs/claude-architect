@@ -92,6 +92,7 @@ export interface PipelineVerificationEvidence {
   failures: string[];
   acceptance: Record<string, unknown>;
   commandOutcomes: CommandOutcome[];
+  authorizedTestDeletions?: string[];
 }
 
 export interface PipelineVerificationReport extends VerificationReport {
@@ -696,21 +697,86 @@ async function promoteFinalCandidate(args: {
   return { attempt: finalAttempt, candidateCommit: canonicalCommit };
 }
 
-export function detectWeakenedTests(diff: string): { testsDeleted: number; testsSkipped: number } {
+interface WeakenedTestEvidence {
+  testsDeleted: number;
+  testsSkipped: number;
+  authorizedTestDeletions: string[];
+}
+
+function analyzeWeakenedTests(
+  diff: string,
+  allowedTestDeletions: string[] = [],
+  deletedPaths?: string[],
+): WeakenedTestEvidence {
   let testsDeleted = 0;
   let testsSkipped = 0;
+  const authorizedTestDeletions: string[] = [];
   let currentFileIsTest = false;
+  let currentPath: string | null = null;
   for (const line of diff.split("\n")) {
-    if (/^deleted file mode/.test(line)) {
-      if (currentFileIsTest) testsDeleted++;
+    if (deletedPaths === undefined && /^deleted file mode/.test(line)) {
+      if (currentFileIsTest && currentPath !== null) {
+        const deletedPath = currentPath;
+        if (allowedTestDeletions.some(pattern => globMatches(pattern, deletedPath))) {
+          authorizedTestDeletions.push(deletedPath);
+        } else {
+          testsDeleted++;
+        }
+      }
     }
-    if (/^diff --git a\/(\S+)/.test(line)) {
+    const diffHeader = /^diff --git a\/(\S+) b\/\S+$/.exec(line);
+    if (diffHeader !== null) {
+      currentPath = diffHeader[1] ?? null;
+      currentFileIsTest = currentPath !== null
+        && /(^|\/)tests?\/|\.test\.|\.spec\./.test(currentPath);
+    } else if (/^diff --git /.test(line)) {
+      currentPath = null;
       currentFileIsTest = /(^|\/)tests?\/|\.test\.|\.spec\./.test(line);
     }
     if (currentFileIsTest && /^\+.*\b(it|test|describe)\.(skip|todo)\(/.test(line)) testsSkipped++;
     if (currentFileIsTest && /^\+.*\bxit\(|^\+.*\bxdescribe\(/.test(line)) testsSkipped++;
   }
+  for (const deletedPath of deletedPaths ?? []) {
+    if (!/(^|\/)tests?\/|\.test\.|\.spec\./.test(deletedPath)) continue;
+    if (allowedTestDeletions.some(pattern => globMatches(pattern, deletedPath))) {
+      authorizedTestDeletions.push(deletedPath);
+    } else {
+      testsDeleted++;
+    }
+  }
+  return { testsDeleted, testsSkipped, authorizedTestDeletions };
+}
+
+export function detectWeakenedTests(
+  diff: string,
+  allowedTestDeletions: string[] = [],
+  deletedPaths?: string[],
+): { testsDeleted: number; testsSkipped: number } {
+  const { testsDeleted, testsSkipped } = analyzeWeakenedTests(
+    diff,
+    allowedTestDeletions,
+    deletedPaths,
+  );
   return { testsDeleted, testsSkipped };
+}
+
+function parseDeletedPaths(nameStatus: string): string[] {
+  const fields = nameStatus.split("\0");
+  const deletedPaths: string[] = [];
+  for (let index = 0; index < fields.length; index += 1) {
+    const entry = fields[index] ?? "";
+    if (entry === "D") {
+      const pathname = fields[index + 1];
+      if (pathname !== undefined && pathname !== "") deletedPaths.push(pathname);
+      index += 1;
+      continue;
+    }
+    const separator = entry.indexOf("\t");
+    if (separator >= 0 && entry.slice(0, separator) === "D") {
+      deletedPaths.push(entry.slice(separator + 1));
+    }
+  }
+  return deletedPaths;
 }
 
 export async function runReviews(args: {
@@ -1022,11 +1088,18 @@ export async function verifyCandidate(args: {
   const fresh = await manager.create(args.candidateCommit);
   let primaryError: unknown;
   try {
-    const [diffText, nameOnly, status, ancestry] = await Promise.all([
+    const [diffText, nameOnly, nameStatus, status, ancestry] = await Promise.all([
       checkedGit(fresh.path, ["diff", `${args.baselineCommit}..${args.candidateCommit}`]),
       checkedGit(fresh.path, [
         "diff",
         "--name-only",
+        `${args.baselineCommit}..${args.candidateCommit}`,
+      ]),
+      checkedGit(fresh.path, [
+        "diff",
+        "--name-status",
+        "--no-renames",
+        "-z",
         `${args.baselineCommit}..${args.candidateCommit}`,
       ]),
       checkedGit(fresh.path, ["status", "--porcelain"]),
@@ -1068,7 +1141,11 @@ export async function verifyCandidate(args: {
     const scopeViolations = changedPaths.filter(pathname =>
       !args.spec.writeAllowlist.some(pattern => globMatches(pattern, pathname))
       || args.spec.forbiddenScope.some(pattern => globMatches(pattern, pathname)));
-    const weakened = detectWeakenedTests(diffText);
+    const weakened = analyzeWeakenedTests(
+      diffText,
+      args.spec.allowedTestDeletions,
+      parseDeletedPaths(nameStatus),
+    );
     const workspaceClean = status === "";
     const verificationCommands = new Map(
       args.spec.verification.map(command => [command.id, command]),
@@ -1099,6 +1176,9 @@ export async function verifyCandidate(args: {
             ...outcome,
             args: [...outcome.args],
           })),
+          ...(args.spec.allowedTestDeletions === undefined
+            ? {}
+            : { authorizedTestDeletions: [...weakened.authorizedTestDeletions] }),
         },
       },
       baselineDrift: ancestry.exitCode !== 0,

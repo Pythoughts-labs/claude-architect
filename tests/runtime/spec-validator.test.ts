@@ -65,6 +65,19 @@ describe("validateSpec", () => {
     expect(r.ok).toBe(false);
     if (!r.ok) expect(r.errors.some(e => e.path.includes("writeAllowlist"))).toBe(true);
   });
+  it("accepts safe allowedTestDeletions and rejects unsafe or malformed entries", () => {
+    expect(validateSpec({
+      ...base,
+      allowedTestDeletions: ["tests/removed/**/*.test.ts"],
+    }).ok).toBe(true);
+    expect(validateSpec({ ...base, allowedTestDeletions: [] }).ok).toBe(true);
+
+    for (const glob of ["", "/tests/foo.test.ts", "../foo.test.ts", "tests/../foo.test.ts", "C:\\tests\\foo.test.ts"]) {
+      const result = validateSpec({ ...base, allowedTestDeletions: [glob] });
+      expect(result.ok, glob).toBe(false);
+    }
+    expect(validateSpec({ ...base, allowedTestDeletions: [42] }).ok).toBe(false);
+  });
   it("rejects over-ceiling timeout", () =>
     expect(validateSpec({ ...base, timeoutMs: 9_000_000 }).ok).toBe(false));
   it("rejects edit specs below the timeout floor and accepts the floor", () => {

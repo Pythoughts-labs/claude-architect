@@ -68,4 +68,23 @@ describe("validateSpec slice semantics", () => {
       expect(result.errors[0]?.path).toBe("/slices/0/verification/0/cwd");
     }
   });
+
+  it("validates per-slice allowedTestDeletions path safety", () => {
+    expect(validateSpec({
+      ...baseSpec,
+      slices: [{ ...slice(["src/a/**"]), allowedTestDeletions: ["tests/old/**"] }],
+    }).ok).toBe(true);
+
+    const result = validateSpec({
+      ...baseSpec,
+      slices: [{ ...slice(["src/a/**"]), allowedTestDeletions: ["../tests/**"] }],
+    });
+    expect(result).toEqual({
+      ok: false,
+      errors: [{
+        path: "/slices/0/allowedTestDeletions/0",
+        message: "must be a non-empty repository-relative glob without traversal",
+      }],
+    });
+  });
 });

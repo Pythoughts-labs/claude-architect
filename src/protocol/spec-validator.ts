@@ -19,6 +19,31 @@ function allowlistCovers(top: string[], glob: string): boolean {
   });
 }
 
+function isSafeRepositoryGlob(glob: string): boolean {
+  return glob.length > 0
+    && !path.posix.isAbsolute(glob)
+    && !path.win32.isAbsolute(glob)
+    && !glob.split(/[\\/]/).includes("..");
+}
+
+function validateAllowedTestDeletions(
+  globs: string[] | undefined,
+  basePath: string,
+): ValidateResult | null {
+  for (const [index, glob] of (globs ?? []).entries()) {
+    if (!isSafeRepositoryGlob(glob)) {
+      return {
+        ok: false,
+        errors: [{
+          path: `${basePath}/${index}`,
+          message: "must be a non-empty repository-relative glob without traversal",
+        }],
+      };
+    }
+  }
+  return null;
+}
+
 // Test-only escape hatch: lets e2e suites exercise real timeout classification
 // without waiting out the production 10-minute edit floor.
 function resolveMinEditTimeoutMs(): number {
@@ -64,6 +89,11 @@ export function validateSpec(input: unknown): ValidateResult {
   const schemaValid = schemas.delegationSpec(schemaInput);
   if (schemaValid) {
     const spec = input as DelegationSpec;
+    const topLevelDeletionError = validateAllowedTestDeletions(
+      spec.allowedTestDeletions,
+      "/allowedTestDeletions",
+    );
+    if (topLevelDeletionError !== null) return topLevelDeletionError;
     for (const [index, command] of spec.verification.entries()) {
       const normalizedCwd = path.posix.normalize(command.cwd);
       if (
@@ -81,6 +111,11 @@ export function validateSpec(input: unknown): ValidateResult {
       }
     }
     for (const [sliceIndex, slice] of (spec.slices ?? []).entries()) {
+      const sliceDeletionError = validateAllowedTestDeletions(
+        slice.allowedTestDeletions,
+        `/slices/${sliceIndex}/allowedTestDeletions`,
+      );
+      if (sliceDeletionError !== null) return sliceDeletionError;
       for (const [globIndex, glob] of slice.writeAllowlist.entries()) {
         if (!allowlistCovers(spec.writeAllowlist, glob)) {
           return {

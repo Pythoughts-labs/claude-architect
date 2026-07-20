@@ -17,6 +17,7 @@ export interface Slice {
   objective: string;
   context: string;
   writeAllowlist: string[];
+  allowedTestDeletions?: string[];
   forbiddenScope: string[];
   successCriteria: string[];
   verification: VerificationCommand[];
@@ -49,6 +50,7 @@ export interface DelegationSpec {
   objective: string;                         // observable outcome
   context: string;                           // relevant background for the Producer
   writeAllowlist: string[];                  // positive path globs; repo-wide MUST be explicit ["**"]
+  allowedTestDeletions?: string[];           // test-file deletion globs explicitly authorized by the architect
   forbiddenScope: string[];                  // path globs never to touch
   successCriteria: string[];
   verification: VerificationCommand[];       // Host-authorized checks only

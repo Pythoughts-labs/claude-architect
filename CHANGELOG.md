@@ -6,6 +6,12 @@ All notable changes to Claude Architect are recorded here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- Optional top-level and per-slice `allowedTestDeletions` globs let architects
+  authorize intentional test-file removals while preserving the pipeline's
+  fail-closed guard and recording each authorized deletion in verification evidence.
+
 ## [0.23.0] - 2026-07-19
 
 ### Fixed

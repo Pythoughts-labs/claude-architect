@@ -32,10 +32,12 @@ describe("delegation spec slice schema", () => {
 
     expect(validate({
       ...validSpec,
+      allowedTestDeletions: ["tests/legacy/**"],
       slices: [{
         objective: "Implement the first slice",
         context: "Slice context",
         writeAllowlist: ["src/slice.ts"],
+        allowedTestDeletions: ["tests/slice/**"],
         forbiddenScope: ["runtime/**"],
         successCriteria: ["The slice passes"],
         verification: [verification],
@@ -46,6 +48,24 @@ describe("delegation spec slice schema", () => {
         perSlice: true,
       },
     })).toBe(true);
+  });
+
+  it("rejects non-string and empty allowedTestDeletions entries", () => {
+    const validate = loadSchemas().delegationSpec;
+
+    expect(validate({ ...validSpec, allowedTestDeletions: [42] })).toBe(false);
+    expect(validate({
+      ...validSpec,
+      slices: [{
+        objective: "Implement the first slice",
+        context: "Slice context",
+        writeAllowlist: ["src/slice.ts"],
+        allowedTestDeletions: [""],
+        forbiddenScope: [],
+        successCriteria: ["The slice passes"],
+        verification: [verification],
+      }],
+    })).toBe(false);
   });
 
   it("rejects a slice with no verification commands", () => {
