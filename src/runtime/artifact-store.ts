@@ -59,6 +59,7 @@ import {
 } from "../autopilot/autopilot-eligibility.js";
 import type { PipelineResult } from "../pipeline/pipeline-runtime.js";
 import type { AdvisorReport } from "../pipeline/report-types.js";
+import type { RunStatus } from "./run-status.js";
 
 const SAFE_COMPONENT = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 const WINDOWS_RESERVED_COMPONENT = /^(?:CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])$/i;
@@ -72,6 +73,7 @@ const attemptResultSchema = schemas.attemptResult;
 const candidateDecisionSchema = schemas.candidateDecision;
 const advisorReportSchema = schemas.advisorReport;
 const autopilotEligibilitySchema = schemas.autopilotEligibility;
+const runStatusSchema = schemas.runStatus;
 
 export interface PrunePolicy {
   maxAgeMs: number;
@@ -821,6 +823,40 @@ export class ArtifactStore {
     } finally {
       await handle?.close();
       if (temporaryCreated) await rm(temporaryPath, { force: true });
+    }
+  }
+
+  async writeRunStatus(status: RunStatus): Promise<void> {
+    if (status.runId !== this.runId) {
+      throw new RuntimeError("run status id does not match artifact store");
+    }
+    const sanitized: RunStatus = {
+      ...structuredClone(status),
+      detail: status.detail === null ? null : redact(status.detail).slice(0, 200),
+    };
+    if (!runStatusSchema(sanitized)) {
+      throw new RuntimeError("run status is invalid");
+    }
+    const directory = await this.ensureRunDirectory(false);
+    if (directory === null) return;
+    await this.replaceJson("status.json", sanitized);
+  }
+
+  async readRunStatus(runId: string): Promise<RunStatus | null> {
+    validateComponent(runId, "run id");
+    const runDirectory = path.join(this.runsRoot, runId);
+    const validated = await this.ensureExistingRunDirectory(runDirectory);
+    if (validated === null) return null;
+    try {
+      const value: unknown = JSON.parse(await readRegularFile(
+        path.join(validated.path, "status.json"),
+        validated.identity,
+      ));
+      if (!runStatusSchema(value)) throw new RuntimeError("archived run status is malformed");
+      return value as RunStatus;
+    } catch (error) {
+      if (isMissing(error)) return null;
+      throw error;
     }
   }
 

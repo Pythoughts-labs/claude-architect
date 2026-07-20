@@ -4338,15 +4338,15 @@ var require_core = __commonJS({
         }
         return metaSchema;
       }
-      _removeAllSchemas(schemas4, regex) {
-        for (const keyRef in schemas4) {
-          const sch = schemas4[keyRef];
+      _removeAllSchemas(schemas5, regex) {
+        for (const keyRef in schemas5) {
+          const sch = schemas5[keyRef];
           if (!regex || regex.test(keyRef)) {
             if (typeof sch == "string") {
-              delete schemas4[keyRef];
+              delete schemas5[keyRef];
             } else if (sch && !sch.meta) {
               this._cache.delete(sch.schema);
-              delete schemas4[keyRef];
+              delete schemas5[keyRef];
             }
           }
         }
@@ -10768,12 +10768,12 @@ var ZodTuple = class _ZodTuple extends ZodType {
     });
   }
 };
-ZodTuple.create = (schemas4, params) => {
-  if (!Array.isArray(schemas4)) {
+ZodTuple.create = (schemas5, params) => {
+  if (!Array.isArray(schemas5)) {
     throw new Error("You must pass an array of schemas to z.tuple([ ... ])");
   }
   return new ZodTuple({
-    items: schemas4,
+    items: schemas5,
     typeName: ZodFirstPartyTypeKind.ZodTuple,
     rest: null,
     ...processCreateParams(params)
@@ -15436,7 +15436,7 @@ function toJSONSchema(input, _params) {
       const [_, schema] = entry;
       gen2.process(schema);
     }
-    const schemas4 = {};
+    const schemas5 = {};
     const external = {
       registry: input,
       uri: _params?.uri,
@@ -15444,18 +15444,18 @@ function toJSONSchema(input, _params) {
     };
     for (const entry of input._idmap.entries()) {
       const [key, schema] = entry;
-      schemas4[key] = gen2.emit(schema, {
+      schemas5[key] = gen2.emit(schema, {
         ..._params,
         external
       });
     }
     if (Object.keys(defs).length > 0) {
       const defsSegment = gen2.target === "draft-2020-12" ? "$defs" : "definitions";
-      schemas4.__shared = {
+      schemas5.__shared = {
         [defsSegment]: defs
       };
     }
-    return { schemas: schemas4 };
+    return { schemas: schemas5 };
   }
   const gen = new JSONSchemaGenerator(_params);
   gen.process(input);
@@ -25950,6 +25950,76 @@ var autopilot_workflow_state_v1_default = {
   }
 };
 
+// runtime/schemas/run-status.v1.json
+var run_status_v1_default = {
+  $schema: "https://json-schema.org/draft/2020-12/schema",
+  $id: "run-status.v1.json",
+  type: "object",
+  additionalProperties: false,
+  required: [
+    "statusVersion",
+    "runId",
+    "mode",
+    "phase",
+    "sliceIndex",
+    "sliceCount",
+    "round",
+    "role",
+    "producerId",
+    "startedAt",
+    "updatedAt",
+    "detail"
+  ],
+  properties: {
+    statusVersion: { const: "1" },
+    runId: { type: "string", minLength: 1, maxLength: 128 },
+    mode: { enum: ["single", "sliced"] },
+    phase: {
+      enum: [
+        "preflight",
+        "baseline-verify",
+        "implementing",
+        "freezing",
+        "verifying",
+        "reviewing",
+        "fixing",
+        "advisor",
+        "gating",
+        "integrating",
+        "done",
+        "failed"
+      ]
+    },
+    sliceIndex: { type: ["integer", "null"], minimum: 1 },
+    sliceCount: { type: ["integer", "null"], minimum: 1 },
+    round: { type: ["integer", "null"], minimum: 1 },
+    role: { type: ["string", "null"], minLength: 1, maxLength: 128 },
+    producerId: { type: ["string", "null"], minLength: 1, maxLength: 128 },
+    startedAt: { type: "string", format: "date-time" },
+    updatedAt: { type: "string", format: "date-time" },
+    detail: { type: ["string", "null"], maxLength: 200 }
+  },
+  allOf: [
+    {
+      if: { properties: { mode: { const: "single" } } },
+      then: {
+        properties: {
+          sliceIndex: { type: "null" },
+          sliceCount: { type: "null" }
+        }
+      }
+    },
+    {
+      if: { properties: { mode: { const: "sliced" } } },
+      then: {
+        properties: {
+          sliceCount: { type: "integer", minimum: 1 }
+        }
+      }
+    }
+  ]
+};
+
 // src/protocol/schema-loader.ts
 var DELEGATION_SPEC_SCHEMA_KEY = "delegation-spec.v1.json";
 var ISO_DATE_TIME = /^([0-9]{4})-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])T(?:[01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9](?:\.[0-9]+)?(?:Z|[+-](?:[01][0-9]|2[0-3]):[0-5][0-9])$/u;
@@ -25985,7 +26055,8 @@ function loadSchemas() {
     verificationReport: ajv.compile(verification_report_v1_default),
     advisorReport: ajv.compile(advisor_report_v1_default),
     autopilotEligibility: ajv.compile(autopilot_eligibility_v1_default),
-    autopilotWorkflowState: ajv.compile(autopilot_workflow_state_v1_default)
+    autopilotWorkflowState: ajv.compile(autopilot_workflow_state_v1_default),
+    runStatus: ajv.compile(run_status_v1_default)
   };
 }
 function checkVersionCompat(skillProtocolVersion) {
@@ -27673,6 +27744,7 @@ var attemptResultSchema = schemas.attemptResult;
 var candidateDecisionSchema = schemas.candidateDecision;
 var advisorReportSchema = schemas.advisorReport;
 var autopilotEligibilitySchema = schemas.autopilotEligibility;
+var runStatusSchema = schemas.runStatus;
 var cleanupJournalTail = Promise.resolve();
 function isSafeComponent(value) {
   const base = value.split(".", 1)[0] ?? value;
@@ -28223,6 +28295,38 @@ var ArtifactStore = class _ArtifactStore {
     } finally {
       await handle?.close();
       if (temporaryCreated) await rm3(temporaryPath, { force: true });
+    }
+  }
+  async writeRunStatus(status) {
+    if (status.runId !== this.runId) {
+      throw new RuntimeError("run status id does not match artifact store");
+    }
+    const sanitized = {
+      ...structuredClone(status),
+      detail: status.detail === null ? null : redact(status.detail).slice(0, 200)
+    };
+    if (!runStatusSchema(sanitized)) {
+      throw new RuntimeError("run status is invalid");
+    }
+    const directory = await this.ensureRunDirectory(false);
+    if (directory === null) return;
+    await this.replaceJson("status.json", sanitized);
+  }
+  async readRunStatus(runId) {
+    validateComponent(runId, "run id");
+    const runDirectory = path11.join(this.runsRoot, runId);
+    const validated = await this.ensureExistingRunDirectory(runDirectory);
+    if (validated === null) return null;
+    try {
+      const value = JSON.parse(await readRegularFile(
+        path11.join(validated.path, "status.json"),
+        validated.identity
+      ));
+      if (!runStatusSchema(value)) throw new RuntimeError("archived run status is malformed");
+      return value;
+    } catch (error2) {
+      if (isMissing(error2)) return null;
+      throw error2;
     }
   }
   async writeLog(name, text) {
@@ -29246,6 +29350,39 @@ function withRunStartPidRecording(ps, context) {
   };
 }
 
+// src/runtime/run-status.ts
+function warnStatusFailure(runId, phase, error2) {
+  try {
+    logger.warn("run status update failed", {
+      runId,
+      phase,
+      error: error2 instanceof Error ? error2.name : "unknown"
+    });
+  } catch {
+  }
+}
+async function writeRunStatusSafely(store, status) {
+  try {
+    await store.writeRunStatus(status);
+  } catch (error2) {
+    warnStatusFailure(status.runId, status.phase, error2);
+  }
+}
+async function transitionRunStatusSafely(store, runId, phase, fields = {}) {
+  try {
+    const current = await store.readRunStatus(runId);
+    if (current === null) return;
+    await store.writeRunStatus({
+      ...current,
+      ...fields,
+      phase,
+      updatedAt: (/* @__PURE__ */ new Date()).toISOString()
+    });
+  } catch (error2) {
+    warnStatusFailure(runId, phase, error2);
+  }
+}
+
 // src/runtime/attempt-runtime.ts
 var MAX_PRODUCER_OUTPUT_BYTES = 1e6;
 var MAX_SNAPSHOT_DIFF_BYTES = 1e5;
@@ -29264,9 +29401,9 @@ async function captureWorktreeSnapshot(worktreePath) {
     truncated
   };
 }
-function reportPhase(deps, phase) {
+async function reportPhase(deps, phase) {
   try {
-    deps.onPhase?.(phase);
+    await deps.onPhase?.(phase);
   } catch {
   }
 }
@@ -29439,6 +29576,40 @@ async function runAttempt(checkoutPath, spec, deps) {
   const startedAtMs = now();
   const runId = (deps.runId ?? randomUUID4)();
   const store = new ArtifactStore(runId);
+  const inferredSlices = Array.isArray(spec.slices) ? spec.slices.length : 0;
+  const statusContext = deps.runStatus ?? {
+    mode: inferredSlices > 0 ? "sliced" : "single",
+    sliceIndex: inferredSlices > 0 ? 1 : null,
+    sliceCount: inferredSlices > 0 ? inferredSlices : null,
+    pipelineManaged: false
+  };
+  const startedAt = new Date(startedAtMs).toISOString();
+  const emitStatus = async (phase, fields = {}) => {
+    await writeRunStatusSafely(store, {
+      statusVersion: "1",
+      runId,
+      mode: statusContext.mode,
+      phase,
+      sliceIndex: statusContext.sliceIndex,
+      sliceCount: statusContext.sliceCount,
+      round: null,
+      role: fields.role ?? null,
+      producerId: fields.producerId ?? null,
+      startedAt,
+      updatedAt: new Date(now()).toISOString(),
+      detail: fields.detail ?? null
+    });
+  };
+  const archiveWithStatus = async (context) => {
+    const result = await archiveTerminal(context);
+    if (!statusContext.pipelineManaged) {
+      await emitStatus(result.status === "verified-candidate" ? "done" : "failed", {
+        producerId: result.producerId,
+        detail: result.summary
+      });
+    }
+    return result;
+  };
   const canonical = await ps.canonicalizePath(checkoutPath);
   const repositoryIdentity = canonical.gitCommonDir ?? canonical.canonical;
   let lock = deps.borrowedCheckoutLease ?? null;
@@ -29466,6 +29637,17 @@ async function runAttempt(checkoutPath, spec, deps) {
         { reason: preconditions.reason, detail: preconditions.detail ?? [] }
       );
     }
+    const runStart = {
+      runId,
+      lockKey: lock.key,
+      canonicalCommonDir: preconditions.gitCommonDir,
+      pid: null,
+      processToken: null,
+      startedAt
+    };
+    const runStartContext = await initializeRunStart(store, runStart);
+    await deps.onRunStart?.(runStartContext);
+    if (!statusContext.pipelineManaged) await emitStatus("preflight");
     const collected = deps.repositoryInstructions !== void 0 && deps.packagedVerifier !== void 0 ? null : await (deps.reproducibilityCollector ?? collectReproducibilityInputs)(
       canonical.canonical,
       preconditions.baseCommitOid
@@ -29474,8 +29656,13 @@ async function runAttempt(checkoutPath, spec, deps) {
     const packagedVerifier = deps.packagedVerifier ?? collected.packagedVerifier;
     const executionMode = spec.executionMode;
     let baselineEvidence = { baseline: "skipped \u2014 read-only spec" };
+    if (!statusContext.pipelineManaged) {
+      await emitStatus("baseline-verify", {
+        detail: executionMode === "edit" ? null : "skipped for read-only execution"
+      });
+    }
     if (executionMode === "edit") {
-      reportPhase(deps, "verifying baseline");
+      await reportPhase(deps, "verifying baseline");
       let baseline;
       try {
         baseline = await (deps.baselineVerifier ?? verifyBaseline)({
@@ -29488,7 +29675,7 @@ async function runAttempt(checkoutPath, spec, deps) {
         });
       } catch (error2) {
         if (!deps.abortSignal?.aborted) throw error2;
-        return archiveTerminal({
+        return archiveWithStatus({
           store,
           spec,
           runId,
@@ -29515,7 +29702,7 @@ async function runAttempt(checkoutPath, spec, deps) {
       baselineEvidence = { baseline };
       const baselineFailed = baseline.commands.some((command) => !command.ok);
       if (baselineFailed) {
-        return archiveTerminal({
+        return archiveWithStatus({
           store,
           spec,
           runId,
@@ -29540,7 +29727,7 @@ async function runAttempt(checkoutPath, spec, deps) {
         });
       }
     }
-    reportPhase(deps, "probing producers");
+    await reportPhase(deps, "probing producers");
     const reports = await probeAll({
       ps,
       os: ps.os,
@@ -29550,7 +29737,7 @@ async function runAttempt(checkoutPath, spec, deps) {
     const routing = route(spec.producerPreferences, reports);
     if (routing.producerId === null) {
       const signals2 = routing.reason === "authentication-required" ? { "authentication-required": true } : { unavailable: true };
-      return archiveTerminal({
+      return archiveWithStatus({
         store,
         spec,
         runId,
@@ -29580,7 +29767,7 @@ async function runAttempt(checkoutPath, spec, deps) {
     const adapter = producerRegistry.get(routing.producerId);
     const report = reports.find((candidate2) => candidate2.producerId === routing.producerId) ?? null;
     if (adapter === void 0 || report?.resolvedExecutable === null || report === null) {
-      return archiveTerminal({
+      return archiveWithStatus({
         store,
         spec,
         runId,
@@ -29604,16 +29791,6 @@ async function runAttempt(checkoutPath, spec, deps) {
         packagedVerifier
       });
     }
-    const runStart = {
-      runId,
-      lockKey: lock.key,
-      canonicalCommonDir: preconditions.gitCommonDir,
-      pid: null,
-      processToken: null,
-      startedAt: new Date(startedAtMs).toISOString()
-    };
-    const runStartContext = await initializeRunStart(store, runStart);
-    await deps.onRunStart?.(runStartContext);
     worktree = await new WorktreeManager(canonical.canonical, runId, ps).create(
       preconditions.baseCommitOid
     );
@@ -29630,7 +29807,7 @@ async function runAttempt(checkoutPath, spec, deps) {
     if (spec.executionMode === "edit") {
       const selection = selectSandboxBackend(report);
       if (selection.backend === null) {
-        return await archiveTerminal({
+        return await archiveWithStatus({
           store,
           spec,
           runId,
@@ -29674,7 +29851,10 @@ async function runAttempt(checkoutPath, spec, deps) {
       invocation.executable,
       invocation.args
     );
-    reportPhase(deps, "producer running");
+    if (!statusContext.pipelineManaged) {
+      await emitStatus("implementing", { producerId: report.producerId });
+    }
+    await reportPhase(deps, "producer running");
     const exit = deps.abortSignal?.aborted === true ? preCancelledExit() : await supervise(recordingServices, {
       executable: watchdog.executable,
       args: watchdog.args,
@@ -29700,7 +29880,10 @@ async function runAttempt(checkoutPath, spec, deps) {
       if (exit.exitCode !== 0) signals["producer-failure"] = true;
     }
     if (!hasFailureSignal(signals)) {
-      reportPhase(deps, "freezing candidate");
+      if (!statusContext.pipelineManaged) {
+        await emitStatus("freezing", { producerId: report.producerId });
+      }
+      await reportPhase(deps, "freezing candidate");
       const frozen = await freezeCandidate({
         repoRoot: canonical.canonical,
         worktreePath: worktree.path,
@@ -29722,7 +29905,10 @@ async function runAttempt(checkoutPath, spec, deps) {
         candidate = frozen.artifact;
         evidence = { ...evidence, ...frozen.evidence };
         try {
-          reportPhase(deps, "verifying candidate");
+          if (!statusContext.pipelineManaged) {
+            await emitStatus("verifying", { producerId: report.producerId });
+          }
+          await reportPhase(deps, "verifying candidate");
           const verification = await deps.verifier.verify({
             repoRoot: canonical.canonical,
             worktreePath: worktree.path,
@@ -29757,8 +29943,8 @@ async function runAttempt(checkoutPath, spec, deps) {
         };
       }
     }
-    reportPhase(deps, "archiving result");
-    return await archiveTerminal({
+    await reportPhase(deps, "archiving result");
+    return await archiveWithStatus({
       store,
       spec,
       runId,
@@ -29783,6 +29969,9 @@ async function runAttempt(checkoutPath, spec, deps) {
     });
   } catch (error2) {
     primaryError = error2;
+    await emitStatus("failed", {
+      detail: error2 instanceof Error ? error2.message : "attempt failed unexpectedly"
+    });
     throw error2;
   } finally {
     const cleanupError = await cleanupAttemptResources({
@@ -30695,8 +30884,190 @@ async function parseStructuredReport(raw, validate, repair) {
   return { ok: false, error: `invalid structured output after repair: ${second.error}` };
 }
 
-// src/pipeline/pipeline-runtime.ts
+// src/pipeline/advisor-stage.ts
 var schemas2 = loadSchemas();
+function frozenAdvisorEvidence(spec, pipelineResult, reviewSnapshot) {
+  const finalRound = pipelineResult.rounds.at(-1) ?? null;
+  return {
+    runId: pipelineResult.runId,
+    specification: {
+      objective: spec.objective,
+      successCriteria: [...spec.successCriteria],
+      writeAllowlist: [...spec.writeAllowlist],
+      forbiddenScope: [...spec.forbiddenScope]
+    },
+    baselineCommitOid: reviewSnapshot.baseCommitOid,
+    candidateCommitOid: reviewSnapshot.candidateCommitOid,
+    candidateTreeOid: reviewSnapshot.candidateTreeOid,
+    candidateManifestHash: reviewSnapshot.manifestHash,
+    reviewSnapshot: structuredClone(reviewSnapshot),
+    finalRound: structuredClone(finalRound),
+    reviewAndFixHistory: structuredClone(pipelineResult.rounds),
+    trustedVerification: structuredClone(pipelineResult.verification),
+    gate: structuredClone(pipelineResult.gate),
+    pipelineStatus: pipelineResult.status
+  };
+}
+function failureReport(failure2, failedRoleLogRef) {
+  return {
+    reportVersion: "1",
+    verdict: "human-decision-required",
+    rationale: `The final advisor did not produce an approving valid report (${failure2}; see ${failedRoleLogRef}).`,
+    risks: [],
+    coverageGaps: ["A fresh confined advisor review is unavailable."]
+  };
+}
+function assertSameFrozenArtifact(label, providedHash, archivedHash) {
+  if (providedHash !== archivedHash) {
+    throw new RuntimeError(`${label} differs from the durable archived artifact`);
+  }
+}
+function advisorExecutionDiagnostic(error2) {
+  const detail = error2 instanceof Error ? `${error2.name}: ${error2.message}` : String(error2);
+  return redact(detail).slice(0, 2e3);
+}
+async function runAdvisorStage(args) {
+  const store = args.store ?? new ArtifactStore(args.runId);
+  const statusStore = new ArtifactStore(args.runId);
+  await transitionRunStatusSafely(statusStore, args.runId, "advisor", {
+    round: null,
+    role: "advisor",
+    detail: null
+  });
+  const [archivedPipelineResult, archivedReviewSnapshot, archivedSpec] = await Promise.all([
+    store.readPipelineArtifact(args.runId, "pipeline-result"),
+    store.readReviewSnapshot(args.runId),
+    store.readPipelineArtifact(args.runId, "delegation-spec")
+  ]);
+  if (archivedPipelineResult === null) {
+    throw new RuntimeError("advisor stage requires a durable archived PipelineResult");
+  }
+  if (archivedReviewSnapshot === null) {
+    throw new RuntimeError("advisor stage requires a durable review snapshot");
+  }
+  if (archivedSpec === null) {
+    throw new RuntimeError("advisor stage requires a durable archived delegation specification");
+  }
+  if (!schemas2.delegationSpec(archivedSpec)) {
+    throw new RuntimeError("advisor stage archived delegation specification is invalid");
+  }
+  const suppliedSpec = redactRecord(structuredClone(args.spec));
+  if (canonicalArtifactHash(suppliedSpec) !== canonicalArtifactHash(archivedSpec)) {
+    throw new RuntimeError("advisor stage specification differs from the durable archived specification");
+  }
+  if (archivedPipelineResult.runId !== args.runId || archivedReviewSnapshot.runId !== args.runId) {
+    throw new RuntimeError("advisor stage run identity does not match its durable evidence");
+  }
+  if (args.pipelineResult !== void 0) {
+    assertSameFrozenArtifact(
+      "pipeline result",
+      pipelineResultHash(args.pipelineResult),
+      pipelineResultHash(archivedPipelineResult)
+    );
+  }
+  if (args.reviewSnapshot !== void 0) {
+    assertSameFrozenArtifact(
+      "review snapshot",
+      reviewSnapshotHash(args.reviewSnapshot),
+      reviewSnapshotHash(archivedReviewSnapshot)
+    );
+  }
+  const advisorSpec = {
+    ...structuredClone(archivedSpec),
+    context: ""
+  };
+  const pkg = {
+    spec: advisorSpec,
+    baselineCommit: archivedReviewSnapshot.baseCommitOid,
+    candidateCommit: archivedReviewSnapshot.candidateCommitOid,
+    candidateDiff: archivedReviewSnapshot.patch,
+    testEvidence: JSON.stringify({
+      evidence: archivedReviewSnapshot.evidence,
+      executedVerification: archivedReviewSnapshot.executedVerification,
+      finalVerification: archivedPipelineResult.verification
+    }),
+    advisorEvidence: frozenAdvisorEvidence(
+      advisorSpec,
+      archivedPipelineResult,
+      archivedReviewSnapshot
+    )
+  };
+  const advisorEvidenceText = JSON.stringify(pkg.advisorEvidence, null, 2);
+  let outcome;
+  if (!canRenderUntrustedBlockExactly(advisorEvidenceText)) {
+    const failedRoleLogRef = await store.writeLog(
+      "role-advisor-final",
+      "advisor was not launched: the exact frozen evidence package exceeds the bounded role input\n"
+    );
+    outcome = {
+      ok: false,
+      failure: "invalid-output",
+      failedRoleLogRef,
+      roleLogRefs: [failedRoleLogRef]
+    };
+  } else {
+    try {
+      outcome = await runStructuredRole({
+        role: "advisor",
+        schema: schemas2.advisorReport,
+        logName: "role-advisor-final",
+        spec: advisorSpec,
+        pkg,
+        worktreePath: args.worktreePath,
+        deps: args.deps,
+        runId: args.runId,
+        store
+      });
+    } catch (error2) {
+      const failedRoleLogRef = await store.writeLog(
+        "role-advisor-final",
+        `advisor execution failed before producing a classified result: ${advisorExecutionDiagnostic(error2)}
+`
+      );
+      outcome = {
+        ok: false,
+        failure: "producer-failure",
+        failedRoleLogRef,
+        roleLogRefs: [failedRoleLogRef]
+      };
+    }
+  }
+  const report = outcome.ok ? redactRecord(outcome.report) : failureReport(outcome.failure, outcome.failedRoleLogRef);
+  const eligibility = evaluateAutopilotEligibility(eligibilityInputFromArtifacts({
+    pipelineResult: archivedPipelineResult,
+    reviewSnapshot: archivedReviewSnapshot,
+    advisor: report,
+    evaluatedAt: args.evaluatedAt
+  }));
+  await transitionRunStatusSafely(statusStore, args.runId, "gating", {
+    role: "advisor"
+  });
+  await store.writePostPipelineAutopilotArtifacts({
+    pipelineResult: archivedPipelineResult,
+    reviewSnapshot: archivedReviewSnapshot,
+    advisorReport: report,
+    eligibility
+  });
+  advisorReportHash(report);
+  await transitionRunStatusSafely(
+    statusStore,
+    args.runId,
+    outcome.ok ? "done" : "failed",
+    {
+      role: "advisor",
+      detail: outcome.ok ? report.verdict : outcome.failure
+    }
+  );
+  return {
+    report,
+    eligibility,
+    failure: outcome.ok ? null : outcome.failure,
+    roleLogRefs: outcome.roleLogRefs
+  };
+}
+
+// src/pipeline/pipeline-runtime.ts
+var schemas3 = loadSchemas();
 var IGNORED_STRUCTURAL_FAILURES = /* @__PURE__ */ new Set([
   "artifact-divergence",
   "base-changed"
@@ -31195,9 +31566,10 @@ async function runReviews(args) {
   const logNameNamespace = args.logNameNamespace === void 0 ? "" : `${args.logNameNamespace}-`;
   const outcomes = await Promise.all(args.reviewers.map(async (reviewer) => {
     const role = `reviewer-${reviewer}`;
+    await args.onReviewer?.(role);
     const outcome = await runStructuredRole({
       role,
-      schema: schemas2.reviewReport,
+      schema: schemas3.reviewReport,
       logName: `role-${role}-${logNameNamespace}round${args.round}`,
       spec: args.spec,
       pkg: args.pkg,
@@ -31274,7 +31646,7 @@ async function runSliceReview(args) {
 async function runFix(args) {
   const outcome = await runStructuredRole({
     role: "fixer",
-    schema: schemas2.fixReport,
+    schema: schemas3.fixReport,
     logName: `role-fixer-round${args.round}`,
     spec: args.spec,
     pkg: args.pkg,
@@ -31291,7 +31663,7 @@ async function runIncrement(args) {
   const logNameNamespace = args.logNameNamespace === void 0 ? "" : `${args.logNameNamespace}-`;
   return runStructuredRole({
     role: "implementer",
-    schema: schemas2.incrementReport,
+    schema: schemas3.incrementReport,
     logName: `role-implementer-${logNameNamespace}increment${args.increment}`,
     spec: args.spec,
     pkg: args.pkg,
@@ -31524,13 +31896,25 @@ async function runPipeline(checkoutPath, spec, deps) {
   let primaryError;
   let hasPrimaryError = false;
   try {
-    return await runPipelineWithLease(
+    const result = await runPipelineWithLease(
       checkoutPath,
       spec,
       deps,
       ps,
       lock
     );
+    await transitionRunStatusSafely(
+      new ArtifactStore(result.runId),
+      result.runId,
+      result.status === "failed" ? "failed" : "done",
+      {
+        round: null,
+        role: null,
+        producerId: result.attempt.producerId,
+        detail: result.status
+      }
+    );
+    return result;
   } catch (error2) {
     primaryError = error2;
     hasPrimaryError = true;
@@ -31547,6 +31931,12 @@ async function runPipeline(checkoutPath, spec, deps) {
     }
   }
 }
+Object.defineProperty(runPipeline, "advisorStage", {
+  value: runAdvisorStage,
+  enumerable: false,
+  configurable: false,
+  writable: false
+});
 async function runPipelineWithLease(checkoutPath, spec, deps, ps, borrowedCheckoutLease) {
   const runAttemptFn = deps.runAttempt ?? runAttempt;
   const slices = resolveSlices(spec);
@@ -31557,24 +31947,76 @@ async function runPipelineWithLease(checkoutPath, spec, deps, ps, borrowedChecko
     startedAt: (/* @__PURE__ */ new Date()).toISOString(),
     sliced: slices.length > 0
   };
-  const notePhase = (phase) => {
+  let statusStore = null;
+  let statusRunId = null;
+  const emitPipelineStatus = async (phase, fields = {}) => {
+    if (statusStore === null || statusRunId === null) return;
+    await transitionRunStatusSafely(statusStore, statusRunId, phase, {
+      sliceIndex: fields.sliceIndex ?? (slices.length > 0 ? slices.length : null),
+      sliceCount: fields.sliceCount ?? (slices.length > 0 ? slices.length : null),
+      round: fields.round ?? null,
+      role: fields.role ?? null,
+      producerId: fields.producerId ?? null,
+      detail: fields.detail ?? null
+    });
+  };
+  const notePhase = async (phase) => {
     try {
-      deps.onPhase?.(phase);
+      await deps.onPhase?.(phase);
     } catch {
     }
   };
   let runStart;
   let slicedMarkerEstablished = false;
   const inheritedOnRunStart = deps.onRunStart;
+  const inheritedOnPhase = deps.onPhase;
   const attempt = await runAttemptFn(checkoutPath, initialSpec, {
     ...deps,
     borrowedCheckoutLease,
+    runStatus: {
+      mode: slices.length > 0 ? "sliced" : "single",
+      sliceIndex: slices.length > 0 ? 1 : null,
+      sliceCount: slices.length > 0 ? slices.length : null,
+      pipelineManaged: true
+    },
+    async onPhase(phase) {
+      const mapped = phase === "producer running" ? "implementing" : phase === "freezing candidate" ? "freezing" : phase === "verifying candidate" ? "verifying" : null;
+      if (mapped !== null) {
+        await emitPipelineStatus(mapped, {
+          sliceIndex: slices.length > 0 ? 1 : null
+        });
+      }
+      try {
+        await inheritedOnPhase?.(phase);
+      } catch {
+      }
+    },
     async onRunStart(context) {
       runStart = context;
+      statusRunId = context.record.runId;
+      statusStore = new ArtifactStore(context.record.runId);
       if (slices.length > 0) {
-        await new ArtifactStore(context.record.runId).writePipelineActiveMarker(activeOwner);
+        await statusStore.writePipelineActiveMarker(activeOwner);
         slicedMarkerEstablished = true;
       }
+      await writeRunStatusSafely(statusStore, {
+        statusVersion: "1",
+        runId: context.record.runId,
+        mode: slices.length > 0 ? "sliced" : "single",
+        phase: "preflight",
+        sliceIndex: slices.length > 0 ? 1 : null,
+        sliceCount: slices.length > 0 ? slices.length : null,
+        round: null,
+        role: null,
+        producerId: null,
+        startedAt: context.record.startedAt,
+        updatedAt: (/* @__PURE__ */ new Date()).toISOString(),
+        detail: null
+      });
+      await emitPipelineStatus("baseline-verify", {
+        sliceIndex: slices.length > 0 ? 1 : null,
+        detail: spec.executionMode === "edit" ? null : "skipped for read-only execution"
+      });
       await inheritedOnRunStart?.(context);
     }
   });
@@ -31629,6 +32071,7 @@ async function runPipelineWithLease(checkoutPath, spec, deps, ps, borrowedChecko
     };
     if (slices.length > 0) {
       const initialNamespace = "slice-1-attempt-0";
+      await emitPipelineStatus("verifying", { sliceIndex: 1 });
       const initialVerification = await verifyCandidate({
         checkoutPath,
         spec: initialSpec,
@@ -31712,6 +32155,10 @@ async function runPipelineWithLease(checkoutPath, spec, deps, ps, borrowedChecko
                     "sandbox-violation"
                   );
                 }
+                await emitPipelineStatus("implementing", {
+                  sliceIndex: index,
+                  role: "implementer"
+                });
                 const incrementRun = await runIncrement({
                   spec: scopedSpec,
                   pkg: {
@@ -31736,6 +32183,10 @@ async function runPipelineWithLease(checkoutPath, spec, deps, ps, borrowedChecko
                     incrementRun.failure
                   );
                 }
+                await emitPipelineStatus("freezing", {
+                  sliceIndex: index,
+                  role: "implementer"
+                });
                 const candidateCommit = incrementRun.report.candidateCommit;
                 const provenanceFailure = await validateCandidateProvenance({
                   worktreePath,
@@ -31778,6 +32229,7 @@ async function runPipelineWithLease(checkoutPath, spec, deps, ps, borrowedChecko
                   }
                   temporarySliceRefs2.push(temporaryRef);
                 }
+                await emitPipelineStatus("verifying", { sliceIndex: index });
                 const verified2 = await verifyCandidate({
                   checkoutPath,
                   spec: scopedSpec,
@@ -31909,7 +32361,7 @@ async function runPipelineWithLease(checkoutPath, spec, deps, ps, borrowedChecko
         finalAttempt = promoted.attempt;
         currentCandidateCommit = promoted.candidateCommit;
         authoritySafeToRelease = true;
-        notePhase("partial halt verification");
+        await notePhase("partial halt verification");
         const verified2 = await verifyCandidate({
           checkoutPath,
           spec,
@@ -31967,7 +32419,7 @@ async function runPipelineWithLease(checkoutPath, spec, deps, ps, borrowedChecko
         }
         try {
           for (let increment = 2; increment <= maxIncrements; increment += 1) {
-            notePhase(`increment ${increment}/${maxIncrements}`);
+            await notePhase(`increment ${increment}/${maxIncrements}`);
             const previousCandidateCommit = currentCandidateCommit;
             const diffText = await checkedGit4(candidateWorktree.path, [
               "diff",
@@ -32088,7 +32540,7 @@ async function runPipelineWithLease(checkoutPath, spec, deps, ps, borrowedChecko
         }
       }
       for (let round = 1; round <= maxRounds; round += 1) {
-        notePhase(`review round ${round}/${maxRounds}`);
+        await notePhase(`review round ${round}/${maxRounds}`);
         const diffText = await checkedGit4(candidateWorktree.path, [
           "diff",
           `${baselineCommit}..${currentCandidateCommit}`
@@ -32108,7 +32560,11 @@ async function runPipelineWithLease(checkoutPath, spec, deps, ps, borrowedChecko
           deps,
           runId: attempt.runId,
           round,
-          store
+          store,
+          onReviewer: (role) => emitPipelineStatus("reviewing", {
+            round,
+            role
+          })
         });
         if (!reviewRun.ok) {
           const reason = `review phase did not produce valid structured output (see ${reviewRun.failedRoleLogRef})`;
@@ -32145,7 +32601,8 @@ async function runPipelineWithLease(checkoutPath, spec, deps, ps, borrowedChecko
             failure: "sandbox-violation"
           });
         }
-        notePhase(`round ${round}: applying fixes`);
+        await emitPipelineStatus("fixing", { round, role: "fixer" });
+        await notePhase(`round ${round}: applying fixes`);
         const fixRun = await runFix({
           spec,
           pkg: { ...pkg, findings: consolidated.findings },
@@ -32233,7 +32690,8 @@ async function runPipelineWithLease(checkoutPath, spec, deps, ps, borrowedChecko
         );
       }
     }
-    notePhase("final verification");
+    await emitPipelineStatus("verifying");
+    await notePhase("final verification");
     const verified = await verifyCandidate({
       checkoutPath,
       spec,
@@ -32246,7 +32704,8 @@ async function runPipelineWithLease(checkoutPath, spec, deps, ps, borrowedChecko
     });
     await store.writePipelineArtifact("verification", verified.verification);
     const lastRound = rounds.at(-1);
-    notePhase("evaluating gate");
+    await emitPipelineStatus("gating");
+    await notePhase("evaluating gate");
     const gate = evaluateGates({
       findings: lastRound?.consolidated.findings ?? [],
       dispositions: lastRound?.fix?.dispositions ?? [],
@@ -32293,6 +32752,9 @@ async function runPipelineWithLease(checkoutPath, spec, deps, ps, borrowedChecko
         );
       }
     }
+    await emitPipelineStatus("failed", {
+      detail: terminalError instanceof Error ? terminalError.message : "pipeline failed unexpectedly"
+    });
     pipelinePrimaryError = terminalError;
     throw terminalError;
   } finally {
@@ -32328,7 +32790,7 @@ async function runPipelineWithLease(checkoutPath, spec, deps, ps, borrowedChecko
 
 // src/protocol/spec-validator.ts
 import path15 from "node:path";
-var schemas3 = loadSchemas();
+var schemas4 = loadSchemas();
 function allowlistCovers(top, glob) {
   return top.some((pattern) => {
     if (pattern === "**" || pattern === glob) return true;
@@ -32375,7 +32837,7 @@ function validateSpec(input) {
   }
   const allowsTestFloor = minEditTimeoutMs < RUNTIME_MIN_EDIT_TIMEOUT_MS && typeof input === "object" && input !== null && "executionMode" in input && input.executionMode === "edit" && "timeoutMs" in input && typeof input.timeoutMs === "number" && Number.isInteger(input.timeoutMs) && input.timeoutMs >= minEditTimeoutMs && input.timeoutMs < RUNTIME_MIN_EDIT_TIMEOUT_MS;
   const schemaInput = allowsTestFloor ? { ...input, timeoutMs: RUNTIME_MIN_EDIT_TIMEOUT_MS } : input;
-  const schemaValid = schemas3.delegationSpec(schemaInput);
+  const schemaValid = schemas4.delegationSpec(schemaInput);
   if (schemaValid) {
     const spec = input;
     const topLevelDeletionError = validateAllowedTestDeletions(
@@ -32427,7 +32889,7 @@ function validateSpec(input) {
     }
     return { ok: true, spec };
   }
-  const validationErrors = (schemas3.delegationSpec.errors ?? []).map((e) => {
+  const validationErrors = (schemas4.delegationSpec.errors ?? []).map((e) => {
     let message = e.message ?? "invalid";
     const allowed = e.params?.allowedValues;
     if (Array.isArray(allowed)) {

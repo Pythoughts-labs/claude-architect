@@ -15,6 +15,7 @@ import {
   reviewSnapshotHash,
   type ReviewSnapshot,
 } from "../runtime/review-snapshot.js";
+import { transitionRunStatusSafely } from "../runtime/run-status.js";
 import { RuntimeError } from "../util/errors.js";
 import {
   runStructuredRole,
@@ -117,11 +118,17 @@ function advisorExecutionDiagnostic(error: unknown): string {
 
 /**
  * Runs only from already-durable post-pipeline evidence. It never writes or
- * replaces pipeline-result.json; the only writes are the advisor log/report
- * and the independently derived eligibility record.
+ * replaces pipeline-result.json; durable writes are limited to advisory status,
+ * the advisor log/report, and the independently derived eligibility record.
  */
 export async function runAdvisorStage(args: RunAdvisorStageArgs): Promise<AdvisorStageResult> {
   const store = args.store ?? new ArtifactStore(args.runId);
+  const statusStore = new ArtifactStore(args.runId);
+  await transitionRunStatusSafely(statusStore, args.runId, "advisor", {
+    round: null,
+    role: "advisor",
+    detail: null,
+  });
   const [archivedPipelineResult, archivedReviewSnapshot, archivedSpec] = await Promise.all([
     store.readPipelineArtifact<PipelineResult>(args.runId, "pipeline-result"),
     store.readReviewSnapshot(args.runId),
@@ -232,6 +239,9 @@ export async function runAdvisorStage(args: RunAdvisorStageArgs): Promise<Adviso
     advisor: report,
     evaluatedAt: args.evaluatedAt,
   }));
+  await transitionRunStatusSafely(statusStore, args.runId, "gating", {
+    role: "advisor",
+  });
   await store.writePostPipelineAutopilotArtifacts({
     pipelineResult: archivedPipelineResult,
     reviewSnapshot: archivedReviewSnapshot,
@@ -242,6 +252,15 @@ export async function runAdvisorStage(args: RunAdvisorStageArgs): Promise<Adviso
   // Force hash construction here as an assertion that the persisted report is
   // canonical JSON before returning control to the autopilot controller.
   advisorReportHash(report);
+  await transitionRunStatusSafely(
+    statusStore,
+    args.runId,
+    outcome.ok ? "done" : "failed",
+    {
+      role: "advisor",
+      detail: outcome.ok ? report.verdict : outcome.failure,
+    },
+  );
   return {
     report,
     eligibility,
