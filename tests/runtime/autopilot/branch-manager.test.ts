@@ -8,6 +8,7 @@ import {
   WorkflowBranchManager,
   type CreateWorkflowBranchRequest,
   type RemoteTransport,
+  type WorkflowBranchBootstrapOwnerRecord,
   type WorkflowBranchIdentity,
 } from "../../../src/autopilot/branch-manager.js";
 import { git, type GitResult } from "../../../src/git/git-exec.js";
@@ -197,6 +198,63 @@ afterEach(async () => {
 });
 
 describe("WorkflowBranchManager", () => {
+  it("records the bootstrap owner in durable branch registration metadata", async () => {
+    const fixture = (await initFixture())!;
+    const beforeCreate = Date.now();
+
+    const created = await fixture.manager.create(fixture.request);
+
+    const ownershipName = createHash("sha256")
+      .update(fixture.request.workflowId).digest("hex");
+    const ownershipPath = path.join(
+      process.env.CLAUDE_PLUGIN_DATA!,
+      "autopilot-branches",
+      `${ownershipName}.json`,
+    );
+    const registration = JSON.parse(await readFile(ownershipPath, "utf8")) as {
+      bootstrapOwner: WorkflowBranchBootstrapOwnerRecord;
+    };
+    expect(registration.bootstrapOwner).toEqual({
+      workflowId: fixture.request.workflowId,
+      pid: process.pid,
+      processToken: await getPlatformServices().getProcessStartToken(process.pid),
+      createdAt: expect.any(String),
+    });
+    expect(Date.parse(registration.bootstrapOwner.createdAt)).toBeGreaterThanOrEqual(beforeCreate);
+    expect(Date.parse(registration.bootstrapOwner.createdAt)).toBeLessThanOrEqual(Date.now());
+    await fixture.manager.cleanup(created);
+  });
+
+  it("reads a bootstrap owner from a durable branch registration", async () => {
+    const fixture = (await initFixture())!;
+    const created = await fixture.manager.create(fixture.request);
+    const recoveryManager = new WorkflowBranchManager({
+      remoteTransport: localTransport(fixture.bareRemote),
+    });
+
+    const owner = await recoveryManager.readBootstrapOwner(fixture.request.workflowId);
+
+    expect(owner).toEqual({
+      workflowId: fixture.request.workflowId,
+      pid: process.pid,
+      processToken: await getPlatformServices().getProcessStartToken(process.pid),
+      createdAt: expect.any(String),
+    });
+    await fixture.manager.cleanup(created);
+  });
+
+  it("removes the bootstrap owner with successful cleanup", async () => {
+    const fixture = (await initFixture())!;
+    const created = await fixture.manager.create(fixture.request);
+    await expect(fixture.manager.readBootstrapOwner(fixture.request.workflowId))
+      .resolves.toBeDefined();
+
+    await expect(fixture.manager.cleanup(created)).resolves.toMatchObject({ ok: true });
+
+    await expect(fixture.manager.readBootstrapOwner(fixture.request.workflowId))
+      .resolves.toBeNull();
+  });
+
   it("derives a fresh branch and leaves the primary checkout untouched", async () => {
     const fixture = (await initFixture())!;
     const before = await snapshotCheckout(fixture.repoRoot);

@@ -18,6 +18,7 @@ import {
   LEGAL_WORKFLOW_PHASE_EDGES,
   WorkflowStore,
 } from "../../../src/autopilot/workflow-store.js";
+import type { WorkflowStoreOptions } from "../../../src/autopilot/workflow-store.js";
 import type {
   AutopilotPhase,
   AutopilotWorkflowState,
@@ -87,11 +88,18 @@ function initialState(workflowId: string): AutopilotWorkflowState {
   };
 }
 
-async function createStore(workflowId = "workflow-1"): Promise<WorkflowStore> {
+async function createStore(
+  workflowId = "workflow-1",
+  options: Pick<
+    WorkflowStoreOptions,
+    "isProcessAlive" | "getProcessStartToken"
+  > = {},
+): Promise<WorkflowStore> {
   const stateDirectory = await temporaryDirectory();
   const store = new WorkflowStore(workflowId, {
     stateDirectory,
     now: () => "2026-07-20T18:01:00.000Z",
+    ...options,
   });
   await store.create(initialState(workflowId));
   return store;
@@ -122,6 +130,90 @@ describe("WorkflowStore", () => {
     expect((await store.read()).tasks[0]!.status).toBe("pending");
     await expect(store.create(initialState("create-read")))
       .rejects.toMatchObject({ detail: { toolError: "workflow-state-conflict" } });
+  });
+
+  it("acquires the durable workflow lease exclusively", async () => {
+    const store = await createStore("lease-acquire", {
+      getProcessStartToken: async () => "current-process-token",
+    });
+
+    const owner = await store.acquireLease();
+
+    expect(owner).toEqual({
+      workflowId: "lease-acquire",
+      pid: process.pid,
+      processToken: "current-process-token",
+      acquiredAt: "2026-07-20T18:01:00.000Z",
+    });
+    expect(JSON.parse(await readFile(store.ownerPath, "utf8"))).toEqual(owner);
+    await expect(store.acquireLease())
+      .rejects.toMatchObject({ detail: { toolError: "workflow-lease-conflict" } });
+  });
+
+  it("adopts a workflow lease whose process is dead", async () => {
+    const store = await createStore("lease-adopt-dead");
+    const child = spawn(process.execPath, ["-e", "process.exit(0)"]);
+    const deadPid = child.pid;
+    if (deadPid === undefined) throw new Error("child process did not start");
+    await once(child, "exit");
+    await writeFile(store.ownerPath, `${JSON.stringify({
+      workflowId: store.workflowId,
+      pid: deadPid,
+      processToken: "dead-process-token",
+      acquiredAt: "2026-07-20T17:00:00.000Z",
+    })}\n`, { mode: 0o600 });
+
+    const owner = await store.adoptLease();
+
+    expect(owner).toMatchObject({ workflowId: store.workflowId, pid: process.pid });
+    expect(JSON.parse(await readFile(store.ownerPath, "utf8"))).toEqual(owner);
+  });
+
+  it("refuses to adopt a workflow lease whose owner is alive", async () => {
+    const processDependencies = {
+      isProcessAlive: () => true,
+      getProcessStartToken: async () => "current-process-token",
+    };
+    const store = await createStore("lease-refuse-live", processDependencies);
+    const owner = await store.acquireLease();
+    const competing = new WorkflowStore(store.workflowId, {
+      stateDirectory: path.dirname(path.dirname(store.workflowDirectory)),
+      ...processDependencies,
+    });
+
+    await expect(competing.adoptLease())
+      .rejects.toMatchObject({ detail: { toolError: "workflow-lease-conflict" } });
+    expect(JSON.parse(await readFile(store.ownerPath, "utf8"))).toEqual(owner);
+  });
+
+  it("releases the workflow lease without enforcing terminal state", async () => {
+    const store = await createStore("lease-release");
+    await store.acquireLease();
+
+    await store.releaseLease();
+
+    await expect(readFile(store.ownerPath)).rejects.toMatchObject({ code: "ENOENT" });
+    expect(await store.read()).toMatchObject({ phase: "preflighting", terminal: null });
+  });
+
+  it("adopts an alive PID when its process token proves PID reuse", async () => {
+    const store = await createStore("lease-pid-reuse", {
+      isProcessAlive: () => true,
+      getProcessStartToken: async () => "current-process-token",
+    });
+    const original = await store.acquireLease();
+    expect(original.processToken).toEqual(expect.any(String));
+    const staleOwner = {
+      ...original,
+      processToken: `${original.processToken}-stale`,
+      acquiredAt: "2026-07-20T17:00:00.000Z",
+    };
+    await writeFile(store.ownerPath, `${JSON.stringify(staleOwner)}\n`, { mode: 0o600 });
+
+    const adopted = await store.adoptLease();
+
+    expect(adopted).toEqual(original);
+    expect(JSON.parse(await readFile(store.ownerPath, "utf8"))).toEqual(original);
   });
 
   it("holds the workflow writer lease across an identity-sensitive operation", async () => {

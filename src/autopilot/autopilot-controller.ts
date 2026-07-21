@@ -75,6 +75,9 @@ export class AutopilotControllerError extends RuntimeError {
 export type WorkflowStorePort = Pick<
   WorkflowStore,
   | "create"
+  | "acquireLease"
+  | "adoptLease"
+  | "releaseLease"
   | "read"
   | "readIntentJournal"
   | "beginIntent"
@@ -448,6 +451,9 @@ export class AutopilotController {
     // variable: it is assigned inside the locked closure, which control-flow
     // analysis cannot see, so a plain null initializer would narrow to never.
     let bootstrapBranch = null as WorkflowBranchIdentity | null;
+    let bootstrapStore = null as WorkflowStorePort | null;
+    let bootstrapState = null as AutopilotWorkflowState | null;
+    let bootstrapLeaseAcquired = false;
     let bootstrapCompleted = false;
     let completedCleanup: CleanupContext;
     try {
@@ -497,6 +503,10 @@ export class AutopilotController {
         startedAt,
         ciDeadlineAt,
       }));
+      bootstrapStore = store;
+      bootstrapState = state;
+      await store.acquireLease();
+      bootstrapLeaseAcquired = true;
       await store.beginIntent({
         expectedRevision: state.revision,
         operation: "record-workflow-spec",
@@ -794,11 +804,38 @@ export class AutopilotController {
           ok: false,
           classification: "cleanup-failed",
         }));
-        if (!cleanup.ok || !cleanup.worktreeRemoved || !cleanup.refsRemoved) {
+        const cleanupSucceeded = cleanup.ok
+          && cleanup.worktreeRemoved
+          && cleanup.refsRemoved;
+        const originalClassification = classificationOf(
+          error,
+          "workflow-bootstrap-failed",
+        );
+        const terminalClassification = cleanupSucceeded
+          ? originalClassification
+          : "workflow-bootstrap-cleanup-failed";
+        if (bootstrapStore !== null
+          && bootstrapState !== null
+          && bootstrapLeaseAcquired) {
+          await bootstrapStore.transition({
+            expectedRevision: bootstrapState.revision,
+            to: "failed",
+            update: draft => {
+              draft.terminal = {
+                classification: "failed",
+                reason: terminalClassification,
+                evidenceRefs: [],
+                completedAt: this.now(),
+              };
+            },
+          });
+          await bootstrapStore.releaseLease();
+        }
+        if (!cleanupSucceeded) {
           throw new AutopilotControllerError(
             "workflow-bootstrap-cleanup-failed",
             "workflow bootstrap failed and its branch could not be safely cleaned",
-            { originalClassification: classificationOf(error, "workflow-bootstrap-failed") },
+            { originalClassification },
           );
         }
       }
@@ -850,6 +887,7 @@ export class AutopilotController {
         let state = await store.read();
         await this.assertRepositoryIdentity(checkoutPath, workflowId, state);
         if (isTerminal(state)) return state;
+        await store.adoptLease();
 
         const recordedWorkflow = recordedWorkflowFrom(await store.readIntentJournal());
         const loadedBranch = await this.dependencies.branchManager.load(workflowId);
@@ -1363,6 +1401,7 @@ export class AutopilotController {
         };
       },
     });
+    await store.releaseLease();
     throw new AutopilotControllerError(classification);
   }
 
@@ -1395,6 +1434,7 @@ export class AutopilotController {
         };
       },
     });
+    await context.store.releaseLease();
     if (!succeeded) throw new AutopilotControllerError(classification);
     return next;
   }

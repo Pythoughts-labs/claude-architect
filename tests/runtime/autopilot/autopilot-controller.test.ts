@@ -244,6 +244,10 @@ class MemoryWorkflowStore implements WorkflowStorePort {
     completion: unknown | null;
   }>();
   createError: Error | null = null;
+  acquireLeaseError: Error | null = null;
+  adoptLeaseError: Error | null = null;
+  releaseLeaseError: Error | null = null;
+  beginIntentError: Error | null = null;
 
   constructor(operations: string[]) {
     this.operations = operations;
@@ -270,6 +274,23 @@ class MemoryWorkflowStore implements WorkflowStorePort {
     return structuredClone(this.state);
   }
 
+  async acquireLease() {
+    this.operations.push("lease:acquire");
+    if (this.acquireLeaseError !== null) throw this.acquireLeaseError;
+    return {} as Awaited<ReturnType<WorkflowStorePort["acquireLease"]>>;
+  }
+
+  async adoptLease() {
+    this.operations.push("lease:adopt");
+    if (this.adoptLeaseError !== null) throw this.adoptLeaseError;
+    return {} as Awaited<ReturnType<WorkflowStorePort["adoptLease"]>>;
+  }
+
+  async releaseLease(): Promise<void> {
+    this.operations.push("lease:release");
+    if (this.releaseLeaseError !== null) throw this.releaseLeaseError;
+  }
+
   async read(): Promise<AutopilotWorkflowState> {
     if (this.state === null) throw new Error("state not created");
     this.operations.push("read:state");
@@ -292,6 +313,7 @@ class MemoryWorkflowStore implements WorkflowStorePort {
 
   async beginIntent(args: Parameters<WorkflowStorePort["beginIntent"]>[0]) {
     this.operations.push(`persist:intent:${args.idempotencyKey}`);
+    if (this.beginIntentError !== null) throw this.beginIntentError;
     if (!this.intents.has(args.idempotencyKey)) {
       this.intents.set(args.idempotencyKey, {
         operation: args.operation,
@@ -348,6 +370,10 @@ function harness(overrides: {
   branchError?: Error & { classification?: string };
   branchIdentity?: WorkflowBranchIdentity;
   storeCreateError?: Error;
+  storeAcquireLeaseError?: Error;
+  storeAdoptLeaseError?: Error;
+  storeReleaseLeaseError?: Error;
+  beginIntentError?: Error;
   pipelineError?: Error & { classification?: string };
   snapshotError?: Error & { classification?: string };
   eligibilityError?: Error & { classification?: string };
@@ -394,6 +420,10 @@ function harness(overrides: {
   const operations: string[] = [];
   const store = new MemoryWorkflowStore(operations);
   store.createError = overrides.storeCreateError ?? null;
+  store.acquireLeaseError = overrides.storeAcquireLeaseError ?? null;
+  store.adoptLeaseError = overrides.storeAdoptLeaseError ?? null;
+  store.releaseLeaseError = overrides.storeReleaseLeaseError ?? null;
+  store.beginIntentError = overrides.beginIntentError ?? null;
   const results = [
     overrides.firstPipeline ?? pipelineResult({
       runId: "run-contracts",
@@ -1447,5 +1477,114 @@ describe("AutopilotController start-through-shipping", () => {
     expect(run.spies.loadBranch).not.toHaveBeenCalled();
     expect(run.spies.preflight).not.toHaveBeenCalled();
     expect(run.spies.runPipeline).not.toHaveBeenCalled();
+  });
+});
+
+describe("AutopilotController workflow leases", () => {
+  it("acquires immediately after workflow creation and releases after ready persistence", async () => {
+    const run = harness();
+
+    await run.controller.start(REPOSITORY, validSpec());
+
+    const created = run.operations.indexOf("persist:preflighting");
+    const acquired = run.operations.indexOf("lease:acquire");
+    const terminal = run.operations.indexOf("persist:ready-for-human-review");
+    const released = run.operations.indexOf("lease:release");
+    expect(acquired).toBe(created + 1);
+    expect(terminal).toBeLessThan(released);
+    expect(run.operations.filter(operation => operation === "lease:release")).toHaveLength(1);
+  });
+
+  it("adopts the prior dead owner's lease before resuming and releases after terminal persistence", async () => {
+    const run = harness({
+      firstPipeline: pipelineResult({
+        runId: "run-controller",
+        base: FIRST_COMMIT,
+        commit: SECOND_COMMIT,
+        tree: SECOND_TREE,
+        manifest: SECOND_MANIFEST,
+      }),
+    });
+    run.store.state = resumedState("running-task");
+
+    await run.controller.resume(REPOSITORY, WORKFLOW_ID);
+
+    expect(run.operations.indexOf("lease:adopt"))
+      .toBeLessThan(run.operations.indexOf("read:journal"));
+    expect(run.operations.indexOf("persist:ready-for-human-review"))
+      .toBeLessThan(run.operations.indexOf("lease:release"));
+  });
+
+  it("refuses to resume when the recorded lease owner is still alive", async () => {
+    const leaseConflict = Object.assign(new Error("workflow owner is still active"), {
+      classification: "workflow-lease-conflict",
+    });
+    const run = harness({ storeAdoptLeaseError: leaseConflict });
+    const state = resumedState("running-task");
+    run.store.state = structuredClone(state);
+
+    await expect(run.controller.resume(REPOSITORY, WORKFLOW_ID)).rejects.toBe(leaseConflict);
+
+    expect(run.store.state).toEqual(state);
+    expect(run.operations).toEqual([
+      "lock",
+      "read:state",
+      "lease:adopt",
+      "lock:released",
+    ]);
+    expect(run.spies.loadBranch).not.toHaveBeenCalled();
+    expect(run.spies.preflight).not.toHaveBeenCalled();
+    expect(run.spies.runPipeline).not.toHaveBeenCalled();
+  });
+
+  it("releases only after a halt transition is durably persisted", async () => {
+    const run = harness({
+      firstPipeline: pipelineResult({
+        runId: "run-contracts",
+        base: BASE,
+        commit: FIRST_COMMIT,
+        tree: FIRST_TREE,
+        manifest: FIRST_MANIFEST,
+        status: "failed",
+      }),
+    });
+
+    await expect(run.controller.start(REPOSITORY, validSpec())).rejects.toMatchObject({
+      classification: "pipeline-failed",
+    });
+
+    expect(run.operations.indexOf("persist:failed"))
+      .toBeLessThan(run.operations.indexOf("lease:release"));
+  });
+
+  it("releases only after persisting a finish-cleanup failure", async () => {
+    const run = harness({ lockReleaseError: new Error("release failed") });
+
+    await expect(run.controller.start(REPOSITORY, validSpec())).rejects.toMatchObject({
+      classification: "workflow-lock-release-failed",
+    });
+
+    expect(run.operations.indexOf("persist:failed"))
+      .toBeLessThan(run.operations.indexOf("lease:release"));
+  });
+
+  it("persists bootstrap failure before releasing its acquired lease", async () => {
+    const bootstrapError = Object.assign(new Error("journal unavailable"), {
+      classification: "workflow-journal-persistence-failed",
+    });
+    const run = harness({ beginIntentError: bootstrapError });
+
+    await expect(run.controller.start(REPOSITORY, validSpec())).rejects.toBe(bootstrapError);
+
+    expect(run.store.state).toMatchObject({
+      phase: "failed",
+      terminal: {
+        classification: "failed",
+        reason: "workflow-journal-persistence-failed",
+      },
+    });
+    expect(run.operations.indexOf("persist:failed"))
+      .toBeLessThan(run.operations.indexOf("lease:release"));
+    expect(run.spies.cleanup).toHaveBeenCalledWith(branch, BASE);
   });
 });

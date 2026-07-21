@@ -20,6 +20,7 @@ import type { AutopilotPhase, AutopilotWorkflowState } from "./types.js";
 
 const NO_FOLLOW = constants.O_NOFOLLOW ?? 0;
 const MAX_WRITER_LOCK_BYTES = 512;
+const MAX_WORKFLOW_OWNER_BYTES = 1_024;
 export const MAX_WORKFLOW_STATE_BYTES = 1_000_000;
 export const MAX_WORKFLOW_JOURNAL_BYTES = 16_000_000;
 
@@ -142,6 +143,25 @@ interface WriterLockIdentity {
   record: WriterLockRecord;
 }
 
+export interface WorkflowOwnerRecord {
+  workflowId: string;
+  pid: number;
+  processToken: string | null;
+  acquiredAt: string;
+}
+
+interface WorkflowOwnerIdentity {
+  dev: number;
+  ino: number;
+  size: number;
+  mtimeMs: number;
+  ctimeMs: number;
+  bytes: Buffer;
+  record: WorkflowOwnerRecord;
+}
+
+type WorkflowOwnerStatus = "dead" | "live" | "unverifiable";
+
 type MutableStateFields = Omit<
   AutopilotWorkflowState,
   | "stateVersion"
@@ -175,6 +195,8 @@ export interface WorkflowStoreOptions {
   now?: () => string;
   maxStateBytes?: number;
   maxJournalBytes?: number;
+  isProcessAlive?: (pid: number) => boolean;
+  getProcessStartToken?: (pid: number) => Promise<string | null>;
 }
 
 interface JournalRead extends WorkflowIntentJournal {
@@ -241,6 +263,41 @@ function parseWriterLock(bytes: Buffer): WriterLockRecord {
     throw workflowError("workflow state lock is malformed", "unsafe-workflow-state");
   }
   return parsed as unknown as WriterLockRecord;
+}
+
+function parseWorkflowOwner(bytes: Buffer, workflowId: string): WorkflowOwnerRecord {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(bytes.toString("utf8")) as unknown;
+  } catch {
+    throw workflowError("workflow owner record is malformed", "unsafe-workflow-owner");
+  }
+  if (!isRecord(parsed)
+    || !exactKeys(parsed, ["workflowId", "pid", "processToken", "acquiredAt"])
+    || parsed.workflowId !== workflowId
+    || !Number.isSafeInteger(parsed.pid)
+    || (parsed.pid as number) < 1
+    || (parsed.processToken !== null
+      && (typeof parsed.processToken !== "string"
+        || parsed.processToken.length < 1
+        || parsed.processToken.length > 256))
+    || typeof parsed.acquiredAt !== "string"
+    || Number.isNaN(Date.parse(parsed.acquiredAt))) {
+    throw workflowError("workflow owner record is malformed", "unsafe-workflow-owner");
+  }
+  return parsed as unknown as WorkflowOwnerRecord;
+}
+
+async function workflowOwnerStatus(
+  record: WorkflowOwnerRecord,
+  processAlive: (pid: number) => boolean,
+  getProcessStartToken: (pid: number) => Promise<string | null>,
+): Promise<WorkflowOwnerStatus> {
+  if (!processAlive(record.pid)) return "dead";
+  if (record.processToken === null) return "unverifiable";
+  const currentToken = await getProcessStartToken(record.pid).catch(() => null);
+  if (currentToken === null) return "unverifiable";
+  return currentToken === record.processToken ? "live" : "dead";
 }
 
 function sameIdentity(metadata: Stats, identity: DirectoryIdentity): boolean {
@@ -617,11 +674,14 @@ export class WorkflowStore {
   readonly statePath: string;
   readonly journalPath: string;
   readonly lockPath: string;
+  readonly ownerPath: string;
 
   private readonly stateRoot: string;
   private readonly now: () => string;
   private readonly maxStateBytes: number;
   private readonly maxJournalBytes: number;
+  private readonly isOwnerProcessAlive: (pid: number) => boolean;
+  private readonly getProcessStartToken: (pid: number) => Promise<string | null>;
 
   constructor(workflowId: string, options: WorkflowStoreOptions = {}) {
     assertWorkflowId(workflowId);
@@ -632,9 +692,13 @@ export class WorkflowStore {
     this.statePath = path.join(this.workflowDirectory, "state.json");
     this.journalPath = path.join(this.workflowDirectory, "journal.ndjson");
     this.lockPath = path.join(this.workflowDirectory, "state.lock");
+    this.ownerPath = path.join(this.workflowDirectory, "owner.json");
     this.now = options.now ?? (() => new Date().toISOString());
     this.maxStateBytes = options.maxStateBytes ?? MAX_WORKFLOW_STATE_BYTES;
     this.maxJournalBytes = options.maxJournalBytes ?? MAX_WORKFLOW_JOURNAL_BYTES;
+    this.isOwnerProcessAlive = options.isProcessAlive ?? isProcessAlive;
+    this.getProcessStartToken = options.getProcessStartToken
+      ?? (pid => getPlatformServices().getProcessStartToken(pid));
     if (!Number.isSafeInteger(this.maxStateBytes) || this.maxStateBytes < 1) {
       throw new TypeError("maxStateBytes must be a positive safe integer");
     }
@@ -677,6 +741,51 @@ export class WorkflowStore {
     }
     const journal = await this.readJournalFromDirectory(directory);
     return structuredClone(this.withJournalCheckpoint(state, journal));
+  }
+
+  async acquireLease(): Promise<WorkflowOwnerRecord> {
+    const directory = await this.ensureWorkflowDirectory();
+    return await this.withWriterLock(directory, async () =>
+      await this.createWorkflowOwner(directory));
+  }
+
+  async adoptLease(): Promise<WorkflowOwnerRecord> {
+    const directory = await this.existingWorkflowDirectory();
+    return await this.withWriterLock(directory, async () => {
+      const existing = await this.readWorkflowOwner(directory);
+      const status = await workflowOwnerStatus(
+        existing.record,
+        this.isOwnerProcessAlive,
+        this.getProcessStartToken,
+      );
+      if (status !== "dead") {
+        throw workflowError(
+          status === "live"
+            ? "workflow owner is still active"
+            : "workflow owner liveness cannot be verified",
+          "workflow-lease-conflict",
+        );
+      }
+      if (!await this.removeWorkflowOwner(existing, directory)) {
+        throw workflowError("workflow owner changed during adoption", "workflow-lease-conflict");
+      }
+      return await this.createWorkflowOwner(directory);
+    });
+  }
+
+  async releaseLease(): Promise<void> {
+    const directory = await this.existingWorkflowDirectory();
+    await this.withWriterLock(directory, async () => {
+      const existing = await this.readWorkflowOwner(directory);
+      const processToken = await this.getProcessStartToken(process.pid).catch(() => null);
+      if (existing.record.pid !== process.pid
+        || existing.record.processToken !== processToken) {
+        throw workflowError("workflow lease is owned by another process", "workflow-lease-conflict");
+      }
+      if (!await this.removeWorkflowOwner(existing, directory)) {
+        throw workflowError("workflow owner changed during release", "workflow-lease-conflict");
+      }
+    });
   }
 
   /**
@@ -947,6 +1056,180 @@ export class WorkflowStore {
       throw workflowError("workflow state path escapes plugin data", "unsafe-workflow-state");
     }
     return workflow;
+  }
+
+  private async createWorkflowOwner(
+    directory: DirectoryIdentity,
+  ): Promise<WorkflowOwnerRecord> {
+    await assertDirectoryIdentity(this.workflowDirectory, directory);
+    const record: WorkflowOwnerRecord = {
+      workflowId: this.workflowId,
+      pid: process.pid,
+      processToken: await this.getProcessStartToken(process.pid).catch(() => null),
+      acquiredAt: this.now(),
+    };
+    if (Number.isNaN(Date.parse(record.acquiredAt))) {
+      throw workflowError("workflow owner timestamp is invalid", "invalid-workflow-owner");
+    }
+    const bytes = Buffer.from(`${JSON.stringify(record)}\n`, "utf8");
+    if (bytes.byteLength > MAX_WORKFLOW_OWNER_BYTES) {
+      throw workflowError("workflow owner record exceeds its size limit", "invalid-workflow-owner");
+    }
+
+    let handle: FileHandle;
+    try {
+      handle = await open(
+        this.ownerPath,
+        constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | NO_FOLLOW,
+        0o600,
+      );
+    } catch (error) {
+      if (errorCode(error) === "EEXIST") {
+        throw workflowError("workflow already has an owner", "workflow-lease-conflict");
+      }
+      throw error;
+    }
+
+    let identity: WorkflowOwnerIdentity | undefined;
+    try {
+      await handle.writeFile(bytes);
+      await handle.sync();
+      const metadata = await handle.stat();
+      const named = await lstat(this.ownerPath);
+      if (!metadata.isFile()
+        || metadata.nlink !== 1
+        || metadata.size !== bytes.byteLength
+        || !named.isFile()
+        || named.isSymbolicLink()
+        || named.nlink !== 1
+        || named.dev !== metadata.dev
+        || named.ino !== metadata.ino
+        || named.size !== metadata.size) {
+        throw workflowError("workflow owner was substituted", "unsafe-workflow-owner");
+      }
+      identity = {
+        dev: metadata.dev,
+        ino: metadata.ino,
+        size: metadata.size,
+        mtimeMs: metadata.mtimeMs,
+        ctimeMs: metadata.ctimeMs,
+        bytes,
+        record,
+      };
+    } finally {
+      await handle.close();
+    }
+
+    if (identity === undefined) {
+      throw workflowError("workflow owner was not created", "unsafe-workflow-owner");
+    }
+    await syncDirectory(this.workflowDirectory);
+    await assertDirectoryIdentity(this.workflowDirectory, directory);
+    return structuredClone(record);
+  }
+
+  private async readWorkflowOwner(
+    directory: DirectoryIdentity,
+  ): Promise<WorkflowOwnerIdentity> {
+    await assertDirectoryIdentity(this.workflowDirectory, directory);
+    let handle: FileHandle;
+    try {
+      handle = await open(this.ownerPath, constants.O_RDONLY | NO_FOLLOW);
+    } catch (error) {
+      if (isMissing(error)) {
+        throw workflowError("workflow owner does not exist", "workflow-lease-not-found");
+      }
+      throw error;
+    }
+    try {
+      const metadata = await handle.stat();
+      const named = await lstat(this.ownerPath);
+      if (!metadata.isFile()
+        || metadata.nlink !== 1
+        || metadata.size < 1
+        || metadata.size > MAX_WORKFLOW_OWNER_BYTES
+        || !named.isFile()
+        || named.isSymbolicLink()
+        || named.nlink !== 1
+        || named.dev !== metadata.dev
+        || named.ino !== metadata.ino
+        || named.size !== metadata.size) {
+        throw workflowError("workflow owner is unsafe", "unsafe-workflow-owner");
+      }
+      const first = await readHandleBytes(handle, metadata.size);
+      const second = await readHandleBytes(handle, metadata.size);
+      const settled = await handle.stat();
+      const settledNamed = await lstat(this.ownerPath);
+      if (!first.equals(second)
+        || settled.size !== metadata.size
+        || settled.mtimeMs !== metadata.mtimeMs
+        || settled.ctimeMs !== metadata.ctimeMs
+        || settledNamed.dev !== metadata.dev
+        || settledNamed.ino !== metadata.ino
+        || settledNamed.size !== metadata.size) {
+        throw workflowError("workflow owner changed during read", "unsafe-workflow-owner");
+      }
+      return {
+        dev: metadata.dev,
+        ino: metadata.ino,
+        size: metadata.size,
+        mtimeMs: metadata.mtimeMs,
+        ctimeMs: metadata.ctimeMs,
+        bytes: first,
+        record: parseWorkflowOwner(first, this.workflowId),
+      };
+    } finally {
+      await handle.close();
+    }
+  }
+
+  private async removeWorkflowOwner(
+    identity: WorkflowOwnerIdentity,
+    directory: DirectoryIdentity,
+  ): Promise<boolean> {
+    let handle: FileHandle;
+    try {
+      handle = await open(this.ownerPath, constants.O_RDONLY | NO_FOLLOW);
+    } catch (error) {
+      if (isMissing(error)) return false;
+      throw error;
+    }
+    try {
+      const metadata = await handle.stat();
+      let named = await lstat(this.ownerPath);
+      if (!metadata.isFile()
+        || metadata.nlink !== 1
+        || metadata.dev !== identity.dev
+        || metadata.ino !== identity.ino
+        || metadata.size !== identity.size
+        || metadata.mtimeMs !== identity.mtimeMs
+        || metadata.ctimeMs !== identity.ctimeMs
+        || !named.isFile()
+        || named.isSymbolicLink()
+        || named.nlink !== 1
+        || named.dev !== identity.dev
+        || named.ino !== identity.ino) return false;
+      const bytes = await readHandleBytes(handle, metadata.size);
+      const settled = await handle.stat();
+      named = await lstat(this.ownerPath);
+      if (!bytes.equals(identity.bytes)
+        || settled.dev !== identity.dev
+        || settled.ino !== identity.ino
+        || settled.size !== identity.size
+        || settled.mtimeMs !== identity.mtimeMs
+        || settled.ctimeMs !== identity.ctimeMs
+        || named.dev !== identity.dev
+        || named.ino !== identity.ino) return false;
+      await rm(this.ownerPath);
+    } catch (error) {
+      if (isMissing(error)) return false;
+      throw error;
+    } finally {
+      await handle.close();
+    }
+    await syncDirectory(this.workflowDirectory);
+    await assertDirectoryIdentity(this.workflowDirectory, directory);
+    return true;
   }
 
   private async withWriterLock<T>(

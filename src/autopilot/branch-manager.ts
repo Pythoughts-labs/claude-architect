@@ -32,7 +32,8 @@ export interface WorkflowBranchManagerDependencies {
   git?: GitRunner;
   remoteTransport?: RemoteTransport;
   removeOwnership?: (ownershipPath: string) => Promise<void>;
-  platformServices?: Pick<PlatformServices, "acquireCheckoutLock" | "canonicalizePath" | "os">;
+  platformServices?: Pick<PlatformServices, "acquireCheckoutLock" | "canonicalizePath" | "os">
+    & Partial<Pick<PlatformServices, "getProcessStartToken">>;
 }
 
 export interface CreateWorkflowBranchRequest {
@@ -59,6 +60,17 @@ export interface WorkflowBranchIdentity {
   remote: "origin";
   remoteUrl: string;
   ownerRepo: string;
+}
+
+export interface WorkflowBranchBootstrapOwnerRecord {
+  workflowId: string;
+  pid: number;
+  processToken: string | null;
+  createdAt: string;
+}
+
+interface WorkflowBranchRegistration extends WorkflowBranchIdentity {
+  bootstrapOwner: WorkflowBranchBootstrapOwnerRecord;
 }
 
 export type BranchRevalidationClassification =
@@ -317,6 +329,48 @@ function sameOwnership(left: WorkflowBranchIdentity, right: WorkflowBranchIdenti
   return JSON.stringify(left) === JSON.stringify(right);
 }
 
+function isBootstrapOwnerRecord(
+  value: unknown,
+  workflowId: string,
+): value is WorkflowBranchBootstrapOwnerRecord {
+  if (typeof value !== "object" || value === null) return false;
+  const record = value as Partial<WorkflowBranchBootstrapOwnerRecord>;
+  return record.workflowId === workflowId
+    && Number.isSafeInteger(record.pid)
+    && record.pid! > 0
+    && (record.processToken === null
+      || (typeof record.processToken === "string"
+        && record.processToken.length > 0
+        && record.processToken.length <= 256))
+    && typeof record.createdAt === "string"
+    && !Number.isNaN(Date.parse(record.createdAt));
+}
+
+function parseRegistration(
+  value: unknown,
+  workflowId: string,
+): WorkflowBranchRegistration | null {
+  if (typeof value !== "object" || value === null) return null;
+  const parsed = value as Partial<WorkflowBranchRegistration>;
+  if (parsed.ownershipVersion !== OWNERSHIP_VERSION
+    || parsed.workflowId !== workflowId
+    || typeof parsed.checkoutPath !== "string"
+    || typeof parsed.gitCommonDir !== "string"
+    || typeof parsed.repositoryIdentity !== "string"
+    || typeof parsed.worktreePath !== "string"
+    || typeof parsed.worktreeGitDir !== "string"
+    || typeof parsed.branch !== "string"
+    || parsed.branchRef !== `refs/heads/${parsed.branch}`
+    || typeof parsed.baseRef !== "string"
+    || typeof parsed.baseBranch !== "string"
+    || !isOid(parsed.baseCommitOid ?? "")
+    || parsed.remote !== "origin"
+    || typeof parsed.remoteUrl !== "string"
+    || typeof parsed.ownerRepo !== "string"
+    || !isBootstrapOwnerRecord(parsed.bootstrapOwner, workflowId)) return null;
+  return parsed as WorkflowBranchRegistration;
+}
+
 function operationFailure(action: string, result: GitResult): never {
   const diagnostic = (result.stderr || result.stdout).trim().slice(0, 2_000);
   fail("git-command-failed", `${action} failed${diagnostic ? `: ${diagnostic}` : ""}`);
@@ -330,12 +384,16 @@ export class WorkflowBranchManager {
     PlatformServices,
     "acquireCheckoutLock" | "canonicalizePath" | "os"
   >;
+  private readonly getProcessStartToken: PlatformServices["getProcessStartToken"];
 
   constructor(dependencies: WorkflowBranchManagerDependencies = {}) {
     this.runGit = dependencies.git ?? git;
     this.remoteTransport = dependencies.remoteTransport ?? createIsolatedRemoteTransport(this.runGit);
     this.removeOwnership = dependencies.removeOwnership ?? (ownershipPath => rm(ownershipPath));
-    this.platformServices = dependencies.platformServices ?? getPlatformServices();
+    const platformServices = dependencies.platformServices ?? getPlatformServices();
+    this.platformServices = platformServices;
+    this.getProcessStartToken = platformServices.getProcessStartToken?.bind(platformServices)
+      ?? getPlatformServices().getProcessStartToken.bind(getPlatformServices());
   }
 
   private ownershipPath(workflowId: string): string {
@@ -343,32 +401,7 @@ export class WorkflowBranchManager {
     return path.join(resolveStateDir(), "autopilot-branches", `${name}.json`);
   }
 
-  private async readOwnership(identity: WorkflowBranchIdentity): Promise<boolean> {
-    let handle;
-    try {
-      const ownershipPath = this.ownershipPath(identity.workflowId);
-      handle = await open(ownershipPath, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
-      const metadata = await handle.stat();
-      const named = await lstat(ownershipPath);
-      if (!metadata.isFile()
-        || metadata.size > 32_768
-        || !named.isFile()
-        || named.isSymbolicLink()
-        || named.dev !== metadata.dev
-        || named.ino !== metadata.ino) return false;
-      const parsed = JSON.parse(await handle.readFile("utf8")) as unknown;
-      return typeof parsed === "object"
-        && parsed !== null
-        && sameOwnership(parsed as WorkflowBranchIdentity, identity);
-    } catch {
-      return false;
-    } finally {
-      await handle?.close();
-    }
-  }
-
-  async load(workflowId: string): Promise<WorkflowBranchIdentity | null> {
-    if (!WORKFLOW_ID.test(workflowId)) fail("ownership-mismatch");
+  private async readRegistration(workflowId: string): Promise<WorkflowBranchRegistration | null> {
     let handle;
     try {
       const ownershipPath = this.ownershipPath(workflowId);
@@ -381,24 +414,8 @@ export class WorkflowBranchManager {
         || named.isSymbolicLink()
         || named.dev !== metadata.dev
         || named.ino !== metadata.ino) return null;
-      const parsed = JSON.parse(await handle.readFile("utf8")) as Partial<WorkflowBranchIdentity>;
-      if (parsed.ownershipVersion !== OWNERSHIP_VERSION
-        || parsed.workflowId !== workflowId
-        || typeof parsed.checkoutPath !== "string"
-        || typeof parsed.gitCommonDir !== "string"
-        || typeof parsed.repositoryIdentity !== "string"
-        || typeof parsed.worktreePath !== "string"
-        || typeof parsed.worktreeGitDir !== "string"
-        || typeof parsed.branch !== "string"
-        || parsed.branchRef !== `refs/heads/${parsed.branch}`
-        || typeof parsed.baseRef !== "string"
-        || typeof parsed.baseBranch !== "string"
-        || !isOid(parsed.baseCommitOid ?? "")
-        || parsed.remote !== "origin"
-        || typeof parsed.remoteUrl !== "string"
-        || typeof parsed.ownerRepo !== "string") return null;
-      const identity = parsed as WorkflowBranchIdentity;
-      return await this.readOwnership(identity) ? identity : null;
+      const parsed = JSON.parse(await handle.readFile("utf8")) as unknown;
+      return parseRegistration(parsed, workflowId);
     } catch (error) {
       if (typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT") {
         return null;
@@ -407,6 +424,29 @@ export class WorkflowBranchManager {
     } finally {
       await handle?.close();
     }
+  }
+
+  private async readOwnership(identity: WorkflowBranchIdentity): Promise<boolean> {
+    const registration = await this.readRegistration(identity.workflowId);
+    if (registration === null) return false;
+    const { bootstrapOwner: _bootstrapOwner, ...registeredIdentity } = registration;
+    return sameOwnership(registeredIdentity, identity);
+  }
+
+  async load(workflowId: string): Promise<WorkflowBranchIdentity | null> {
+    if (!WORKFLOW_ID.test(workflowId)) fail("ownership-mismatch");
+    const registration = await this.readRegistration(workflowId);
+    if (registration === null) return null;
+    const { bootstrapOwner: _bootstrapOwner, ...identity } = registration;
+    return identity;
+  }
+
+  async readBootstrapOwner(
+    workflowId: string,
+  ): Promise<WorkflowBranchBootstrapOwnerRecord | null> {
+    if (!WORKFLOW_ID.test(workflowId)) fail("ownership-mismatch");
+    const registration = await this.readRegistration(workflowId);
+    return registration === null ? null : { ...registration.bootstrapOwner };
   }
 
   private async ownershipExists(workflowId: string): Promise<boolean> {
@@ -421,12 +461,15 @@ export class WorkflowBranchManager {
     }
   }
 
-  private async persistOwnership(identity: WorkflowBranchIdentity): Promise<void> {
+  private async persistOwnership(
+    identity: WorkflowBranchIdentity,
+    bootstrapOwner: WorkflowBranchBootstrapOwnerRecord,
+  ): Promise<void> {
     const ownershipPath = this.ownershipPath(identity.workflowId);
     const directory = path.dirname(ownershipPath);
     await mkdir(directory, { recursive: true });
     const temporaryPath = path.join(directory, `.${path.basename(ownershipPath)}.${randomUUID()}.tmp`);
-    const bytes = Buffer.from(`${JSON.stringify(identity)}\n`);
+    const bytes = Buffer.from(`${JSON.stringify({ ...identity, bootstrapOwner })}\n`);
     let temporaryExists = false;
     let ownershipLinked = false;
     try {
@@ -624,7 +667,13 @@ export class WorkflowBranchManager {
         remoteUrl: remoteIdentity.url,
         ownerRepo: remoteIdentity.ownerRepo,
       };
-      await this.persistOwnership(identity);
+      const bootstrapOwner: WorkflowBranchBootstrapOwnerRecord = {
+        workflowId: request.workflowId,
+        pid: process.pid,
+        processToken: await this.getProcessStartToken(process.pid).catch(() => null),
+        createdAt: new Date().toISOString(),
+      };
+      await this.persistOwnership(identity, bootstrapOwner);
       completedIdentity = identity;
     } catch (error) {
       const cleanupErrors: unknown[] = [];
