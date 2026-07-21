@@ -24181,6 +24181,19 @@ async function exists2(filePath) {
     throw error2;
   }
 }
+async function checkInProgressOperation(checkoutPath, runGit = git) {
+  const gitDirectoryResult = await runGit(checkoutPath, [
+    "rev-parse",
+    "--path-format=absolute",
+    "--git-dir"
+  ]);
+  if (!succeeded(gitDirectoryResult)) return "scan-failed";
+  try {
+    return (await Promise.all(IN_PROGRESS_PATHS.map((relative) => exists2(path5.join(gitDirectoryResult.stdout.trim(), relative))))).some(Boolean) ? "in-progress" : "clear";
+  } catch {
+    return "scan-failed";
+  }
+}
 function segmentMatches(pattern, value) {
   const expression = pattern.replace(/[.+?^${}()|[\]\\]/g, "\\$&").replace(/\*+/g, ".*");
   return new RegExp(`^${expression}$`).test(value);
@@ -24308,14 +24321,9 @@ async function checkPreconditions(repoRoot, options = {}) {
   const head = await git(canonical, ["rev-parse", "--verify", "HEAD"]);
   if (!succeeded(head)) return { ok: false, reason: "unborn-repository" };
   const baseCommitOid = head.stdout.trim();
-  const gitDirectoryResult = await git(canonical, ["rev-parse", "--path-format=absolute", "--git-dir"]);
-  if (!succeeded(gitDirectoryResult)) return { ok: false, reason: "git-command-failed" };
-  const gitDirectory = gitDirectoryResult.stdout.trim();
-  try {
-    if ((await Promise.all(IN_PROGRESS_PATHS.map((relative) => exists2(path5.join(gitDirectory, relative))))).some(Boolean)) {
-      return { ok: false, reason: "in-progress-operation" };
-    }
-  } catch {
+  const inProgress = await checkInProgressOperation(canonical);
+  if (inProgress === "in-progress") return { ok: false, reason: "in-progress-operation" };
+  if (inProgress === "scan-failed") {
     return { ok: false, reason: "in-progress-operation-scan-failed" };
   }
   const submodules = await git(canonical, ["submodule", "status", "--recursive"]);
@@ -24777,6 +24785,35 @@ var WorktreeManager = class {
     );
     if (result.exitCode !== 0) {
       throw failure("git worktree add", result);
+    }
+    return {
+      path: worktreePath,
+      cleanup: () => this.remove(worktreePath)
+    };
+  }
+  async createAttached(branch, expectedCommitOid) {
+    const { worktreesRoot, worktreePath } = this.managedWorktreePath();
+    await mkdir2(worktreesRoot, { recursive: true });
+    const runGit = this.dependencies.git ?? git;
+    const result = await runGit(
+      this.repoRoot,
+      ["worktree", "add", "--no-guess-remote", worktreePath, branch]
+    );
+    if (result.exitCode !== 0) {
+      throw failure("git worktree add", result);
+    }
+    const symbolicBranch = await runGit(worktreePath, ["symbolic-ref", "--quiet", "--short", "HEAD"]);
+    const head = await runGit(worktreePath, ["rev-parse", "--verify", "HEAD"]);
+    if (symbolicBranch.exitCode !== 0 || symbolicBranch.stdout.trim() !== branch || head.exitCode !== 0 || head.stdout.trim() !== expectedCommitOid) {
+      try {
+        await this.remove(worktreePath);
+      } catch (cleanupError) {
+        throw new AggregateError(
+          [new RuntimeError("created worktree identity did not match"), cleanupError],
+          "created worktree identity did not match and cleanup failed"
+        );
+      }
+      throw new RuntimeError("created worktree identity did not match");
     }
     return {
       path: worktreePath,

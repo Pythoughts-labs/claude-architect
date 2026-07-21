@@ -61,6 +61,44 @@ export class WorktreeManager {
     };
   }
 
+  async createAttached(
+    branch: string,
+    expectedCommitOid: string,
+  ): Promise<{ path: string; cleanup(): Promise<void> }> {
+    const { worktreesRoot, worktreePath } = this.managedWorktreePath();
+    await mkdir(worktreesRoot, { recursive: true });
+    const runGit = this.dependencies.git ?? git;
+    const result = await runGit(
+      this.repoRoot,
+      ["worktree", "add", "--no-guess-remote", worktreePath, branch],
+    );
+    if (result.exitCode !== 0) {
+      throw failure("git worktree add", result);
+    }
+
+    const symbolicBranch = await runGit(worktreePath, ["symbolic-ref", "--quiet", "--short", "HEAD"]);
+    const head = await runGit(worktreePath, ["rev-parse", "--verify", "HEAD"]);
+    if (symbolicBranch.exitCode !== 0
+      || symbolicBranch.stdout.trim() !== branch
+      || head.exitCode !== 0
+      || head.stdout.trim() !== expectedCommitOid) {
+      try {
+        await this.remove(worktreePath);
+      } catch (cleanupError) {
+        throw new AggregateError(
+          [new RuntimeError("created worktree identity did not match"), cleanupError],
+          "created worktree identity did not match and cleanup failed",
+        );
+      }
+      throw new RuntimeError("created worktree identity did not match");
+    }
+
+    return {
+      path: worktreePath,
+      cleanup: () => this.remove(worktreePath),
+    };
+  }
+
   async remove(worktreePath: string): Promise<void> {
     if (worktreePath !== this.managedWorktreePath().worktreePath) {
       throw new RuntimeError("refusing to remove unmanaged worktree path");
