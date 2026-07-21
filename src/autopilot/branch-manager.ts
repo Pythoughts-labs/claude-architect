@@ -110,7 +110,9 @@ interface RemoteIdentity {
 }
 
 function succeeded(result: GitResult): boolean {
-  return result.exitCode === 0;
+  return result.exitCode === 0
+    && result.truncated?.stdout !== true
+    && result.truncated?.stderr !== true;
 }
 
 function transportFailure(action: string): GitResult {

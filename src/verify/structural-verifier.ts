@@ -86,11 +86,11 @@ function isAllowed(
 }
 
 function normalizedFoldedPath(value: string): { exact: string; folded: string } {
-  const exact = value.replaceAll("\\", "/");
+  const exact = value.replaceAll("\\", "/").normalize("NFC");
   return { exact, folded: exact.toLowerCase() };
 }
 
-function pathsCaseCollide(changedPaths: string[], treePaths: string[]): boolean {
+export function pathsCaseCollide(changedPaths: string[], treePaths: string[]): boolean {
   const changedByFold = new Map<string, string>();
   for (const changedPath of changedPaths) {
     const { exact, folded } = normalizedFoldedPath(changedPath);

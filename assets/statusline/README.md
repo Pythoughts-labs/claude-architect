@@ -8,7 +8,7 @@ Make the script executable, then add a command statusline to your Claude Code us
 {
   "statusLine": {
     "type": "command",
-    "command": "CLAUDE_PLUGIN_DATA=/absolute/path/to/plugin-data /absolute/path/to/claude-architect/assets/statusline/delegation-status.sh"
+    "command": "CLAUDE_PLUGIN_DATA=\"/absolute/path/to/plugin-data\" \"${CLAUDE_PLUGIN_ROOT}/assets/statusline/delegation-status.sh\""
   }
 }
 ```

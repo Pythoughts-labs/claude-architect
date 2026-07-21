@@ -13,7 +13,7 @@
       "displayName": "Claude Architect",
       "source": "./",
       "version": "0.27.0",
-      "description": "Verified autopilot delegation through a PR ready for human review. macOS arm64 certified for Codex editing; Linux is tested; native Windows Codex editing is not certified.",
+      "description": "Verified autopilot delegation through a PR ready for human review. macOS arm64 certified for Codex editing; eligible Linux Codex editing is tested; native Windows Codex editing is not certified.",
       "author": {
         "name": "elkaix",
         "url": "https://github.com/elkaix"

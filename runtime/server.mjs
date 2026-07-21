@@ -27320,19 +27320,22 @@ function changeType(status) {
 function sortChangedPaths(changedPaths) {
   return changedPaths.sort((left, right) => left.path < right.path ? -1 : left.path > right.path ? 1 : 0);
 }
-function rejectCaseCollisions(changedPaths) {
+function validateChangedPaths(changedPaths) {
   const observed = /* @__PURE__ */ new Map();
   for (const change of changedPaths) {
-    const normalized = change.path.replaceAll("\\", "/");
-    const folded = normalized.toLowerCase();
+    if (change.path.includes("\\")) {
+      throw new RuntimeError("changed path is not forward-slash normalized");
+    }
+    const folded = change.path.toLowerCase();
     const existing = observed.get(folded);
-    if (existing !== void 0 && existing !== normalized) {
+    if (existing !== void 0 && existing !== change.path) {
       throw new RuntimeError("changed paths collide under case folding");
     }
-    observed.set(folded, normalized);
+    observed.set(folded, change.path);
   }
 }
 function manifestHashOf(changedPaths) {
+  validateChangedPaths(changedPaths);
   const canonical = changedPaths.map(({ path: path21, changeType: changeType2, mode, contentHash }) => ({ path: path21, changeType: changeType2, mode, contentHash }));
   return createHash5("sha256").update(JSON.stringify(canonical)).digest("hex");
 }
@@ -27355,7 +27358,6 @@ function computeChangedPathManifest(inputs) {
       contentHash: treeEntry?.oid ?? null
     };
   }));
-  rejectCaseCollisions(changedPaths);
   return { changedPaths, manifestHash: manifestHashOf(changedPaths) };
 }
 
@@ -28367,7 +28369,7 @@ function isAllowed(pathname, writeAllowlist, forbiddenScope, opaqueDirectory = f
   return writeAllowlist.some((pattern) => scopePaths.some((candidate) => globMatches(pattern, candidate))) && !forbiddenScope.some((pattern) => scopePaths.some((candidate) => globMatches(pattern, candidate, true)));
 }
 function normalizedFoldedPath(value) {
-  const exact = value.replaceAll("\\", "/");
+  const exact = value.replaceAll("\\", "/").normalize("NFC");
   return { exact, folded: exact.toLowerCase() };
 }
 function pathsCaseCollide(changedPaths, treePaths) {
@@ -31440,7 +31442,7 @@ var WorkflowBranchError = class extends RuntimeError {
   classification;
 };
 function succeeded2(result) {
-  return result.exitCode === 0;
+  return result.exitCode === 0 && result.truncated?.stdout !== true && result.truncated?.stderr !== true;
 }
 function transportFailure(action) {
   return { exitCode: 2, stdout: "", stderr: `${action} failed in isolated transport` };
@@ -41579,8 +41581,8 @@ async function recoverAutopilotWorkflows(root, dependencies) {
       results.push({ workflowId, disposition: "live-preserve" });
       continue;
     }
-    const stateExists = await isAbsent(store.statePath);
-    if (stateExists === true) {
+    const stateAbsent = await isAbsent(store.statePath);
+    if (stateAbsent === true) {
       if (branch.presence === "present" && branch.ownerStatus === "dead" && branch.identity !== null) {
         const cleanup = await branchManager.cleanup(branch.identity, branch.identity.baseCommitOid);
         results.push({
@@ -41592,7 +41594,7 @@ async function recoverAutopilotWorkflows(root, dependencies) {
       }
       continue;
     }
-    if (stateExists !== false) {
+    if (stateAbsent !== false) {
       results.push({ workflowId, disposition: "human-decision-required" });
       continue;
     }

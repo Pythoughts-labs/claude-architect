@@ -37,7 +37,15 @@ The artifact store supports age/size pruning and crash-safe cleanup, but the plu
 
 Local evidence remains until pruning or user removal; Git refs may keep objects reachable. Provider-side retention is controlled by the chosen model provider/account, and GitHub retains pushed branch and PR data under repository/account policy. Autopilot may reach a PR ready for human review but never merges, deploys, or releases it.
 
-To remove local data, first stop Claude Code and ensure no delegation is active. Uninstall/disable the plugin through Claude Code, remove its plugin data directory, and inspect/delete remaining `refs/claude-architect/candidates/*` if no audit or recovery need remains. Remove provider CLI caches, sessions, and credentials using each CLI's instructions. Deleting local data does not delete provider-side prompts, logs, or model-service records; use the provider's controls for those requests.
+To remove local data, first stop Claude Code and ensure no delegation is active. Use runtime-supported cleanup before uninstalling/disabling the plugin and removing its plugin data directory. If runtime cleanup is unavailable, verify the durable workflow ownership and terminal state before deleting each individually identified candidate ref; never delete the candidate-ref namespace with a wildcard. For example, after verifying the corresponding workflow record, run the following from its repository with the exact run ID substituted:
+
+```bash
+candidate_ref="refs/claude-architect/candidates/0123456789abcdef"
+git show-ref --verify "$candidate_ref"
+git update-ref -d "$candidate_ref"
+```
+
+Remove provider CLI caches, sessions, and credentials using each CLI's instructions. Deleting local data does not delete provider-side prompts, logs, or model-service records; use the provider's controls for those requests.
 
 ## User choices and limitations
 

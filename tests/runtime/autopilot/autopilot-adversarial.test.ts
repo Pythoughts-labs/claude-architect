@@ -532,6 +532,7 @@ async function candidateWorktreeFixture() {
 async function candidateArtifactWithEntries(
   fixture: Awaited<ReturnType<typeof createRepository>>,
   entries: Array<{ path: string; mode: "100644" | "120000" }>,
+  forgeInvalidManifest = false,
 ): Promise<CandidateArtifact> {
   const root = temporaryPaths[0]!;
   const payload = path.join(root, `candidate-payload-${fixtureNumber}`);
@@ -562,7 +563,9 @@ async function candidateArtifactWithEntries(
     candidateCommitOid,
     anchorRef,
     changedPaths,
-    manifestHash: manifestHashOf(changedPaths),
+    manifestHash: forgeInvalidManifest
+      ? createHash("sha256").update(JSON.stringify(changedPaths)).digest("hex")
+      : manifestHashOf(changedPaths),
     patch: "",
   };
 }
@@ -635,7 +638,11 @@ describe("autopilot adversarial trust boundaries", () => {
     ], "case-collision"],
   ])("rejects a %s in the immutable candidate tree", async (_label, entries, finding) => {
     const fixture = await createRepository(temporaryPaths[0]!);
-    const artifact = await candidateArtifactWithEntries(fixture, entries);
+    const artifact = await candidateArtifactWithEntries(
+      fixture,
+      entries,
+      finding === "case-collision",
+    );
 
     const result = await structuralVerify({
       repoRoot: fixture.checkout,

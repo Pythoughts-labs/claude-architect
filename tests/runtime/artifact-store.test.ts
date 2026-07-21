@@ -488,6 +488,36 @@ describe("ArtifactStore", () => {
     await expect(crossStore.readResult(crossRunId)).rejects.toThrow(/attempt result.*run id/i);
   });
 
+  it("rejects case-colliding changed paths consumed from archived pipeline bytes", async () => {
+    const runId = "run-case-colliding-pipeline";
+    const store = new ArtifactStore(runId);
+    const pipeline = pipelineResult(runId);
+    const changedPaths = [
+      { path: "Foo.txt", changeType: "added" as const, mode: "100644", contentHash: "b".repeat(40) },
+      { path: "foo.txt", changeType: "added" as const, mode: "100644", contentHash: "c".repeat(40) },
+    ];
+    pipeline.attempt.candidate = {
+      ...pipeline.attempt.candidate!,
+      manifestHash: createHash("sha256").update(JSON.stringify(changedPaths)).digest("hex"),
+      changedPaths,
+    };
+    await store.writePipelineArtifact("pipeline-result", pipeline);
+    const archivedBytes = await store.readEvidence("pipeline/pipeline-result.json");
+    expect(archivedBytes).not.toBeNull();
+    const archivedPipeline = JSON.parse(archivedBytes!);
+
+    const eligibility = evaluateAutopilotEligibility(eligibilityInputFromArtifacts({
+      pipelineResult: archivedPipeline,
+      reviewSnapshot: reviewSnapshot(runId),
+      advisor: advisorReport,
+      evaluatedAt: "2026-07-20T12:00:00.000Z",
+    }));
+    expect(eligibility).toMatchObject({
+      eligible: false,
+      reasons: expect.arrayContaining(["pipeline result is malformed"]),
+    });
+  });
+
   it("rejects a runtime-invalid AttemptResult before writing it", async () => {
     const runId = "run-invalid-result-write";
     const store = new ArtifactStore(runId);

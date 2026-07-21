@@ -95,16 +95,18 @@ function sortChangedPaths(changedPaths: ChangedPath[]): ChangedPath[] {
   return changedPaths.sort((left, right) => left.path < right.path ? -1 : left.path > right.path ? 1 : 0);
 }
 
-function rejectCaseCollisions(changedPaths: ChangedPath[]): void {
+export function validateChangedPaths(changedPaths: ChangedPath[]): void {
   const observed = new Map<string, string>();
   for (const change of changedPaths) {
-    const normalized = change.path.replaceAll("\\", "/");
-    const folded = normalized.toLowerCase();
+    if (change.path.includes("\\")) {
+      throw new RuntimeError("changed path is not forward-slash normalized");
+    }
+    const folded = change.path.toLowerCase();
     const existing = observed.get(folded);
-    if (existing !== undefined && existing !== normalized) {
+    if (existing !== undefined && existing !== change.path) {
       throw new RuntimeError("changed paths collide under case folding");
     }
-    observed.set(folded, normalized);
+    observed.set(folded, change.path);
   }
 }
 
@@ -112,9 +114,12 @@ function rejectCaseCollisions(changedPaths: ChangedPath[]): void {
  * The canonical serialization + hash of a changed-path manifest — the single
  * definition of the hashed bytes (`JSON.stringify` of the entries in their fixed
  * key order). Callers that already hold a `ChangedPath[]` (e.g. an archival
- * self-consistency check) hash it here rather than re-deriving the encoding.
+ * self-consistency check) validate and hash it here rather than re-deriving the
+ * encoding. Validation deliberately makes every manifest ingestion fail closed
+ * before hashing malformed path aliases.
  */
 export function manifestHashOf(changedPaths: ChangedPath[]): string {
+  validateChangedPaths(changedPaths);
   // Serialize each entry with an explicit key order so the hash is a function
   // of the manifest's values, not of the key insertion order of whichever
   // in-memory copy (freshly computed vs reloaded from key-sorted persisted
@@ -151,6 +156,5 @@ export function computeChangedPathManifest(inputs: {
       contentHash: treeEntry?.oid ?? null,
     };
   }));
-  rejectCaseCollisions(changedPaths);
   return { changedPaths, manifestHash: manifestHashOf(changedPaths) };
 }

@@ -131,10 +131,13 @@ describe("P0-A plugin wiring", () => {
     assert.match(changelog, /^## \[0\.8\.0\] - 2026-07-14$/mu);
     assert.match(readme, /macOS arm64[^\n]*certified/iu);
     assert.match(readme, /Linux[^\n]*tested/iu);
-    assert.match(readme, /Windows[^\n]*unsupported/iu);
+    assert.match(readme, /Windows[^\n]*not certified/iu);
     assert.match(readme, /codex-native-sandbox/u);
     assert.match(marketplace.plugins[0].description, /macOS arm64 certified/iu);
-    assert.match(marketplace.plugins[0].description, /Linux is tested; native Windows Codex editing is not certified/iu);
+    assert.match(
+      marketplace.plugins[0].description,
+      /eligible Linux Codex editing is tested; native Windows Codex editing is not certified/iu,
+    );
     assert.match(readme, /Installed marketplace copies[^\n]*update[^\n]*reload/iu);
     assert.match(readme, /--disable multi_agent/u);
     assert.match(readme, /features\.multi_agent_v2=\{enabled=false,max_concurrent_threads_per_session=1\}/u);

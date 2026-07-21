@@ -2556,8 +2556,8 @@ async function recoverAutopilotWorkflows(
       continue;
     }
 
-    const stateExists = await isAbsent(store.statePath);
-    if (stateExists === true) {
+    const stateAbsent = await isAbsent(store.statePath);
+    if (stateAbsent === true) {
       if (branch.presence === "present" && branch.ownerStatus === "dead"
         && branch.identity !== null) {
         const cleanup = await branchManager.cleanup(branch.identity, branch.identity.baseCommitOid);
@@ -2572,7 +2572,7 @@ async function recoverAutopilotWorkflows(
       }
       continue;
     }
-    if (stateExists !== false) {
+    if (stateAbsent !== false) {
       results.push({ workflowId, disposition: "human-decision-required" });
       continue;
     }

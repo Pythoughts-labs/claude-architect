@@ -246,6 +246,30 @@ describe("manifestHashOf", () => {
     expect(manifestHashOf(canonical)).toBe(GOLDEN1_HASH);
     expect(manifestHashOf(alphabetized)).toBe(GOLDEN1_HASH);
   });
+
+  it("rejects case-colliding entries reloaded from persisted bytes", () => {
+    const reloaded = JSON.parse(JSON.stringify([
+      { path: "Foo.txt", changeType: "added", mode: "100644", contentHash: OID_1 },
+      { path: "foo.txt", changeType: "added", mode: "100644", contentHash: OID_2 },
+    ])) as ChangedPath[];
+
+    expect(() => manifestHashOf(reloaded)).toThrow("changed paths collide under case folding");
+  });
+
+  it.each([
+    ["backslash alias", ["a\\b", "a/b"]],
+    ["backslash case variant", ["A\\B", "a/b"]],
+  ])("rejects a %s instead of normalizing it", (_label, paths) => {
+    const changedPaths = paths.map((changedPath, index): ChangedPath => ({
+      path: changedPath,
+      changeType: "added",
+      mode: "100644",
+      contentHash: index === 0 ? OID_1 : OID_2,
+    }));
+
+    expect(() => manifestHashOf(changedPaths))
+      .toThrow("changed path is not forward-slash normalized");
+  });
 });
 
 describe("canonicalization has a single owner (no bypass)", () => {

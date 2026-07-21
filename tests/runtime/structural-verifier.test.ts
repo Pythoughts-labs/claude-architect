@@ -7,7 +7,10 @@ import { freezeCandidate } from "../../src/git/candidate-tree.js";
 import { git } from "../../src/git/git-exec.js";
 import type { CandidateArtifact } from "../../src/protocol/attempt-result.js";
 import { isWithinScope } from "../../src/verify/project-verifier.js";
-import { structuralVerify } from "../../src/verify/structural-verifier.js";
+import {
+  pathsCaseCollide,
+  structuralVerify,
+} from "../../src/verify/structural-verifier.js";
 
 interface Fixture {
   repoRoot: string;
@@ -98,7 +101,7 @@ async function candidateWithAddedPaths(
     changeType: "added",
     mode: "100644",
     contentHash: blobOid,
-  })).sort((left, right) => left.path.localeCompare(right.path));
+  })).sort((left, right) => left.path < right.path ? -1 : left.path > right.path ? 1 : 0);
   return {
     ...fixture.artifact,
     candidateTreeOid,
@@ -320,15 +323,9 @@ describe("structuralVerify", () => {
     expect(result.failures).toContain("case-collision");
   });
 
-  it("accepts Unicode-distinct paths and never treats a path as colliding with itself", async () => {
-    const fixture = await frozenFixture();
-    const artifact = await candidateWithAddedPaths(fixture, ["é.txt", "e\u0301.txt"]);
-
-    const result = await verify(fixture, artifact, {
-      writeAllowlist: ["**"], forbiddenScope: [],
-    });
-
-    expect(result.failures).not.toContain("case-collision");
+  it("normalizes NFC and NFD paths before exact and folded comparisons", () => {
+    expect(pathsCaseCollide(["É.txt", "e\u0301.txt"], [])).toBe(true);
+    expect(pathsCaseCollide(["é.txt"], ["e\u0301.txt"])).toBe(false);
   });
 
   it("rejects a gitlink encoded directly in the immutable candidate tree", async () => {

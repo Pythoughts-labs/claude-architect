@@ -279,6 +279,33 @@ describe("WorkflowBranchManager", () => {
     expect(await snapshotCheckout(fixture.repoRoot)).toEqual(before);
   });
 
+  it.each(["stdout", "stderr"] as const)(
+    "fails closed when successful git %s is truncated",
+    async stream => {
+      const fixture = (await initFixture())!;
+      const created = await fixture.manager.create(fixture.request);
+      const truncatingManager = new WorkflowBranchManager({
+        remoteTransport: localTransport(fixture.bareRemote),
+        git: async (cwd, args, options) => {
+          const result = await git(cwd, args, options);
+          if (args[0] !== "rev-parse" || args[1] !== "--verify" || args[2] !== "HEAD") {
+            return result;
+          }
+          return {
+            ...result,
+            truncated: { stdout: stream === "stdout", stderr: stream === "stderr" },
+          };
+        },
+      });
+
+      await expect(truncatingManager.revalidate(created)).resolves.toEqual({
+        ok: false,
+        classification: "git-command-failed",
+      });
+      await fixture.manager.cleanup(created);
+    },
+  );
+
   it("preserves and supports a dirty primary checkout", async () => {
     const fixture = (await initFixture())!;
     await writeFile(path.join(fixture.repoRoot, "tracked.txt"), "human dirty bytes\n");
