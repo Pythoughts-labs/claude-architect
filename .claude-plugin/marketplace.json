@@ -12,8 +12,8 @@
       "name": "claude-architect",
       "displayName": "Claude Architect",
       "source": "./",
-      "version": "0.26.0",
-      "description": "Verified P0-A MCP delegation with macOS arm64 certified; Linux tested; native Windows pending. Codex edit eligibility requires its proven native sandbox.",
+      "version": "0.27.0",
+      "description": "Verified autopilot delegation through a PR ready for human review. macOS arm64 certified for Codex editing; eligible Linux Codex editing is tested; native Windows Codex editing is not certified.",
       "author": {
         "name": "elkaix",
         "url": "https://github.com/elkaix"
@@ -33,9 +33,7 @@
         "pi",
         "pythinker",
         "advisor",
-        "macos-arm64-certified",
-        "linux-pending-p0-b",
-        "windows-pending-p0-b"
+        "macos-arm64-certified"
       ]
     }
   ]

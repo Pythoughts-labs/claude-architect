@@ -55,10 +55,11 @@ export interface RoleRunResult {
   producerId: string | null;
 }
 
-const READ_ONLY_ROLES = new Set<PipelineRole>([
+export const READ_ONLY_ROLES = new Set<PipelineRole>([
   "reviewer-correctness",
   "reviewer-systems",
   "verifier",
+  "advisor",
 ]);
 const MAX_PRODUCER_OUTPUT_BYTES = 1_000_000;
 

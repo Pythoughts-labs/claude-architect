@@ -4,10 +4,15 @@ import {
   RUNTIME_MIN_EDIT_TIMEOUT_MS,
   type DelegationSpec,
 } from "./delegation-spec.js";
+import type { AutopilotSpec } from "./autopilot-spec.js";
 const schemas = loadSchemas();
+type ValidationError = { path: string; message: string };
 export type ValidateResult =
   | { ok: true; spec: DelegationSpec }
-  | { ok: false; errors: Array<{ path: string; message: string }> };
+  | { ok: false; errors: ValidationError[] };
+export type ValidateAutopilotResult =
+  | { ok: true; spec: AutopilotSpec }
+  | { ok: false; errors: ValidationError[] };
 
 function allowlistCovers(top: string[], glob: string): boolean {
   return top.some(pattern => {
@@ -155,4 +160,84 @@ export function validateSpec(input: unknown): ValidateResult {
     return { path: e.instancePath || e.schemaPath, message };
   });
   return { ok: false, errors: validationErrors };
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function escapeJsonPointerSegment(value: string): string {
+  return value.replaceAll("~", "~0").replaceAll("/", "~1");
+}
+
+function prefixDelegationError(taskId: string, error: ValidationError): ValidationError {
+  const suffix = error.path.startsWith("#") ? error.path.slice(1) : error.path;
+  const normalizedSuffix = suffix.startsWith("/") ? suffix : `/${suffix}`;
+  return {
+    path: `#/tasks/${escapeJsonPointerSegment(taskId)}/delegation${normalizedSuffix}`,
+    message: error.message,
+  };
+}
+
+function isSafeCommitMessage(message: string): boolean {
+  const byteLength = Buffer.byteLength(message, "utf8");
+  if (message.trim().length === 0 || byteLength > 200) return false;
+  if (/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/u.test(message)) return false;
+  if (/\bco-authored-by\s*:/iu.test(message)) return false;
+  if (/\bgenerated(?:-|\s+)(?:by|with)\b/iu.test(message)) return false;
+  if (/\b(?:ai|claude|codex|chatgpt|copilot|gemini|llm)[ -]generated\b/iu.test(message)) {
+    return false;
+  }
+  return true;
+}
+
+function taskIdForDelegationPath(
+  input: unknown,
+  instancePath: string,
+): string | undefined {
+  const match = /^\/tasks\/(\d+)\/delegation(?:\/|$)/u.exec(instancePath);
+  if (match === null || !isRecord(input) || !Array.isArray(input.tasks)) return undefined;
+  const task = input.tasks[Number(match[1])];
+  if (!isRecord(task) || typeof task.id !== "string") return undefined;
+  const idLength = [...task.id].length;
+  return idLength >= 1 && idLength <= 128 ? task.id : undefined;
+}
+
+export function validateAutopilotSpec(input: unknown): ValidateAutopilotResult {
+  const schemaValid = schemas.autopilotSpec(input);
+  const errors: ValidationError[] = (schemas.autopilotSpec.errors ?? [])
+    .filter(error => taskIdForDelegationPath(input, error.instancePath) === undefined)
+    .map(error => ({
+      path: error.instancePath || error.schemaPath,
+      message: error.message ?? "invalid",
+    }));
+
+  const ids = new Set<string>();
+  const tasks = isRecord(input) && Array.isArray(input.tasks) ? input.tasks : [];
+  for (const task of tasks) {
+    if (!isRecord(task) || typeof task.id !== "string") continue;
+    const taskId = task.id;
+
+    if (ids.has(taskId)) {
+      errors.push({ path: "#/tasks", message: `duplicate task id: ${taskId}` });
+    }
+    ids.add(taskId);
+
+    if (typeof task.commitMessage === "string" && !isSafeCommitMessage(task.commitMessage)) {
+      errors.push({
+        path: `#/tasks/${escapeJsonPointerSegment(taskId)}/commitMessage`,
+        message: "unsafe commit message",
+      });
+    }
+
+    if ("delegation" in task) {
+      const delegated = validateSpec(task.delegation);
+      if (!delegated.ok) {
+        errors.push(...delegated.errors.map(error => prefixDelegationError(taskId, error)));
+      }
+    }
+  }
+
+  if (!schemaValid || errors.length > 0) return { ok: false, errors };
+  return { ok: true, spec: input as AutopilotSpec };
 }

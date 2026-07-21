@@ -29,6 +29,12 @@ import {
 } from "../runtime/artifact-store.js";
 import { redact, redactRecord } from "../runtime/redaction.js";
 import type { RunStartContext } from "../runtime/run-start.js";
+import {
+  transitionRunStatusSafely,
+  writeRunStatusSafely,
+  type RunStatus,
+  type RunStatusPhase,
+} from "../runtime/run-status.js";
 import { RuntimeError } from "../util/errors.js";
 import { AcceptanceVerifier } from "../verify/acceptance-verifier.js";
 import {
@@ -59,6 +65,7 @@ import {
   resolveLinkedWorktreeWritableRoots,
   type LinkedWorktreeGitAccess,
 } from "./git-writable-roots.js";
+import { runAdvisorStage as bundledAdvisorStage } from "./advisor-stage.js";
 
 export interface PipelineRound {
   round: number;
@@ -127,7 +134,7 @@ type FixRunResult =
     roleLogRefs: string[];
   };
 
-type StructuredRoleRunResult<T> =
+export type StructuredRoleRunResult<T> =
   | { ok: true; report: T; roleLogRefs: string[] }
   | {
     ok: false;
@@ -275,7 +282,7 @@ function roleArgs(args: {
 async function runArchivedRole(
   runner: (args: RoleRunArgs) => Promise<RoleRunResult>,
   args: RoleRunArgs,
-  store: ArtifactStore,
+  store: Pick<ArtifactStore, "writeLog">,
   logName: string,
 ): Promise<{ result: RoleRunResult; logRef: string }> {
   const result = await runner(args);
@@ -286,7 +293,7 @@ async function runArchivedRole(
   return { result, logRef };
 }
 
-async function runStructuredRole<T>(args: {
+export async function runStructuredRole<T>(args: {
   role: PipelineRole;
   schema: Parameters<typeof parseStructuredReport>[1];
   logName: string;
@@ -295,7 +302,7 @@ async function runStructuredRole<T>(args: {
   worktreePath: string;
   deps: PipelineDependencies;
   runId: string;
-  store: ArtifactStore;
+  store: Pick<ArtifactStore, "writeLog">;
   runStart?: RunStartContext;
   gitObjectAccess?: LinkedWorktreeGitAccess;
 }): Promise<StructuredRoleRunResult<T>> {
@@ -789,12 +796,14 @@ export async function runReviews(args: {
   round: number;
   store: ArtifactStore;
   logNameNamespace?: string;
+  onReviewer?: (role: `reviewer-${ReviewerKind}`) => Promise<void>;
 }): Promise<ReviewRunResult> {
   const logNameNamespace = args.logNameNamespace === undefined
     ? ""
     : `${args.logNameNamespace}-`;
   const outcomes = await Promise.all(args.reviewers.map(async reviewer => {
     const role = `reviewer-${reviewer}` as const;
+    await args.onReviewer?.(role);
     const outcome = await runStructuredRole<ReviewReport>({
       role,
       schema: schemas.reviewReport,
@@ -1210,13 +1219,25 @@ export async function runPipeline(
   let primaryError: unknown;
   let hasPrimaryError = false;
   try {
-    return await runPipelineWithLease(
+    const result = await runPipelineWithLease(
       checkoutPath,
       spec,
       deps,
       ps,
       lock,
     );
+    await transitionRunStatusSafely(
+      new ArtifactStore(result.runId),
+      result.runId,
+      result.status === "failed" ? "failed" : "done",
+      {
+        round: null,
+        role: null,
+        producerId: result.attempt.producerId,
+        detail: result.status,
+      },
+    );
+    return result;
   } catch (error) {
     primaryError = error;
     hasPrimaryError = true;
@@ -1234,6 +1255,15 @@ export async function runPipeline(
   }
 }
 
+// The packaged single-file runtime must retain every trusted pipeline stage,
+// including the separately invoked post-pipeline advisor entrypoint.
+Object.defineProperty(runPipeline, "advisorStage", {
+  value: bundledAdvisorStage,
+  enumerable: false,
+  configurable: false,
+  writable: false,
+});
+
 async function runPipelineWithLease(
   checkoutPath: string,
   spec: DelegationSpec,
@@ -1250,26 +1280,88 @@ async function runPipelineWithLease(
     startedAt: new Date().toISOString(),
     sliced: slices.length > 0,
   };
-  const notePhase = (phase: string): void => {
+  let statusStore: ArtifactStore | null = null;
+  let statusRunId: string | null = null;
+  const emitPipelineStatus = async (
+    phase: RunStatusPhase,
+    fields: Partial<Pick<
+      RunStatus,
+      "sliceIndex" | "sliceCount" | "round" | "role" | "producerId" | "detail"
+    >> = {},
+  ): Promise<void> => {
+    if (statusStore === null || statusRunId === null) return;
+    await transitionRunStatusSafely(statusStore, statusRunId, phase, {
+      sliceIndex: fields.sliceIndex ?? (slices.length > 0 ? slices.length : null),
+      sliceCount: fields.sliceCount ?? (slices.length > 0 ? slices.length : null),
+      round: fields.round ?? null,
+      role: fields.role ?? null,
+      producerId: fields.producerId ?? null,
+      detail: fields.detail ?? null,
+    });
+  };
+  const notePhase = async (phase: string): Promise<void> => {
     // Best-effort progress; must never affect pipeline control flow.
-    try { deps.onPhase?.(phase); } catch { /* progress reporting is advisory */ }
+    try { await deps.onPhase?.(phase); } catch { /* progress reporting is advisory */ }
   };
   let runStart: RunStartContext | undefined;
   let slicedMarkerEstablished = false;
   const inheritedOnRunStart = deps.onRunStart;
+  const inheritedOnPhase = deps.onPhase;
   const attempt = await runAttemptFn(checkoutPath, initialSpec, {
     ...deps,
     borrowedCheckoutLease,
+    runStatus: {
+      mode: slices.length > 0 ? "sliced" : "single",
+      sliceIndex: slices.length > 0 ? 1 : null,
+      sliceCount: slices.length > 0 ? slices.length : null,
+      pipelineManaged: true,
+    },
+    async onPhase(phase) {
+      const mapped = phase === "producer running"
+        ? "implementing"
+        : phase === "freezing candidate"
+          ? "freezing"
+          : phase === "verifying candidate"
+            ? "verifying"
+            : null;
+      if (mapped !== null) {
+        await emitPipelineStatus(mapped, {
+          sliceIndex: slices.length > 0 ? 1 : null,
+        });
+      }
+      try { await inheritedOnPhase?.(phase); } catch { /* host progress is advisory */ }
+    },
     async onRunStart(context) {
       runStart = context;
+      statusRunId = context.record.runId;
+      statusStore = new ArtifactStore(context.record.runId);
       if (slices.length > 0) {
-        await new ArtifactStore(context.record.runId).writePipelineActiveMarker(activeOwner);
+        await statusStore.writePipelineActiveMarker(activeOwner);
         slicedMarkerEstablished = true;
       }
+      await writeRunStatusSafely(statusStore, {
+        statusVersion: "1",
+        runId: context.record.runId,
+        mode: slices.length > 0 ? "sliced" : "single",
+        phase: "preflight",
+        sliceIndex: slices.length > 0 ? 1 : null,
+        sliceCount: slices.length > 0 ? slices.length : null,
+        round: null,
+        role: null,
+        producerId: null,
+        startedAt: context.record.startedAt,
+        updatedAt: new Date().toISOString(),
+        detail: null,
+      });
+      await emitPipelineStatus("baseline-verify", {
+        sliceIndex: slices.length > 0 ? 1 : null,
+        detail: spec.executionMode === "edit" ? null : "skipped for read-only execution",
+      });
       await inheritedOnRunStart?.(context);
     },
   });
   const store = new ArtifactStore(attempt.runId);
+  await store.writePipelineArtifact("delegation-spec", spec);
   if (attempt.status !== "verified-candidate" || attempt.candidate === null) {
     if (slicedMarkerEstablished) await store.clearPipelineActiveMarker();
     // Propagate the attempt's own classification (e.g. verification-failure for a
@@ -1335,6 +1427,7 @@ async function runPipelineWithLease(
 
     if (slices.length > 0) {
       const initialNamespace = "slice-1-attempt-0";
+      await emitPipelineStatus("verifying", { sliceIndex: 1 });
       const initialVerification = await verifyCandidate({
         checkoutPath,
         spec: initialSpec,
@@ -1420,6 +1513,10 @@ async function runPipelineWithLease(
                     "sandbox-violation",
                   );
                 }
+                await emitPipelineStatus("implementing", {
+                  sliceIndex: index,
+                  role: "implementer",
+                });
                 const incrementRun = await runIncrement({
                   spec: scopedSpec,
                   pkg: {
@@ -1447,6 +1544,10 @@ async function runPipelineWithLease(
                   );
                 }
 
+                await emitPipelineStatus("freezing", {
+                  sliceIndex: index,
+                  role: "implementer",
+                });
                 const candidateCommit = incrementRun.report.candidateCommit;
                 const provenanceFailure = await validateCandidateProvenance({
                   worktreePath,
@@ -1490,6 +1591,7 @@ async function runPipelineWithLease(
                   temporarySliceRefs.push(temporaryRef);
                 }
 
+                await emitPipelineStatus("verifying", { sliceIndex: index });
                 const verified = await verifyCandidate({
                   checkoutPath,
                   spec: scopedSpec,
@@ -1631,7 +1733,7 @@ async function runPipelineWithLease(
         finalAttempt = promoted.attempt;
         currentCandidateCommit = promoted.candidateCommit;
         authoritySafeToRelease = true;
-        notePhase("partial halt verification");
+        await notePhase("partial halt verification");
         const verified = await verifyCandidate({
           checkoutPath,
           spec,
@@ -1691,7 +1793,7 @@ async function runPipelineWithLease(
 
         try {
           for (let increment = 2; increment <= maxIncrements; increment += 1) {
-            notePhase(`increment ${increment}/${maxIncrements}`);
+            await notePhase(`increment ${increment}/${maxIncrements}`);
             const previousCandidateCommit = currentCandidateCommit;
             const diffText = await checkedGit(candidateWorktree.path, [
               "diff",
@@ -1816,7 +1918,7 @@ async function runPipelineWithLease(
       }
 
       for (let round = 1; round <= maxRounds; round += 1) {
-        notePhase(`review round ${round}/${maxRounds}`);
+        await notePhase(`review round ${round}/${maxRounds}`);
         const diffText = await checkedGit(candidateWorktree.path, [
           "diff",
           `${baselineCommit}..${currentCandidateCommit}`,
@@ -1837,6 +1939,10 @@ async function runPipelineWithLease(
           runId: attempt.runId,
           round,
           store,
+          onReviewer: role => emitPipelineStatus("reviewing", {
+            round,
+            role,
+          }),
         });
         if (!reviewRun.ok) {
           const reason = `review phase did not produce valid structured output (see ${reviewRun.failedRoleLogRef})`;
@@ -1877,7 +1983,8 @@ async function runPipelineWithLease(
           });
         }
 
-        notePhase(`round ${round}: applying fixes`);
+        await emitPipelineStatus("fixing", { round, role: "fixer" });
+        await notePhase(`round ${round}: applying fixes`);
         const fixRun = await runFix({
           spec,
           pkg: { ...pkg, findings: consolidated.findings },
@@ -1969,7 +2076,8 @@ async function runPipelineWithLease(
       }
     }
 
-    notePhase("final verification");
+    await emitPipelineStatus("verifying");
+    await notePhase("final verification");
     const verified = await verifyCandidate({
       checkoutPath,
       spec,
@@ -1982,7 +2090,8 @@ async function runPipelineWithLease(
     });
     await store.writePipelineArtifact("verification", verified.verification);
     const lastRound = rounds.at(-1);
-    notePhase("evaluating gate");
+    await emitPipelineStatus("gating");
+    await notePhase("evaluating gate");
     const gate = evaluateGates({
       findings: lastRound?.consolidated.findings ?? [],
       dispositions: lastRound?.fix?.dispositions ?? [],
@@ -2031,6 +2140,9 @@ async function runPipelineWithLease(
         );
       }
     }
+    await emitPipelineStatus("failed", {
+      detail: terminalError instanceof Error ? terminalError.message : "pipeline failed unexpectedly",
+    });
     pipelinePrimaryError = terminalError;
     throw terminalError;
   } finally {

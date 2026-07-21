@@ -4,7 +4,10 @@ import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { freezeCandidate } from "../../src/git/candidate-tree.js";
 import { git } from "../../src/git/git-exec.js";
-import { applyCandidateTree } from "../../src/integrate/controlled-integrator.js";
+import {
+  applyCandidateTree,
+  stageCandidateTreeUnderLock,
+} from "../../src/integrate/controlled-integrator.js";
 import type { CheckoutLock, PlatformServices } from "../../src/platform/platform-services.js";
 import { getPlatformServices } from "../../src/platform/select-platform.js";
 import type { CandidateArtifact } from "../../src/protocol/attempt-result.js";
@@ -107,6 +110,94 @@ afterEach(async () => {
   else process.env.CLAUDE_PLUGIN_DATA = originalPluginData;
   await Promise.all(temporaryPaths.splice(0).map(entry =>
     rm(entry, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })));
+});
+
+describe("stageCandidateTreeUnderLock", () => {
+  it("stages the exact candidate tree while retaining the anchor and borrowed lease", async () => {
+    const f = await fixture();
+    await writeFile(path.join(f.worktreePath, "a.txt"), "candidate\n");
+    const artifact = await freeze(f, "stage-under-lock");
+    const platformServices = getPlatformServices();
+    const canonicalPath = await platformServices.canonicalizePath(f.repoRoot);
+    const repositoryIdentity = canonicalPath.gitCommonDir ?? canonicalPath.canonical;
+    let held = true;
+    let releaseCalls = 0;
+    const borrowedCheckoutLock: CheckoutLock = {
+      key: "stage-under-lock",
+      repositoryIdentity,
+      async release() {
+        releaseCalls += 1;
+        held = false;
+      },
+    };
+    integrationHooks.beforeReadTree = async () => {
+      expect(held).toBe(true);
+    };
+    integrationHooks.afterWorktreeDiff = async () => {
+      expect(held).toBe(true);
+    };
+
+    const result = await stageCandidateTreeUnderLock({
+      repoRoot: f.repoRoot,
+      artifact,
+      expectedArtifactHash: artifact.manifestHash,
+      borrowedCheckoutLock,
+      platformServices,
+    });
+
+    expect(result).toEqual({ integration: "applied", detail: "candidate tree applied" });
+    expect(await runGit(f.repoRoot, ["write-tree"])).toBe(artifact.candidateTreeOid);
+    expect(await readFile(path.join(f.repoRoot, "a.txt"), "utf8")).toBe("candidate\n");
+    expect(await runGit(f.repoRoot, ["rev-parse", artifact.anchorRef])).toBe(
+      artifact.candidateCommitOid,
+    );
+    expect(releaseCalls).toBe(0);
+    expect(held).toBe(true);
+  });
+
+  it.each([
+    ["artifact hash", "artifact-hash-mismatch"],
+    ["candidate anchor", "candidate-anchor-mismatch"],
+    ["candidate tree", "candidate-tree-mismatch"],
+  ] as const)("classifies a %s failure without mutating the checkout", async (failure, detail) => {
+    const f = await fixture();
+    await writeFile(path.join(f.worktreePath, "a.txt"), "candidate\n");
+    const artifact = await freeze(f, `stage-failure-${failure.replace(" ", "-")}`);
+    let stagedArtifact = artifact;
+    let expectedArtifactHash = artifact.manifestHash;
+    if (failure === "artifact hash") {
+      expectedArtifactHash = "f".repeat(64);
+    } else if (failure === "candidate anchor") {
+      await runGit(f.repoRoot, ["update-ref", artifact.anchorRef, f.baseCommitOid]);
+    } else {
+      stagedArtifact = {
+        ...artifact,
+        candidateTreeOid: await runGit(f.repoRoot, ["rev-parse", `${f.baseCommitOid}^{tree}`]),
+      };
+    }
+    const platformServices = getPlatformServices();
+    const canonicalPath = await platformServices.canonicalizePath(f.repoRoot);
+    const repositoryIdentity = canonicalPath.gitCommonDir ?? canonicalPath.canonical;
+    const borrowedCheckoutLock: CheckoutLock = {
+      key: `stage-failure-${failure.replace(" ", "-")}`,
+      repositoryIdentity,
+      async release() {
+        throw new Error("staging primitive released its borrowed checkout lease");
+      },
+    };
+
+    const result = await stageCandidateTreeUnderLock({
+      repoRoot: f.repoRoot,
+      artifact: stagedArtifact,
+      expectedArtifactHash,
+      borrowedCheckoutLock,
+      platformServices,
+    });
+
+    expect(result).toEqual({ integration: "aborted", detail });
+    expect(await readFile(path.join(f.repoRoot, "a.txt"), "utf8")).toBe("base\n");
+    expect(await runGit(f.repoRoot, ["status", "--porcelain"])).toBe("");
+  });
 });
 
 describe("applyCandidateTree", () => {

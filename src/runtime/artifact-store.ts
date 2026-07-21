@@ -19,6 +19,13 @@ import type {
   CandidateArtifact,
   CommandOutcome,
 } from "../protocol/attempt-result.js";
+import type {
+  AutopilotCandidateDecisionV2,
+  CandidateDecision,
+  CandidateDecisionV2,
+  CandidateDecisionValue,
+  HumanCandidateDecisionV2,
+} from "../protocol/candidate-decision.js";
 import type { VerificationCommand } from "../protocol/delegation-spec.js";
 import { loadSchemas } from "../protocol/schema-loader.js";
 import { RuntimeError } from "../util/errors.js";
@@ -29,6 +36,11 @@ import {
   redactRecord,
 } from "./redaction.js";
 import {
+  reviewSnapshotHash,
+  validateReviewSnapshot,
+  type ReviewSnapshot,
+} from "./review-snapshot.js";
+import {
   sanitizeRunManifest,
   verifyRunManifest,
   type RunManifest,
@@ -36,6 +48,18 @@ import {
 import { resolveStateDir } from "./state-dir.js";
 import { getPlatformServices } from "../platform/select-platform.js";
 import type { CheckoutLock, PlatformServices } from "../platform/platform-services.js";
+import {
+  advisorReportHash,
+  autopilotDecisionEligibilityProjection,
+  canonicalArtifactHash,
+  eligibilityInputFromArtifacts,
+  evaluateAutopilotEligibility,
+  pipelineResultHash,
+  type AutopilotEligibilityRecord,
+} from "../autopilot/autopilot-eligibility.js";
+import type { PipelineResult } from "../pipeline/pipeline-runtime.js";
+import type { AdvisorReport } from "../pipeline/report-types.js";
+import type { RunStatus } from "./run-status.js";
 
 const SAFE_COMPONENT = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 const WINDOWS_RESERVED_COMPONENT = /^(?:CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])$/i;
@@ -44,7 +68,14 @@ const PRUNE_BACKUP_REF_PREFIX = "refs/claude-architect/prune-backups/";
 const CLEANUP_JOURNAL = "cleanup.ndjson";
 const NO_FOLLOW = constants.O_NOFOLLOW ?? 0;
 const MAX_ARCHIVE_FILE_BYTES = 8_000_000;
-const attemptResultSchema = loadSchemas().attemptResult;
+const MAX_EVIDENCE_REFERENCES = 4_096;
+const MAX_EVIDENCE_DEPTH = 16;
+const schemas = loadSchemas();
+const attemptResultSchema = schemas.attemptResult;
+const candidateDecisionSchema = schemas.candidateDecision;
+const advisorReportSchema = schemas.advisorReport;
+const autopilotEligibilitySchema = schemas.autopilotEligibility;
+const runStatusSchema = schemas.runStatus;
 
 export interface PrunePolicy {
   maxAgeMs: number;
@@ -60,10 +91,15 @@ export interface PruneDependencies {
   platformServices?: Pick<PlatformServices, "acquireCheckoutLock" | "canonicalizePath">;
 }
 
-export type RunDecisionValue = "accepted" | "rejected" | "revision-requested";
+export type RunDecisionValue = CandidateDecisionValue;
 
-export interface RunDecisionRecord {
-  decision: RunDecisionValue;
+type HumanCandidateDecisionV2Input = Omit<
+  HumanCandidateDecisionV2,
+  "decisionVersion" | "authority"
+>;
+
+interface PersistedLegacyCandidateDecisionV1 {
+  decision: CandidateDecisionValue;
   recordedAt: string;
 }
 
@@ -238,6 +274,15 @@ async function readRegularFile(
   filename: string,
   parentIdentity?: DirectoryIdentity,
 ): Promise<string> {
+  // Reject a symlinked leaf on every platform. `O_NOFOLLOW` is the atomic guard
+  // on POSIX but is a no-op on Windows (`O_NOFOLLOW` is undefined there, so
+  // `NO_FOLLOW` is 0), which would otherwise let the open follow a symlink out
+  // of the archive. The pre-open lstat closes that Windows gap; the fd-identity
+  // checks below still defend against a POSIX TOCTOU swap.
+  const linkMetadata = await lstat(filename);
+  if (linkMetadata.isSymbolicLink()) {
+    throw new RuntimeError(`archive entry must not be a symbolic link: ${redact(filename)}`);
+  }
   const handle = await open(filename, constants.O_RDONLY | NO_FOLLOW);
   try {
     if (parentIdentity !== undefined) {
@@ -514,6 +559,131 @@ function verifyAttemptResult(value: unknown, runId: string): AttemptResult {
   return result;
 }
 
+function isCandidateDecisionValue(value: unknown): value is CandidateDecisionValue {
+  return (["accepted", "rejected", "revision-requested"] as const)
+    .includes(value as CandidateDecisionValue);
+}
+
+function verifyCandidateDecisionV2(value: unknown): CandidateDecisionV2 {
+  if (!candidateDecisionSchema(value)) {
+    throw new RuntimeError("candidate decision is invalid");
+  }
+  return value as CandidateDecisionV2;
+}
+
+function parsePersistedDecision(value: unknown): CandidateDecision {
+  if (typeof value === "object"
+    && value !== null
+    && (value as { decisionVersion?: unknown }).decisionVersion === "2") {
+    try {
+      return verifyCandidateDecisionV2(value);
+    } catch {
+      throw new RuntimeError("archived run decision is malformed");
+    }
+  }
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new RuntimeError("archived run decision is malformed");
+  }
+  const legacy = value as Partial<PersistedLegacyCandidateDecisionV1>;
+  const keys = Object.keys(value);
+  if (keys.length !== 2
+    || !keys.includes("decision")
+    || !keys.includes("recordedAt")
+    || !isCandidateDecisionValue(legacy.decision)
+    || typeof legacy.recordedAt !== "string"
+    || !Number.isFinite(Date.parse(legacy.recordedAt))) {
+    throw new RuntimeError("archived run decision is malformed");
+  }
+  return {
+    decisionVersion: "1",
+    decision: legacy.decision,
+    authority: "human",
+    recordedAt: legacy.recordedAt,
+  };
+}
+
+function hasIdenticalDecisionProvenance(
+  existing: CandidateDecision,
+  attempted: CandidateDecision,
+): boolean {
+  if (existing.decisionVersion !== attempted.decisionVersion
+    || existing.decision !== attempted.decision
+    || existing.authority !== attempted.authority) {
+    return false;
+  }
+  if (existing.decisionVersion === "1" || attempted.decisionVersion === "1") {
+    return true;
+  }
+  return existing.candidateManifestHash === attempted.candidateManifestHash
+    && existing.evidenceHash === attempted.evidenceHash
+    && existing.policyVersion === attempted.policyVersion;
+}
+
+function validateAdvisorReport(value: unknown): AdvisorReport {
+  if (!advisorReportSchema(value)) {
+    throw new RuntimeError("archived advisor report is invalid");
+  }
+  return value as AdvisorReport;
+}
+
+function validateAutopilotEligibilityRecord(
+  value: unknown,
+  runId: string,
+): AutopilotEligibilityRecord {
+  if (!autopilotEligibilitySchema(value)) {
+    throw new RuntimeError("archived autopilot eligibility record is invalid");
+  }
+  const record = value as AutopilotEligibilityRecord;
+  if (record.runId !== runId || record.eligible !== (record.reasons.length === 0)) {
+    throw new RuntimeError("archived autopilot eligibility record is inconsistent");
+  }
+  return record;
+}
+
+interface PostPipelineAutopilotArtifacts {
+  artifactVersion: "1";
+  advisorReport: AdvisorReport;
+  eligibility: AutopilotEligibilityRecord;
+  advisorReportHash: string;
+  eligibilityRecordHash: string;
+}
+
+function validatePostPipelineAutopilotArtifacts(
+  value: unknown,
+  runId: string,
+): PostPipelineAutopilotArtifacts {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    throw new RuntimeError("archived post-pipeline autopilot artifacts are invalid");
+  }
+  const candidate = value as Partial<PostPipelineAutopilotArtifacts>;
+  const keys = Object.keys(value);
+  if (keys.length !== 5
+    || !keys.includes("artifactVersion")
+    || !keys.includes("advisorReport")
+    || !keys.includes("eligibility")
+    || !keys.includes("advisorReportHash")
+    || !keys.includes("eligibilityRecordHash")
+    || candidate.artifactVersion !== "1") {
+    throw new RuntimeError("archived post-pipeline autopilot artifacts are invalid");
+  }
+  const advisorReport = validateAdvisorReport(candidate.advisorReport);
+  const eligibility = validateAutopilotEligibilityRecord(candidate.eligibility, runId);
+  const expectedAdvisorHash = advisorReportHash(advisorReport);
+  const expectedEligibilityHash = canonicalArtifactHash(eligibility);
+  if (candidate.advisorReportHash !== expectedAdvisorHash
+    || candidate.eligibilityRecordHash !== expectedEligibilityHash
+    || eligibility.advisorReportHash !== expectedAdvisorHash) {
+    throw new RuntimeError("archived post-pipeline autopilot artifact hashes do not agree");
+  }
+  return {
+    artifactVersion: "1",
+    advisorReport,
+    eligibility,
+    advisorReportHash: expectedAdvisorHash,
+    eligibilityRecordHash: expectedEligibilityHash,
+  };
+}
+
 export class ArtifactStore {
   readonly runDirectory: string;
   private readonly runsRoot: string;
@@ -667,6 +837,40 @@ export class ArtifactStore {
     }
   }
 
+  async writeRunStatus(status: RunStatus): Promise<void> {
+    if (status.runId !== this.runId) {
+      throw new RuntimeError("run status id does not match artifact store");
+    }
+    const sanitized: RunStatus = {
+      ...structuredClone(status),
+      detail: status.detail === null ? null : redact(status.detail).slice(0, 200),
+    };
+    if (!runStatusSchema(sanitized)) {
+      throw new RuntimeError("run status is invalid");
+    }
+    const directory = await this.ensureRunDirectory(false);
+    if (directory === null) return;
+    await this.replaceJson("status.json", sanitized);
+  }
+
+  async readRunStatus(runId: string): Promise<RunStatus | null> {
+    validateComponent(runId, "run id");
+    const runDirectory = path.join(this.runsRoot, runId);
+    const validated = await this.ensureExistingRunDirectory(runDirectory);
+    if (validated === null) return null;
+    try {
+      const value: unknown = JSON.parse(await readRegularFile(
+        path.join(validated.path, "status.json"),
+        validated.identity,
+      ));
+      if (!runStatusSchema(value)) throw new RuntimeError("archived run status is malformed");
+      return value as RunStatus;
+    } catch (error) {
+      if (isMissing(error)) return null;
+      throw error;
+    }
+  }
+
   async writeLog(name: string, text: string): Promise<string> {
     validateComponent(name, "log name");
     const ref = path.posix.join("logs", `${name}.log`);
@@ -707,6 +911,119 @@ export class ArtifactStore {
     }
   }
 
+  /**
+   * Read immutable evidence bytes from this run without permitting traversal or
+   * following directory/file symlinks. Final cumulative review uses this
+   * narrow primitive so its hashes bind the exact archived bytes, not merely a
+   * caller-supplied reference.
+   */
+  async readEvidence(reference: string): Promise<string | null> {
+    if (typeof reference !== "string"
+      || reference.length < 1
+      || reference.length > 1024
+      || path.posix.isAbsolute(reference)
+      || reference.includes("\\")
+      || /[\0\r\n]/u.test(reference)) {
+      throw new RuntimeError("invalid archived evidence reference");
+    }
+    const components = reference.split("/");
+    if (components.some(component => component === "" || component === "." || component === "..")) {
+      throw new RuntimeError("invalid archived evidence reference");
+    }
+    for (const component of components) validateComponent(component, "log name");
+
+    const run = await this.ensureExistingRunDirectory(this.runDirectory);
+    if (run === null) return null;
+    let directory = run;
+    try {
+      for (const component of components.slice(0, -1)) {
+        await assertDirectoryIdentity(directory.path, directory.identity);
+        const child = path.join(directory.path, component);
+        const metadata = await lstat(child);
+        if (metadata.isSymbolicLink() || !metadata.isDirectory()) {
+          throw new RuntimeError("archived evidence directory is not a plain directory");
+        }
+        const canonical = await realpath(child);
+        if (!isWithin(run.path, canonical)) {
+          throw new RuntimeError("archived evidence reference escapes run directory");
+        }
+        directory = {
+          path: canonical,
+          identity: { dev: metadata.dev, ino: metadata.ino },
+        };
+        await assertDirectoryIdentity(directory.path, directory.identity);
+      }
+      const content = await readRegularFile(
+        path.join(directory.path, components.at(-1)!),
+        directory.identity,
+      );
+      await assertDirectoryIdentity(run.path, run.identity);
+      return content;
+    } catch (error) {
+      if (isMissing(error)) return null;
+      throw error;
+    }
+  }
+
+  /**
+   * Enumerate the complete run archive from the archive itself. Callers must
+   * not be able to omit review, repair, advisor, or promotion evidence by
+   * supplying only a hand-picked list of references.
+   */
+  async listEvidenceReferences(): Promise<string[]> {
+    const run = await this.ensureExistingRunDirectory(this.runDirectory);
+    if (run === null) return [];
+    const references: string[] = [];
+
+    const walk = async (
+      directory: ValidatedDirectory,
+      components: string[],
+    ): Promise<void> => {
+      if (components.length > MAX_EVIDENCE_DEPTH) {
+        throw new RuntimeError("archived evidence nesting exceeds the supported limit");
+      }
+      await assertDirectoryIdentity(directory.path, directory.identity);
+      const names = (await readdir(directory.path)).sort();
+      for (const name of names) {
+        validateComponent(name, "log name");
+        const child = path.join(directory.path, name);
+        const metadata = await lstat(child);
+        if (metadata.isSymbolicLink()) {
+          throw new RuntimeError("archived evidence must not contain symbolic links");
+        }
+        const reference = [...components, name].join("/");
+        if (reference.length > 1024) {
+          throw new RuntimeError("archived evidence reference is too long");
+        }
+        if (metadata.isDirectory()) {
+          const canonical = await realpath(child);
+          if (!isWithin(run.path, canonical)) {
+            throw new RuntimeError("archived evidence directory escapes run directory");
+          }
+          const nested = {
+            path: canonical,
+            identity: { dev: metadata.dev, ino: metadata.ino },
+          };
+          await assertDirectoryIdentity(nested.path, nested.identity);
+          await walk(nested, [...components, name]);
+          continue;
+        }
+        if (!metadata.isFile()) {
+          throw new RuntimeError("archived evidence entry is not a regular file");
+        }
+        references.push(reference);
+        if (references.length > MAX_EVIDENCE_REFERENCES) {
+          throw new RuntimeError("archived evidence exceeds the supported file limit");
+        }
+      }
+      await assertDirectoryIdentity(directory.path, directory.identity);
+    };
+
+    await walk(run, []);
+    await assertDirectoryIdentity(run.path, run.identity);
+    return references.sort();
+  }
+
   async writeResult(result: AttemptResult): Promise<void> {
     if (result.runId !== this.runId) {
       throw new RuntimeError("attempt result run id does not match artifact store");
@@ -735,7 +1052,7 @@ export class ArtifactStore {
     if (args.manifest.runId !== this.runId) {
       throw new RuntimeError("run manifest id does not match artifact store");
     }
-    if (await this.readDecision(this.runId) !== null) {
+    if (await this.readCandidateDecision(this.runId) !== null) {
       throw new RuntimeError("terminal artifacts cannot be promoted after a decision");
     }
     const result = sanitizeAttemptResult(args.result);
@@ -804,46 +1121,214 @@ export class ArtifactStore {
     }
   }
 
-  async writeDecision(record: RunDecisionRecord): Promise<void> {
-    if (!(["accepted", "rejected", "revision-requested"] as const).includes(record.decision)
-      || !Number.isFinite(Date.parse(record.recordedAt))) {
-      throw new RuntimeError("run decision is invalid");
-    }
+  async writeReviewSnapshot(snapshot: ReviewSnapshot): Promise<void> {
+    const validated = validateReviewSnapshot(snapshot, this.runId);
+    const attemptedHash = reviewSnapshotHash(validated);
     try {
-      await this.writeJson("decision.json", record);
+      await this.writeJson("review-snapshot.json", validated);
       return;
     } catch (error) {
-      const existing = await this.readDecision(this.runId);
+      const existing = await this.readReviewSnapshot(this.runId);
       if (existing === null) throw error;
-      if (existing.decision === record.decision) return;
+      if (reviewSnapshotHash(existing) === attemptedHash) return;
       throw new RuntimeError(
-        `candidate decision conflict: recorded ${existing.decision}, attempted ${record.decision}`,
-        { toolError: "decision-conflict" },
+        "review snapshot conflict: archived snapshot differs from attempted snapshot",
+        { toolError: "review-snapshot-conflict" },
       );
     }
   }
 
-  async readDecision(runId: string): Promise<RunDecisionRecord | null> {
+  async readReviewSnapshot(runId: string): Promise<ReviewSnapshot | null> {
     validateComponent(runId, "run id");
     const runDirectory = path.join(this.runsRoot, runId);
     const validated = await this.ensureExistingRunDirectory(runDirectory);
     if (validated === null) return null;
     try {
-      const value = JSON.parse(await readRegularFile(
-        path.join(validated.path, "decision.json"),
-        validated.identity,
-      )) as Partial<RunDecisionRecord>;
-      if (!(["accepted", "rejected", "revision-requested"] as const)
-        .includes(value.decision as RunDecisionValue)
-        || typeof value.recordedAt !== "string"
-        || !Number.isFinite(Date.parse(value.recordedAt))) {
-        throw new RuntimeError("archived run decision is malformed");
-      }
-      return value as RunDecisionRecord;
+      const snapshot = validateReviewSnapshot(
+        JSON.parse(await readRegularFile(
+          path.join(validated.path, "review-snapshot.json"),
+          validated.identity,
+        )),
+        runId,
+      );
+      reviewSnapshotHash(snapshot);
+      return snapshot;
     } catch (error) {
       if (isMissing(error)) return null;
       throw error;
     }
+  }
+
+  async readAdvisorReport(runId: string): Promise<AdvisorReport | null> {
+    const value = await this.readPipelineArtifact<unknown>(runId, "post-pipeline-autopilot");
+    return value === null
+      ? null
+      : validatePostPipelineAutopilotArtifacts(value, runId).advisorReport;
+  }
+
+  private async recomputeArchivedEligibility(
+    record: AutopilotEligibilityRecord,
+  ): Promise<AutopilotEligibilityRecord | null> {
+    const [pipelineResult, reviewSnapshot, advisorReport] = await Promise.all([
+      this.readPipelineArtifact<PipelineResult>(this.runId, "pipeline-result"),
+      this.readReviewSnapshot(this.runId),
+      this.readAdvisorReport(this.runId),
+    ]);
+    if (pipelineResult === null || reviewSnapshot === null || advisorReport === null) return null;
+    return evaluateAutopilotEligibility(eligibilityInputFromArtifacts({
+      pipelineResult,
+      reviewSnapshot,
+      advisor: advisorReport,
+      evaluatedAt: record.evaluatedAt,
+    }));
+  }
+
+  async readAutopilotEligibility(runId: string): Promise<AutopilotEligibilityRecord | null> {
+    validateComponent(runId, "run id");
+    const value = await this.readPipelineArtifact<unknown>(runId, "post-pipeline-autopilot");
+    if (value === null) return null;
+    const record = validatePostPipelineAutopilotArtifacts(value, runId).eligibility;
+    if (runId !== this.runId) {
+      return new ArtifactStore(runId).readAutopilotEligibility(runId);
+    }
+    const expected = await this.recomputeArchivedEligibility(record);
+    if (expected === null) return null;
+    if (canonicalArtifactHash(expected) !== canonicalArtifactHash(record)) {
+      throw new RuntimeError("archived autopilot eligibility does not match its evidence");
+    }
+    return record;
+  }
+
+  async writePostPipelineAutopilotArtifacts(args: {
+    pipelineResult: PipelineResult;
+    reviewSnapshot: ReviewSnapshot;
+    advisorReport: AdvisorReport;
+    eligibility: AutopilotEligibilityRecord;
+  }): Promise<{ advisorReportHash: string; eligibilityRecordHash: string }> {
+    const [archivedPipelineResult, archivedReviewSnapshot] = await Promise.all([
+      this.readPipelineArtifact<PipelineResult>(this.runId, "pipeline-result"),
+      this.readReviewSnapshot(this.runId),
+    ]);
+    if (archivedPipelineResult === null || archivedReviewSnapshot === null) {
+      throw new RuntimeError("post-pipeline artifacts require a durable pipeline result and review snapshot");
+    }
+    if (pipelineResultHash(args.pipelineResult) !== pipelineResultHash(archivedPipelineResult)
+      || reviewSnapshotHash(args.reviewSnapshot) !== reviewSnapshotHash(archivedReviewSnapshot)) {
+      throw new RuntimeError("post-pipeline artifacts do not match the immutable archive");
+    }
+    const report = validateAdvisorReport(structuredClone(args.advisorReport));
+    const sanitizedReport = validateAdvisorReport(redactRecord(report));
+    if (advisorReportHash(sanitizedReport) !== advisorReportHash(report)) {
+      throw new RuntimeError("advisor report cannot be safely persisted after redaction");
+    }
+    const record = validateAutopilotEligibilityRecord(structuredClone(args.eligibility), this.runId);
+    const expected = evaluateAutopilotEligibility(eligibilityInputFromArtifacts({
+      pipelineResult: archivedPipelineResult,
+      reviewSnapshot: archivedReviewSnapshot,
+      advisor: sanitizedReport,
+      evaluatedAt: record.evaluatedAt,
+    }));
+    if (canonicalArtifactHash(expected) !== canonicalArtifactHash(record)) {
+      throw new RuntimeError("post-pipeline eligibility was not derived from the supplied frozen evidence");
+    }
+
+    const persistedAdvisorHash = advisorReportHash(sanitizedReport);
+    const eligibilityRecordHash = canonicalArtifactHash(record);
+    const artifacts: PostPipelineAutopilotArtifacts = {
+      artifactVersion: "1",
+      advisorReport: sanitizedReport,
+      eligibility: record,
+      advisorReportHash: persistedAdvisorHash,
+      eligibilityRecordHash,
+    };
+    await this.writeJson(
+      path.posix.join("pipeline", "post-pipeline-autopilot.json"),
+      artifacts,
+    );
+    return { advisorReportHash: persistedAdvisorHash, eligibilityRecordHash };
+  }
+
+  async writeHumanDecision(record: HumanCandidateDecisionV2Input): Promise<void> {
+    const decision = verifyCandidateDecisionV2({
+      ...record,
+      decisionVersion: "2",
+      authority: "human",
+    });
+    await this.writeCandidateDecision(decision, decision);
+  }
+
+  async writeAutopilotDecision(
+    candidate: CandidateArtifact,
+    eligibility: AutopilotEligibilityRecord,
+    recordedAt: string,
+  ): Promise<void> {
+    let validated: AutopilotEligibilityRecord;
+    try {
+      validated = validateAutopilotEligibilityRecord(eligibility, this.runId);
+    } catch {
+      throw new RuntimeError("autopilot decision eligibility is invalid");
+    }
+    const archived = await this.readAutopilotEligibility(this.runId);
+    if (archived === null
+      || canonicalArtifactHash(archived) !== canonicalArtifactHash(validated)
+      || candidate.baseCommitOid !== validated.baseCommitOid
+      || candidate.candidateCommitOid !== validated.candidateCommitOid
+      || candidate.candidateTreeOid !== validated.candidateTreeOid
+      || candidate.manifestHash !== validated.candidateManifestHash
+      || candidate.manifestHash !== manifestHashOf(candidate.changedPaths)) {
+      throw new RuntimeError("autopilot decision eligibility is invalid");
+    }
+    const decisionEligibility = autopilotDecisionEligibilityProjection(validated);
+    const decision = verifyCandidateDecisionV2({
+      decisionVersion: "2",
+      decision: "accepted",
+      authority: "autopilot-policy",
+      candidateManifestHash: candidate.manifestHash,
+      evidenceHash: decisionEligibility.evidenceHash,
+      policyVersion: decisionEligibility.policyVersion,
+      recordedAt,
+    }) as AutopilotCandidateDecisionV2;
+    await this.writeCandidateDecision(decision, decision);
+  }
+
+  private async writeCandidateDecision(
+    persisted: CandidateDecisionV2,
+    normalized: CandidateDecision,
+  ): Promise<void> {
+    try {
+      await this.writeJson("decision.json", persisted);
+      return;
+    } catch (error) {
+      const existing = await this.readCandidateDecision(this.runId);
+      if (existing === null) throw error;
+      if (hasIdenticalDecisionProvenance(existing, normalized)) return;
+      throw new RuntimeError(
+        `candidate decision conflict: recorded ${existing.decision}, attempted ${normalized.decision}`,
+        { toolError: "decision-conflict" },
+      );
+    }
+  }
+
+  async readCandidateDecision(runId: string): Promise<CandidateDecision | null> {
+    validateComponent(runId, "run id");
+    const runDirectory = path.join(this.runsRoot, runId);
+    const validated = await this.ensureExistingRunDirectory(runDirectory);
+    if (validated === null) return null;
+    try {
+      const value: unknown = JSON.parse(await readRegularFile(
+        path.join(validated.path, "decision.json"),
+        validated.identity,
+      ));
+      return parsePersistedDecision(value);
+    } catch (error) {
+      if (isMissing(error)) return null;
+      throw error;
+    }
+  }
+
+
+  async readDecision(runId: string): Promise<CandidateDecision | null> {
+    return this.readCandidateDecision(runId);
   }
 
   async writePipelineActiveMarker(marker: PipelineActiveMarker): Promise<void> {

@@ -1,15 +1,15 @@
 ---
 name: delegate
-description: Let Claude Architect route a versioned implementation spec through the trusted MCP runtime, independently review the Candidate Artifact, record a decision, and integrate only accepted bytes. Use for implementation delegation, Producer selection, or commitment-boundary review.
+description: Let Claude Architect author an Autopilot Spec and drive the trusted runtime through isolated implementation, whole-branch review, policy-gated promotion, and a pull request ready for human review. Use for implementation delegation, Producer selection, or commitment-boundary review.
 ---
 
 # Delegate
 
 ```claude-architect-protocol
-PROTOCOL_VERSION: 1.3.0
+PROTOCOL_VERSION: 2.0.0
 ```
 
-The current session is the architect. It owns requirements, the Delegation Spec, Producer selection, review, and acceptance. Producers are untrusted: their output is only a candidate until the runtime freezes it, independently verifies it, and the architect reviews the exact anchored bytes.
+The current session is the architect. It owns requirements, the Autopilot Spec, and Producer selection. Producers are untrusted: their output is only a candidate until the runtime freezes and independently verifies it. During autopilot, the trusted runtime alone evaluates hash-bound eligibility, records an `accepted` Candidate Decision with authority `autopilot-policy`, promotes eligible bytes to the workflow-owned feature branch, reviews the cumulative branch, and ships it to a pull request ready for human review. Only a human may merge or otherwise advance `main`.
 
 Always present this skill as `/claude-architect:delegate`. Never show a shorter command.
 
@@ -37,7 +37,7 @@ Offer exactly these choices:
 
 There is no implicit lane default. If the answer names a supported model or reasoning override, include it in the delegation spec; otherwise let the selected Producer use its configured default.
 
-P0-A certifies the MCP implementation path only for Codex on macOS arm64 when its capability report names `codex-native-sandbox` and marks the edit Lane eligible.
+P0-A certifies the MCP implementation path only for Codex on macOS arm64 when its capability report names `codex-native-sandbox` and marks the edit Lane eligible. Eligible Linux Codex editing is tested; native Windows runtime supervision exists, but native Windows Codex editing is not certified. Other Producer/platform/backend combinations remain specific to their capability report.
 
 ## Build the Delegation Spec
 
@@ -68,173 +68,56 @@ Construct a candidate spec with every required field:
 
 Resolve ambiguity before calling the runtime. Do not give the Producer credentials, hidden instructions, acceptance authority, or permission to expand scope.
 
+## Build the Autopilot Spec
+
+Wrap one or more Delegation Specs in the canonical Autopilot Spec:
+
+1. Set `specVersion: "1"` and a lowercase, hyphenated `topic`.
+2. Set `base` exactly to `{ remote: "origin", branch: "main" }`.
+3. Put 1..32 ordered tasks in `tasks`. Each task needs a stable `id`, a single-line `commitMessage`, and a complete `delegation` spec built by the rules above.
+4. Set `finalSuccessCriteria` and `finalVerification` for the entire cumulative workflow branch, not only the last task. The final evidence must cover every promoted commit and their interactions.
+5. Set `shipping` to GitHub draft-PR shipping: `provider: "github"`, `draft: true`, `markReadyWhenRequiredChecksPass: true`, a 600000..3600000 `requiredChecksTimeoutMs`, and bounded PR title/body text.
+
+Shipping v1 requires GitHub CLI 2.96 or newer, an authenticated GitHub HTTPS `origin`, a clean checkout based on `origin/main`, and configured required checks that can become green for the exact workflow head. Resolve these preconditions before calling the controller; it fails closed rather than changing remotes, inventing checks, or bypassing repository policy.
+
 ## Coordinator duties
 
 When running multiple delegations, normalize reported blockers by phase, command id, and root cause. The moment two independent lanes report the same blocker, pause affected lanes and treat it as an architect-owned shared-environment defect. Reproduce it once against the clean baseline, fix it centrally, rerun the preflight to green, then resume or redispatch the unchanged specs. Never wait for remaining lanes to rediscover it, and never push shared-tooling fixes into individual Producer lanes.
 
 **Repository precondition:** delegation and controlled integration require an exact clean checkout; tracked or unignored changes must be committed before delegation, including tracked planning files such as `tasks/todo.md`. Git-ignored local planning files do not affect the clean check. Do not use skip-worktree or assume-unchanged flags as a workaround.
 
-## Trusted MCP lifecycle
+## Trusted MCP autopilot lifecycle
 
-The `delegate` and `delegatePipeline` MCP calls are synchronous. Keep each call in the foreground until it returns; never hand it to Monitor or background execution.
+Project-scoped permission settings become active only after the human grants Claude Code workspace trust. They can allow the three autopilot tools, but they cannot override managed `ask` or `deny` policy. “No mid-loop prompts” is therefore conditional: it applies only after workspace trust, when all three tool calls are allowed and no higher-precedence policy, controller halt, or ambiguity requires the human.
 
-1. Call `delegate` through `mcp__plugin_claude-architect_runtime__delegate` with `checkoutPath`, the candidate spec, and `protocolVersion: "1.3.0"` copied from this skill's `PROTOCOL_VERSION` marker.
-2. When it returns `ok:false` with `validationErrors`, repair only the reported spec defects and resubmit. This repair loop must not touch a Producer.
-3. When it returns a protocol/schema diagnostic, stop and tell the user to update the installed marketplace copy and reload Claude Code. Never guess across a version mismatch.
-4. When the result is `unavailable`, `failed`, or `cancelled`, report the structured classification and evidence. Do not claim a candidate exists. A report with `laneEligibility.edit=false`, or any other ineligible or unconfined Lane, fails closed with the structured diagnostic.
-5. When the result is `verified-candidate`, call `reviewCandidate` with `checkoutPath` and the run id. Read the exact unredacted patch, changed-path manifest, and verification evidence; compare them with every success criterion and repository convention.
-6. Present the review outcome. Call `decideCandidate` with `checkoutPath`, the run id, and `accepted`, `rejected`, or `revision-requested`. Rejection discards the candidate anchor; a revision requires a new spec/attempt rather than editing frozen bytes.
-7. Only after an accepted decision, call `integrateCandidate` with `checkoutPath`, the run id, and the exact candidate `manifestHash` as `expectedArtifactHash`. Report `applied`, `conflicted`, or `aborted` truthfully. Integration stages the reviewed tree but does not commit it.
+1. Call `autopilotStart` with `checkoutPath`, the complete Autopilot Spec as `spec`, and `protocolVersion: "2.0.0"` copied from this skill's marker. Do not attempt a workflow start against a dirty checkout.
+2. If validation returns `validationErrors`, repair only the reported spec defects and resubmit. A protocol mismatch means the installed plugin must be updated and reloaded; never guess across versions. A report with `laneEligibility.edit=false`, or any other ineligible or unconfined lane, fails closed with the structured diagnostic.
+3. Record the returned `workflowId`. Call `autopilotStatus` with `checkoutPath`, that `workflowId`, and `protocolVersion: "2.0.0"` for read-only monitoring. Report only persisted phases and bounded progress supplied by the runtime; never infer completion from a phase name or Producer output.
+4. After a host or process interruption, call `autopilotResume` with `checkoutPath`, the same `workflowId`, and `protocolVersion: "2.0.0"`. Resume replays durable observed state; it does not authorize a second workflow or waive a failed gate.
+5. During autopilot, do not construct Autopilot Eligibility, synthesize a Candidate Decision, call separate review/decision/integration tools, run Git or `gh`, push, create or edit a PR, mark a PR ready, merge, or delete a branch. The controller owns policy, promotion, cumulative final review, exact-head push, draft-PR identity, required-check polling, ready transition, cleanup, and recovery.
 
-Never accept a Producer self-report as evidence, bypass `reviewCandidate`, call integration before an accepted decision, or substitute a different artifact hash.
+The controller may proceed without a mid-loop prompt only while every eligibility and shipping gate remains objectively proven. Interpret terminal states exactly:
 
-## Presenting delegations as subagents
+- `ready-for-human-review`: the workflow branch was pushed, the draft PR was proven for the expected head, configured required checks were green for that head, the PR was marked ready, and runtime cleanup completed. Review the cumulative PR evidence; only the human may merge or otherwise advance `main`.
+- `human-decision-required`: ambiguity, a non-waivable finding, ownership mismatch, shipping uncertainty, or another fail-closed condition requires a human decision. Preserve the workflow branch, worktree, and evidence; do not improvise continuation.
+- `failed`: the workflow ended without authority to ship. Present the durable reason and evidence. Do not claim the PR is ready or retry under altered policy.
+- `cancelled`: cancellation is a durable terminal classification. Present preserved cleanup/evidence and do not resume it as if non-terminal; a human chooses any next action.
 
-Surface every delegation in the Claude Code subagent look & feel. This is presentation only: it renders the runtime's durable evidence and never replaces spec construction, `reviewCandidate`, the human decision, or `integrateCandidate`. A rendered card is not evidence; a Producer self-report is not evidence; acceptance stays human-only.
+Autopilot is autonomous only up to a PR ready for human review. It never merges, deploys, releases, or deletes the remote feature branch. Successful cleanup removes temporary local workflow resources while retaining durable evidence and recovery records; fail-closed terminals retain what the runtime needs for inspection.
 
-**Dispatch card** — emit when you call `delegate`/`delegatePipeline`, so the run reads like an `Agent` launch:
+## Presenting workflow progress
+
+Surface the workflow in the Claude Code subagent look and feel, but treat the card as presentation rather than evidence:
 
 ```text
-▸ Agent · codex-implementer          edit · worktree-isolated
+▸ Autopilot · codex-implementer      workflow-owned branch
   Task    <3–5 word description>
   Model   GPT-5.6 Sol · reasoning low
-  Mode    foreground        Pipeline  delegatePipeline
+  Phase   running-task      Workflow <workflowId>
 ```
 
-**Live status** — one FleetView-style line while the call runs and after the host collapses it to background. Derive it only from the run's durable artifacts using the rules in *Monitoring a backgrounded delegation*; never invent progress.
+Use one compact status line derived from `autopilotStatus`, for example `● running-task · task 1/2`. Use `◑` for `human-decision-required`, `✓` for `ready-for-human-review`, and `✗` for `failed` or `cancelled`. Never invent progress, display a Producer self-report as evidence, or equate policy acceptance with merge.
 
-```text
-● running · codex-implementer · verification · 4m12s
-```
+## Explicit manual fallback
 
-Status glyphs: `●` running · `◑` decision-ready / human-decision-required · `✓` verified-candidate · `✗` failed, unavailable, or cancelled.
-
-**Completion notification** — when the call returns, render one compact box populated from the `reviewCandidate` evidence and verification report (mirrors a background subagent's completion notice):
-
-```text
-┌ ✓ codex-implementer · verified-candidate ───────────────
-│ 6 files · verification 5/5 pass
-│ findings 1 major (fixed in-pipeline) · 0 open
-│ manifestHash 1f2e3d… → awaiting your decision
-└──────────────────────────────────────────────────────────
-```
-
-The box summarizes; it does not decide. Still read the exact unredacted patch, changed-path manifest, and verification evidence before recommending a decision, and present `failed` or `human-decision-required` outcomes verbatim.
-
-## Choosing delegate vs delegatePipeline
-
-Use `delegatePipeline` by default for non-trivial tasks — anything with
-meaningful correctness or systems risk (multiple files, state, concurrency,
-security surface, or behavior existing code depends on). Use plain `delegate`
-only for trivial tasks (typo-level fixes, single obvious one-liners, doc-only
-edits).
-
-## Pipeline lifecycle
-
-1. Build the Delegation Spec exactly as for `delegate`. Optionally add:
-
-   ```yaml
-   review:
-     reviewers: [correctness, systems]   # default
-     maxRounds: 2                         # default
-     focus:
-       - Check platform-specific process cleanup.
-   ```
-
-2. Call `mcp__plugin_claude-architect_runtime__delegatePipeline` with
-   `checkoutPath`, `spec`, `protocolVersion: "1.3.0"`.
-3. Read the returned evidence bundle: attempt result, per-round review
-   reports and consolidated findings, fix dispositions, verification report,
-   and gate reasons.
-   - `status: "decision-ready"` — review the evidence yourself, then call
-     `decideCandidate` with `checkoutPath` and the run id and, if accepted,
-     `integrateCandidate` with `checkoutPath`, the run id, and the candidate
-     `manifestHash` as `expectedArtifactHash`.
-   - `status: "human-decision-required"` — present the gate reasons,
-     unresolved findings, and dispositions to the human verbatim. Never
-     accept on their behalf.
-   - `status: "failed"` — report the failure classification; retry or
-     re-scope per the normal delegate failure guidance.
-4. The pipeline never merges and never waives findings; you and the human
-   remain the only decision-makers.
-
-## Sliced pipeline
-
-For a task that decomposes into ordered, independently testable steps, add a
-top-level `slices` array to the spec. Each slice is a scoped mini-spec with its
-own `objective`, `context`, `writeAllowlist`, `forbiddenScope`,
-`successCriteria`, and — required — its own `verification`:
-
-```yaml
-slices:
-  - objective: Add the parser for the new record type.
-    context: The record grammar lives in docs/format.md.
-    writeAllowlist: [src/parse/**]
-    forbiddenScope: [src/emit/**]
-    successCriteria:
-      - New record type round-trips through the parser.
-    verification:
-      - id: parse-tests
-        executable: npx
-        args: [vitest, run, tests/parse]
-        cwd: "."
-        timeoutMs: 600000
-        network: denied
-        expectedExitCodes: [0]
-  - objective: Emit the new record type.
-    # ...its own scope and verification
-```
-
-Slice rules and guarantees:
-
-- Each slice runs **fresh with no context** — a slice implementer sees only its
-  own mini-spec, never a prior slice's conversation, and is gated only by its
-  own `verification`. Each slice's `writeAllowlist` must be a subset of the
-  spec's, and its verification `cwd` must stay inside the candidate root.
-- A deterministic wayfinder routes each completed slice **advance / repair /
-  halt** from objective gate results — the slice's own `verification`, plus its
-  independent per-slice review findings when `review.perSlice` is enabled —
-  never from model judgment or a Producer's self-report. A slice that passes
-  advances; a slice that fails is repaired within its round budget; a slice that
-  cannot be made to pass halts the run.
-- Review and the advisor judge the **composed candidate** at the end, over the
-  whole slice branch. Per-slice review is off by default; opt in with
-  `review.perSlice: true` to review each slice as it lands.
-- A mid-run halt **after at least one slice has advanced** yields a **partial**
-  candidate with `status: "human-decision-required"`, the halted slice index in
-  `haltedSliceIndex`, and each slice's route in `slices`; the promoted partial
-  branch (the advanced slices) is a real candidate the human may accept, reject,
-  or revise, and the halted slice's attempts stay in `slices` as evidence. A
-  halt on the very first slice, with nothing advanced, is reported `failed` with
-  the slice evidence retained — there is no partial branch to accept. Present
-  the completed slices, the halt reason, and the partial candidate to the human;
-  never accept or continue past a halt on their behalf.
-
-## Monitoring a backgrounded delegation
-
-`delegate` and `delegatePipeline` are synchronous, but the host auto-backgrounds
-a long call (after roughly 120s) and then surfaces only a generic "1 MCP task
-still running" line; the in-band progress phases stop being visible there. A
-producer alone almost always runs longer than the background threshold, so most
-of a real delegation happens after the collapse. When a call backgrounds, do not
-go silent — report a real status line by reading the run's durable artifacts.
-
-Correlate the run without guessing:
-
-1. Before dispatch, snapshot the run directories under the state dir
-   (`CLAUDE_PLUGIN_DATA/runs` on a host; `CLAUDE_ARCHITECT_STATE_DIR`/tmp under
-   tests). Reading these directories is read-only observation only.
-2. After the call backgrounds, take the newly appeared directory whose
-   `run-start.json` `canonicalCommonDir` equals this checkout's `.git` and that
-   has no `result.json` yet. If more than one new matching directory appears —
-   another session may be delegating against the same repository — report the
-   ambiguity and do not assume which run is yours.
-3. Read `runs/<runId>/pipeline/<name>.json` for the latest stage: `round-N-…`,
-   `verification`, then `pipeline-result`. No pipeline artifact yet means the
-   implement attempt (baseline or producer) is still running. `result.json`
-   appearing means the run finished.
-
-After backgrounding the host returns control once; emit a single Live status
-line (the FleetView-style format above) then. Continuous status requires scheduled wakeups (about 75s apart, each a full
-turn) — only do this when the human explicitly asks for live status, tell them it
-costs a turn per update, and never poll tighter than the round cadence.
+Use the manual candidate lifecycle only when the human explicitly chooses it instead of autopilot. In that mode, call `delegate` or `delegatePipeline`, inspect the exact frozen evidence with `reviewCandidate`, obtain the human's Candidate Decision through `decideCandidate`, and use `integrateCandidate` only for an accepted, hash-matched candidate. Manual integration stages bytes in the human checkout and does not commit, push, open a PR, merge, deploy, or release. Never switch a halted autopilot workflow into the manual lifecycle implicitly.

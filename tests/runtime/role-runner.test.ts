@@ -97,6 +97,7 @@ class FakeAdapter implements ProducerAdapter {
   readonly extraWritableRootRequests: Array<string[] | undefined> = [];
   readonly gitObjectDirectoryRequests: Array<string | undefined> = [];
   readonly gitAlternateDirectoryRequests: Array<string | undefined> = [];
+  readonly roleSpecs: DelegationSpec[] = [];
 
   constructor(private readonly options: FakeAdapterOptions = {}) {}
 
@@ -104,8 +105,9 @@ class FakeAdapter implements ProducerAdapter {
     return capabilityReport(ctx, this.options);
   }
 
-  buildInvocation(_spec: DelegationSpec, ctx: InvocationContext): ProducerInvocation {
+  buildInvocation(spec: DelegationSpec, ctx: InvocationContext): ProducerInvocation {
     this.invocationCount += 1;
+    this.roleSpecs.push(structuredClone(spec));
     if (ctx.tempHome !== undefined) this.tempHomes.push(ctx.tempHome);
     this.readOnlyRequests.push(ctx.readOnly === true);
     this.extraWritableRootRequests.push(ctx.extraWritableRoots);
@@ -331,6 +333,31 @@ describe("runRole", () => {
     expect(result.failure).toBeNull();
     expect(adapter.spawnCount).toBe(1);
     expect(adapter.spawnedCommands).toEqual(["/usr/bin/sandbox-exec"]);
+  });
+
+  it("runs each advisor invocation in a fresh read-only home without mutation or authority capabilities", async () => {
+    const adapter = new FakeAdapter({ cannedStdout: REVIEW_OUTPUT });
+    const first = argsWith(adapter, "advisor");
+    const second = argsWith(adapter, "advisor");
+
+    await runRole(first);
+    await runRole(second);
+
+    expect(adapter.tempHomes).toHaveLength(2);
+    expect(adapter.tempHomes[0]).not.toBe(adapter.tempHomes[1]);
+    expect(adapter.spawnedEnvs.map(env => env.HOME)).toEqual(adapter.tempHomes);
+    expect(adapter.spawnedCommands).toEqual(["/usr/bin/sandbox-exec", "/usr/bin/sandbox-exec"]);
+    expect(adapter.readOnlyRequests).toEqual([false, false]);
+    expect(adapter.extraWritableRootRequests).toEqual([undefined, undefined]);
+    expect(adapter.gitObjectDirectoryRequests).toEqual([undefined, undefined]);
+    expect(adapter.gitAlternateDirectoryRequests).toEqual([undefined, undefined]);
+    for (const roleSpec of adapter.roleSpecs) {
+      expect(roleSpec.writeAllowlist).toEqual([]);
+      expect(roleSpec.forbiddenScope).toEqual(["**/*"]);
+      expect(roleSpec.context).toContain("READ-ONLY final advisor in a fresh session");
+      expect(roleSpec.context).toContain("no authority to accept, waive, promote, integrate, commit, push, ship");
+      expect(roleSpec.context).toContain("call MCP decision tools");
+    }
   });
 
   it("fails closed when the HOST has no OS sandbox backend", async () => {

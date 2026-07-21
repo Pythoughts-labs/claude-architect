@@ -1,46 +1,49 @@
 # Threat Model
 
-This model covers every Producer adapter exposed through the MCP implementation path. It assumes the local OS, user account, Node.js runtime, Git executable, and Claude Code host are not already fully compromised. It does not assume that repository text, generated code, Producer output, or model-provider responses are trustworthy.
+This model covers every Producer adapter and the autopilot shipping path. It assumes the local OS, account, Claude Code host, Node.js, Git, and GitHub CLI are not already fully compromised. Repository text, generated code, Producer output, model responses, workflow state, and hosting observations are not assumed trustworthy. Claude Architect is a public beta; security-sensitive work still requires human review.
 
-## Assets
+## Assets and authority
 
-Assets include the integrity and confidentiality of the user's repository and Git history; uncommitted work; credentials and environment variables; filesystem data outside the delegated scope; the correctness of verification evidence; candidate/decision integrity; plugin run logs; provider account access; and the human's exclusive authority to accept and integrate a candidate.
+Assets include repository/history integrity and confidentiality; credentials; files outside delegated scope; candidate, eligibility, decision, and cumulative-review integrity; workflow branch/head identity; required-check evidence; durable recovery data; and the human's exclusive authority to merge or otherwise advance `main`.
+
+A human may record any Candidate Decision. Autopilot Promotion may record `accepted` with authority `autopilot-policy` only from current hash-bound Autopilot Eligibility proving every review, verification, advisor, artifact, and base gate. That acceptance permits Controlled Integration only into the workflow branch. Producers, reviewers, advisors, skills, and MCP callers cannot construct or waive eligibility.
 
 ## Adversaries
 
-1. A malicious or mistaken Producer emits unsafe code, changes forbidden files, lies about tests, creates unusual Git objects, or embeds instructions for later reviewers.
-2. Repository content contains prompt injection in source, documentation, tests, filenames, diffs, or `AGENTS.md`, attempting to override the Delegation Spec or exfiltrate data.
-3. A compromised Producer CLI or provider response executes unexpected commands, probes credentials, escapes its worktree, or forges structured output.
-4. A local process races state files, swaps paths/symlinks, reuses a PID, alters candidate refs, or calls MCP decision tools.
-5. An authorized but careless operator accepts incorrect output, allows overly broad scope/network access, or removes evidence prematurely.
+1. A malicious or mistaken Producer changes forbidden files, creates traversal/symlink/case-collision paths, lies about tests, or injects commit trailers.
+2. Repository content or a candidate injects instructions into implementers, reviewers, or advisors.
+3. A compromised CLI/provider probes credentials, escapes confinement, emits oversized/truncated output, or forges structured evidence.
+4. A local process tampers with state, journals, ownership, refs, branches, remotes, PR identity, or process tokens; races promotion, shipping, cleanup, or recovery; or reuses a PID.
+5. Hosting returns stale/wrong-head checks, a duplicate PR, or changed identity between observations.
+6. An operator grants broad scope/network access, trusts a workspace or permission unexpectedly, misconfigures required checks, or removes retained evidence too early.
 
 ## Attack surfaces and mitigations
 
 | Surface | Principal mitigations | Residual risk |
 |---|---|---|
-| Delegation input | Schema/version validation in `src/protocol/spec-validator.ts` and `src/protocol/schema-loader.ts`; explicit allowlist, forbidden scope, timeout, verification argv, and network policy | A valid but overly broad spec grants broad authority |
-| Producer process | Adapter-built argv in `src/producers/`; sanitized environment in `src/runtime/environment-policy.ts`; supervised process groups/timeouts in `src/platform/process-supervisor.ts`; nested-delegation marker | Compromised binaries run with whatever read authority the sandbox permits |
-| Filesystem writes | Detached worktree in `src/git/worktree-manager.ts`; Producer-native sandbox or eligible platform backend; fail-closed eligibility; post-run inventory and scope rejection in `src/git/candidate-tree.ts` | Defects in an eligible sandbox can allow transient out-of-scope effects before detection |
-| Network/exfiltration | Codex network disabled; per-command verification network declarations; minimal environment propagation; credential redaction | Provider traffic is necessary for cloud models; readable repository secrets may be sent; no destination allowlist |
-| Prompt injection | Producer labeled untrusted; pipeline prompts delimit candidate diff/evidence as untrusted in `src/pipeline/role-prompts.ts`; reviewers are fresh, read-only invocations | Models can still follow malicious content or miss subtle behavior |
-| Forged success claims | Producer self-report is not acceptance evidence; structural verification and Host-run commands in `src/verify/acceptance-verifier.ts`; separate verification worktree in `src/verify/project-verifier.ts` | Tests can be incomplete, malicious, nondeterministic, or dependent on unavailable services |
-| Candidate substitution | Candidate tree/commit/ref anchors, changed-path content hashes, candidate manifest hash, and hashed run manifest; `reviewCandidate` regenerates patch from anchored objects | SHA-256/Git integrity does not establish code safety; local users with repository write access can disrupt refs |
-| Review/fix pipeline | New role invocation per round; reviewers/verifier use empty write allowlist and all-path forbidden scope; only fixer may edit; adversarial gates in `src/pipeline/gates.ts` | Provider-side context retention is outside plugin control; reviewer and implementer may share a vulnerable model family |
-| Acceptance/integration | `handleDecideCandidate` accepts only verified candidates; `handleIntegrateCandidate` requires accepted record and exact manifest hash; `src/integrate/controlled-integrator.ts` rechecks base/ref/tree/status under locks | MCP caller identity is not cryptographically authenticated; a hijacked Claude session can accept |
-| State tampering/races | Plain-directory/no-follow checks, bounded reads, restrictive modes, exclusive writes, hashes, repository and checkout locks in `src/runtime/artifact-store.ts` and platform services | Same-user malware may still deny service or tamper between operations not covered by OS guarantees |
-| Crash/PID reuse | Startup recovery validates canonical paths and process start tokens before termination/reclamation in `src/runtime/recovery-manager.ts` | Platform process metadata can be unavailable; abrupt failure may leave artifacts requiring manual inspection |
-| Sensitive logs | Bounded buffers, registered sensitive environment values, pattern/field redaction, refusal to persist known secrets | Unknown, encoded, transformed, or source-level secrets may remain |
+| Autopilot input | Strict versioned schemas; fixed `origin/main` and GitHub draft/ready policy; no authority/hash/branch/argv overrides | A valid broad task still grants broad bounded authority |
+| Producer process | Adapter-built argv, sanitized environment, eligible OS sandbox, timeouts/process-tree cleanup, nested-delegation denial | Compromised binaries retain permitted read authority |
+| Candidate paths | Detached worktrees; canonicalization; traversal, absolute, symlink-escape, scope, submodule, and case-collision rejection | Sandbox defects can cause transient effects before detection |
+| Evidence/eligibility | Frozen Git objects, content/manifest hashes, Host verification, read-only reviewers/advisor, schema/revision binding | Incomplete tests or reviewers can miss semantic flaws |
+| Promotion | Promotion alone consumes current Eligibility and writes `autopilot-policy`; branch/base/head and intent checks; sanitized commit messages | Same-user compromise can deny service or attack trusted dependencies |
+| Final review | Entire workflow branch plus cumulative cross-task evidence | Model review remains fallible and provider context retention is unknown |
+| Shipping | GitHub CLI 2.96+; authenticated GitHub HTTPS origin; exact refspec; PR identity TOCTOU bracket; required checks bound to expected head | GitHub/account compromise and misconfigured checks remain possible |
+| Permissions | Workspace trust required; project allow rules cannot override managed `ask`/`deny`; narrow autopilot MCP schemas | A compromised host/session can still call allowed tools |
+| State/recovery | Bounded no-follow reads, schema/hash/revision checks, atomic writes, leases/registrations, PID+start-token liveness, journal plus direct observation | Abrupt failure or same-user tampering may require human judgment |
+| Logs/privacy | Bounded output, truncation rejection at trusted seams, secret registration and redaction | Unknown/transformed/source secrets may remain |
 
-## Abuse cases
+## Shipping and terminal outcomes
 
-A Producer that edits `README.md` when only `src/x.ts` is allowed is rejected during candidate freezing. A Producer that claims tests passed is not trusted; the Host verifier runs the exact authorized commands in a new worktree and archives stdout/stderr. A malicious diff that tells a reviewer to ignore policy remains inside an explicitly untrusted prompt block, while the reviewer has read-only confinement. A swapped candidate is rejected when its anchor, commit/tree identity, changed-path manifest hash, run manifest, expected artifact hash, or base commit fails revalidation.
+**Accepted** means workflow-branch integration is authorized. **Shipped** means the exact workflow head was pushed and a draft PR identity was established. **Ready** means configured required checks were green for that exact head and the PR was marked ready for human review. **Merged** means a human advanced `main`.
 
-These mitigations do not validate business intent. For example, a small allowed change can add a subtle backdoor while passing all tests. Review quality and success criteria remain decisive.
+Autopilot is autonomous only through ready. It never automatically merges, deploys, releases, closes the PR, or deletes the remote feature branch. `human-decision-required`, `failed`, and `cancelled` are fail-closed durable terminals. “No mid-loop prompts” applies only when workspace trust and effective permissions allow it and every runtime proof remains valid.
 
-## Platform-specific residual risks
+## Platform and retention residuals
 
-The backend registry marks Codex native sandboxing certified only on macOS arm64 and tested on native Linux. Native Windows is unsupported for Codex editing, though watchdog/process-tree support exists. Every Producer/platform combination must satisfy the capability registry before editing; an unsupported or unavailable combination fails closed with no alternate-lane substitution. Provider-specific autonomy remains a residual risk, so all Producer results require independent diff and test review.
+Native macOS arm64 Codex editing is certified. Eligible Linux Codex editing is tested. Native Windows process/runtime supervision exists, but native Windows Codex editing is not certified. Other Producers and backends remain capability-specific.
 
-## Security conclusions
+Active and fail-closed workflows retain their worktree/branch and evidence as required for inspection or recovery. Ready-state cleanup removes temporary local worktrees, locks, and refs, but retains durable evidence and the remote workflow branch/PR. Local data persists until pruning or deliberate removal; provider data follows provider policy.
 
-Claude Architect provides containment, provenance, and a commitment boundary, not proof that generated code is secure. The strongest guarantee is that accepted bytes should match the frozen, reviewed candidate manifest hash and must pass the configured gates. Residual risks remain from overly broad specs, prompt injection, incomplete tests, compromised local dependencies, provider handling, redaction gaps, OS sandbox defects, and unauthenticated control of the Claude/MCP session.
+## Security conclusion
+
+The strongest claim is containment and provenance through a human-review-ready PR, not proof of correctness. Required checks must be configured and green for the exact head. Human review and human merge authority remain the final boundary; no automatic merge, deployment, or release is in scope.

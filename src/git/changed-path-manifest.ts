@@ -95,14 +95,38 @@ function sortChangedPaths(changedPaths: ChangedPath[]): ChangedPath[] {
   return changedPaths.sort((left, right) => left.path < right.path ? -1 : left.path > right.path ? 1 : 0);
 }
 
+export function validateChangedPaths(changedPaths: ChangedPath[]): void {
+  const observed = new Map<string, string>();
+  for (const change of changedPaths) {
+    if (change.path.includes("\\")) {
+      throw new RuntimeError("changed path is not forward-slash normalized");
+    }
+    const folded = change.path.toLowerCase();
+    const existing = observed.get(folded);
+    if (existing !== undefined && existing !== change.path) {
+      throw new RuntimeError("changed paths collide under case folding");
+    }
+    observed.set(folded, change.path);
+  }
+}
+
 /**
  * The canonical serialization + hash of a changed-path manifest — the single
  * definition of the hashed bytes (`JSON.stringify` of the entries in their fixed
  * key order). Callers that already hold a `ChangedPath[]` (e.g. an archival
- * self-consistency check) hash it here rather than re-deriving the encoding.
+ * self-consistency check) validate and hash it here rather than re-deriving the
+ * encoding. Validation deliberately makes every manifest ingestion fail closed
+ * before hashing malformed path aliases.
  */
 export function manifestHashOf(changedPaths: ChangedPath[]): string {
-  return createHash("sha256").update(JSON.stringify(changedPaths)).digest("hex");
+  validateChangedPaths(changedPaths);
+  // Serialize each entry with an explicit key order so the hash is a function
+  // of the manifest's values, not of the key insertion order of whichever
+  // in-memory copy (freshly computed vs reloaded from key-sorted persisted
+  // artifacts) the caller holds.
+  const canonical = changedPaths.map(({ path, changeType, mode, contentHash }) =>
+    ({ path, changeType, mode, contentHash }));
+  return createHash("sha256").update(JSON.stringify(canonical)).digest("hex");
 }
 
 /**

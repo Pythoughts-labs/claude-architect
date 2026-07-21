@@ -1,0 +1,68 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "run-status.v1.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "statusVersion",
+    "runId",
+    "mode",
+    "phase",
+    "sliceIndex",
+    "sliceCount",
+    "round",
+    "role",
+    "producerId",
+    "startedAt",
+    "updatedAt",
+    "detail"
+  ],
+  "properties": {
+    "statusVersion": { "const": "1" },
+    "runId": { "type": "string", "minLength": 1, "maxLength": 128 },
+    "mode": { "enum": ["single", "sliced"] },
+    "phase": {
+      "enum": [
+        "preflight",
+        "baseline-verify",
+        "implementing",
+        "freezing",
+        "verifying",
+        "reviewing",
+        "fixing",
+        "advisor",
+        "gating",
+        "integrating",
+        "done",
+        "failed"
+      ]
+    },
+    "sliceIndex": { "type": ["integer", "null"], "minimum": 1 },
+    "sliceCount": { "type": ["integer", "null"], "minimum": 1 },
+    "round": { "type": ["integer", "null"], "minimum": 1 },
+    "role": { "type": ["string", "null"], "minLength": 1, "maxLength": 128 },
+    "producerId": { "type": ["string", "null"], "minLength": 1, "maxLength": 128 },
+    "startedAt": { "type": "string", "format": "date-time" },
+    "updatedAt": { "type": "string", "format": "date-time" },
+    "detail": { "type": ["string", "null"], "maxLength": 200 }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "mode": { "const": "single" } } },
+      "then": {
+        "properties": {
+          "sliceIndex": { "type": "null" },
+          "sliceCount": { "type": "null" }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "mode": { "const": "sliced" } } },
+      "then": {
+        "properties": {
+          "sliceCount": { "type": "integer", "minimum": 1 }
+        }
+      }
+    }
+  ]
+}

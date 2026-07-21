@@ -25,6 +25,7 @@ import type {
 } from "../../src/producers/producer-adapter.js";
 import { buildEnvironment } from "../../src/runtime/environment-policy.js";
 import { supervise } from "../../src/platform/process-supervisor.js";
+import { buildRoleSpec, type RolePackage } from "../../src/pipeline/role-prompts.js";
 
 const execFileAsync = promisify(execFile);
 const executable: ResolvedExecutable = {
@@ -231,6 +232,35 @@ describe("CodexAdapter", () => {
     expect(invocation.args[sandboxIndex + 1]).toBe("read-only");
     expect(invocation.args).not.toContain("workspace-write");
     expect(invocation.stdin).not.toContain(CODEX_EDIT_ACTION_PREAMBLE);
+  });
+
+  it("gives the advisor an ephemeral no-config read-only invocation with no external authority", () => {
+    const base = sampleSpec();
+    const pkg: RolePackage = {
+      spec: base,
+      baselineCommit: "a".repeat(40),
+      candidateCommit: "b".repeat(40),
+      candidateDiff: "diff --git a/a b/a",
+      testEvidence: "verified",
+      advisorEvidence: { candidateTreeOid: "c".repeat(40) },
+    };
+    const advisorSpec = buildRoleSpec("advisor", base, pkg);
+    const invocation = new CodexAdapter().buildInvocation(advisorSpec, {
+      ...invocationContext(),
+      readOnly: true,
+    });
+
+    expect(invocation.args).toContain("--ephemeral");
+    expect(invocation.args).toContain("--ignore-user-config");
+    expect(invocation.args).toContain("--ignore-rules");
+    expect(invocation.args).toContain('approval_policy="never"');
+    expect(invocation.args).toContain('web_search="disabled"');
+    expect(invocation.args).toContain("read-only");
+    expect(invocation.args).not.toContain("workspace-write");
+    expect(invocation.network).toBe("denied");
+    expect(invocation.stdin).toContain("no authority to accept, waive, promote, integrate, commit, push, ship");
+    expect(invocation.stdin).toContain("call MCP decision tools");
+    expect(invocation.stdin).not.toContain(base.context);
   });
 
   it("carries the defaulted auth store on the invocation env", () => {

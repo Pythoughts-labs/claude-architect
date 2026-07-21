@@ -11,6 +11,9 @@ import {
   type GitReadDependencies,
 } from "./git-read-tools.js";
 import {
+  handleAutopilotResume,
+  handleAutopilotStart,
+  handleAutopilotStatus,
   handleDecideCandidate,
   handleDelegate,
   handleDelegatePipeline,
@@ -61,7 +64,12 @@ export const delegatePipelineOutput = z.object({
   diagnostic: z.string().optional(),
   error: z.string().optional(),
 });
-const reviewOutput = z.object({
+export const reviewCandidateOutputSchema = z.object({
+  runId: z.string().optional(),
+  baseCommitOid: z.string().regex(/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/u).optional(),
+  candidateCommitOid: z.string().regex(/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/u).optional(),
+  candidateTreeOid: z.string().regex(/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/u).optional(),
+  manifestHash: z.string().regex(/^[0-9a-f]{64}$/u).optional(),
   patch: z.string().optional(),
   changedPaths: z.array(z.object({
     path: z.string(),
@@ -97,6 +105,13 @@ const gitReadOutput = z.object({
   error: z.literal("git-read-failed").optional(),
   diagnostic: z.string().optional(),
 });
+const autopilotOutput = z.object({
+  ok: z.boolean(),
+  result: z.record(z.string(), z.unknown()).optional(),
+  validationErrors: z.array(z.object({ path: z.string(), message: z.string() })).optional(),
+  diagnostic: z.string().optional(),
+  error: z.string().optional(),
+});
 
 const protocolVersionInput = z.literal(PROTOCOL_VERSION, {
   errorMap: issue => ({
@@ -120,6 +135,18 @@ export const delegatePipelineInputSchema = z.object({
   protocolVersion: protocolVersionInput,
 }).strict();
 
+export const autopilotStartInputSchema = z.object({
+  checkoutPath: z.string(),
+  spec: z.unknown(),
+  protocolVersion: protocolVersionInput,
+}).strict();
+
+export const autopilotWorkflowInputSchema = z.object({
+  checkoutPath: z.string(),
+  workflowId: z.string(),
+  protocolVersion: protocolVersionInput,
+}).strict();
+
 export const reviewCandidateInputSchema = z.object({
   checkoutPath: z.string(),
   runId: z.string(),
@@ -129,6 +156,7 @@ export const decideCandidateInputSchema = z.object({
   checkoutPath: z.string(),
   runId: z.string(),
   decision: z.enum(["accepted", "rejected", "revision-requested"]),
+  expectedArtifactHash: z.string().regex(/^[0-9a-f]{64}$/u),
 }).strict();
 
 export const integrateCandidateInputSchema = z.object({
@@ -149,13 +177,9 @@ function toolOutput(value: object) {
   };
 }
 
-export async function start(dependencies: ServerDependencies = {}): Promise<void> {
-  if (process.env.CLAUDE_ARCHITECT_DELEGATED !== undefined) {
-    console.error("Claude Architect MCP startup denied: CLAUDE_ARCHITECT_DELEGATED is present");
-    process.exitCode = 1;
-    return;
-  }
-
+export async function createServer(
+  dependencies: ServerDependencies = {},
+): Promise<McpServer> {
   await (dependencies.recoverStaleRuns ?? recoverStaleRuns)();
 
   const server = new McpServer({ name: "claude-architect", version: RUNTIME_VERSION });
@@ -248,12 +272,111 @@ export async function start(dependencies: ServerDependencies = {}): Promise<void
     },
   );
   server.registerTool(
+    "autopilotStart",
+    {
+      title: "Start an autopilot workflow",
+      description: "Validate an Autopilot Spec and run its verified workflow.",
+      inputSchema: autopilotStartInputSchema,
+      outputSchema: autopilotOutput,
+    },
+    async ({ checkoutPath, spec, protocolVersion }, extra) => {
+      const progressToken = extra._meta?.progressToken;
+      const startedAt = Date.now();
+      let step = 0;
+      let lastPhase = "starting autopilot workflow";
+      const emit = (message: string) => {
+        if (progressToken === undefined) return;
+        step += 1;
+        const elapsed = Math.round((Date.now() - startedAt) / 1000);
+        void extra.sendNotification({
+          method: "notifications/progress",
+          params: { progressToken, progress: step, message: `${message} (${elapsed}s)` },
+        }).catch(() => { /* progress is best-effort */ });
+      };
+      const onProgress = progressToken === undefined ? undefined : (message: string) => {
+        lastPhase = message;
+        emit(message);
+      };
+      const heartbeat = onProgress === undefined
+        ? undefined
+        : setInterval(() => emit(lastPhase), 8_000);
+      try {
+        return toolOutput(await handleAutopilotStart(checkoutPath, spec, {
+          ...dependencies,
+          skillProtocolVersion: protocolVersion,
+          abortSignal: extra.signal,
+          ...(onProgress === undefined ? {} : { onProgress }),
+        }));
+      } finally {
+        if (heartbeat !== undefined) clearInterval(heartbeat);
+      }
+    },
+  );
+  server.registerTool(
+    "autopilotStatus",
+    {
+      title: "Read autopilot workflow status",
+      description: "Return the persisted state of an autopilot workflow.",
+      inputSchema: autopilotWorkflowInputSchema,
+      outputSchema: autopilotOutput,
+      annotations: { readOnlyHint: true },
+    },
+    async ({ checkoutPath, workflowId, protocolVersion }, extra) => toolOutput(
+      await handleAutopilotStatus(checkoutPath, workflowId, {
+        ...dependencies,
+        skillProtocolVersion: protocolVersion,
+        abortSignal: extra.signal,
+      }),
+    ),
+  );
+  server.registerTool(
+    "autopilotResume",
+    {
+      title: "Resume an autopilot workflow",
+      description: "Resume a recoverable autopilot workflow from durable state.",
+      inputSchema: autopilotWorkflowInputSchema,
+      outputSchema: autopilotOutput,
+    },
+    async ({ checkoutPath, workflowId, protocolVersion }, extra) => {
+      const progressToken = extra._meta?.progressToken;
+      const startedAt = Date.now();
+      let step = 0;
+      let lastPhase = "resuming autopilot workflow";
+      const emit = (message: string) => {
+        if (progressToken === undefined) return;
+        step += 1;
+        const elapsed = Math.round((Date.now() - startedAt) / 1000);
+        void extra.sendNotification({
+          method: "notifications/progress",
+          params: { progressToken, progress: step, message: `${message} (${elapsed}s)` },
+        }).catch(() => { /* progress is best-effort */ });
+      };
+      const onProgress = progressToken === undefined ? undefined : (message: string) => {
+        lastPhase = message;
+        emit(message);
+      };
+      const heartbeat = onProgress === undefined
+        ? undefined
+        : setInterval(() => emit(lastPhase), 8_000);
+      try {
+        return toolOutput(await handleAutopilotResume(checkoutPath, workflowId, {
+          ...dependencies,
+          skillProtocolVersion: protocolVersion,
+          abortSignal: extra.signal,
+          ...(onProgress === undefined ? {} : { onProgress }),
+        }));
+      } finally {
+        if (heartbeat !== undefined) clearInterval(heartbeat);
+      }
+    },
+  );
+  server.registerTool(
     "reviewCandidate",
     {
       title: "Review a verified candidate",
-      description: "Regenerate and return the exact candidate patch and verification evidence.",
+      description: "Return the exact candidate manifest hash, patch, and verification evidence.",
       inputSchema: reviewCandidateInputSchema,
-      outputSchema: reviewOutput,
+      outputSchema: reviewCandidateOutputSchema,
     },
     async ({ checkoutPath, runId }) => toolOutput(await handleReviewCandidate(
       checkoutPath,
@@ -269,10 +392,11 @@ export async function start(dependencies: ServerDependencies = {}): Promise<void
       inputSchema: decideCandidateInputSchema,
       outputSchema: decisionOutput,
     },
-    async ({ checkoutPath, runId, decision }) => toolOutput(await handleDecideCandidate(
+    async ({ checkoutPath, runId, decision, expectedArtifactHash }) => toolOutput(await handleDecideCandidate(
       checkoutPath,
       runId,
       decision,
+      expectedArtifactHash,
       dependencies,
     )),
   );
@@ -341,6 +465,17 @@ export async function start(dependencies: ServerDependencies = {}): Promise<void
     gitChangedFiles,
   );
 
+  return server;
+}
+
+export async function start(dependencies: ServerDependencies = {}): Promise<void> {
+  if (process.env.CLAUDE_ARCHITECT_DELEGATED !== undefined) {
+    console.error("Claude Architect MCP startup denied: CLAUDE_ARCHITECT_DELEGATED is present");
+    process.exitCode = 1;
+    return;
+  }
+
+  const server = await createServer(dependencies);
   await server.connect(new StdioServerTransport());
   console.error("claude-architect MCP server ready");
 }

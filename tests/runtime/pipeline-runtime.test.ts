@@ -386,7 +386,7 @@ async function expectPipelineAuthorityBlocksTools(
     error: "pipeline-active",
     diagnostic: "the delegation pipeline for this run is still active",
   };
-  await expect(handleDecideCandidate(repo, runId, "accepted")).resolves.toEqual(expected);
+  await expect(handleDecideCandidate(repo, runId, "accepted", manifestHash)).resolves.toEqual(expected);
   await expect(handleIntegrateCandidate(repo, runId, manifestHash)).resolves.toEqual(expected);
 }
 
@@ -1734,10 +1734,13 @@ describe("runPipeline", () => {
     expect(result.attempt).toEqual(archived);
     expect(await runGit(repo, ["rev-parse", result.attempt.candidate!.anchorRef]))
       .toBe(result.attempt.candidate!.candidateCommitOid);
-    await store.writeDecision({
-      decision: "accepted",
-      recordedAt: "2026-07-19T12:00:00.000Z",
-    });
+    await writeFile(
+      path.join(store.runDirectory, "decision.json"),
+      `${JSON.stringify({
+        decision: "accepted",
+        recordedAt: "2026-07-19T12:00:00.000Z",
+      })}\n`,
+    );
     await expect(handleIntegrateCandidate(
       repo,
       runId,
@@ -1809,14 +1812,20 @@ describe("runPipeline", () => {
     // The promoted partial is a real verified-candidate anchored at the partial
     // branch, so the human can accept it — the crux of a human-decision halt.
     const store = new ArtifactStore(runId);
-    await expect(store.readResult(runId)).resolves.toMatchObject({
+    const archivedResult = await store.readResult(runId);
+    expect(archivedResult).toMatchObject({
       status: "verified-candidate",
       failure: null,
       candidate: { candidateCommitOid: result.finalCandidateCommit },
     });
     expect(await runGit(repo, ["rev-parse", result.attempt.candidate!.anchorRef]))
       .toBe(result.finalCandidateCommit);
-    await expect(handleDecideCandidate(repo, runId, "accepted"))
+    await expect(handleDecideCandidate(
+      repo,
+      runId,
+      "accepted",
+      archivedResult!.candidate!.manifestHash,
+    ))
       .resolves.toEqual({ recorded: true });
   }, 120_000);
 
@@ -2661,6 +2670,7 @@ describe("runPipeline", () => {
     const repo = await initRepo();
     const runId = "pipeline-clean";
     const store = new ArtifactStore(runId);
+    const spec = validSpec();
     const markerPath = path.join(store.runDirectory, "pipeline-active.json");
     const baseRoleRunner = roundReviews(
       [{ correctness: approve, systems: approve }],
@@ -2680,7 +2690,7 @@ describe("runPipeline", () => {
 
     const result = await runPipeline(
       repo,
-      validSpec(),
+      spec,
       dependencies({ runId, roleRunner }),
     );
 
@@ -2695,6 +2705,7 @@ describe("runPipeline", () => {
       "logs/role-reviewer-correctness-round1.log",
       "logs/role-reviewer-systems-round1.log",
     ]);
+    await expect(store.readPipelineArtifact(runId, "delegation-spec")).resolves.toEqual(spec);
     await expect(readFile(
       path.join(store.runDirectory, "logs", "role-reviewer-correctness-round1.log"),
       "utf8",

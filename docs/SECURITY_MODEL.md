@@ -1,64 +1,60 @@
 # Security Model
 
-Claude Architect treats repository content, Producer output, model text, and command output as untrusted. The Host runtime and the human-controlled Claude session form the control plane. The main security objective is to prevent an implementation Producer from silently expanding its scope or causing unreviewed bytes to enter the user's checkout.
+Claude Architect treats repository content, Producer output, model text, command output, and hosting observations as untrusted. The Host runtime and human-controlled Claude Code session form the control plane. Autopilot may operate through a pull request ready for human review, but only a human may merge or otherwise advance `main`. The product remains a public beta and is not an unattended security-review, deployment, or release system.
 
 ## Components that execute code
 
-`runtime/bootstrap.mjs` executes Node.js and starts the MCP server. The Host runtime invokes `git`, the selected Producer CLI (`codex`, `opencode`, `pi`, or `pythinker`), OS confinement helpers such as `/usr/bin/sandbox-exec` on supported macOS systems, Linux sandbox tooling when selected, and the packaged Windows watchdog/helper. Verification executes only commands listed in the validated Delegation Spec.
+`runtime/bootstrap.mjs` starts the MCP server. The Host runtime may invoke `git`, Node.js, a selected Producer CLI (`codex`, `opencode`, `pi`, or `pythinker`), eligible confinement/process helpers, validated verification executables, and GitHub CLI for shipping v1. Commands use executable-plus-argument arrays, not interpolated shell programs. There is no general MCP shell tool and no autopilot schema field for arbitrary argv, merge, deployment, release, or branch deletion.
 
-Producer commands are built by adapters in `src/producers/`; user-controlled values are passed as argv rather than interpolated shell programs. Executables are resolved through platform services. Verification commands include an executable, argv, relative cwd, timeout, network policy, expected exit codes, optional environment, platform filters, and mutation policy. There is no general MCP “run arbitrary shell” tool.
+Shipping v1 requires GitHub CLI 2.96 or newer, its authenticated account, an authenticated GitHub HTTPS `origin`, and configured required checks. PR identity is observed before and after check retrieval; a passing result is accepted only for the exact expected head. The controller never force-pushes, bypasses hooks, merges, closes a PR, deploys, releases, or deletes the remote branch.
 
 ## Authorization and write confinement
 
-The architect supplies explicit `writeAllowlist` and `forbiddenScope` entries. The Producer works in a detached worktree, not the user's checkout. After execution, `src/git/candidate-tree.ts` inventories tracked, untracked, and ignored changes and rejects unauthorized paths. This post-run check complements, but does not replace, OS sandboxing. Nested delegation is denied by the `CLAUDE_ARCHITECT_DELEGATED` marker and MCP startup refuses to run when that marker is present.
+The architect supplies explicit write allowlists and forbidden scopes. Producers work in isolated worktrees. Candidate inventory rejects traversal, absolute paths, symlink escapes, unauthorized changes, unsafe submodules, and case-folding collisions. This post-run validation complements but does not replace eligible OS confinement. Nested delegation is denied.
 
-Codex receives its native `workspace-write` or `read-only` sandbox. The supported backend table is fail-closed: macOS arm64 is certified, Linux is tested, and native Windows Codex editing is unsupported. Every other Producer must likewise pass its adapter and platform capability checks; lack of an eligible backend makes the requested edit unavailable and never authorizes an unconfined substitute.
+Native macOS arm64 Codex editing with `codex-native-sandbox` is certified. Eligible native Linux Codex editing is tested. Windows watchdog/process supervision supports native Windows runtime operation, but native Windows Codex editing is not certified. Every Producer/platform/backend combination must independently prove eligibility; failure never enables an unconfined substitute.
 
-## Network access
+## Candidate decisions and promotion authority
 
-Codex edit and read-only invocations request no network (`sandbox_workspace_write.network_access=false`). Each verification command declares `network: denied` or an allowed policy; the verifier reports the requested and effective enforcement. A command is not evidence of network denial if the selected platform cannot enforce it. Producer CLIs may contact their configured cloud model service, and local providers may contact configured local endpoints. The plugin has no fixed hostname allowlist and does not proxy model traffic. Provider authentication, transport, and retention remain the provider/CLI operator's responsibility.
+A human may record any Candidate Decision after reviewing evidence. Autopilot is the sole exception to human-recorded acceptance: the trusted Promotion module may record `accepted` with authority `autopilot-policy` only when a current, hash-bound Autopilot Eligibility record proves every required review, verification, advisor, artifact, and base gate. Producers, reviewers, advisors, skills, and MCP callers cannot construct or waive that eligibility.
 
-## Files read and written
+Autopilot acceptance authorizes Controlled Integration only into the workflow-owned feature branch. It is neither push nor merge authority. The lifecycle distinctions are:
 
-The runtime reads the selected Git repository, Git metadata, applicable repository instructions such as worktree `AGENTS.md`, plugin schemas/runtime files, Producer configuration needed by the CLI, and verification inputs. The Producer can read files visible through its sandbox and worktree; repository secrets committed or present in readable paths may therefore reach the Producer model.
+- **accepted**: the exact candidate may be integrated into the workflow branch;
+- **shipped**: the exact workflow head was pushed and a draft PR was established;
+- **ready**: configured required checks passed for that head and the PR was marked ready for human review;
+- **merged**: a human advanced `main` outside the controller.
 
-Writes are limited to the isolated worktree, plugin data state, Git candidate refs, locks, logs, and—only after acceptance—the target checkout/index. Verification runs in a separate materialized worktree. Integration stages the candidate tree and modifies working-tree files but does not create a commit.
+The manual lifecycle still requires a human Candidate Decision and stages accepted bytes in the human checkout without committing or shipping.
 
-## Workflow state and artifacts
+## Fresh-context review and cumulative evidence
 
-Outside tests, state resolves only from `$CLAUDE_PLUGIN_DATA`. Runs are archived at `$CLAUDE_PLUGIN_DATA/runs/<run-id>/`; managed worktrees are under `$CLAUDE_PLUGIN_DATA/worktrees/`; locks and recovery records are also beneath the plugin data root. A run contains a sanitized `manifest.json`, `result.json`, decision record when present, bounded redacted logs, and pipeline JSON. Candidate commits are anchored under `refs/claude-architect/candidates/` in the repository. The run manifest hashes its canonical body, prompt, repository instructions, packaged verifier, execution policy, environment provenance, and candidate manifest association. The candidate manifest hash is SHA-256 over the normalized changed-path records; content hashes and Git object identities provide additional anchoring.
+Pipeline implementers, fixers, reviewers, and final verifiers are separate invocations. Reviewers and the advisor are read-only and cannot create eligibility or decisions. Before shipping, the final branch reviewer evaluates the entire workflow branch and durable evidence from all promoted commits and cumulative task interactions. “Fresh context” limits conversational coupling; it does not prove provider-side statelessness or semantic correctness.
 
-## Fresh-context isolation and reviewers
+## Permissions and prompts
 
-Pipeline roles are separate one-shot Producer invocations. Reviewer prompts explicitly treat diff and evidence blocks as untrusted. Correctness reviewers, systems reviewers, and the final verifier are configured read-only with no allowed writes and all paths forbidden; the Codex adapter requests its native read-only sandbox. The fixer is the only pipeline role permitted to edit, using the original policy. “Fresh context” means a new invocation with a role-specific prompt; it does not guarantee provider-side statelessness.
+The committed project settings allow only `autopilotStart`, `autopilotStatus`, and `autopilotResume`. Claude Code must first grant workspace trust. Project settings cannot override higher-precedence managed `ask` or `deny` policy. “No mid-loop prompts” is conditional on those effective permissions and uninterrupted objective proof; a permission prompt, failed gate, ambiguity, or `human-decision-required` outcome stops autonomy.
 
-## Human decision authentication
+## Network access and data exposure
 
-`decideCandidate` is an MCP tool available to the controlling Claude session. The runtime records a decision and refuses acceptance unless the result is a verified candidate. It does not implement a separate user login, signature, hardware confirmation, or cryptographic identity proof. Therefore “human-only” is a workflow and UI trust assumption: Claude must present evidence and act on the human's instruction. Anyone able to control the Claude session or call its MCP tools can record a decision.
+Codex edit/review sandboxes request no tool-side network. Verification declares `network: denied` or `allowed`, and evidence reports effective enforcement. Cloud Producer and reviewer CLIs necessarily communicate with their configured model providers; local harnesses may use local endpoints. GitHub shipping communicates through the authenticated CLI. The plugin has no universal destination allowlist and does not control provider telemetry, authentication, transport, or retention.
 
-## Atomic candidate integration
+Repository files visible to a Producer may reach its provider. Redaction is bounded and best effort, not data-loss prevention. Do not include credentials, production secrets, deployment commands, or sensitive arguments in specs, repositories, prompts, or test fixtures.
 
-Integration requires a stored accepted decision and an exact `expectedArtifactHash`. It revalidates the archive, canonical repository identity, base commit, candidate ref/commit/tree, structural identity, and clean preconditions while holding repository locks. Git `read-tree -m -u` applies the complete candidate tree, followed by staged-tree, HEAD, worktree, and status checks. Archive writes use exclusive creation and atomic rename/link patterns. This is a guarded tree application, not a transaction across arbitrary external processes; filesystem or Git failures can return `conflicted` or `aborted` and require inspection.
+## Workflow state, retention, and recovery
 
-## Logging and redaction
+Production state is rooted only at `$CLAUDE_PLUGIN_DATA`. Attempt archives contain manifests, frozen artifacts, bounded redacted logs, decisions, and pipeline evidence. Workflow directories contain state, an intent journal, lease ownership, final whole-branch evidence, and head-bound CI observations; branch registrations live under `autopilot-branches/`. Git candidate and workflow refs keep exact objects reachable as required.
 
-Output is bounded and archived through `ArtifactStore`. Environment variables with sensitive names are registered as secrets; common token formats, registered values, and sensitive record fields are redacted. Persistence fails when a registered secret cannot be safely removed. Logs use restrictive modes and reject symlink/path escapes. Redaction is pattern-based and cannot guarantee removal of every secret, especially secrets with unusual names, transformed/encoded values, or sensitive source text that is not recognized as a credential.
+Active and fail-closed workflows retain owned worktrees, branches, and evidence when inspection or recovery requires them. Successful ready-state cleanup removes temporary local worktrees, locks, and workflow refs while retaining durable evidence and the remote feature branch/PR. Recovery uses PID plus process-start-token liveness, ownership records, journal entries, and direct Git/filesystem observation; ambiguity becomes `human-decision-required` rather than inferred success.
 
-## What data leaves the machine
-
-The Delegation Spec, selected repository context, Producer prompt, and any file/output the Producer reads and includes in requests may leave the machine for the configured model provider. Pipeline reviewers may receive the candidate diff and test evidence. Verification commands can send data only when their network policy is allowed and actually enforced as such. Git and local runtime operations do not inherently upload data. See `PRIVACY.md`.
-
-## Uninstall and data removal
-
-Disable/remove the plugin through Claude Code's plugin manager, then remove its installed/cache copy according to Claude Code documentation. Uninstalling code may not remove `$CLAUDE_PLUGIN_DATA`, Git candidate refs, provider CLI configuration, or provider-side records. After ensuring no run is active, users may remove the plugin data directory and inspect/delete `refs/claude-architect/candidates/*` with Git. Remove provider CLI credentials separately. Back up accepted evidence first if audit retention is required.
+Archives use restrictive modes, bounded no-follow reads, atomic writes, and integrity hashes. They are not encrypted at rest. Local evidence remains until pruning or deliberate removal; provider-side records follow provider policy. Stop active workflows before removing plugin data or refs.
 
 ## Known limitations
 
-- Only native macOS arm64 Codex is certified; Linux is tested, and native Windows Codex edit confinement is unsupported.
-- Producer edit availability is capability-gated and fails closed; certification is specific to the reported Producer, platform, and confinement backend.
-- Prompt injection can influence a model despite role prompts; confinement limits consequences but does not prove semantic correctness.
-- Read access may expose repository secrets to a remote provider.
-- Redaction is best effort, not data-loss prevention.
-- A compromised Producer CLI, Node.js, Git binary, OS account, or Claude session can attack outside assumptions.
-- Allowlist validation occurs after execution as well as through sandbox policy; a missing/defective OS boundary is not repaired by post-run detection.
-- Human acceptance is not cryptographically authenticated, and integration does not commit or merge.
+- Public beta safeguards do not prove business correctness or eliminate prompt injection, supply-chain, same-user, or host compromise.
+- Only native macOS arm64 Codex editing is certified; Linux is tested when eligible; native Windows Codex editing is not certified.
+- Producer availability and confinement are capability-specific and fail closed.
+- Required checks can be incomplete or misconfigured; shipping requires configured checks that are green for the exact expected head.
+- Redaction is best effort, and readable repository secrets may reach a provider.
+- A compromised Claude Code session, Node.js, Git, GitHub CLI, Producer binary, OS account, or model provider is outside important assumptions.
+- Autopilot never automatically merges, deploys, releases, or deletes the remote feature branch.

@@ -1,4 +1,14 @@
 import { createHash } from "node:crypto";
+import {
+  AutopilotController,
+  AutopilotControllerError,
+  type AutopilotControllerEvent,
+  type AutopilotStatusResult,
+} from "../autopilot/autopilot-controller.js";
+import { WorkflowBranchManager } from "../autopilot/branch-manager.js";
+import { CandidatePromoter } from "../autopilot/candidate-promoter.js";
+import { FinalBranchReviewer } from "../autopilot/final-branch-reviewer.js";
+import { WorkflowStore } from "../autopilot/workflow-store.js";
 import { git as runGit } from "../git/git-exec.js";
 import { applyCandidateTree as applyTree } from "../integrate/controlled-integrator.js";
 import type { CheckoutLock, PlatformServices } from "../platform/platform-services.js";
@@ -10,9 +20,13 @@ import {
 } from "../pipeline/pipeline-runtime.js";
 import { registry } from "../producers/producer-registry.js";
 import type { AttemptResult, CandidateArtifact } from "../protocol/attempt-result.js";
+import type {
+  CandidateDecision,
+  HumanCandidateDecisionV2,
+} from "../protocol/candidate-decision.js";
 import type { DelegationSpec } from "../protocol/delegation-spec.js";
 import { checkVersionCompat } from "../protocol/schema-loader.js";
-import { validateSpec } from "../protocol/spec-validator.js";
+import { validateAutopilotSpec, validateSpec } from "../protocol/spec-validator.js";
 import {
   DELEGATION_SPEC_VERSION,
   PROTOCOL_VERSION,
@@ -20,26 +34,39 @@ import {
 import {
   ArtifactStore,
   type PipelineActiveMarker,
-  type RunDecisionRecord,
   type RunDecisionValue,
 } from "../runtime/artifact-store.js";
 import {
   runAttempt as executeAttempt,
   type AttemptRuntimeDependencies,
 } from "../runtime/attempt-runtime.js";
+import {
+  createReviewSnapshot,
+  reviewSnapshotHash,
+  type ReviewSnapshot,
+} from "../runtime/review-snapshot.js";
 import type { RunManifest } from "../runtime/run-manifest.js";
 import { redact } from "../runtime/redaction.js";
 import { NestedDelegationError, RuntimeError } from "../util/errors.js";
 import { AcceptanceVerifier } from "../verify/acceptance-verifier.js";
+import { runAdvisorStage } from "../pipeline/advisor-stage.js";
+import { GitHubCliAdapter } from "../ship/github-cli-adapter.js";
 import { boundIgnoredPathEvidence, withRepoLock } from "./serialize.js";
 
-export type RunDecision = RunDecisionRecord;
+export type RunDecision = CandidateDecision;
+
+export type HumanDecisionRecord = Omit<
+  HumanCandidateDecisionV2,
+  "decisionVersion" | "authority"
+>;
 
 export interface ToolArtifactStore {
   readResult(runId: string): Promise<AttemptResult | null>;
   readManifest(runId: string): Promise<RunManifest | null>;
-  writeDecision(record: RunDecision): Promise<void>;
-  readDecision(runId: string): Promise<RunDecision | null>;
+  writeReviewSnapshot?(snapshot: ReviewSnapshot): Promise<void>;
+  readReviewSnapshot?(runId: string): Promise<ReviewSnapshot | null>;
+  writeHumanDecision(record: HumanDecisionRecord): Promise<void>;
+  readCandidateDecision(runId: string): Promise<RunDecision | null>;
   readPipelineActiveMarker(runId: string): Promise<PipelineActiveMarker | null>;
 }
 
@@ -55,6 +82,13 @@ export interface ToolDependencies {
   now?: () => Date;
   /** Host progress reporting for long-running delegate calls. */
   onProgress?: (message: string) => void;
+  /** Host cancellation for long-running calls. */
+  abortSignal?: AbortSignal;
+  /** Injectable controller seam for hermetic MCP protocol tests. */
+  autopilotControllerFactory?: (context: {
+    onProgress?: (message: string) => void;
+    abortSignal?: AbortSignal;
+  }) => Pick<AutopilotController, "start" | "status" | "resume">;
 }
 
 export interface ToolErrorResult {
@@ -101,6 +135,175 @@ function errorResult(error: unknown): ToolErrorResult {
     : "runtime-error";
   const diagnostic = error instanceof Error ? error.message : String(error);
   return { ok: false, error: code, diagnostic: redact(diagnostic) };
+}
+
+function throwIfAborted(signal?: AbortSignal): void {
+  if (!signal?.aborted) return;
+  throw runtimeError("autopilot request was cancelled", "cancelled");
+}
+
+function createAutopilotController(deps: ToolDependencies): Pick<
+  AutopilotController,
+  "start" | "status" | "resume"
+> {
+  const context = {
+    ...(deps.onProgress === undefined ? {} : { onProgress: deps.onProgress }),
+    ...(deps.abortSignal === undefined ? {} : { abortSignal: deps.abortSignal }),
+  };
+  if (deps.autopilotControllerFactory !== undefined) {
+    return deps.autopilotControllerFactory(context);
+  }
+
+  const ps = services(deps);
+  const branchManager = new WorkflowBranchManager({ platformServices: ps });
+  const workflowStore = (workflowId: string) => new WorkflowStore(workflowId);
+  const configured = deps.attemptDependencies ?? { verifier: new AcceptanceVerifier() };
+  const attemptDependencies: AttemptRuntimeDependencies = {
+    ...configured,
+    ps,
+    verifier: configured.verifier ?? new AcceptanceVerifier(),
+    ...(deps.abortSignal === undefined ? {} : { abortSignal: deps.abortSignal }),
+    ...(deps.onProgress === undefined ? {} : { onPhase: deps.onProgress }),
+  };
+  const pipelineDependencies: PipelineDependencies = {
+    ...attemptDependencies,
+    registry,
+    ...(deps.runAttempt === undefined ? {} : { runAttempt: deps.runAttempt }),
+  };
+
+  return new AutopilotController({
+    workflowLock: {
+      runExclusive: (workflowId, operation) => withRepoLock(`autopilot:${workflowId}`, operation),
+    },
+    workflowStore,
+    repositoryIdentity: async checkoutPath => {
+      const canonical = await ps.canonicalizePath(checkoutPath);
+      return canonical.gitCommonDir ?? canonical.canonical;
+    },
+    branchManager,
+    pipelineRunner: {
+      run: (checkoutPath, spec) => (deps.runPipeline ?? executePipeline)(
+        checkoutPath,
+        spec,
+        pipelineDependencies,
+      ),
+    },
+    reviewSnapshotter: {
+      async create({ branch, pipelineResult }) {
+        const store = new ArtifactStore(pipelineResult.runId);
+        const snapshot = await createReviewSnapshot({
+          runId: pipelineResult.runId,
+          repoRoot: branch.worktreePath,
+          repositoryIdentity: branch.repositoryIdentity,
+          store,
+          platformServices: ps,
+          git: deps.git ?? runGit,
+        });
+        await store.writeReviewSnapshot(snapshot);
+        return snapshot;
+      },
+    },
+    eligibilityEvaluator: {
+      async evaluate({ branch, task, pipelineResult, reviewSnapshot }) {
+        const result = await runAdvisorStage({
+          runId: pipelineResult.runId,
+          spec: task.delegation,
+          worktreePath: branch.worktreePath,
+          deps: pipelineDependencies,
+          evaluatedAt: (deps.now ?? (() => new Date()))().toISOString(),
+          pipelineResult,
+          reviewSnapshot,
+        });
+        return result.eligibility;
+      },
+    },
+    promoter: new CandidatePromoter({
+      platformServices: ps,
+      branchManager,
+      workflowStore,
+    }),
+    finalBranchReviewer: new FinalBranchReviewer({
+      platformServices: ps,
+      branchManager,
+      workflowStore,
+    }),
+    hostingAdapter: new GitHubCliAdapter(),
+    ...(deps.abortSignal === undefined ? {} : { abortSignal: deps.abortSignal }),
+    emit: (event: AutopilotControllerEvent) => deps.onProgress?.(event),
+  });
+}
+
+function autopilotErrorResult(error: unknown): ToolErrorResult {
+  const classification = error instanceof AutopilotControllerError
+    ? error.classification
+    : error instanceof RuntimeError && typeof error.detail?.classification === "string"
+      ? error.detail.classification
+      : undefined;
+  if (classification === undefined) return errorResult(error);
+  const diagnostic = error instanceof Error ? error.message : String(error);
+  return { ok: false, error: classification, diagnostic: redact(diagnostic) };
+}
+
+export async function handleAutopilotStart(
+  checkoutPath: string,
+  input: unknown,
+  deps: ToolDependencies = {},
+): Promise<
+  | { ok: true; result: AutopilotStatusResult }
+  | { ok: false; error: "invalid-spec"; validationErrors: Array<{ path: string; message: string }> }
+  | ToolErrorResult
+> {
+  const validation = validateAutopilotSpec(input);
+  if (!validation.ok) {
+    return { ok: false, error: "invalid-spec", validationErrors: validation.errors };
+  }
+  try {
+    throwIfAborted(deps.abortSignal);
+    const controller = createAutopilotController(deps);
+    const started = await controller.start(checkoutPath, validation.spec);
+    throwIfAborted(deps.abortSignal);
+    return {
+      ok: true,
+      result: await controller.status(checkoutPath, started.workflowId),
+    };
+  } catch (error) {
+    return autopilotErrorResult(error);
+  }
+}
+
+export async function handleAutopilotStatus(
+  checkoutPath: string,
+  workflowId: string,
+  deps: ToolDependencies = {},
+): Promise<{ ok: true; result: AutopilotStatusResult } | ToolErrorResult> {
+  try {
+    throwIfAborted(deps.abortSignal);
+    return {
+      ok: true,
+      result: await createAutopilotController(deps).status(checkoutPath, workflowId),
+    };
+  } catch (error) {
+    return autopilotErrorResult(error);
+  }
+}
+
+export async function handleAutopilotResume(
+  checkoutPath: string,
+  workflowId: string,
+  deps: ToolDependencies = {},
+): Promise<{ ok: true; result: AutopilotStatusResult } | ToolErrorResult> {
+  try {
+    throwIfAborted(deps.abortSignal);
+    const controller = createAutopilotController(deps);
+    await controller.resume(checkoutPath, workflowId);
+    throwIfAborted(deps.abortSignal);
+    return {
+      ok: true,
+      result: await controller.status(checkoutPath, workflowId),
+    };
+  } catch (error) {
+    return autopilotErrorResult(error);
+  }
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -372,63 +575,100 @@ export async function handleDelegatePipeline(
   }
 }
 
+function requireMatchingSnapshotBytes(
+  regenerated: ReviewSnapshot,
+  persisted: ReviewSnapshot,
+): void {
+  reviewSnapshotHash(persisted);
+  if (JSON.stringify(persisted) !== JSON.stringify(regenerated)) {
+    throw runtimeError(
+      "persisted review snapshot does not match the regenerated snapshot",
+      "archive-inconsistent",
+    );
+  }
+}
+
+async function sharedReviewSnapshot(
+  run: ArchivedRun,
+  deps: ToolDependencies,
+  allowMissingAnchor = false,
+): Promise<ReviewSnapshot> {
+  const regenerated = await createReviewSnapshot({
+    runId: run.result.runId,
+    repoRoot: run.repoRoot,
+    repositoryIdentity: run.lockKey,
+    store: run.store,
+    platformServices: services(deps),
+    git: deps.git ?? runGit,
+    allowMissingAnchor,
+  });
+  const persisted = await run.store.readReviewSnapshot?.(run.result.runId) ?? null;
+  if (persisted !== null) {
+    requireMatchingSnapshotBytes(regenerated, persisted);
+    return persisted;
+  }
+
+  await run.store.writeReviewSnapshot?.(regenerated);
+  const newlyPersisted = await run.store.readReviewSnapshot?.(run.result.runId) ?? null;
+  if (newlyPersisted !== null) {
+    requireMatchingSnapshotBytes(regenerated, newlyPersisted);
+    return newlyPersisted;
+  }
+  return regenerated;
+}
+
+function isIdenticalHumanDecision(
+  existing: CandidateDecision,
+  attempted: HumanDecisionRecord,
+): boolean {
+  return existing.decisionVersion === "2"
+    && existing.authority === "human"
+    && existing.decision === attempted.decision
+    && existing.candidateManifestHash === attempted.candidateManifestHash
+    && existing.evidenceHash === attempted.evidenceHash
+    && existing.policyVersion === attempted.policyVersion;
+}
+
+async function deleteRejectedCandidateAnchor(
+  run: ArchivedRun,
+  candidate: CandidateArtifact,
+  deps: ToolDependencies,
+  allowAlreadyAbsent = false,
+): Promise<void> {
+  const git = deps.git ?? runGit;
+  if (allowAlreadyAbsent) {
+    const current = await git(run.repoRoot, [
+      "show-ref",
+      "--verify",
+      "--hash",
+      candidate.anchorRef,
+    ]);
+    if (current.exitCode === 1 && current.stdout.trim().length === 0) return;
+    if (current.exitCode !== 0 || current.stdout.trim() !== candidate.candidateCommitOid) {
+      throw runtimeError("rejected candidate anchor changed identity", "anchor-delete-failed");
+    }
+  }
+  const deleted = await git(run.repoRoot, [
+    "update-ref",
+    "--no-deref",
+    "-d",
+    candidate.anchorRef,
+    candidate.candidateCommitOid,
+  ]);
+  if (deleted.exitCode !== 0) {
+    throw runtimeError("failed to delete rejected candidate anchor", "anchor-delete-failed");
+  }
+}
+
 export async function handleReviewCandidate(
   checkoutPath: string,
   runId: string,
   deps: ToolDependencies = {},
-): Promise<
-  | {
-    patch: string;
-    changedPaths: CandidateArtifact["changedPaths"];
-    evidence: AttemptResult["evidence"];
-    executedVerification: AttemptResult["executedVerification"];
-  }
-  | ToolErrorResult
-> {
+): Promise<ReviewSnapshot | ToolErrorResult> {
   try {
     return await withCurrentArchivedRun(checkoutPath, runId, deps, async run => {
       await requireInactivePipeline(run, runId);
-      const candidate = requireCandidate(run);
-      const git = deps.git ?? runGit;
-      const anchor = await git(run.repoRoot, [
-        "rev-parse",
-        "--verify",
-        "--quiet",
-        `${candidate.anchorRef}^{commit}`,
-      ]);
-      const tree = await git(run.repoRoot, [
-        "rev-parse",
-        "--verify",
-        `${candidate.candidateCommitOid}^{tree}`,
-      ]);
-      if (anchor.exitCode !== 0
-        || anchor.stdout.trim() !== candidate.candidateCommitOid
-        || tree.exitCode !== 0
-        || tree.stdout.trim() !== candidate.candidateTreeOid) {
-        throw runtimeError("candidate anchor no longer matches the archive", "candidate-anchor-mismatch");
-      }
-      const patch = await git(run.repoRoot, [
-        "diff",
-        "--no-ext-diff",
-        "--no-textconv",
-        "--binary",
-        "--full-index",
-        candidate.baseCommitOid,
-        candidate.candidateTreeOid,
-        "--",
-      ]);
-      if (patch.exitCode !== 0 || patch.truncated?.stdout === true) {
-        throw runtimeError("failed to regenerate candidate patch", "candidate-review-failed");
-      }
-      return boundIgnoredPathEvidence({
-        patch: patch.stdout,
-        changedPaths: candidate.changedPaths.map(change => ({ ...change })),
-        evidence: structuredClone(run.result.evidence),
-        executedVerification: run.result.executedVerification.map(outcome => ({
-          ...outcome,
-          args: [...outcome.args],
-        })),
-      });
+      return sharedReviewSnapshot(run, deps);
     });
   } catch (error) {
     return errorResult(error);
@@ -439,29 +679,61 @@ export async function handleDecideCandidate(
   checkoutPath: string,
   runId: string,
   decision: RunDecisionValue,
+  expectedArtifactHash: string,
   deps: ToolDependencies = {},
 ): Promise<{ recorded: true } | ToolErrorResult> {
   try {
     return await withCurrentArchivedRun(checkoutPath, runId, deps, async run => {
       await requireInactivePipeline(run, runId);
-      if (decision === "accepted") requireVerifiedCandidate(run);
-      const record: RunDecision = {
+      const candidate = decision === "accepted"
+        ? requireVerifiedCandidate(run)
+        : requireCandidate(run);
+      if (expectedArtifactHash !== run.manifest.candidateManifestHash) {
+        throw runtimeError(
+          "expected artifact hash does not match archived candidate manifest hash",
+          "artifact-hash-mismatch",
+        );
+      }
+      const existing = await run.store.readCandidateDecision(runId);
+      if (existing !== null) {
+        if (existing.decisionVersion !== "2"
+          || existing.authority !== "human"
+          || existing.decision !== decision
+          || existing.candidateManifestHash !== candidate.manifestHash
+          || existing.policyVersion !== "1") {
+          throw runtimeError(
+            `candidate decision conflict: recorded ${existing.decision}, attempted ${decision}`,
+            "decision-conflict",
+          );
+        }
+      }
+      const reviewSnapshot = await sharedReviewSnapshot(
+        run,
+        deps,
+        existing !== null && decision === "rejected",
+      );
+      const record: HumanDecisionRecord = {
         decision,
+        candidateManifestHash: candidate.manifestHash,
+        evidenceHash: reviewSnapshotHash(reviewSnapshot),
+        policyVersion: "1",
         recordedAt: (deps.now ?? (() => new Date()))().toISOString(),
       };
-      await run.store.writeDecision(record);
-      if (decision === "rejected" && run.result.candidate !== null) {
-        const candidate = run.result.candidate;
-        const deleted = await (deps.git ?? runGit)(run.repoRoot, [
-          "update-ref",
-          "--no-deref",
-          "-d",
-          candidate.anchorRef,
-          candidate.candidateCommitOid,
-        ]);
-        if (deleted.exitCode !== 0) {
-          throw runtimeError("failed to delete rejected candidate anchor", "anchor-delete-failed");
+      if (existing !== null) {
+        if (!isIdenticalHumanDecision(existing, record)) {
+          throw runtimeError(
+            `candidate decision conflict: recorded ${existing.decision}, attempted ${decision}`,
+            "decision-conflict",
+          );
         }
+        if (decision === "rejected") {
+          await deleteRejectedCandidateAnchor(run, candidate, deps, true);
+        }
+        return { recorded: true };
+      }
+      await run.store.writeHumanDecision(record);
+      if (decision === "rejected") {
+        await deleteRejectedCandidateAnchor(run, candidate, deps);
       }
       return { recorded: true };
     });
@@ -479,7 +751,7 @@ export async function handleIntegrateCandidate(
   try {
     return await withCurrentArchivedRun(checkoutPath, runId, deps, async (run, lock, ps) => {
       await requireInactivePipeline(run, runId);
-      const decision = await run.store.readDecision(runId);
+      const decision = await run.store.readCandidateDecision(runId);
       if (decision?.decision !== "accepted") {
         return { integration: "aborted", detail: "no-accepted-decision" };
       }

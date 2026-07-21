@@ -19,6 +19,22 @@ describe("P0-A plugin wiring", () => {
     }, "Claude plugin must register the packaged runtime bootstrap without a shell");
     assert.ok(fs.statSync(`${root}/runtime/bootstrap.mjs`).isFile(), "bootstrap must ship");
     assert.ok(fs.statSync(`${root}/runtime/server.mjs`).isFile(), "server bundle must ship");
+    const serverBundle = read("runtime/server.mjs");
+    assert.equal(serverBundle.includes("/Projects/active/"), false,
+      "server bundle must not embed a checkout-specific dependency path");
+    assert.equal(serverBundle.includes("/.claude/plugins/"), false,
+      "server bundle must not embed a plugin-worktree path");
+    for (const autopilotTool of ["autopilotStart", "autopilotStatus", "autopilotResume"]) {
+      assert.ok(
+        serverBundle.includes(`\"${autopilotTool}\"`),
+        `server bundle must register ${autopilotTool}`,
+      );
+    }
+    assert.equal(
+      /var RUNTIME_VERSION = "([^"]+)";/u.exec(serverBundle)?.[1],
+      "0.27.0",
+      "packaged runtime must match the release version",
+    );
     if (process.platform !== "win32") {
       assert.ok(fs.statSync(`${root}/scripts/build-runtime.sh`).mode & 0o111, "build wrapper must be executable");
     }
@@ -52,12 +68,14 @@ describe("P0-A plugin wiring", () => {
 
     const versions = read("src/protocol/versions.ts");
     const runtimeProtocol = /PROTOCOL_VERSION\s*=\s*"([^"]+)"/u.exec(versions)?.[1];
+    const runtimeVersion = /RUNTIME_VERSION\s*=\s*"([^"]+)"/u.exec(versions)?.[1];
     const skill = read("skills/delegate/SKILL.md");
     const skillProtocol = /^PROTOCOL_VERSION:\s*([^\s]+)$/mu.exec(skill)?.[1];
-    assert.equal(runtimeProtocol, "1.3.0", "runtime must expose the current wire protocol");
-    assert.equal(skillProtocol, runtimeProtocol, "delegate skill protocol marker must match runtime");
+    assert.equal(runtimeProtocol, "2.0.0", "runtime must expose the current wire protocol");
+    assert.equal(runtimeVersion, "0.27.0", "source runtime must match the release version");
+    assert.equal(skillProtocol, "2.0.0", "delegate skill must match the current wire protocol");
     assert.doesNotMatch(skill, /(^|[^:])\/delegate\b/mu, "delegate skill must use the fully qualified command");
-    for (const lifecycleTool of ["delegate", "reviewCandidate", "decideCandidate", "integrateCandidate"]) {
+    for (const lifecycleTool of ["autopilotStart", "autopilotStatus", "autopilotResume"]) {
       assert.ok(skill.includes(`\`${lifecycleTool}\``), `delegate skill must drive ${lifecycleTool}`);
       assert.match(
         skill,
@@ -101,9 +119,10 @@ describe("P0-A plugin wiring", () => {
     const marketplace = JSON.parse(read(".claude-plugin/marketplace.json"));
     const readme = read("README.md");
     const changelog = read("CHANGELOG.md");
-    assert.equal(plugin.version, "0.26.0");
-    assert.equal(marketplace.plugins[0].version, "0.26.0");
-    assert.match(readme, /badge\/version-0\.26\.0-/u);
+    assert.equal(plugin.version, "0.27.0");
+    assert.equal(marketplace.plugins[0].version, "0.27.0");
+    assert.match(readme, /badge\/version-0\.27\.0-/u);
+    assert.match(changelog, /^## \[0\.27\.0\] - 2026-07-21$/mu);
     assert.doesNotMatch(
       readme,
       /`\/delegate`/u,
@@ -112,10 +131,13 @@ describe("P0-A plugin wiring", () => {
     assert.match(changelog, /^## \[0\.8\.0\] - 2026-07-14$/mu);
     assert.match(readme, /macOS arm64[^\n]*certified/iu);
     assert.match(readme, /Linux[^\n]*tested/iu);
-    assert.match(readme, /Windows[^\n]*unsupported/iu);
+    assert.match(readme, /Windows[^\n]*not certified/iu);
     assert.match(readme, /codex-native-sandbox/u);
     assert.match(marketplace.plugins[0].description, /macOS arm64 certified/iu);
-    assert.match(marketplace.plugins[0].description, /Linux tested; native Windows pending/iu);
+    assert.match(
+      marketplace.plugins[0].description,
+      /eligible Linux Codex editing is tested; native Windows Codex editing is not certified/iu,
+    );
     assert.match(readme, /Installed marketplace copies[^\n]*update[^\n]*reload/iu);
     assert.match(readme, /--disable multi_agent/u);
     assert.match(readme, /features\.multi_agent_v2=\{enabled=false,max_concurrent_threads_per_session=1\}/u);
@@ -137,5 +159,28 @@ describe("P0-A plugin wiring", () => {
     ]) {
       assert.ok(releaseValidator.includes(required), `release validator must check ${required}`);
     }
+  });
+
+  it("tracks only the exact shared autopilot MCP permissions", () => {
+    const settings = JSON.parse(read(".claude/settings.json"));
+    assert.deepEqual(settings, {
+      $schema: "https://json.schemastore.org/claude-code-settings.json",
+      permissions: {
+        allow: [
+          "mcp__plugin_claude-architect_runtime__autopilotStart",
+          "mcp__plugin_claude-architect_runtime__autopilotStatus",
+          "mcp__plugin_claude-architect_runtime__autopilotResume",
+        ],
+      },
+    });
+    assert.deepEqual(
+      read(".gitignore").split(/\r?\n/u).filter(line => line.startsWith(".claude")),
+      [
+        ".claude/*",
+        ".claude/settings.local.json",
+        ".claude/worktrees/",
+      ],
+    );
+    assert.match(read(".gitignore"), /^!\.claude\/settings\.json$/mu);
   });
 });

@@ -7,7 +7,10 @@ import { freezeCandidate } from "../../src/git/candidate-tree.js";
 import { git } from "../../src/git/git-exec.js";
 import type { CandidateArtifact } from "../../src/protocol/attempt-result.js";
 import { isWithinScope } from "../../src/verify/project-verifier.js";
-import { structuralVerify } from "../../src/verify/structural-verifier.js";
+import {
+  pathsCaseCollide,
+  structuralVerify,
+} from "../../src/verify/structural-verifier.js";
 
 interface Fixture {
   repoRoot: string;
@@ -70,6 +73,42 @@ function verify(
     artifact,
     ...scope,
   });
+}
+
+async function candidateWithAddedPaths(
+  fixture: Fixture,
+  paths: string[],
+): Promise<CandidateArtifact> {
+  const indexFile = join(fixture.repoRoot, ".git", `structural-case-${paths.length}-index`);
+  const blobOid = await runGit(fixture.repoRoot, [
+    "hash-object", "-w", join(fixture.worktreePath, "a.txt"),
+  ]);
+  await runGit(fixture.repoRoot, ["read-tree", fixture.baseCommitOid], indexFile);
+  for (const candidatePath of paths) {
+    await runGit(fixture.repoRoot, [
+      "update-index", "--add", "--cacheinfo", `100644,${blobOid},${candidatePath}`,
+    ], indexFile);
+  }
+  const candidateTreeOid = await runGit(fixture.repoRoot, ["write-tree"], indexFile);
+  const candidateCommitOid = await runGit(fixture.repoRoot, [
+    "commit-tree", candidateTreeOid, "-p", fixture.baseCommitOid, "-m", "case candidate",
+  ]);
+  await runGit(fixture.repoRoot, [
+    "update-ref", fixture.artifact.anchorRef, candidateCommitOid,
+  ]);
+  const changedPaths: CandidateArtifact["changedPaths"] = paths.map(candidatePath => ({
+    path: candidatePath,
+    changeType: "added",
+    mode: "100644",
+    contentHash: blobOid,
+  })).sort((left, right) => left.path < right.path ? -1 : left.path > right.path ? 1 : 0);
+  return {
+    ...fixture.artifact,
+    candidateTreeOid,
+    candidateCommitOid,
+    changedPaths,
+    manifestHash: manifestHash(changedPaths),
+  };
 }
 
 afterEach(async () => {
@@ -260,6 +299,33 @@ describe("structuralVerify", () => {
     });
 
     expect(result.failures).toContain("modified-symlink");
+  });
+
+  it("independently rejects collisions among changed paths", async () => {
+    const fixture = await frozenFixture();
+    const artifact = await candidateWithAddedPaths(fixture, ["Case.txt", "case.txt"]);
+
+    const result = await verify(fixture, artifact, {
+      writeAllowlist: ["**"], forbiddenScope: [],
+    });
+
+    expect(result.failures).toContain("case-collision");
+  });
+
+  it("rejects a changed path colliding with an untouched candidate-tree path", async () => {
+    const fixture = await frozenFixture();
+    const artifact = await candidateWithAddedPaths(fixture, ["A.TXT"]);
+
+    const result = await verify(fixture, artifact, {
+      writeAllowlist: ["**"], forbiddenScope: [],
+    });
+
+    expect(result.failures).toContain("case-collision");
+  });
+
+  it("normalizes NFC and NFD paths before exact and folded comparisons", () => {
+    expect(pathsCaseCollide(["É.txt", "e\u0301.txt"], [])).toBe(true);
+    expect(pathsCaseCollide(["é.txt"], ["e\u0301.txt"])).toBe(false);
   });
 
   it("rejects a gitlink encoded directly in the immutable candidate tree", async () => {

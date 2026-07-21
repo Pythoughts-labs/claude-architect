@@ -57,9 +57,10 @@ Before invoking **dynamic workflows**, **ultra code**, or any equivalent harness
 - Read-only roles cannot mutate files, Git state, processes, or external systems.
 - Roles communicate through versioned specs, manifests, patches, findings, and other durable artifacts—not hidden conversational state.
 - Verification is objective, recorded, and rerunnable; Producer claims are never evidence.
-- Only a human can accept a candidate. Agents may recommend a decision but cannot make it for the human.
+- A human may record any Candidate Decision after reviewing the evidence. The trusted runtime may record `accepted` with authority `autopilot-policy` only through the hash-bound Promotion module when a current Autopilot Eligibility record proves every required review, verification, advisor, artifact, and base gate. Producers, reviewers, advisors, skills, and MCP callers cannot construct or waive eligibility.
+- Autopilot acceptance authorizes Controlled Integration only into the workflow-owned feature branch. Only a human may merge a pull request or otherwise advance `main`.
 - Workflow state, decisions, evidence, and recovery data remain durable across process failure.
-- Final review covers the entire candidate branch and cumulative interactions across attempts, not only the latest patch.
+- Final review covers the entire workflow branch and evidence from cumulative interactions across attempts, not only the latest patch.
 
 ## Architecture boundaries
 
@@ -193,5 +194,5 @@ Work is complete only when all applicable conditions hold:
 - Documentation, schemas, manifests, and changelog are consistent.
 - Git status contains no unexplained changes.
 - Security-sensitive behavior received explicit review.
-- Final review covers the whole candidate branch.
+- Final review covers the whole workflow branch and evidence from cumulative interactions across attempts.
 - Every delegation-discovered bug is captured in `scratchpad.md` as a dogfood regression test.

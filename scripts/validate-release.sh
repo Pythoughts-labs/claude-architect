@@ -67,6 +67,10 @@ fi
 BUNDLE_SNAPSHOT=$(mktemp)
 trap 'rm -f "$BUNDLE_SNAPSHOT"' EXIT
 cp runtime/server.mjs "$BUNDLE_SNAPSHOT"
+if grep -Fq -- '../node_modules' runtime/server.mjs; then
+  printf 'ERROR: committed runtime/server.mjs references ../node_modules.\n' >&2
+  exit 1
+fi
 "$BASH" scripts/build-runtime.sh >/dev/null
 if ! cmp -s "$BUNDLE_SNAPSHOT" runtime/server.mjs; then
   printf 'ERROR: runtime/server.mjs was stale; run scripts/build-runtime.sh and commit it.\n' >&2

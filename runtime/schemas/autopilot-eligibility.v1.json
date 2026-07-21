@@ -1,0 +1,38 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "recordVersion",
+    "policyVersion",
+    "runId",
+    "eligible",
+    "reasons",
+    "baseCommitOid",
+    "candidateCommitOid",
+    "candidateTreeOid",
+    "candidateManifestHash",
+    "reviewSnapshotHash",
+    "pipelineResultHash",
+    "advisorReportHash",
+    "evaluatedAt"
+  ],
+  "properties": {
+    "recordVersion": { "const": "1" },
+    "policyVersion": { "const": "1" },
+    "runId": { "type": "string", "minLength": 1 },
+    "eligible": { "type": "boolean" },
+    "reasons": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 }
+    },
+    "baseCommitOid": { "type": "string", "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$" },
+    "candidateCommitOid": { "type": "string", "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$" },
+    "candidateTreeOid": { "type": "string", "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$" },
+    "candidateManifestHash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "reviewSnapshotHash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "pipelineResultHash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "advisorReportHash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "evaluatedAt": { "type": "string", "format": "date-time" }
+  }
+}

@@ -1,4 +1,7 @@
-import { describe, expect, it } from "vitest";
+import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import { afterEach, describe, expect, it } from "vitest";
 import type { PlatformServices } from "../../src/platform/platform-services.js";
 import type { CapabilityReport } from "../../src/producers/producer-adapter.js";
 import {
@@ -7,6 +10,13 @@ import {
   RUNTIME_VERSION,
 } from "../../src/protocol/versions.js";
 import { doctor } from "../../src/mcp/doctor.js";
+
+const temporaryDirectories: string[] = [];
+
+afterEach(async () => {
+  await Promise.all(temporaryDirectories.splice(0).map(directory =>
+    rm(directory, { recursive: true, force: true })));
+});
 
 function platform(os: "darwin" | "win32"): PlatformServices {
   return {
@@ -45,6 +55,36 @@ function codexReport(os: "darwin" | "win32"): CapabilityReport {
     writeConfinementBackend: available ? "codex-native-sandbox" : null,
     laneEligibility: { edit: available },
   };
+}
+
+async function checkoutLockFixture(contents: string): Promise<{
+  lockPath: string;
+  locksRoot: string;
+  stateDir: string;
+}> {
+  const stateDir = await mkdtemp(path.join(tmpdir(), "doctor-locks-"));
+  temporaryDirectories.push(stateDir);
+  const locksRoot = path.join(stateDir, "locks");
+  const lockPath = path.join(locksRoot, `${"a".repeat(64)}.lock`);
+  await mkdir(locksRoot);
+  await writeFile(lockPath, contents);
+  return { lockPath, locksRoot, stateDir };
+}
+
+async function doctorWithLocks(
+  stateDir: string,
+  ps: PlatformServices,
+  isProcessAlive: (pid: number) => boolean,
+) {
+  return doctor({
+    ps,
+    env: { CLAUDE_PLUGIN_DATA: stateDir },
+    nodeVersion: "22.17.0",
+    git: async () => ({ stdout: "git version 2.49.0\n", stderr: "", exitCode: 0 }),
+    probeAll: async () => [],
+    probeCowSupport: async () => ({ cowSupported: true, strategy: "clonefile" }),
+    isProcessAlive,
+  });
 }
 
 describe("doctor", () => {
@@ -199,5 +239,99 @@ describe("doctor", () => {
     expect(serialized).toContain("codex");
     expect(serialized).toContain("config.json");
     expect(serialized).toContain("launcher.js");
+  });
+
+  it("reports a held checkout lock without modifying the lease", async () => {
+    const owner = { pid: 4242, processToken: "darwin:held-owner" };
+    const fixture = await checkoutLockFixture(JSON.stringify(owner));
+    const ps = platform("darwin");
+    ps.getProcessStartToken = async pid => {
+      expect(pid).toBe(owner.pid);
+      return owner.processToken;
+    };
+    const before = await stat(fixture.lockPath);
+
+    const result = await doctorWithLocks(fixture.stateDir, ps, pid => pid === owner.pid);
+
+    expect(result.issues).toContain("checkout-lock-held");
+    expect(await readFile(fixture.lockPath, "utf8")).toBe(JSON.stringify(owner));
+    expect(await readdir(fixture.locksRoot)).toEqual([path.basename(fixture.lockPath)]);
+    expect((await stat(fixture.lockPath)).mtimeMs).toBe(before.mtimeMs);
+  });
+
+  it("accepts PID 1 as a valid live checkout lock owner", async () => {
+    const owner = { pid: 1, processToken: "linux:init-owner" };
+    const fixture = await checkoutLockFixture(JSON.stringify(owner));
+    const ps = platform("darwin");
+    ps.getProcessStartToken = async pid => {
+      expect(pid).toBe(owner.pid);
+      return owner.processToken;
+    };
+
+    const result = await doctorWithLocks(fixture.stateDir, ps, pid => pid === owner.pid);
+
+    expect(result.issues).toContain("checkout-lock-held");
+    expect(result.issues).not.toContain("checkout-lock-malformed");
+    expect(await readFile(fixture.lockPath, "utf8")).toBe(JSON.stringify(owner));
+  });
+
+  it("reports a leaked checkout lock when its recorded owner is dead", async () => {
+    const owner = { pid: 4243, processToken: "darwin:dead-owner" };
+    const fixture = await checkoutLockFixture(JSON.stringify(owner));
+
+    const result = await doctorWithLocks(
+      fixture.stateDir,
+      platform("darwin"),
+      () => false,
+    );
+
+    expect(result.issues).toContain("checkout-lock-leaked");
+    expect(await readFile(fixture.lockPath, "utf8")).toBe(JSON.stringify(owner));
+    expect(await readdir(fixture.locksRoot)).toEqual([path.basename(fixture.lockPath)]);
+  });
+
+  it("reports a live checkout lock as held when process identity is unavailable", async () => {
+    const owner = { pid: 4244, processToken: "darwin:unknown-owner" };
+    const fixture = await checkoutLockFixture(JSON.stringify(owner));
+    const ps = platform("darwin");
+    ps.getProcessStartToken = async () => null;
+
+    const result = await doctorWithLocks(fixture.stateDir, ps, () => true);
+
+    expect(result.issues).toContain("checkout-lock-held");
+    expect(result.issues).not.toContain("checkout-lock-leaked");
+    expect(await readFile(fixture.lockPath, "utf8")).toBe(JSON.stringify(owner));
+  });
+
+  it("bounds checkout lock reads and reports oversized locks as malformed", async () => {
+    const fixture = await checkoutLockFixture("x".repeat(4_097));
+
+    const result = await doctorWithLocks(
+      fixture.stateDir,
+      platform("darwin"),
+      () => {
+        throw new Error("oversized locks must not probe processes");
+      },
+    );
+
+    expect(result.issues).toContain("checkout-lock-malformed");
+    expect((await stat(fixture.lockPath)).size).toBe(4_097);
+  });
+
+  it("reports a malformed checkout lock and still completes without modifying it", async () => {
+    const malformed = "{not valid lock JSON";
+    const fixture = await checkoutLockFixture(malformed);
+
+    const result = await doctorWithLocks(
+      fixture.stateDir,
+      platform("darwin"),
+      () => {
+        throw new Error("malformed locks must not probe processes");
+      },
+    );
+
+    expect(result.issues).toContain("checkout-lock-malformed");
+    expect(await readFile(fixture.lockPath, "utf8")).toBe(malformed);
+    expect(await readdir(fixture.locksRoot)).toEqual([path.basename(fixture.lockPath)]);
   });
 });

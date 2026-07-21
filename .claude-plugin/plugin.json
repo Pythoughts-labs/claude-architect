@@ -1,8 +1,8 @@
 {
   "name": "claude-architect",
   "displayName": "Claude Architect",
-  "version": "0.26.0",
-  "description": "Verified coding-agent delegation for Claude Code with isolated Producers, frozen candidate artifacts, independent review, and human-controlled integration.",
+  "version": "0.27.0",
+  "description": "Verified coding-agent delegation for Claude Code with isolated Producers, policy-gated workflow promotion, independent review, and human-controlled merge.",
   "author": {
     "name": "Mohamed Elkholy",
     "url": "https://github.com/elkaix"

@@ -6,6 +6,55 @@ All notable changes to Claude Architect are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.27.0] - 2026-07-21
+
+### Added
+
+- Added the controller-owned autopilot workflow and its three narrow MCP tools:
+  `autopilotStart`, read-only `autopilotStatus`, and `autopilotResume`. A
+  versioned Autopilot Spec drives ordered fresh-context tasks, policy-gated
+  promotion to a workflow-owned feature branch, cumulative whole-branch review,
+  exact-head GitHub shipping, configured required-check polling, PR readiness,
+  cleanup, and four durable terminal classifications. Autopilot is autonomous
+  only through a pull request ready for human review; it never automatically
+  merges, deploys, releases, or deletes the remote feature branch.
+- Added workflow crash recovery for lifetime leases, bootstrap orphans, intent
+  journals, branch/worktree ownership, interrupted cleanup, and byte-idempotent
+  resume/finalize/dispose dispositions. Ambiguous state fails closed as
+  `human-decision-required`; a phase string alone is never completion evidence.
+- Extended `doctor` with stable autopilot lock, worktree, branch, promotion,
+  shipping-recovery, and malformed-state diagnostics using bounded no-follow,
+  read-only scans.
+
+### Changed
+
+- **Breaking CandidateDecision v2 semantics:** an accepted decision now records
+  an explicit authority. A human may record any Candidate Decision after
+  reviewing evidence. The trusted Promotion module may record `accepted` with
+  authority `autopilot-policy` only from a current hash-bound Autopilot
+  Eligibility record proving all required review, verification, advisor,
+  artifact, and base gates. Producers, reviewers, advisors, skills, and MCP
+  callers cannot construct or waive eligibility. Existing v1 decision records
+  are migration provenance only and are not silently upgraded to
+  `autopilot-policy`; callers must rerun under protocol 2.0.0/current evidence or
+  use the explicit human-directed manual lifecycle.
+- The delegate skill protocol marker now matches MCP protocol `2.0.0` and drives
+  the AutopilotController lifecycle by default. The manual candidate lifecycle
+  is used only when a human explicitly chooses it.
+- Release/runtime/plugin/marketplace version surfaces advance to `0.27.0`.
+
+### Fixed
+
+- Bound required-check observations to the exact expected head commit and
+  bracketed GitHub check retrieval with stable PR-identity observations, so
+  stale CI for an earlier head cannot mark a PR ready.
+- Preserved mid-phase cancellation as the durable terminal `cancelled`
+  classification, with no post-cancellation push, PR creation, or mark-ready
+  mutation.
+- Rejected changed paths that collide under Unicode-aware case folding both
+  when constructing changed-path manifests and during independent structural
+  verification, including collisions with untouched candidate-tree paths.
+
 ## [0.26.0] - 2026-07-19
 
 ### Changed

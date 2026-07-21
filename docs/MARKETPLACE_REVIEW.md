@@ -1,70 +1,69 @@
 # Marketplace Review Summary
 
-Claude Architect is maintained by Mohamed Elkholy (`elkaix`) and published from `Pythoughts-labs/claude-architect` under the MIT license. It is a Claude Code plugin for delegating bounded implementation tasks to external coding CLIs while keeping review, acceptance, and integration under the Claude architect and human operator.
+Claude Architect 0.27.0 is maintained by Mohamed Elkholy (`elkaix`), published from `Pythoughts-labs/claude-architect`, and MIT licensed. It is a public-beta Claude Code plugin for verified delegation to external coding CLIs. Autopilot is autonomous only through a pull request ready for human review; only a human may merge or otherwise advance `main`.
 
 ## What the plugin does
 
-The plugin validates a versioned Delegation Spec, selects an eligible Producer, creates an isolated detached Git worktree, supervises the Producer, rejects changes outside an explicit write allowlist or inside forbidden scope, freezes the result as an anchored Git candidate, computes a SHA-256 candidate manifest hash, independently reruns authorized verification in a separate worktree, and returns evidence for review. Non-trivial work can use fresh-context correctness/systems reviewers, a bounded fixer, and a read-only clean-room verifier.
+The plugin validates an ordered Autopilot Spec, selects eligible Producers, creates isolated worktrees, freezes and independently verifies candidates, runs fresh-context review/fix rounds, and records durable evidence. For each task, current hash-bound Autopilot Eligibility must prove every review, verification, advisor, artifact, and base gate before the trusted Promotion module can record `accepted` with authority `autopilot-policy` and perform Controlled Integration into the workflow-owned feature branch. Producers, reviewers, advisors, skills, and MCP callers cannot construct or waive eligibility.
 
-No Producer can mark its own work accepted. `decideCandidate` records the architect/human decision; `integrateCandidate` requires an accepted record and exact manifest hash, revalidates the candidate and base, and stages the candidate tree. It does not commit, merge, push, publish, or deploy.
+After all task commits, a final reviewer evaluates the whole workflow branch and evidence from cumulative interactions. Shipping v1 pushes the exact head, creates a draft PR, waits for configured required checks that are green for that exact head, marks the PR ready, and cleans temporary local workflow resources. It never automatically merges, deploys, releases, closes the PR, or deletes the remote branch.
+
+The manual candidate lifecycle remains available only by explicit human choice. A human may record any Candidate Decision after evidence review; manual Controlled Integration stages a hash-matched accepted candidate without committing or shipping.
 
 ## Component inventory
 
-- Skill: `/claude-architect:delegate` in `skills/delegate/SKILL.md`.
-- Read-only advisor: `advisor`.
-- MCP tools: `delegate`, `delegatePipeline`, `reviewCandidate`, `decideCandidate`, `integrateCandidate`, `doctor`, `gitStatus`, `gitDiff`, `gitLog`, and `gitChangedFiles`.
+- Skill: `/claude-architect:delegate`, which authors an Autopilot Spec and drives `autopilotStart`, `autopilotStatus`, and `autopilotResume`.
+- Agent: strictly read-only `advisor`, whose report is evidence rather than authority.
+- Autopilot MCP tools: validated start, read-only status, and resume. Their schemas expose no eligibility, authority, gate, hash, branch, or argv override.
+- Manual MCP tools: `delegate`, `delegatePipeline`, `reviewCandidate`, `decideCandidate`, and `integrateCandidate`.
+- Diagnostics: read-only `doctor` and bounded read-only Git tools.
+- Runtime modules: protocol validation, Producer routing, sandbox/process supervision, Git candidate/workflow management, independent verification, policy eligibility, Promotion, final branch review, GitHub shipping, durable stores, cleanup, doctor, and crash recovery.
 - Packaged runtime: `runtime/bootstrap.mjs`, `runtime/server.mjs`, schemas, and Windows watchdog/helper support.
-- Host modules: protocol validation, Producer adapters/routing, platform sandbox/process supervision, Git worktree/candidate handling, verification, pipeline gates, artifact storage/recovery, and controlled integration.
-- Plugin hooks: none declared. The repository's `.githooks/pre-push` is contributor tooling, not a marketplace-installed Claude hook.
+- Plugin hooks: none. The repository `.githooks/pre-push` is contributor tooling, not marketplace-installed behavior.
 
-## Executables invoked
+## Executables and network destinations
 
-The plugin starts a suitable `node` executable and uses `git`. Depending on the chosen Producer it may invoke `codex`, `opencode`, `pi`, or `pythinker`. Platform confinement/supervision can invoke macOS `/usr/bin/sandbox-exec`, Linux sandbox tooling such as `bwrap` when that backend is selected, and Windows watchdog/helper binaries. Verification invokes only the executable and argv explicitly authorized in the Delegation Spec. The plugin does not expose an unrestricted shell MCP tool.
+The runtime may invoke a suitable Node.js, Git, the selected `codex`/`opencode`/`pi`/`pythinker` CLI, eligible confinement/process helpers, Host-authorized verification executables, and GitHub CLI. Commands use executable and argument arrays; there is no unrestricted shell MCP tool.
 
-## Supported operating systems
+Shipping v1 requires GitHub CLI 2.96 or newer, authenticated for an `origin` that is a GitHub HTTPS remote. It communicates branch, commit, PR, and required-check data to GitHub. Producer/reviewer CLIs communicate with the cloud or local provider configured by the user. Verification can use network only as declared and effectively enforced. The plugin has no universal provider destination allowlist and does not control provider telemetry or retention.
 
-The plugin is designed for macOS, Linux, and Windows process/runtime operation. Security capability is narrower than basic runtime compatibility: the Codex MCP edit path is certified on native macOS arm64 with `codex-native-sandbox`; native Linux is marked tested; native Windows Codex editing is unsupported and must fail eligibility checks. Every Producer/platform combination is capability-gated. An unavailable combination fails closed without unconfined execution or substitution, and certification must not be inferred across Producers, backends, or operating systems.
+## Permission model and prompts
 
-## Network destinations
+The committed project settings allow exactly the three autopilot MCP tools. Claude Code workspace trust is required before project settings apply; managed `ask` or `deny` policy takes precedence. “No mid-loop prompts” is conditional on effective permission policy and every runtime gate remaining proven. A permission prompt, cancellation, ambiguity, or `human-decision-required` outcome stops autonomous progress.
 
-There is no plugin-maintained fixed destination list. A cloud Producer CLI contacts the provider configured by that CLI: Codex normally uses its configured OpenAI service; OpenCode, Pi, and Pythinker can use various cloud or local endpoints. Claude Code separately contacts its configured Anthropic/model service. Verification commands may contact destinations only when their spec allows network, subject to effective platform enforcement. Codex's coding sandbox is configured with network disabled. Provider authentication, telemetry, transport, and retention are governed by the selected CLI/provider.
+Producers receive sanitized environments, isolated worktrees, explicit write allowlists/forbidden scopes, and eligible confinement. Candidate freezing rejects traversal, absolute paths, symlink escapes, unsafe submodules, out-of-scope changes, and case-folding collisions. Reviewers/advisor are read-only. The controller accepts required checks only for the expected workflow head and fails closed on PR/branch/ref/remote/repository mismatch.
 
-## Persistent state locations
+## Lifecycle vocabulary and human approval
 
-Production state is rooted at `$CLAUDE_PLUGIN_DATA`; the runtime refuses an implicit fallback. Runs, decisions, manifests, bounded redacted logs, and pipeline reports live under `runs/<run-id>/`. Managed and verification worktrees, locks, recovery records, and cleanup journals also live below the plugin data root. Frozen candidates create Git objects and namespaced refs under `refs/claude-architect/candidates/` in the user's repository. Producer CLIs retain their own configuration, credentials, caches, or provider-side records independently.
+- **Accepted**: a Candidate Decision permits hash-bound Controlled Integration into the workflow branch.
+- **Shipped**: the exact workflow head was pushed and a draft PR identity was established.
+- **Ready**: configured required checks were green for that head and the PR was marked ready for human review.
+- **Merged**: a human advanced `main`; this is outside plugin authority.
 
-## Permission model
+Autopilot terminals are `ready-for-human-review`, `human-decision-required`, `failed`, and `cancelled`. Cancelled is durable and terminal. The runtime does not cryptographically authenticate a human instruction; control of the Claude/MCP session remains a trust assumption. Final merge, deployment, and release are always human-controlled external actions.
 
-The architect must specify repository-relative write allowlists and forbidden scopes, Host-authorized verification commands, timeouts, network policy, and expected exit codes. Producers execute in detached worktrees with sanitized environments. Certified Codex runs use native `workspace-write` confinement, no network, ephemeral/ignored user configuration, and disabled child-agent delegation. Reviewers and the final verifier use fresh invocations with an empty write allowlist, all paths forbidden, and read-only sandboxing. Post-run structural checks reject unauthorized changes even if a Producer reports success.
+## Supported operating systems and Producers
 
-The Host runtime can read the selected repository and Git metadata; it writes plugin state, temporary worktrees, candidate refs, and—after acceptance—the target checkout/index. It does not automatically commit. Readable source or secrets may be transmitted by a configured cloud CLI, so users should minimize context and avoid delegating secret-bearing repositories.
+Basic runtime/process support covers macOS, Linux, and native Windows, but edit eligibility is narrower. Native macOS arm64 Codex with `codex-native-sandbox` is certified. Eligible native Linux Codex is tested. Native Windows Codex editing is not certified. OpenCode, Pi, Pythinker, and every platform/backend combination must pass their own capability checks; certification is not transferable and unavailable lanes fail closed.
 
-## Human approval points
+## Persistent state and recovery
 
-The user chooses the Producer when none is named. After a verified candidate or pipeline evidence bundle is returned, the architect must show/review the evidence and call `decideCandidate` with `accepted`, `rejected`, or `revision-requested`. Only `accepted` enables `integrateCandidate`, and integration additionally requires the exact candidate manifest hash. The runtime does not cryptographically authenticate the human; control of the Claude/MCP session is the decision credential. Final commit, merge, push, or release remains a separate human-controlled action.
+Production state is rooted at `$CLAUDE_PLUGIN_DATA`; no implicit fallback is used. Attempt archives retain manifests, frozen candidates, decisions, bounded redacted logs, and pipeline evidence. Workflow directories retain state, intent journals, leases, task promotions, whole-branch final evidence, CI observations, cleanup outcomes, and recovery metadata. Branch ownership records and Git refs/worktrees preserve exact identities.
 
-## Threat-model summary and limitations
+Active and fail-closed workflows retain their workflow worktree/branch and evidence when inspection or recovery requires them. Ready-state cleanup removes temporary local worktrees, locks, ownership records, and workflow refs, while preserving durable evidence and the remote feature branch/PR. Recovery correlates PID plus process-start token, leases/bootstrap ownership, journal intent, and direct Git/filesystem observations; ambiguity fails closed. No universal local retention period is promised, and provider/GitHub records follow their own policies.
 
-Primary threats are malicious Producer output, prompt injection in repository/diff content, a compromised Producer CLI, scope escape, forged test claims, candidate substitution, state races, credential leakage, and unauthorized acceptance. Mitigations include versioned validation, OS sandboxing where eligible, detached worktrees, environment minimization, timeouts/process-tree cleanup, post-run allowlist checks, Git object anchoring, manifest hashes, separate Host verification, read-only fresh reviewers, bounded/redacted archives, crash recovery with process start tokens, and hash-gated integration.
+## Threats and limitations
 
-Known limitations are material: only macOS arm64 Codex is certified; Linux is tested and native Windows Codex editing is unsupported; other Producer/platform combinations depend on reported capability and eligibility; prompt injection and subtle malicious code can pass review/tests; provider retention is outside plugin control; redaction is best effort; same-user or host compromise is out of scope; and the human decision is not cryptographically authenticated.
+Primary threats include malicious Producer output, prompt injection, compromised CLIs/providers, scope/path escapes, case collisions, forged or stale checks, candidate/branch/remote substitution, state races, cancellation, credential leakage, and unauthorized acceptance. Mitigations include strict schemas, eligible sandboxing, detached worktrees, environment minimization, process supervision, path/case checks, Git/hash anchoring, independent verification, read-only review, current eligibility, sanitized Promotion, whole-branch final review, exact-head shipping, bounded/redacted persistence, and ownership-aware recovery.
 
-## Installation
+Known limitations remain material: this is a public beta; prompt injection and subtle malicious code can pass review/tests; required checks can be incomplete or misconfigured; provider retention is outside plugin control; redaction is best effort; same-user/host/account compromise is out of scope; native Windows Codex editing is not certified; and no autopilot action proves business or deployment safety.
 
-1. Install/enable the Claude Architect plugin from its Claude Code marketplace entry.
-2. Restart or reload Claude Code so the packaged MCP server is registered.
-3. Install and authenticate at least one supported Producer CLI. For the certified lane, use a supported Codex CLI on native macOS arm64 and confirm `doctor` reports `codex-native-sandbox` with edit eligibility.
-4. Run the plugin's `doctor` MCP surface (or the corresponding Claude workflow) to inspect Node, Git, Producer, platform, and confinement status before delegating.
-5. Invoke `/claude-architect:delegate`, choose a Producer, and review the generated scope and verification plan.
+## Installation and removal
 
-Exact marketplace CLI syntax can vary by Claude Code release; use the current Claude Code plugin-manager documentation rather than copying an unverified command.
+1. Install/enable Claude Architect through Claude Code and reload it.
+2. Grant workspace trust only after reviewing project settings; managed policy still applies.
+3. Install/authenticate an eligible Producer. For shipping, install GitHub CLI 2.96+ and authenticate the repository's GitHub HTTPS `origin`.
+4. Configure required checks and run `doctor` before autopilot.
+5. Invoke `/claude-architect:delegate`, review its Autopilot Spec, and monitor the durable workflow.
 
-## Uninstallation and data removal
-
-1. Finish or cancel active runs and close/reload Claude Code.
-2. Disable/uninstall Claude Architect through the Claude Code plugin manager.
-3. If evidence retention is not required, remove the plugin's `$CLAUDE_PLUGIN_DATA` directory after confirming its exact path.
-4. Inspect and delete stale `refs/claude-architect/candidates/*` with Git when those frozen candidates are no longer needed. This may make unreachable Git objects eligible for normal Git garbage collection.
-5. Remove each Producer CLI's credentials, configuration, sessions, and caches separately if desired, and use provider account controls for remote data deletion.
-
-Uninstalling plugin code alone does not guarantee removal of local run archives, Git candidate refs, CLI credentials, or model-provider records.
+To remove data, first stop Claude Code and confirm no workflow owner is live. Disable the plugin, then deliberately remove `$CLAUDE_PLUGIN_DATA`, candidate/workflow refs, Producer caches, provider records, or GitHub branches/PRs only when their audit/recovery value is no longer required. Uninstalling plugin code alone removes none of those records.

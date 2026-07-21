@@ -1,34 +1,43 @@
 # Architecture
 
-Claude Architect is a Claude Code plugin that turns a bounded implementation request into a reviewable candidate artifact. Claude remains the architect: it creates the Delegation Spec, selects a Producer, reviews evidence, and presents the acceptance decision. External coding CLIs are untrusted Producers. Their edits are never treated as accepted merely because the CLI exits successfully.
+Claude Architect is a Claude Code plugin that turns an ordered Autopilot Spec into a workflow-owned feature branch and a pull request ready for human review. Claude authors the spec and selects Producers; the trusted runtime owns policy, promotion, cumulative review, shipping, cleanup, and recovery. External coding CLIs remain untrusted Producers. Only a human may merge or otherwise advance `main`.
 
 ## Runtime shape
 
-The plugin manifest is `.claude-plugin/plugin.json`; the packaged MCP entry point is `runtime/bootstrap.mjs`, which locates a suitable Node.js runtime and starts `runtime/server.mjs` over stdio. The TypeScript source is under `src/`. `src/mcp/server.ts` exposes `delegate`, `delegatePipeline`, `reviewCandidate`, `decideCandidate`, `integrateCandidate`, `doctor`, and four bounded Git read tools.
+The plugin manifest is `.claude-plugin/plugin.json`; `runtime/bootstrap.mjs` locates Node.js and starts the packaged `runtime/server.mjs` over MCP stdio. TypeScript source lives under `src/`. The server exposes the autopilot tools `autopilotStart`, read-only `autopilotStatus`, and `autopilotResume`, plus the manual candidate tools, `doctor`, and bounded read-only Git tools. Handlers validate inputs and delegate workflow policy to `AutopilotController`.
 
-The normal MCP flow is:
+The autopilot flow is:
 
-1. `delegate` validates a versioned spec containing an objective, context, write allowlist, forbidden scope, success criteria, Producer preferences, timeout, and explicit verification commands.
-2. `src/runtime/attempt-runtime.ts` checks repository preconditions, selects an eligible Producer, creates a detached Git worktree under the plugin data directory, builds a sanitized environment, and supervises the Producer.
-3. `src/git/candidate-tree.ts` inventories all changes, rejects paths outside the allowlist or inside forbidden scope, rejects unsafe symlink/submodule conditions, writes a Git tree and commit, and anchors it at `refs/claude-architect/candidates/<run-id>`.
-4. The candidate's sorted changed-path manifest is SHA-256 hashed. `src/verify/acceptance-verifier.ts` performs structural checks and runs Host-authorized verification in a separate worktree created by `src/verify/project-verifier.ts`.
-5. `src/runtime/artifact-store.ts` freezes the result, run manifest, redacted logs, and pipeline reports under `$CLAUDE_PLUGIN_DATA/runs/<run-id>/`.
-6. `reviewCandidate` regenerates the exact binary/full-index patch from the anchored candidate tree and returns it with changed paths and verification evidence.
-7. `decideCandidate` records `accepted`, `rejected`, or `revision-requested`. Only a verified candidate may be accepted.
-8. `integrateCandidate` requires an accepted decision and the exact candidate manifest hash. `src/integrate/controlled-integrator.ts` rechecks base, anchor, tree, hash, and repository cleanliness, then applies the tree to the index and worktree. It does not commit.
+1. `autopilotStart` validates the Autopilot Spec, clean repository identity, `origin/main`, shipping prerequisites, and Producer eligibility. It creates a workflow-owned worktree, feature branch, lifetime lease, durable state, and intent journal.
+2. Each task runs the real delegation pipeline in a fresh isolated worktree. Candidate freezing rejects scope/path escapes and case collisions; independent verification and review produce durable, hash-bound evidence.
+3. `src/autopilot/autopilot-eligibility.ts` proves the current candidate, reviews, verification, advisor report, artifact identity, and base. Only `src/autopilot/candidate-promoter.ts` may consume that record, write an `accepted` Candidate Decision with authority `autopilot-policy`, and perform Controlled Integration into the workflow branch. No Producer, reviewer, advisor, skill, or MCP caller can construct or waive eligibility.
+4. Each promoted task becomes one sanitized commit on the workflow branch. `src/autopilot/final-branch-reviewer.ts` evaluates the entire branch and evidence from cumulative task interactions, not only the latest patch.
+5. Shipping v1 pushes the exact reviewed head, creates a draft PR, polls configured required checks bound to that head, and marks the PR ready. It requires GitHub CLI 2.96 or newer and an authenticated GitHub HTTPS `origin`; mismatched PR identity, remote, branch, or head fails closed.
+6. Successful cleanup removes temporary local workflow resources and reaches `ready-for-human-review`. The remote feature branch, PR, and durable evidence remain. The controller never merges, deploys, releases, or deletes the remote branch.
 
-## Fresh-context pipeline
+`autopilotStatus` reads persisted state. `autopilotResume` replays a non-terminal workflow from journaled intent plus direct Git/filesystem observations; it never infers success from a phase string. Terminal outcomes are `ready-for-human-review`, `human-decision-required`, `failed`, and `cancelled`.
 
-`delegatePipeline` adds correctness and systems review rounds, optional fix rounds, gates, and a final clean-room verification. `src/pipeline/role-prompts.ts` labels candidate diffs and test evidence as untrusted data. Each reviewer and verifier is launched as a new Producer invocation; read-only roles receive an empty write allowlist, `forbiddenScope: ["**/*"]`, and a read-only sandbox request. A fixer receives the original bounded write policy. This is fresh process/model context, not a mathematical guarantee that a provider retains no server-side state.
+## Lifecycle vocabulary
+
+- **Accepted**: a Candidate Decision authorizes hash-bound Controlled Integration into the workflow-owned feature branch. It may be human-recorded, or recorded by Promotion with authority `autopilot-policy` from current Autopilot Eligibility.
+- **Shipped**: the exact workflow head was pushed and the draft PR identity was established.
+- **Ready**: configured required checks were green for that exact head and the PR was marked ready for human review.
+- **Merged**: a human advanced `main`. This is outside runtime authority.
+
+The manual candidate lifecycle remains available only when the human explicitly chooses it. It freezes, reviews, decides, and stages a candidate in the human checkout; it does not commit or ship.
+
+## Permission and prompt boundary
+
+The repository's `.claude/settings.json` grants only the three autopilot MCP calls. Project settings take effect only after Claude Code workspace trust and cannot override managed `ask` or `deny` policy. Therefore “no mid-loop prompts” is conditional on effective permission policy and continued objective proof; a policy prompt, `human-decision-required`, cancellation, or ambiguity stops unattended progress.
 
 ## Platform and Producer model
 
-The Codex adapter uses Codex's native sandbox, requests `workspace-write`, disables network, constrains shell environment inclusion, disables multi-agent delegation, and uses ephemeral configuration. The backend table in `src/platform/sandbox/backends.ts` marks native macOS arm64 Codex as certified, native Linux as tested, and native Windows as unsupported for the edit lane. The macOS Seatbelt backend is used by other MCP adapters where eligible. Linux confinement fails closed when the required backend is unavailable. Windows process supervision uses the packaged watchdog/helper, but this is not a certified Windows Codex edit sandbox.
+The Codex adapter requests its native sandbox, disables network and nested multi-agent delegation, and uses ephemeral configuration. Native macOS arm64 Codex editing is certified. Native Linux is tested where the required sandbox is eligible. Native Windows process supervision is supported, but native Windows Codex editing is not certified. OpenCode, Pi, and Pythinker are independently capability-gated; certification is never inferred across Producers, operating systems, or backends.
 
-OpenCode, Pi, and Pythinker use the same validated MCP attempt lifecycle and remain subject to adapter and platform eligibility checks. A requested Producer with no eligible confinement backend is unavailable: the runtime fails closed instead of selecting an unconfined path or substituting a different Producer. Certification claims remain specific to the Producer, platform, and backend reported by the capability registry.
+## State, retention, and recovery
 
-## State and recovery
+`CLAUDE_PLUGIN_DATA` is mandatory outside tests. Attempt archives live under `runs/`; autopilot state/journals/leases live under `workflows/`; branch ownership records live under `autopilot-branches/`; managed worktrees, locks, cleanup journals, and recovery records remain local. Archives use restrictive modes, no-follow bounded reads, atomic writes, and integrity hashes.
 
-`CLAUDE_PLUGIN_DATA` is mandatory outside tests. It contains `runs/`, `worktrees/`, and lock/recovery state. Archives use restrictive file modes, no-follow checks, bounded reads, atomic create/link or rename patterns, and integrity hashes. Startup recovery in `src/runtime/recovery-manager.ts` validates directory identity and process start tokens before terminating or reclaiming stale work. Git candidate refs keep frozen commits reachable until rejection, successful integration, or pruning.
+Active or fail-closed workflows retain their owned worktree/branch and evidence when inspection or recovery requires them. Ready-state cleanup removes temporary local worktrees, locks, and workflow refs but does not delete the remote feature branch or durable workflow evidence. Startup recovery validates PID plus process-start tokens, journal intent, ownership, and direct Git/filesystem state before preserving, resuming, finalizing, disposing, or requesting human judgment.
 
-The architecture reduces the authority of a Producer; it does not make generated code trustworthy. Human review and the final integration boundary remain essential.
+This architecture reduces Producer authority; it does not make generated code trustworthy. The product remains a public beta for security-sensitive work, and human review plus human merge authority remain essential.

@@ -4,7 +4,10 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { LATEST_PROTOCOL_VERSION } from "@modelcontextprotocol/sdk/types.js";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { afterEach, describe, expect, it } from "vitest";
+import { createServer } from "../../src/mcp/server.js";
 import { PROTOCOL_VERSION } from "../../src/protocol/versions.js";
 
 const bootstrapPath = fileURLToPath(new URL("../../runtime/bootstrap.mjs", import.meta.url));
@@ -40,6 +43,34 @@ afterEach(async () => {
 });
 
 describe("MCP server handshake", () => {
+  it("advertises the source autopilot lifecycle schemas", async () => {
+    const server = await createServer({
+      recoverStaleRuns: async () => ({ recovered: [], skipped: [] }),
+    });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    await server.connect(serverTransport);
+    const client = new Client(
+      { name: "claude-architect-handshake-test", version: "1.0.0" },
+      { capabilities: {} },
+    );
+    await client.connect(clientTransport);
+    try {
+      const listed = await client.listTools();
+      const autopilot = listed.tools.filter(tool => tool.name.startsWith("autopilot"));
+      expect(autopilot.map(tool => tool.name).sort()).toEqual([
+        "autopilotResume",
+        "autopilotStart",
+        "autopilotStatus",
+      ]);
+      expect(autopilot.every(tool => tool.inputSchema.type === "object")).toBe(true);
+      expect(autopilot.find(tool => tool.name === "autopilotStatus")?.annotations?.readOnlyHint)
+        .toBe(true);
+    } finally {
+      await client.close();
+      await server.close();
+    }
+  });
+
   it("lists lifecycle tools without non-protocol stdout", async () => {
     const stateRoot = await mkdtemp(path.join(tmpdir(), "ca-handshake-"));
     temporaryPaths.push(stateRoot);
@@ -78,7 +109,7 @@ describe("MCP server handshake", () => {
       }
     });
 
-    const request = async (id: number, method: string, params: Record<string, unknown>) => {
+    const requestRaw = async (id: number, method: string, params: Record<string, unknown>) => {
       const response = responses.get(id) ?? await new Promise<JsonRpcResponse>((resolve, reject) => {
         const timeout = setTimeout(() => {
           waiters.delete(id);
@@ -90,6 +121,10 @@ describe("MCP server handshake", () => {
         });
         child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id, method, params })}\n`);
       });
+      return response;
+    };
+    const request = async (id: number, method: string, params: Record<string, unknown>) => {
+      const response = await requestRaw(id, method, params);
       if (response.error !== undefined) throw new Error(JSON.stringify(response.error));
       return response.result ?? {};
     };
@@ -120,8 +155,20 @@ describe("MCP server handshake", () => {
         name: "doctor",
         arguments: {},
       });
+      const mismatched = await requestRaw(5, "tools/call", {
+        name: "delegate",
+        arguments: {
+          checkoutPath: "/unused-invalid-spec",
+          protocolVersion: "1.3.0",
+          spec: { specVersion: "1" },
+        },
+      });
+      const mismatchDiagnostic = JSON.stringify(mismatched);
 
       expect(names).toEqual([
+        "autopilotResume",
+        "autopilotStart",
+        "autopilotStatus",
         "decideCandidate",
         "delegate",
         "delegatePipeline",
@@ -145,6 +192,9 @@ describe("MCP server handshake", () => {
         producers: expect.any(Array),
         issues: expect.any(Array),
       });
+      expect(mismatchDiagnostic).toContain("protocol version mismatch");
+      expect(mismatchDiagnostic).toContain("received 1.3.0");
+      expect(mismatchDiagnostic).toContain("expected 2.0.0");
       expect(stdout.trim().split(/\r?\n/).every(line => {
         try {
           JSON.parse(line);

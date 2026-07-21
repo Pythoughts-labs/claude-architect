@@ -1,51 +1,54 @@
 # Plugin Components
 
-This inventory describes the shipped surfaces relevant to marketplace review. The release manifest is `.claude-plugin/plugin.json` (Claude Architect 0.15.0 at the time of this document), licensed MIT.
+This inventory describes Claude Architect 0.27.0 surfaces relevant to marketplace review. The release manifest is `.claude-plugin/plugin.json`; the plugin is MIT licensed and remains a public beta.
 
-## Skill
+## Skill and advisor
 
-`skills/delegate/SKILL.md` defines `/claude-architect:delegate`. It instructs Claude to build a versioned Delegation Spec, choose a Producer explicitly, call the MCP lifecycle, review exact frozen bytes, record a human decision, and integrate only an accepted candidate whose manifest hash matches. It recommends `delegatePipeline` for non-trivial changes. If the requested Producer is not eligible, the workflow reports it unavailable instead of substituting another Producer or bypassing confinement. The skill itself is orchestration text; it does not directly receive Bash or file-edit tools.
+`skills/delegate/SKILL.md` defines `/claude-architect:delegate`. It authors a versioned Autopilot Spec, chooses a Producer explicitly, starts the controller, monitors durable status, resumes interrupted non-terminal workflows, and explains all terminal states. It uses the manual candidate lifecycle only when the human explicitly chooses it. The skill has no authority to construct eligibility, record `autopilot-policy`, push, manipulate PRs directly, merge, deploy, release, or delete branches.
 
-## Agents
-
-| Component | Purpose and declared restrictions |
-|---|---|
-| `agents/advisor.md` | Strictly non-mutating advisor. Declares read-only repository tools and no Bash or edit authority. |
-
-Agent frontmatter restrictions constrain Claude Code's advisor wrapper. Implementation Producers run through the validated MCP lifecycle and have only the authority granted by their adapter and eligible OS sandbox. Certification remains specific to the reported Producer, platform, and backend.
+`agents/advisor.md` declares only read-only repository tools. Its whole-branch report is one hash-bound eligibility input; it cannot edit, delegate, decide, promote, integrate, ship, or waive a gate.
 
 ## MCP tools
 
-`src/mcp/server.ts` exposes these tools over stdio:
+`src/mcp/server.ts` exposes narrow tools over stdio:
 
 | Tool | Authority |
 |---|---|
-| `delegate` | Validate one spec, run one isolated Producer attempt, freeze and independently verify a candidate. |
-| `delegatePipeline` | Run implementation plus fresh-context correctness/systems review, fix rounds, gates, and clean-room verification. It never accepts or integrates automatically. |
-| `reviewCandidate` | Read-only regeneration of the exact anchored patch, changed-path manifest, and evidence. |
-| `decideCandidate` | Record accepted/rejected/revision-requested. Acceptance requires a verified candidate; rejection removes its candidate anchor. |
-| `integrateCandidate` | Apply an accepted tree only after exact manifest-hash and identity revalidation. Stages changes; does not commit. |
-| `doctor` | Read runtime, Git, Producer capability, sandbox, and platform diagnostics. |
-| `gitStatus`, `gitDiff`, `gitLog`, `gitChangedFiles` | Bounded, redacted Git reads with external diff/textconv behavior disabled where applicable. They do not mutate the repository. |
+| `autopilotStart` | Validate an Autopilot Spec and start controller-owned implementation, promotion, whole-branch review, shipping, and cleanup. |
+| `autopilotStatus` | Read-only durable workflow state. |
+| `autopilotResume` | Resume a non-terminal workflow from corroborated durable state. |
+| `delegate` | Run one isolated Producer attempt, freeze, and independently verify a candidate. |
+| `delegatePipeline` | Run fresh-context implement/review/repair/verification without acceptance authority. |
+| `reviewCandidate` | Read-only exact anchored patch, changed-path manifest, and evidence. |
+| `decideCandidate` | Manual human-directed accepted/rejected/revision-requested Candidate Decision. |
+| `integrateCandidate` | Manual hash-bound tree staging; no commit or shipping. |
+| `doctor` | Read-only runtime, Git, Producer, platform, workflow ownership, and recovery diagnostics. |
+| `gitStatus`, `gitDiff`, `gitLog`, `gitChangedFiles` | Bounded, redacted, non-mutating Git evidence. |
 
-The MCP server has no generic command-execution endpoint. Verification execution is reachable only through a validated Delegation Spec.
+The autopilot input schemas expose no eligibility, authority, gate, hash, branch, or arbitrary argv controls. Project settings allow only the three autopilot tools, require Claude Code workspace trust, and cannot override managed `ask`/`deny`; “no mid-loop prompts” is conditional on those effective permissions and continued objective proof.
 
-## Runtime modules
+## Authority modules
 
-- `src/runtime/attempt-runtime.ts`: lifecycle orchestration, policy, state, and result production.
-- `src/producers/*`: Producer discovery, capability reporting, routing, prompt/argv construction, and result parsing.
-- `src/platform/*`: executable resolution, process-group/job supervision, checkout locks, process start tokens, and sandbox selection.
-- `src/git/worktree-manager.ts` and `candidate-tree.ts`: detached worktrees, change inventory, scope enforcement, candidate Git objects/refs, and manifest hash.
-- `src/verify/*`: structural and project verification in a separate worktree.
-- `src/pipeline/*`: fresh role invocations, adversarial review/fix reports, consolidation, gates, and final verification.
-- `src/runtime/artifact-store.ts`, `run-manifest.ts`, and `recovery-manager.ts`: bounded/redacted archives, provenance hashes, pruning, and crash recovery.
-- `src/integrate/controlled-integrator.ts`: locked, hash-gated candidate tree application.
-- `runtime/bootstrap.mjs` and `runtime/server.mjs`: packaged executable JavaScript loaded by Claude Code.
+- `src/runtime/*`, `src/git/*`, and `src/verify/*`: attempt isolation, frozen artifacts, scope/path/case-collision enforcement, independent verification, bounded evidence, and manual recovery.
+- `src/pipeline/*`: fresh implement/review/fix rounds and gates; roles cannot accept their own output.
+- `src/autopilot/autopilot-eligibility.ts`: constructs current hash-bound eligibility from every required review, verification, advisor, artifact, and base gate.
+- `src/autopilot/candidate-promoter.ts`: the only autopilot authority that consumes eligibility, records `accepted` with authority `autopilot-policy`, and performs Controlled Integration into the workflow branch.
+- `src/autopilot/final-branch-reviewer.ts`: reviews the whole workflow branch and evidence from cumulative task interactions.
+- `src/autopilot/autopilot-controller.ts`: phase machine through exact-head shipping, cleanup, and the four terminal classifications.
+- `src/autopilot/workflow-store.ts`, `branch-manager.ts`, and `src/runtime/recovery-manager.ts`: durable journals/leases/ownership plus fail-closed workflow recovery.
+- `src/ship/*`: GitHub preflight, exact push, draft PR identity, head-bound required checks, and mark-ready. Shipping v1 requires GitHub CLI 2.96+ and authenticated GitHub HTTPS `origin`.
+- `runtime/bootstrap.mjs` and `runtime/server.mjs`: packaged JavaScript loaded by Claude Code.
 
-## Hooks and scripts
+## Lifecycle and retention
 
-The plugin contains no marketplace/runtime hook declaration under a `hooks/` directory. Repository development uses `.githooks/pre-push`, which is not installed as a Claude Code plugin hook and only runs when a contributor configures Git's `core.hooksPath`. Shell scripts under `scripts/` provide release validation and development/install checks. They may invoke `bash`, timeout/process utilities, Node.js, Git, and test/build commands according to their specific script.
+**Accepted** permits controlled integration into the workflow feature branch. **Shipped** proves the exact head was pushed and draft PR established. **Ready** proves configured required checks were green for that head and the PR was marked ready for human review. **Merged** is a human action advancing `main`.
 
-## Tool restriction summary
+Autopilot is autonomous only through ready. It never automatically merges, deploys, releases, closes the PR, or deletes the remote branch. Active and fail-closed workflows retain worktree/branch/evidence as required for inspection and recovery. Ready-state cleanup removes temporary local worktrees, locks, ownership, and refs while retaining durable evidence and the remote feature branch/PR.
 
-Implementation Producers may edit only in an isolated worktree and are checked against allowlist/forbidden scope. Pipeline reviewers and verifier are configured read-only with all writes forbidden. The fixer alone receives bounded edit authority. The Host runs only spec-authorized verification commands. Acceptance and integration remain separate MCP calls controlled by the architect/human workflow.
+## Executables, platforms, and hooks
+
+The runtime may invoke Node.js, Git, configured verification executables, the selected Producer CLI, eligible OS confinement/process helpers, and GitHub CLI for shipping. It has no unrestricted shell endpoint. GitHub shipping requires configured required checks to become green for the exact expected head.
+
+Native macOS arm64 Codex editing is certified. Eligible Linux Codex editing is tested. Native Windows process/runtime supervision is supported, but native Windows Codex editing is not certified. OpenCode, Pi, Pythinker, and other platform/backend combinations remain individually capability-gated.
+
+The marketplace plugin declares no runtime hook. `.githooks/pre-push` is contributor tooling used only when a developer configures Git's `core.hooksPath`.

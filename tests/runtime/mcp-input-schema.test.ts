@@ -40,6 +40,17 @@ describe.each([
     expect(result.success).toBe(false);
     if (!result.success) expect(result.error.issues[0]?.code).toBe("unrecognized_keys");
   });
+
+  it("diagnoses the previous 1.3.0 protocol and names expected 2.0.0", () => {
+    const result = schema.safeParse({ ...validInput, protocolVersion: "1.3.0" });
+
+    expect(result.success).toBe(false);
+    if (result.success) return;
+    const diagnostic = result.error.issues.map(issue => issue.message).join("\n");
+    expect(diagnostic).toContain("protocol version mismatch");
+    expect(diagnostic).toContain("received 1.3.0");
+    expect(diagnostic).toContain("expected 2.0.0");
+  }, 5_000);
 });
 
 describe.each([
@@ -47,6 +58,7 @@ describe.each([
   ["decideCandidate", decideCandidateInputSchema, {
     runId: "run-test",
     decision: "accepted",
+    expectedArtifactHash: "a".repeat(64),
   }],
   ["integrateCandidate", integrateCandidateInputSchema, {
     runId: "run-test",
@@ -60,6 +72,37 @@ describe.each([
 
   it("rejects unknown input keys", () => {
     const result = schema.safeParse({ checkoutPath: "/repo", ...input, checkoutPaths: ["/repo"] });
+    expect(result.success).toBe(false);
+    if (!result.success) expect(result.error.issues[0]?.code).toBe("unrecognized_keys");
+  });
+});
+
+describe("decideCandidate MCP input hash binding", () => {
+  const input = {
+    checkoutPath: "/repo",
+    runId: "run-test",
+    decision: "accepted" as const,
+    expectedArtifactHash: "a".repeat(64),
+  };
+
+  it("requires an exact lowercase SHA-256 artifact hash", () => {
+    expect(decideCandidateInputSchema.safeParse(input).success).toBe(true);
+    expect(decideCandidateInputSchema.safeParse({
+      ...input,
+      expectedArtifactHash: undefined,
+    }).success).toBe(false);
+    expect(decideCandidateInputSchema.safeParse({
+      ...input,
+      expectedArtifactHash: "a".repeat(63),
+    }).success).toBe(false);
+    expect(decideCandidateInputSchema.safeParse({
+      ...input,
+      expectedArtifactHash: "A".repeat(64),
+    }).success).toBe(false);
+  });
+
+  it("does not expose an authority input", () => {
+    const result = decideCandidateInputSchema.safeParse({ ...input, authority: "human" });
     expect(result.success).toBe(false);
     if (!result.success) expect(result.error.issues[0]?.code).toBe("unrecognized_keys");
   });

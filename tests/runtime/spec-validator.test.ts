@@ -1,4 +1,5 @@
 import { describe, it, expect } from "vitest";
+import delegationSpecSchema from "../../runtime/schemas/delegation-spec.v1.json" with { type: "json" };
 import { RUNTIME_MIN_EDIT_TIMEOUT_MS } from "../../src/protocol/delegation-spec.js";
 import { validateSpec } from "../../src/protocol/spec-validator.js";
 
@@ -90,16 +91,27 @@ describe("validateSpec", () => {
     });
     expect(validateSpec({ ...base, timeoutMs: RUNTIME_MIN_EDIT_TIMEOUT_MS }).ok).toBe(true);
   });
+  it("keeps the validator timeout floor aligned with the schema edit minimum", () => {
+    const schemaEditTimeoutMinimum = delegationSpecSchema.allOf[0]
+      .then.properties.timeoutMs.minimum;
+
+    expect(schemaEditTimeoutMinimum).toBe(600_000);
+    expect(RUNTIME_MIN_EDIT_TIMEOUT_MS).toBe(600_000);
+    expect(RUNTIME_MIN_EDIT_TIMEOUT_MS).toBe(schemaEditTimeoutMinimum);
+  });
   it("ignores the timeout-floor override outside tests", () => {
     const previousNodeEnv = process.env.NODE_ENV;
     const previousVitest = process.env.VITEST;
     const previousOverride = process.env.CLAUDE_ARCHITECT_MIN_EDIT_TIMEOUT_MS;
     try {
-      process.env.NODE_ENV = "production";
       process.env.CLAUDE_ARCHITECT_MIN_EDIT_TIMEOUT_MS = "1";
-      for (const vitestValue of ["false", "", "1", "unrelated"]) {
-        process.env.VITEST = vitestValue;
-        expect(validateSpec({ ...base, timeoutMs: 1 }).ok).toBe(false);
+      for (const nodeEnv of [undefined, "", "development", "production"]) {
+        if (nodeEnv === undefined) delete process.env.NODE_ENV;
+        else process.env.NODE_ENV = nodeEnv;
+        for (const vitestValue of ["false", "", "1", "unrelated"]) {
+          process.env.VITEST = vitestValue;
+          expect(validateSpec({ ...base, timeoutMs: 1 }).ok).toBe(false);
+        }
       }
     } finally {
       if (previousNodeEnv === undefined) delete process.env.NODE_ENV;

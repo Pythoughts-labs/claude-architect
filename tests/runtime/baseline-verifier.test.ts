@@ -3,6 +3,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { git } from "../../src/git/git-exec.js";
+import type { PlatformServices } from "../../src/platform/platform-services.js";
+import { getPlatformServices } from "../../src/platform/select-platform.js";
 import type { VerificationCommand } from "../../src/protocol/delegation-spec.js";
 import { verifyBaseline } from "../../src/verify/baseline-verifier.js";
 
@@ -19,6 +21,14 @@ async function fixture(): Promise<{ repoRoot: string; headCommitOid: string }> {
     expect((await git(repoRoot, args)).exitCode).toBe(0);
   }
   await writeFile(join(repoRoot, "a.txt"), "baseline\n");
+  await writeFile(join(repoRoot, "package.json"), JSON.stringify({
+    scripts: {
+      test: "npm run unit",
+      unit: "vitest run",
+      "echo-vitest": "echo vitest",
+      cycle: "npm run cycle",
+    },
+  }));
   await writeFile(join(repoRoot, ".gitignore"), "node_modules/\n.cache/\n");
   await writeFile(join(repoRoot, "package-lock.json"), "{}\n");
   expect((await git(repoRoot, ["add", "-A"])).exitCode).toBe(0);
@@ -40,6 +50,23 @@ function command(exitCode: number): VerificationCommand {
     network: "denied",
     expectedExitCodes: [0],
   };
+}
+
+function platformWithCommandOutput(
+  source: string,
+  executableNames: string[],
+): PlatformServices {
+  const ps = Object.create(getPlatformServices()) as PlatformServices;
+  const resolveExecutable = ps.resolveExecutable.bind(ps);
+  ps.resolveExecutable = async request => executableNames.includes(request.name)
+    ? {
+        kind: "native",
+        command: process.execPath,
+        prefixArgs: ["-e", source],
+        resolvedFrom: "test-output-fixture",
+      }
+    : resolveExecutable(request);
+  return ps;
 }
 
 afterEach(async () => {
@@ -82,6 +109,234 @@ describe("verifyBaseline", () => {
     const repo = await fixture();
     const report = await verifyBaseline({ ...repo, commands: [command(1)] });
     expect(report.commands).toEqual([{ id: "exit-1", exitCode: 1, ok: false }]);
+  });
+
+  it("fails closed with a distinct classification when vitest collects no test files", async () => {
+    const repo = await fixture();
+    const report = await verifyBaseline({
+      ...repo,
+      ps: platformWithCommandOutput(
+        "process.stdout.write(process.argv.slice(1).join(' '))",
+        ["vitest"],
+      ),
+      commands: [
+        {
+          ...command(0),
+          id: "vitest",
+          executable: "vitest",
+          args: ["No test files found, exiting with code 0"],
+        },
+        {
+          ...command(0),
+          id: "vitest-json",
+          executable: "vitest",
+          args: [JSON.stringify({ numTotalTestSuites: 0, testResults: [] })],
+        },
+      ],
+    });
+
+    expect(report.commands).toEqual([
+      {
+        id: "vitest",
+        exitCode: 0,
+        ok: false,
+        classification: "no-tests-collected",
+      },
+      {
+        id: "vitest-json",
+        exitCode: 0,
+        ok: false,
+        classification: "no-tests-collected",
+      },
+    ]);
+  });
+
+  it("tolerates no tests only for an expected baseline failure", async () => {
+    const repo = await fixture();
+    const report = await verifyBaseline({
+      ...repo,
+      ps: platformWithCommandOutput(
+        "process.stdout.write('No test files found, exiting with code 0')",
+        ["vitest"],
+      ),
+      commands: [
+        {
+          ...command(0),
+          id: "expected-empty",
+          executable: "vitest",
+          args: [],
+          expectBaselineFailure: true,
+        },
+        { ...command(0), id: "unexpected-empty", executable: "vitest", args: [] },
+      ],
+    });
+
+    expect(report.commands).toEqual([
+      {
+        id: "expected-empty",
+        exitCode: 0,
+        ok: true,
+        classification: "no-tests-collected",
+      },
+      {
+        id: "unexpected-empty",
+        exitCode: 0,
+        ok: false,
+        classification: "no-tests-collected",
+      },
+    ]);
+  });
+
+  it("does not classify a collecting vitest run or non-vitest output as empty", async () => {
+    const repo = await fixture();
+    const report = await verifyBaseline({
+      ...repo,
+      ps: platformWithCommandOutput(
+        "process.stdout.write(process.argv.slice(1).join(' '))",
+        ["vitest"],
+      ),
+      commands: [
+        {
+          ...command(0),
+          id: "collecting-vitest",
+          executable: "vitest",
+          args: ["Test Files 1 passed (1)"],
+        },
+        {
+          ...command(0),
+          id: "not-vitest",
+          args: ["-e", "process.stdout.write('No test files found, exiting with code 0')"],
+        },
+      ],
+    });
+
+    expect(report.commands).toEqual([
+      { id: "collecting-vitest", exitCode: 0, ok: true },
+      { id: "not-vitest", exitCode: 0, ok: true },
+    ]);
+  });
+
+  it("recognizes package-manager script chains without trusting deceptive wrappers", async () => {
+    const repo = await fixture();
+    const report = await verifyBaseline({
+      ...repo,
+      ps: platformWithCommandOutput(
+        "process.stdout.write('No test files found, exiting with code 0')",
+        ["npm", "npx", "pnpm", "yarn", "node"],
+      ),
+      commands: [
+        { ...command(0), id: "npm-test", executable: "npm", args: ["test"] },
+        { ...command(0), id: "pnpm-test", executable: "pnpm", args: ["run", "test"] },
+        { ...command(0), id: "yarn-test", executable: "yarn", args: ["test"] },
+        { ...command(0), id: "npx-echo", executable: "npx", args: ["echo", "vitest"] },
+        {
+          ...command(0),
+          id: "npm-echo-script",
+          executable: "npm",
+          args: ["run", "echo-vitest"],
+        },
+        {
+          ...command(0),
+          id: "node-custom-vitest",
+          executable: "node",
+          args: ["custom/vitest.mjs"],
+        },
+        { ...command(0), id: "npm-cycle", executable: "npm", args: ["run", "cycle"] },
+      ],
+    });
+
+    expect(report.commands).toEqual([
+      {
+        id: "npm-test",
+        exitCode: 0,
+        ok: false,
+        classification: "no-tests-collected",
+      },
+      {
+        id: "pnpm-test",
+        exitCode: 0,
+        ok: false,
+        classification: "no-tests-collected",
+      },
+      {
+        id: "yarn-test",
+        exitCode: 0,
+        ok: false,
+        classification: "no-tests-collected",
+      },
+      { id: "npx-echo", exitCode: 0, ok: true },
+      { id: "npm-echo-script", exitCode: 0, ok: true },
+      { id: "node-custom-vitest", exitCode: 0, ok: true },
+      { id: "npm-cycle", exitCode: 0, ok: true },
+    ]);
+  });
+
+  it("recognizes the Vitest package entrypoint when launched through Node", async () => {
+    const repo = await fixture();
+    const report = await verifyBaseline({
+      ...repo,
+      ps: platformWithCommandOutput(
+        "process.stdout.write('No test files found, exiting with code 0')",
+        ["node"],
+      ),
+      commands: [{
+        ...command(0),
+        id: "node-vitest-package",
+        executable: "node",
+        args: ["node_modules/vitest/vitest.mjs"],
+      }],
+    });
+
+    expect(report.commands).toEqual([{
+      id: "node-vitest-package",
+      exitCode: 0,
+      ok: false,
+      classification: "no-tests-collected",
+    }]);
+  });
+
+  it("detects split empty-suite output but lets a positive final summary win", async () => {
+    const repo = await fixture();
+    const emptyReport = await verifyBaseline({
+      ...repo,
+      ps: platformWithCommandOutput(
+        "process.stdout.write('No test files '); process.stderr.write('found, exiting with code 0')",
+        ["vitest"],
+      ),
+      commands: [{ ...command(0), id: "split-empty", executable: "vitest", args: [] }],
+    });
+    const collectingReport = await verifyBaseline({
+      ...repo,
+      ps: platformWithCommandOutput(
+        "process.stdout.write('No test files found\\nTest Files  1 passed (1)')",
+        ["vitest"],
+      ),
+      commands: [{ ...command(0), id: "collecting", executable: "vitest", args: [] }],
+    });
+    const structuredReport = await verifyBaseline({
+      ...repo,
+      ps: platformWithCommandOutput(
+        "process.stdout.write('{\"numTotal'); process.stderr.write('TestSuites\":0}')",
+        ["vitest"],
+      ),
+      commands: [{ ...command(0), id: "split-json", executable: "vitest", args: [] }],
+    });
+
+    expect(emptyReport.commands).toEqual([{
+      id: "split-empty",
+      exitCode: 0,
+      ok: false,
+      classification: "no-tests-collected",
+    }]);
+    expect(collectingReport.commands).toEqual([
+      { id: "collecting", exitCode: 0, ok: true },
+    ]);
+    expect(structuredReport.commands).toEqual([{
+      id: "split-json",
+      exitCode: 0,
+      ok: false,
+      classification: "no-tests-collected",
+    }]);
   });
 
   it("tolerates only commands individually marked as expected baseline failures", async () => {
