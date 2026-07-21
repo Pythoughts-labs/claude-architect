@@ -95,6 +95,19 @@ function sortChangedPaths(changedPaths: ChangedPath[]): ChangedPath[] {
   return changedPaths.sort((left, right) => left.path < right.path ? -1 : left.path > right.path ? 1 : 0);
 }
 
+function rejectCaseCollisions(changedPaths: ChangedPath[]): void {
+  const observed = new Map<string, string>();
+  for (const change of changedPaths) {
+    const normalized = change.path.replaceAll("\\", "/");
+    const folded = normalized.toLowerCase();
+    const existing = observed.get(folded);
+    if (existing !== undefined && existing !== normalized) {
+      throw new RuntimeError("changed paths collide under case folding");
+    }
+    observed.set(folded, normalized);
+  }
+}
+
 /**
  * The canonical serialization + hash of a changed-path manifest — the single
  * definition of the hashed bytes (`JSON.stringify` of the entries in their fixed
@@ -138,5 +151,6 @@ export function computeChangedPathManifest(inputs: {
       contentHash: treeEntry?.oid ?? null,
     };
   }));
+  rejectCaseCollisions(changedPaths);
   return { changedPaths, manifestHash: manifestHashOf(changedPaths) };
 }

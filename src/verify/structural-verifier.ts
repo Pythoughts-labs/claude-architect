@@ -1,5 +1,10 @@
 import { git, type GitResult } from "../git/git-exec.js";
-import { computeChangedPathManifest, parseRawDiff, type RawDiffEntry } from "../git/changed-path-manifest.js";
+import {
+  computeChangedPathManifest,
+  parseRawDiff,
+  splitNul,
+  type RawDiffEntry,
+} from "../git/changed-path-manifest.js";
 import type { CandidateArtifact, ChangedPath } from "../protocol/attempt-result.js";
 import { redact } from "../runtime/redaction.js";
 import { RuntimeError } from "../util/errors.js";
@@ -11,6 +16,7 @@ export type StructuralFailure =
   | "artifact-divergence"
   | "out-of-scope-write"
   | "modified-symlink"
+  | "case-collision"
   | "empty-candidate"
   | "base-changed";
 
@@ -77,6 +83,43 @@ function isAllowed(
   return writeAllowlist.some(pattern => scopePaths.some(candidate => globMatches(pattern, candidate)))
     && !forbiddenScope.some(pattern =>
       scopePaths.some(candidate => globMatches(pattern, candidate, true)));
+}
+
+function normalizedFoldedPath(value: string): { exact: string; folded: string } {
+  const exact = value.replaceAll("\\", "/");
+  return { exact, folded: exact.toLowerCase() };
+}
+
+function pathsCaseCollide(changedPaths: string[], treePaths: string[]): boolean {
+  const changedByFold = new Map<string, string>();
+  for (const changedPath of changedPaths) {
+    const { exact, folded } = normalizedFoldedPath(changedPath);
+    const existing = changedByFold.get(folded);
+    if (existing !== undefined && existing !== exact) return true;
+    changedByFold.set(folded, exact);
+  }
+  for (const treePath of treePaths) {
+    const { exact, folded } = normalizedFoldedPath(treePath);
+    const changed = changedByFold.get(folded);
+    if (changed !== undefined && changed !== exact) return true;
+  }
+  return false;
+}
+
+async function candidateHasCaseCollision(args: Pick<
+  StructuralVerifyArgs,
+  "worktreePath" | "baseCommitOid" | "artifact"
+>): Promise<boolean> {
+  const [changedOutput, treeOutput] = await Promise.all([
+    checkedGit(args.worktreePath, [
+      "diff-tree", "-r", "--no-commit-id", "--no-renames", "--name-only", "-z",
+      args.baseCommitOid, args.artifact.candidateTreeOid,
+    ]),
+    checkedGit(args.worktreePath, [
+      "ls-tree", "-r", "--name-only", "-z", args.artifact.candidateTreeOid,
+    ]),
+  ]);
+  return pathsCaseCollide(splitNul(changedOutput), splitNul(treeOutput));
 }
 
 export async function recomputeManifest(args: Pick<
@@ -147,6 +190,13 @@ async function artifactIdentityMatches(args: StructuralVerifyArgs): Promise<bool
 }
 
 export async function structuralVerify(args: StructuralVerifyArgs): Promise<StructuralVerifyResult> {
+  if (await candidateHasCaseCollision(args)) {
+    return {
+      ok: false,
+      failures: ["case-collision"],
+      manifestHash: args.artifact.manifestHash,
+    };
+  }
   const failures = new Set<StructuralFailure>();
   const [manifest, baseTreeOid, currentHead, mainStatus, artifactIdentityValid] = await Promise.all([
     recomputeManifest(args),

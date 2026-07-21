@@ -409,6 +409,7 @@ describe("WorkflowStore", () => {
         ciObservations: [...waiting.ciObservations, {
           observedAt: "2026-07-20T18:01:00.000Z",
           result: "pending",
+          headCommitOid: "2".repeat(40),
           checks: [{
             bucket: "pending",
             name: "test",

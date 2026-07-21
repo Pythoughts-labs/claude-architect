@@ -49,6 +49,7 @@ function validWorkflowState(): AutopilotWorkflowState {
     ciObservations: [{
       observedAt: "2026-07-20T18:00:00.000Z",
       result: "passed",
+      headCommitOid: "4".repeat(40),
       checks: [{
         bucket: "pass",
         name: "test",

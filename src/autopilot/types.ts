@@ -54,6 +54,7 @@ export interface AutopilotWorkflowState {
   ciObservations: Array<{
     observedAt: string;
     result: "missing" | "pending" | "failed" | "passed";
+    headCommitOid: string;
     checks: Array<{
       bucket: "pass" | "pending" | "fail" | "cancel" | "skipping";
       name: string;

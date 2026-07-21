@@ -346,6 +346,7 @@ async function appendCiObservation(
       draft.ciObservations.push({
         observedAt: "2026-07-21T18:05:00.000Z",
         result,
+        headCommitOid: expectedHead(draft),
         checks: [{
           bucket: result === "passed" ? "pass" : "pending",
           name: "build",

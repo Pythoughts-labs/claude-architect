@@ -58,6 +58,7 @@ export type HostingAdapterErrorClassification =
   | "required-checks-identity-query-failed"
   | "required-checks-identity-response-invalid"
   | "required-checks-identity-mismatch"
+  | "required-checks-head-mismatch"
   | "required-checks-command-failed"
   | "required-checks-response-invalid"
   | "mark-ready-request-invalid"
@@ -853,12 +854,33 @@ export class GitHubCliAdapter implements HostingAdapter {
   async requiredChecks(request: ChecksRequest): Promise<RequiredChecksResult> {
     if (!validCheckoutPath(request.checkoutPath)
       || !validTarget(request.target)
-      || !validPullRequestNumber(request.pullRequestNumber)) {
+      || !validPullRequestNumber(request.pullRequestNumber)
+      || !OID.test(request.headCommitOid)) {
       fail("required-checks-request-invalid");
     }
     const key = pullRequestKey(request.target.repository, request.pullRequestNumber);
     const expected = this.pullRequests.get(key);
     if (expected === undefined) fail("required-checks-identity-not-established");
+    this.checksPassed.delete(key);
+
+    const before = await this.viewPullRequest(
+      request.checkoutPath,
+      request.target,
+      request.pullRequestNumber,
+      "required-checks-identity-query-failed",
+      "required-checks-identity-response-invalid",
+    ).catch(error => {
+      this.checksPassed.delete(key);
+      throw error;
+    });
+    if (!samePullRequestIdentity(before, expected)) {
+      this.checksPassed.delete(key);
+      fail("required-checks-identity-mismatch");
+    }
+    if (before.headCommitOid !== request.headCommitOid) {
+      this.checksPassed.delete(key);
+      fail("required-checks-head-mismatch");
+    }
 
     let result: HostingCommandResult;
     try {
@@ -880,14 +902,14 @@ export class GitHubCliAdapter implements HostingAdapter {
       fail("required-checks-command-failed");
     }
 
-    const live = await this.viewPullRequest(
+    const after = await this.viewPullRequest(
       request.checkoutPath,
       request.target,
       request.pullRequestNumber,
       "required-checks-identity-query-failed",
       "required-checks-identity-response-invalid",
     );
-    if (!samePullRequestIdentity(live, expected)) {
+    if (!samePullRequestIdentity(after, before)) {
       this.checksPassed.delete(key);
       fail("required-checks-identity-mismatch");
     }
@@ -911,7 +933,7 @@ export class GitHubCliAdapter implements HostingAdapter {
     if (result.exitCode !== expectedExitCode) fail("required-checks-response-invalid");
     if (aggregate === "passed") this.checksPassed.add(key);
     else this.checksPassed.delete(key);
-    return { result: aggregate, checks };
+    return { result: aggregate, headCommitOid: request.headCommitOid, checks };
   }
 
   async markReady(request: MarkReadyRequest): Promise<PullRequestIdentity> {
@@ -1017,9 +1039,16 @@ export class InMemoryHostingAdapter implements HostingAdapter {
       ?? Promise.reject(new HostingAdapterError("in-memory-draft-pull-request-not-configured"));
   }
 
-  requiredChecks(request: ChecksRequest): Promise<RequiredChecksResult> {
-    return this.operations.requiredChecks?.(request)
-      ?? Promise.reject(new HostingAdapterError("in-memory-required-checks-not-configured"));
+  async requiredChecks(request: ChecksRequest): Promise<RequiredChecksResult> {
+    const operation = this.operations.requiredChecks;
+    if (operation === undefined) {
+      throw new HostingAdapterError("in-memory-required-checks-not-configured");
+    }
+    const result = await operation(request);
+    if (result.headCommitOid !== request.headCommitOid) {
+      throw new HostingAdapterError("required-checks-head-mismatch");
+    }
+    return result;
   }
 
   markReady(request: MarkReadyRequest): Promise<PullRequestIdentity> {

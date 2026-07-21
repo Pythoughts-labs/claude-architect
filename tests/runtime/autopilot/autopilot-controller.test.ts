@@ -397,6 +397,7 @@ function harness(overrides: {
   pullRequestDraft?: boolean;
   checks?: Array<{
     result: "missing" | "pending" | "failed" | "passed";
+    headCommitOid?: string;
     checks: Array<{
       bucket: "pass" | "pending" | "fail" | "cancel" | "skipping";
       name: string;
@@ -554,10 +555,11 @@ function harness(overrides: {
       link: "https://github.com/openai/claude-architect/actions/runs/1",
     }],
   }];
-  const requiredChecks = vi.fn(async () => {
+  const requiredChecks = vi.fn(async (request: { headCommitOid: string }) => {
     operations.push("side-effect:required-checks");
     if (overrides.checksError !== undefined) throw overrides.checksError;
-    return checkResults[Math.min(checksIndex++, checkResults.length - 1)]!;
+    const result = checkResults[Math.min(checksIndex++, checkResults.length - 1)]!;
+    return { ...result, headCommitOid: result.headCommitOid ?? request.headCommitOid };
   });
   const markReady = vi.fn(async () => {
     operations.push("side-effect:mark-ready");
@@ -1133,6 +1135,26 @@ describe("AutopilotController start-through-shipping", () => {
     expect(run.spies.cleanup).not.toHaveBeenCalled();
   });
 
+  it("never marks ready from passing checks bound to an earlier head", async () => {
+    const times = [NOW, "2026-07-21T12:29:59.999Z", DEADLINE];
+    const run = harness({
+      now: vi.fn(() => times.shift() ?? DEADLINE),
+      checks: [{
+        result: "passed",
+        headCommitOid: FIRST_COMMIT,
+        checks: [{ bucket: "pass", name: "test", state: "SUCCESS", link: null }],
+      }],
+    });
+
+    await expect(run.controller.start(REPOSITORY, validSpec())).rejects.toMatchObject({
+      classification: "required-checks-timeout",
+    });
+    expect(run.store.state?.ciObservations).toEqual([
+      expect.objectContaining({ result: "passed", headCommitOid: FIRST_COMMIT }),
+    ]);
+    expect(run.spies.markReady).not.toHaveBeenCalled();
+  });
+
   it("halts a mark-ready failure before cleanup", async () => {
     const markReadyError = Object.assign(new Error("ready failed"), {
       classification: "mark-ready-command-failed",
@@ -1220,6 +1242,7 @@ describe("AutopilotController start-through-shipping", () => {
     run.store.state.ciObservations.push({
       observedAt: NOW,
       result: "pending",
+      headCommitOid: SECOND_COMMIT,
       checks: [{
         bucket: "pending",
         name: "test",
@@ -1370,6 +1393,7 @@ describe("AutopilotController start-through-shipping", () => {
     state.ciObservations.push({
       observedAt: "2026-07-21T12:29:00.000Z",
       result: "passed",
+      headCommitOid: SECOND_COMMIT,
       checks: [{ bucket: "pass", name: "test", state: "SUCCESS", link: null }],
     });
     run.store.state = state;
@@ -1397,6 +1421,24 @@ describe("AutopilotController start-through-shipping", () => {
     expect(run.spies.cleanup).not.toHaveBeenCalled();
   });
 
+  it("fails closed before replaying mark-ready from stale-head all-pass proof", async () => {
+    const run = harness();
+    const state = resumedState("waiting-required-checks");
+    state.phase = "marking-ready";
+    state.ciObservations.push({
+      observedAt: "2026-07-21T12:29:00.000Z",
+      result: "passed",
+      headCommitOid: FIRST_COMMIT,
+      checks: [{ bucket: "pass", name: "test", state: "SUCCESS", link: null }],
+    });
+    run.store.state = state;
+
+    await expect(run.controller.resume(REPOSITORY, WORKFLOW_ID)).rejects.toMatchObject({
+      classification: "required-checks-proof-missing",
+    });
+    expect(run.spies.markReady).not.toHaveBeenCalled();
+  });
+
   it("observes an already-ready exact pull request after a mark-ready crash", async () => {
     const run = harness({ pullRequestDraft: false });
     const state = resumedState("waiting-required-checks");
@@ -1404,6 +1446,7 @@ describe("AutopilotController start-through-shipping", () => {
     state.ciObservations.push({
       observedAt: "2026-07-21T12:29:00.000Z",
       result: "passed",
+      headCommitOid: SECOND_COMMIT,
       checks: [{ bucket: "pass", name: "test", state: "SUCCESS", link: null }],
     });
     run.store.state = state;

@@ -23676,10 +23676,11 @@ var autopilot_workflow_state_v1_default = {
     ciObservation: {
       type: "object",
       additionalProperties: false,
-      required: ["observedAt", "result", "checks"],
+      required: ["observedAt", "result", "headCommitOid", "checks"],
       properties: {
         observedAt: { type: "string", format: "date-time" },
         result: { enum: ["missing", "pending", "failed", "passed"] },
+        headCommitOid: { $ref: "#/$defs/commitOid" },
         checks: {
           type: "array",
           items: { $ref: "#/$defs/ciCheck" }
@@ -27319,6 +27320,18 @@ function changeType(status) {
 function sortChangedPaths(changedPaths) {
   return changedPaths.sort((left, right) => left.path < right.path ? -1 : left.path > right.path ? 1 : 0);
 }
+function rejectCaseCollisions(changedPaths) {
+  const observed = /* @__PURE__ */ new Map();
+  for (const change of changedPaths) {
+    const normalized = change.path.replaceAll("\\", "/");
+    const folded = normalized.toLowerCase();
+    const existing = observed.get(folded);
+    if (existing !== void 0 && existing !== normalized) {
+      throw new RuntimeError("changed paths collide under case folding");
+    }
+    observed.set(folded, normalized);
+  }
+}
 function manifestHashOf(changedPaths) {
   const canonical = changedPaths.map(({ path: path21, changeType: changeType2, mode, contentHash }) => ({ path: path21, changeType: changeType2, mode, contentHash }));
   return createHash5("sha256").update(JSON.stringify(canonical)).digest("hex");
@@ -27342,6 +27355,7 @@ function computeChangedPathManifest(inputs) {
       contentHash: treeEntry?.oid ?? null
     };
   }));
+  rejectCaseCollisions(changedPaths);
   return { changedPaths, manifestHash: manifestHashOf(changedPaths) };
 }
 
@@ -28352,6 +28366,47 @@ function isAllowed(pathname, writeAllowlist, forbiddenScope, opaqueDirectory = f
   const scopePaths = opaqueDirectory ? [pathname, `${pathname}/`] : [pathname];
   return writeAllowlist.some((pattern) => scopePaths.some((candidate) => globMatches(pattern, candidate))) && !forbiddenScope.some((pattern) => scopePaths.some((candidate) => globMatches(pattern, candidate, true)));
 }
+function normalizedFoldedPath(value) {
+  const exact = value.replaceAll("\\", "/");
+  return { exact, folded: exact.toLowerCase() };
+}
+function pathsCaseCollide(changedPaths, treePaths) {
+  const changedByFold = /* @__PURE__ */ new Map();
+  for (const changedPath of changedPaths) {
+    const { exact, folded } = normalizedFoldedPath(changedPath);
+    const existing = changedByFold.get(folded);
+    if (existing !== void 0 && existing !== exact) return true;
+    changedByFold.set(folded, exact);
+  }
+  for (const treePath of treePaths) {
+    const { exact, folded } = normalizedFoldedPath(treePath);
+    const changed = changedByFold.get(folded);
+    if (changed !== void 0 && changed !== exact) return true;
+  }
+  return false;
+}
+async function candidateHasCaseCollision(args) {
+  const [changedOutput, treeOutput] = await Promise.all([
+    checkedGit2(args.worktreePath, [
+      "diff-tree",
+      "-r",
+      "--no-commit-id",
+      "--no-renames",
+      "--name-only",
+      "-z",
+      args.baseCommitOid,
+      args.artifact.candidateTreeOid
+    ]),
+    checkedGit2(args.worktreePath, [
+      "ls-tree",
+      "-r",
+      "--name-only",
+      "-z",
+      args.artifact.candidateTreeOid
+    ])
+  ]);
+  return pathsCaseCollide(splitNul(changedOutput), splitNul(treeOutput));
+}
 async function recomputeManifest(args) {
   const [rawOutput, nameStatusOutput, treeOutput] = await Promise.all([
     checkedGit2(args.worktreePath, [
@@ -28407,6 +28462,13 @@ async function artifactIdentityMatches(args) {
   return anchorResult.stdout.trim() === args.artifact.candidateCommitOid && treeResult.stdout.trim() === args.artifact.candidateTreeOid && commitAndParents.length === 2 && commitAndParents[0] === args.artifact.candidateCommitOid && commitAndParents[1] === args.baseCommitOid;
 }
 async function structuralVerify(args) {
+  if (await candidateHasCaseCollision(args)) {
+    return {
+      ok: false,
+      failures: ["case-collision"],
+      manifestHash: args.artifact.manifestHash
+    };
+  }
   const failures = /* @__PURE__ */ new Set();
   const [manifest, baseTreeOid, currentHead, mainStatus, artifactIdentityValid] = await Promise.all([
     recomputeManifest(args),
@@ -33408,12 +33470,13 @@ function pullRequestIdentityMatches(pullRequest, target, branch, expectedHead2) 
 function pullRequestMatches(pullRequest, target, branch, expectedHead2, expectedDraft) {
   return pullRequestIdentityMatches(pullRequest, target, branch, expectedHead2) && pullRequest.draft === expectedDraft;
 }
-function checksAreNonEmptyAndPassing(checks) {
-  return checks.result === "passed" && checks.checks.length > 0 && checks.checks.every((check2) => check2.bucket === "pass");
+function checksAreNonEmptyAndPassing(checks, expectedHead2) {
+  return checks.result === "passed" && checks.headCommitOid === expectedHead2 && checks.checks.length > 0 && checks.checks.every((check2) => check2.bucket === "pass");
 }
 function stateHasPassingChecks(state) {
   const observation = state.ciObservations.at(-1);
-  return observation !== void 0 && checksAreNonEmptyAndPassing(observation);
+  const expectedHead2 = state.finalGate?.headCommitOid;
+  return observation !== void 0 && expectedHead2 !== void 0 && checksAreNonEmptyAndPassing(observation, expectedHead2);
 }
 var CLEANUP_INTENT_OPERATION = "cleanup-workflow-branch";
 function cleanupIntentKey(headCommitOid) {
@@ -33556,7 +33619,11 @@ var AutopilotController = class {
               task.delegation
             ).catch(async (error2) => await this.halt(store, state, classificationOf(error2, "pipeline-failed")));
             if (pipelineResult.status === "failed") {
-              return await this.halt(store, state, "pipeline-failed");
+              return await this.halt(
+                store,
+                state,
+                pipelineResult.failure === "cancelled" ? "cancelled" : "pipeline-failed"
+              );
             }
             if (pipelineResult.status === "human-decision-required" || pipelineResult.gate.requiresHumanDecision) {
               return await this.halt(store, state, "human-decision-required");
@@ -33716,7 +33783,8 @@ var AutopilotController = class {
             const observation = await this.dependencies.hostingAdapter.requiredChecks({
               checkoutPath: branch.worktreePath,
               target,
-              pullRequestNumber: pullRequest.number
+              pullRequestNumber: pullRequest.number,
+              headCommitOid: expectedHead2
             }).catch(async (error2) => await this.halt(
               store,
               state,
@@ -33731,6 +33799,7 @@ var AutopilotController = class {
                 draft.ciObservations.push({
                   observedAt,
                   result: observation.result,
+                  headCommitOid: observation.headCommitOid,
                   checks: structuredClone(observation.checks)
                 });
               }
@@ -33738,7 +33807,7 @@ var AutopilotController = class {
             if (!Number.isFinite(observedAtMs) || observedAtMs >= ciDeadlineMs) {
               return await this.halt(store, state, "required-checks-timeout");
             }
-            if (checksAreNonEmptyAndPassing(observation)) break;
+            if (checksAreNonEmptyAndPassing(observation, expectedHead2)) break;
             if (observation.result === "missing" || observation.checks.length === 0) {
               return await this.halt(store, state, "required-checks-missing");
             }
@@ -33978,7 +34047,11 @@ var AutopilotController = class {
           task.delegation
         ).catch(async (error2) => await this.halt(store, state, classificationOf(error2, "pipeline-failed")));
         if (pipelineResult.status === "failed") {
-          return await this.halt(store, state, "pipeline-failed");
+          return await this.halt(
+            store,
+            state,
+            pipelineResult.failure === "cancelled" ? "cancelled" : "pipeline-failed"
+          );
         }
         if (pipelineResult.status === "human-decision-required" || pipelineResult.gate.requiresHumanDecision) {
           return await this.halt(store, state, "human-decision-required");
@@ -34197,7 +34270,8 @@ var AutopilotController = class {
         const observation = await this.dependencies.hostingAdapter.requiredChecks({
           checkoutPath: branch.worktreePath,
           target,
-          pullRequestNumber: pullRequest.number
+          pullRequestNumber: pullRequest.number,
+          headCommitOid: expectedHead2
         }).catch(async (error2) => await this.halt(store, state, classificationOf(error2, "required-checks-failed")));
         this.dependencies.emit?.(`checks:${observation.result === "passed" ? "pass" : observation.result === "failed" ? "red" : observation.result}`);
         const observedAt = this.now();
@@ -34208,6 +34282,7 @@ var AutopilotController = class {
             draft.ciObservations.push({
               observedAt,
               result: observation.result,
+              headCommitOid: observation.headCommitOid,
               checks: structuredClone(observation.checks)
             });
           }
@@ -34215,7 +34290,7 @@ var AutopilotController = class {
         if (!Number.isFinite(observedAtMs) || observedAtMs >= deadlineMs) {
           return await this.halt(store, state, "required-checks-timeout");
         }
-        if (checksAreNonEmptyAndPassing(observation)) break;
+        if (checksAreNonEmptyAndPassing(observation, expectedHead2)) break;
         if (observation.result === "missing" || observation.checks.length === 0) {
           return await this.halt(store, state, "required-checks-missing");
         }
@@ -38877,12 +38952,31 @@ var GitHubCliAdapter = class {
     return identity;
   }
   async requiredChecks(request) {
-    if (!validCheckoutPath(request.checkoutPath) || !validTarget(request.target) || !validPullRequestNumber(request.pullRequestNumber)) {
+    if (!validCheckoutPath(request.checkoutPath) || !validTarget(request.target) || !validPullRequestNumber(request.pullRequestNumber) || !OID2.test(request.headCommitOid)) {
       fail3("required-checks-request-invalid");
     }
     const key = pullRequestKey(request.target.repository, request.pullRequestNumber);
     const expected = this.pullRequests.get(key);
     if (expected === void 0) fail3("required-checks-identity-not-established");
+    this.checksPassed.delete(key);
+    const before = await this.viewPullRequest(
+      request.checkoutPath,
+      request.target,
+      request.pullRequestNumber,
+      "required-checks-identity-query-failed",
+      "required-checks-identity-response-invalid"
+    ).catch((error2) => {
+      this.checksPassed.delete(key);
+      throw error2;
+    });
+    if (!samePullRequestIdentity(before, expected)) {
+      this.checksPassed.delete(key);
+      fail3("required-checks-identity-mismatch");
+    }
+    if (before.headCommitOid !== request.headCommitOid) {
+      this.checksPassed.delete(key);
+      fail3("required-checks-head-mismatch");
+    }
     let result;
     try {
       result = await this.run(
@@ -38906,14 +39000,14 @@ var GitHubCliAdapter = class {
     if (!boundedOutput(result) || ![0, 1, 8].includes(result.exitCode ?? -1)) {
       fail3("required-checks-command-failed");
     }
-    const live = await this.viewPullRequest(
+    const after = await this.viewPullRequest(
       request.checkoutPath,
       request.target,
       request.pullRequestNumber,
       "required-checks-identity-query-failed",
       "required-checks-identity-response-invalid"
     );
-    if (!samePullRequestIdentity(live, expected)) {
+    if (!samePullRequestIdentity(after, before)) {
       this.checksPassed.delete(key);
       fail3("required-checks-identity-mismatch");
     }
@@ -38924,7 +39018,7 @@ var GitHubCliAdapter = class {
     if (result.exitCode !== expectedExitCode) fail3("required-checks-response-invalid");
     if (aggregate === "passed") this.checksPassed.add(key);
     else this.checksPassed.delete(key);
-    return { result: aggregate, checks };
+    return { result: aggregate, headCommitOid: request.headCommitOid, checks };
   }
   async markReady(request) {
     if (!validCheckoutPath(request.checkoutPath) || !validTarget(request.target) || !validPullRequestNumber(request.pullRequestNumber)) {

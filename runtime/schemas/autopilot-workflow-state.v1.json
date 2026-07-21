@@ -201,10 +201,11 @@
     "ciObservation": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["observedAt", "result", "checks"],
+      "required": ["observedAt", "result", "headCommitOid", "checks"],
       "properties": {
         "observedAt": { "type": "string", "format": "date-time" },
         "result": { "enum": ["missing", "pending", "failed", "passed"] },
+        "headCommitOid": { "$ref": "#/$defs/commitOid" },
         "checks": {
           "type": "array",
           "items": { "$ref": "#/$defs/ciCheck" }

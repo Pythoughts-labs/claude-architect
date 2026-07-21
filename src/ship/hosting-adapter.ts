@@ -40,6 +40,7 @@ export interface ChecksRequest {
   checkoutPath: string;
   target: HostingTarget;
   pullRequestNumber: number;
+  headCommitOid: string;
 }
 
 export type RequiredCheckBucket = "pass" | "pending" | "fail" | "cancel" | "skipping";
@@ -53,6 +54,7 @@ export interface RequiredCheck {
 
 export interface RequiredChecksResult {
   result: "missing" | "pending" | "failed" | "passed";
+  headCommitOid: string;
   checks: RequiredCheck[];
 }
 

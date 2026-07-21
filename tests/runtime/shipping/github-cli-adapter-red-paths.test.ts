@@ -177,6 +177,7 @@ function checksRequest(overrides: Partial<ChecksRequest> = {}): ChecksRequest {
     checkoutPath: "/source/checkout",
     target: TARGET,
     pullRequestNumber: 17,
+    headCommitOid: HEAD,
     ...overrides,
   };
 }
@@ -321,19 +322,21 @@ async function checksCase(
     throw new Error(`unexpected ${current} ${SECRET} ${LEAK_PATH}`);
   }, calls);
   await adapter.ensureDraftPullRequest(draftRequest({ checkoutPath: LEAK_PATH }));
-  const sequence = ["pr-list", "pr-checks", "pr-view"];
+  const sequence = ["pr-list", "pr-view", "pr-checks", "pr-view"];
   return {
     operation: adapter.requiredChecks(checksRequest({ checkoutPath: LEAK_PATH })),
     calls,
     expectedStages: classification === "required-checks-response-invalid"
       ? sequence
-      : sequence.slice(0, sequence.indexOf(failedStage) + 1),
+      : failedStage === "pr-view"
+        ? sequence.slice(0, 2)
+        : sequence.slice(0, 3),
   };
 }
 
 async function markReadyCase(
   classification: HostingAdapterErrorClassification,
-  failedView: 2 | 3 | undefined,
+  failedView: 3 | 4 | undefined,
   failure: HostingCommandResult | Error,
 ): Promise<Scenario> {
   const calls: HostingCommandRequest[] = [];
@@ -352,7 +355,7 @@ async function markReadyCase(
         if (failure instanceof Error) throw failure;
         return failure;
       }
-      return result(JSON.stringify(pullRequestJson({ isDraft: views < 3 })));
+      return result(JSON.stringify(pullRequestJson({ isDraft: views < 4 })));
     }
     if (current === "pr-ready") {
       if (failedView === undefined) {
@@ -365,11 +368,11 @@ async function markReadyCase(
   }, calls);
   await adapter.ensureDraftPullRequest(draftRequest({ checkoutPath: LEAK_PATH }));
   await adapter.requiredChecks(checksRequest({ checkoutPath: LEAK_PATH }));
-  const expectedStages = failedView === 2
-    ? ["pr-list", "pr-checks", "pr-view", "pr-view"]
-    : failedView === 3
-      ? ["pr-list", "pr-checks", "pr-view", "pr-view", "pr-ready", "pr-view"]
-      : ["pr-list", "pr-checks", "pr-view", "pr-view", "pr-ready"];
+  const expectedStages = failedView === 3
+    ? ["pr-list", "pr-view", "pr-checks", "pr-view", "pr-view"]
+    : failedView === 4
+      ? ["pr-list", "pr-view", "pr-checks", "pr-view", "pr-view", "pr-ready", "pr-view"]
+      : ["pr-list", "pr-view", "pr-checks", "pr-view", "pr-view", "pr-ready"];
   return {
     operation: adapter.markReady(markReadyRequest({ checkoutPath: LEAK_PATH })),
     calls,
@@ -537,6 +540,26 @@ const redCases: RedCase[] = [
     "required-checks-identity-mismatch", "pr-view",
     result(JSON.stringify(pullRequestJson({ headRefOid: OTHER_HEAD }))),
   ) },
+  {
+    classification: "required-checks-head-mismatch",
+    create: async () => {
+      const calls: HostingCommandRequest[] = [];
+      const adapter = fakeAdapter(request => {
+        if (stage(request) === "pr-list") return result(JSON.stringify([pullRequestJson()]));
+        if (stage(request) === "pr-view") return result(JSON.stringify(pullRequestJson()));
+        throw new Error(`unexpected ${stage(request)} ${SECRET} ${LEAK_PATH}`);
+      }, calls);
+      await adapter.ensureDraftPullRequest(draftRequest({ checkoutPath: LEAK_PATH }));
+      return {
+        operation: adapter.requiredChecks(checksRequest({
+          checkoutPath: LEAK_PATH,
+          headCommitOid: OTHER_HEAD,
+        })),
+        calls,
+        expectedStages: ["pr-list", "pr-view"],
+      };
+    },
+  },
   { classification: "required-checks-response-invalid", create: () => checksCase(
     "required-checks-response-invalid", "pr-checks", result(`[{"bucket":"${SECRET}"}]`, { exitCode: 1 }),
   ) },
@@ -574,13 +597,13 @@ const redCases: RedCase[] = [
     },
   },
   { classification: "mark-ready-identity-query-failed", create: () => markReadyCase(
-    "mark-ready-identity-query-failed", 2, new Error(`${SECRET} ${LEAK_PATH}`),
+    "mark-ready-identity-query-failed", 3, new Error(`${SECRET} ${LEAK_PATH}`),
   ) },
   { classification: "mark-ready-identity-response-invalid", create: () => markReadyCase(
-    "mark-ready-identity-response-invalid", 2, result(`{"leak":"${SECRET}"}`),
+    "mark-ready-identity-response-invalid", 3, result(`{"leak":"${SECRET}"}`),
   ) },
   { classification: "mark-ready-identity-mismatch", create: () => markReadyCase(
-    "mark-ready-identity-mismatch", 2,
+    "mark-ready-identity-mismatch", 3,
     result(JSON.stringify(pullRequestJson({ headRefOid: OTHER_HEAD }))),
   ) },
   { classification: "mark-ready-command-failed", create: () => markReadyCase(
@@ -639,6 +662,7 @@ const allRedClassifications = [
   "required-checks-identity-query-failed",
   "required-checks-identity-response-invalid",
   "required-checks-identity-mismatch",
+  "required-checks-head-mismatch",
   "required-checks-command-failed",
   "required-checks-response-invalid",
   "mark-ready-request-invalid",

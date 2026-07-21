@@ -370,15 +370,22 @@ function pullRequestMatches(
     && pullRequest.draft === expectedDraft;
 }
 
-function checksAreNonEmptyAndPassing(checks: RequiredChecksResult): boolean {
+function checksAreNonEmptyAndPassing(
+  checks: RequiredChecksResult,
+  expectedHead: string,
+): boolean {
   return checks.result === "passed"
+    && checks.headCommitOid === expectedHead
     && checks.checks.length > 0
     && checks.checks.every(check => check.bucket === "pass");
 }
 
 function stateHasPassingChecks(state: AutopilotWorkflowState): boolean {
   const observation = state.ciObservations.at(-1);
-  return observation !== undefined && checksAreNonEmptyAndPassing(observation);
+  const expectedHead = state.finalGate?.headCommitOid;
+  return observation !== undefined
+    && expectedHead !== undefined
+    && checksAreNonEmptyAndPassing(observation, expectedHead);
 }
 
 const CLEANUP_INTENT_OPERATION = "cleanup-workflow-branch";
@@ -542,7 +549,8 @@ export class AutopilotController {
         ).catch(async error =>
           await this.halt(store, state, classificationOf(error, "pipeline-failed")));
         if (pipelineResult.status === "failed") {
-          return await this.halt(store, state, "pipeline-failed");
+          return await this.halt(store, state,
+            pipelineResult.failure === "cancelled" ? "cancelled" : "pipeline-failed");
         }
         if (pipelineResult.status === "human-decision-required"
           || pipelineResult.gate.requiresHumanDecision) {
@@ -719,6 +727,7 @@ export class AutopilotController {
           checkoutPath: branch.worktreePath,
           target,
           pullRequestNumber: pullRequest.number,
+          headCommitOid: expectedHead,
         }).catch(async error =>
           await this.halt(
             store,
@@ -736,6 +745,7 @@ export class AutopilotController {
             draft.ciObservations.push({
               observedAt,
               result: observation.result,
+              headCommitOid: observation.headCommitOid,
               checks: structuredClone(observation.checks),
             });
           },
@@ -743,7 +753,7 @@ export class AutopilotController {
         if (!Number.isFinite(observedAtMs) || observedAtMs >= ciDeadlineMs) {
           return await this.halt(store, state, "required-checks-timeout");
         }
-        if (checksAreNonEmptyAndPassing(observation)) break;
+        if (checksAreNonEmptyAndPassing(observation, expectedHead)) break;
         if (observation.result === "missing" || observation.checks.length === 0) {
           return await this.halt(store, state, "required-checks-missing");
         }
@@ -1030,7 +1040,8 @@ export class AutopilotController {
         ).catch(async error =>
           await this.halt(store, state, classificationOf(error, "pipeline-failed")));
         if (pipelineResult.status === "failed") {
-          return await this.halt(store, state, "pipeline-failed");
+          return await this.halt(store, state,
+            pipelineResult.failure === "cancelled" ? "cancelled" : "pipeline-failed");
         }
         if (pipelineResult.status === "human-decision-required"
           || pipelineResult.gate.requiresHumanDecision) {
@@ -1267,6 +1278,7 @@ export class AutopilotController {
           checkoutPath: branch.worktreePath,
           target,
           pullRequestNumber: pullRequest.number,
+          headCommitOid: expectedHead,
         }).catch(async error =>
           await this.halt(store, state, classificationOf(error, "required-checks-failed")));
         this.dependencies.emit?.(`checks:${observation.result === "passed"
@@ -1280,6 +1292,7 @@ export class AutopilotController {
             draft.ciObservations.push({
               observedAt,
               result: observation.result,
+              headCommitOid: observation.headCommitOid,
               checks: structuredClone(observation.checks),
             });
           },
@@ -1287,7 +1300,7 @@ export class AutopilotController {
         if (!Number.isFinite(observedAtMs) || observedAtMs >= deadlineMs) {
           return await this.halt(store, state, "required-checks-timeout");
         }
-        if (checksAreNonEmptyAndPassing(observation)) break;
+        if (checksAreNonEmptyAndPassing(observation, expectedHead)) break;
         if (observation.result === "missing" || observation.checks.length === 0) {
           return await this.halt(store, state, "required-checks-missing");
         }

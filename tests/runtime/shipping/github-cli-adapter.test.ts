@@ -586,13 +586,19 @@ describe("GitHubCliAdapter pull request lifecycle", () => {
 describe("GitHubCliAdapter required checks", () => {
   async function runChecks(
     checkResult: HostingCommandResult,
-    view: Record<string, unknown> = pullRequestJson(),
+    view: Record<string, unknown> | Record<string, unknown>[] = pullRequestJson(),
     calls: HostingCommandRequest[] = [],
   ): ReturnType<GitHubCliAdapter["requiredChecks"]> {
+    let viewIndex = 0;
     const adapter = fakeAdapter(request => {
       if (request.args[1] === "list") return ok(JSON.stringify([pullRequestJson()]));
       if (request.args[1] === "checks") return checkResult;
-      if (request.args[1] === "view") return ok(JSON.stringify(view));
+      if (request.args[1] === "view") {
+        const current = Array.isArray(view)
+          ? view[Math.min(viewIndex++, view.length - 1)]!
+          : view;
+        return ok(JSON.stringify(current));
+      }
       throw new Error(`unexpected command: ${commandKey(request)}`);
     }, calls);
     await adapter.ensureDraftPullRequest(draftRequest());
@@ -600,6 +606,7 @@ describe("GitHubCliAdapter required checks", () => {
       checkoutPath: "/source/checkout",
       target: TARGET,
       pullRequestNumber: 17,
+      headCommitOid: HEAD,
     });
   }
 
@@ -629,6 +636,11 @@ describe("GitHubCliAdapter required checks", () => {
 
     expect(calls.slice(1).map(call => call.args)).toEqual([
       [
+        "pr", "view", "17",
+        "--repo", "example/project",
+        "--json", "number,url,baseRefName,headRefName,headRefOid,headRepository,isDraft",
+      ],
+      [
         "pr", "checks", "17",
         "--repo", "example/project",
         "--required",
@@ -642,15 +654,37 @@ describe("GitHubCliAdapter required checks", () => {
     ]);
   });
 
+  it("rejects stale passing checks when the expected head differs before observation", async () => {
+    const calls: HostingCommandRequest[] = [];
+    const adapter = fakeAdapter(request => {
+      if (request.args[1] === "list") return ok(JSON.stringify([pullRequestJson()]));
+      if (request.args[1] === "view") return ok(JSON.stringify(pullRequestJson()));
+      if (request.args[1] === "checks") {
+        return ok(checksJson([{ bucket: "pass", name: "unit", state: "SUCCESS", link: null }]));
+      }
+      throw new Error(`unexpected command: ${commandKey(request)}`);
+    }, calls);
+    await adapter.ensureDraftPullRequest(draftRequest());
+
+    await expectClassification(adapter.requiredChecks({
+      checkoutPath: "/source/checkout",
+      target: TARGET,
+      pullRequestNumber: 17,
+      headCommitOid: OTHER_HEAD,
+    }), "required-checks-head-mismatch");
+    expect(calls.map(call => call.args[1])).toEqual(["list", "view"]);
+  });
+
   it("revalidates the live head after fetching checks and before parsing evidence", async () => {
     const calls: HostingCommandRequest[] = [];
     await expectClassification(
-      runChecks({ ...ok("not-json"), exitCode: 0 }, pullRequestJson({
-        headRefOid: OTHER_HEAD,
-      }), calls),
+      runChecks({ ...ok("not-json"), exitCode: 0 }, [
+        pullRequestJson(),
+        pullRequestJson({ headRefOid: OTHER_HEAD }),
+      ], calls),
       "required-checks-identity-mismatch",
     );
-    expect(calls.map(call => call.args[1])).toEqual(["list", "checks", "view"]);
+    expect(calls.map(call => call.args[1])).toEqual(["list", "view", "checks", "view"]);
   });
 
   it.each([
@@ -705,7 +739,7 @@ describe("GitHubCliAdapter mark ready", () => {
     expect(calls.some(call => call.args[1] === "ready")).toBe(false);
   });
 
-  it("freshly revalidates identity before mutation and halts on a stale head", async () => {
+  it("halts when the PR head changes inside the required-checks bracket", async () => {
     const calls: HostingCommandRequest[] = [];
     let views = 0;
     const adapter = fakeAdapter(request => {
@@ -722,16 +756,12 @@ describe("GitHubCliAdapter mark ready", () => {
       return ok();
     }, calls);
     await adapter.ensureDraftPullRequest(draftRequest());
-    await adapter.requiredChecks({
+    await expectClassification(adapter.requiredChecks({
       checkoutPath: "/source/checkout",
       target: TARGET,
       pullRequestNumber: 17,
-    });
-    await expectClassification(adapter.markReady({
-      checkoutPath: "/source/checkout",
-      target: TARGET,
-      pullRequestNumber: 17,
-    }), "mark-ready-identity-mismatch");
+      headCommitOid: HEAD,
+    }), "required-checks-identity-mismatch");
     expect(calls.some(call => call.args[1] === "ready")).toBe(false);
   });
 
@@ -755,6 +785,7 @@ describe("GitHubCliAdapter mark ready", () => {
       checkoutPath: "/source/checkout",
       target: TARGET,
       pullRequestNumber: 17,
+      headCommitOid: HEAD,
     }).catch(cause => cause);
     if (check.bucket === "pass") {
       expect(checksError).toMatchObject({ classification: "required-checks-response-invalid" });
@@ -791,6 +822,7 @@ describe("GitHubCliAdapter mark ready", () => {
       checkoutPath: "/source/checkout",
       target: TARGET,
       pullRequestNumber: 17,
+      headCommitOid: HEAD,
     });
     await expect(adapter.markReady({
       checkoutPath: "/source/checkout",
@@ -798,6 +830,11 @@ describe("GitHubCliAdapter mark ready", () => {
       pullRequestNumber: 17,
     })).resolves.toEqual(pullRequestIdentity({ draft: false }));
     expect(calls.slice(1).map(call => call.args)).toEqual([
+      [
+        "pr", "view", "17",
+        "--repo", "example/project",
+        "--json", "number,url,baseRefName,headRefName,headRefOid,headRepository,isDraft",
+      ],
       [
         "pr", "checks", "17",
         "--repo", "example/project",
@@ -842,6 +879,7 @@ describe("GitHubCliAdapter mark ready", () => {
     await adapter.ensureDraftPullRequest(draftRequest());
     await adapter.requiredChecks({
       checkoutPath: "/source/checkout", target: TARGET, pullRequestNumber: 17,
+      headCommitOid: HEAD,
     });
     await adapter.markReady({
       checkoutPath: "/source/checkout", target: TARGET, pullRequestNumber: 17,
@@ -849,6 +887,7 @@ describe("GitHubCliAdapter mark ready", () => {
 
     await expectClassification(adapter.requiredChecks({
       checkoutPath: "/source/checkout", target: TARGET, pullRequestNumber: 17,
+      headCommitOid: HEAD,
     }), "required-checks-identity-not-established");
   });
 });
@@ -866,6 +905,7 @@ describe("InMemoryHostingAdapter", () => {
         checkoutPath: "/repository",
         target: TARGET,
         pullRequestNumber: 1,
+        headCommitOid: HEAD,
       }),
       "in-memory-required-checks-not-configured",
     );
@@ -875,6 +915,7 @@ describe("InMemoryHostingAdapter", () => {
     const identity = pullRequestIdentity();
     const checks = {
       result: "passed" as const,
+      headCommitOid: HEAD,
       checks: [{ bucket: "pass" as const, name: "unit", state: "SUCCESS", link: null }],
     };
     const adapter = new InMemoryHostingAdapter({
@@ -890,6 +931,7 @@ describe("InMemoryHostingAdapter", () => {
       checkoutPath: "/source/checkout",
       target: TARGET,
       pullRequestNumber: 17,
+      headCommitOid: HEAD,
     })).resolves.toEqual(checks);
     await expect(adapter.markReady({
       checkoutPath: "/source/checkout",
