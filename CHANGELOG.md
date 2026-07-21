@@ -6,6 +6,14 @@ All notable changes to Claude Architect are recorded here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- The MCP server now prunes the run archive once per boot, after crash
+  recovery. Terminal runs older than 14 days, or the oldest terminal runs once
+  the archive exceeds 1 GiB, are reclaimed; active, incomplete, and undecided
+  runs are always retained. A prune failure only logs a redacted diagnostic and
+  never blocks startup.
+
 ## [0.26.0] - 2026-07-19
 
 ### Changed

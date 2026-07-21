@@ -20,6 +20,7 @@ import {
 } from "./tools.js";
 import { recoverStaleRuns } from "../runtime/recovery-manager.js";
 import { pruneRuns } from "../runtime/artifact-store.js";
+import { boundedRedactedDiagnostic } from "../runtime/redaction.js";
 
 const errorOutputFields = {
   ok: z.literal(false).optional(),
@@ -169,7 +170,7 @@ export async function start(dependencies: ServerDependencies = {}): Promise<void
   try {
     await (dependencies.pruneRuns ?? pruneRuns)();
   } catch (error) {
-    console.error(`Claude Architect run pruning skipped: ${error instanceof Error ? error.message : String(error)}`);
+    console.error(`Claude Architect run pruning skipped: ${boundedRedactedDiagnostic(error, 2_000)}`);
   }
 
   const server = new McpServer({ name: "claude-architect", version: RUNTIME_VERSION });

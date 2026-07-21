@@ -23728,6 +23728,15 @@ function redact(text) {
     current = next;
   }
 }
+function boundedRedactedDiagnostic(error2, maxBytes) {
+  const raw = error2 instanceof Error ? `${error2.name}: ${error2.message}` : String(error2);
+  const sanitized = redact(raw).replace(/\\\\[^'"\r\n]*/g, "[path]").replace(/[A-Za-z]:[\\/][^'"\r\n]*/g, "[path]").replace(/\\[^'"\r\n]*/g, "[path]").replace(/\/[^'"\r\n]*/g, "[path]");
+  const bytes = Buffer.from(sanitized, "utf8");
+  if (bytes.byteLength <= maxBytes) return sanitized;
+  let end = maxBytes;
+  while (end > 0 && (bytes[end] & 192) === 128) end -= 1;
+  return bytes.subarray(0, end).toString("utf8");
+}
 var DANGEROUS_KEYS = /* @__PURE__ */ new Set(["__proto__", "constructor", "prototype"]);
 function redactValue(value, redactKeys) {
   if (typeof value === "string") return redact(value);
@@ -31741,13 +31750,7 @@ function cleanupOutcome(record2) {
   return record2.backupRef === null ? "already-absent" : "deleted";
 }
 function boundedQuarantineReason(error2) {
-  const raw = error2 instanceof Error ? `${error2.name}: ${error2.message}` : String(error2);
-  const sanitized = redact(raw).replace(/\\\\[^'"\r\n]*/g, "[path]").replace(/[A-Za-z]:[\\/][^'"\r\n]*/g, "[path]").replace(/\\[^'"\r\n]*/g, "[path]").replace(/\/[^'"\r\n]*/g, "[path]");
-  const bytes = Buffer.from(sanitized, "utf8");
-  if (bytes.byteLength <= MAX_QUARANTINE_REASON_BYTES) return sanitized;
-  let end = MAX_QUARANTINE_REASON_BYTES;
-  while (end > 0 && (bytes[end] & 192) === 128) end -= 1;
-  return bytes.subarray(0, end).toString("utf8");
+  return boundedRedactedDiagnostic(error2, MAX_QUARANTINE_REASON_BYTES);
 }
 function parseRecoveryQuarantineRecord(line) {
   if (Buffer.byteLength(`${line}
@@ -33252,7 +33255,7 @@ async function start(dependencies = {}) {
   try {
     await (dependencies.pruneRuns ?? pruneRuns)();
   } catch (error2) {
-    console.error(`Claude Architect run pruning skipped: ${error2 instanceof Error ? error2.message : String(error2)}`);
+    console.error(`Claude Architect run pruning skipped: ${boundedRedactedDiagnostic(error2, 2e3)}`);
   }
   const server = new McpServer({ name: "claude-architect", version: RUNTIME_VERSION });
   server.registerTool(

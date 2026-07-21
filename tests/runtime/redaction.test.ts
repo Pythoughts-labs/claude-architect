@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import {
+  boundedRedactedDiagnostic,
   clearRegisteredSecrets,
   redact,
   redactRecord,
@@ -137,5 +138,37 @@ describe("redact", () => {
     expect(JSON.stringify(output)).not.toContain("enterprise-secret-key");
     expect(JSON.stringify(output)).toContain("[s]");
     registration.dispose();
+  });
+});
+
+describe("boundedRedactedDiagnostic", () => {
+  it("strips POSIX and Windows repository paths from an error message", () => {
+    const posix = boundedRedactedDiagnostic(
+      new Error("ENOENT: no such file /Users/panda/Projects/secret-repo/.git/HEAD"),
+      2_000,
+    );
+    expect(posix).not.toContain("/Users/panda/Projects/secret-repo");
+    expect(posix).toContain("[path]");
+
+    const windows = boundedRedactedDiagnostic(
+      new Error("cannot open C:\\Users\\panda\\secret-repo\\.git"),
+      2_000,
+    );
+    expect(windows).not.toContain("secret-repo");
+    expect(windows).toContain("[path]");
+  });
+
+  it("redacts registered secrets and non-Error values", () => {
+    clearRegisteredSecrets();
+    const registration = registerSecretValue("enterprise-secret-key");
+    expect(boundedRedactedDiagnostic("failed with enterprise-secret-key", 2_000)).not.toContain(
+      "enterprise-secret-key",
+    );
+    registration.dispose();
+  });
+
+  it("truncates to the byte budget on a UTF-8 boundary", () => {
+    const output = boundedRedactedDiagnostic(new Error("x".repeat(5_000)), 100);
+    expect(Buffer.byteLength(output, "utf8")).toBeLessThanOrEqual(100);
   });
 });

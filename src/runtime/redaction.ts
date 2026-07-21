@@ -100,6 +100,26 @@ export function redact(text: string): string {
   }
 }
 
+/**
+ * Turn an arbitrary caught error into a stable diagnostic safe for bounded
+ * runtime logs: redact registered secrets and token shapes, replace absolute
+ * POSIX/Windows/UNC paths with `[path]` so filesystem and Git failures cannot
+ * leak repository locations, then truncate to `maxBytes` on a UTF-8 boundary.
+ */
+export function boundedRedactedDiagnostic(error: unknown, maxBytes: number): string {
+  const raw = error instanceof Error ? `${error.name}: ${error.message}` : String(error);
+  const sanitized = redact(raw)
+    .replace(/\\\\[^'"\r\n]*/g, "[path]")
+    .replace(/[A-Za-z]:[\\/][^'"\r\n]*/g, "[path]")
+    .replace(/\\[^'"\r\n]*/g, "[path]")
+    .replace(/\/[^'"\r\n]*/g, "[path]");
+  const bytes = Buffer.from(sanitized, "utf8");
+  if (bytes.byteLength <= maxBytes) return sanitized;
+  let end = maxBytes;
+  while (end > 0 && (bytes[end]! & 0xc0) === 0x80) end -= 1;
+  return bytes.subarray(0, end).toString("utf8");
+}
+
 const DANGEROUS_KEYS = new Set(["__proto__", "constructor", "prototype"]);
 
 function redactValue(value: unknown, redactKeys: boolean): unknown {

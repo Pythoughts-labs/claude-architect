@@ -21,7 +21,7 @@ import type { AttemptResult } from "../protocol/attempt-result.js";
 import { RuntimeError } from "../util/errors.js";
 import { logger } from "../util/logger.js";
 import { ArtifactStore } from "./artifact-store.js";
-import { redact } from "./redaction.js";
+import { boundedRedactedDiagnostic } from "./redaction.js";
 import { resolveStateDir } from "./state-dir.js";
 
 const NO_FOLLOW = constants.O_NOFOLLOW ?? 0;
@@ -587,17 +587,7 @@ function cleanupOutcome(record: CleanupRecord): AnchorCleanup {
 }
 
 function boundedQuarantineReason(error: unknown): string {
-  const raw = error instanceof Error ? `${error.name}: ${error.message}` : String(error);
-  const sanitized = redact(raw)
-    .replace(/\\\\[^'"\r\n]*/g, "[path]")
-    .replace(/[A-Za-z]:[\\/][^'"\r\n]*/g, "[path]")
-    .replace(/\\[^'"\r\n]*/g, "[path]")
-    .replace(/\/[^'"\r\n]*/g, "[path]");
-  const bytes = Buffer.from(sanitized, "utf8");
-  if (bytes.byteLength <= MAX_QUARANTINE_REASON_BYTES) return sanitized;
-  let end = MAX_QUARANTINE_REASON_BYTES;
-  while (end > 0 && (bytes[end]! & 0xc0) === 0x80) end -= 1;
-  return bytes.subarray(0, end).toString("utf8");
+  return boundedRedactedDiagnostic(error, MAX_QUARANTINE_REASON_BYTES);
 }
 
 function parseRecoveryQuarantineRecord(line: string): RecoveryQuarantineRecord {
