@@ -13,6 +13,8 @@ import type { AutopilotWorkflowState } from "../../../src/autopilot/types.js";
 import type { PipelineResult } from "../../../src/pipeline/pipeline-runtime.js";
 import type { AutopilotSpec } from "../../../src/protocol/autopilot-spec.js";
 import type { ReviewSnapshot } from "../../../src/runtime/review-snapshot.js";
+import type { HostingAdapter } from "../../../src/ship/hosting-adapter.js";
+import { GitHubCliAdapter } from "../../../src/ship/github-cli-adapter.js";
 
 const REPOSITORY = "/repo";
 const WORKFLOW_ID = "12345678-1234-4123-8123-123456789abc";
@@ -416,6 +418,7 @@ function harness(overrides: {
   now?: () => string;
   sleepError?: Error & { classification?: string };
   lockReleaseError?: Error;
+  hostingAdapter?: HostingAdapter;
 } = {}) {
   const events: string[] = [];
   const operations: string[] = [];
@@ -598,7 +601,7 @@ function harness(overrides: {
     eligibilityEvaluator: { evaluate },
     promoter: { promote },
     finalBranchReviewer: { review: finalReview },
-    hostingAdapter: {
+    hostingAdapter: overrides.hostingAdapter ?? {
       preflight,
       pushBranch,
       ensureDraftPullRequest,
@@ -685,6 +688,9 @@ describe("AutopilotController start-through-shipping", () => {
       checkoutPath: branch.worktreePath,
     }));
     expect(run.spies.pushBranch).toHaveBeenCalledWith(expect.objectContaining({
+      headCommitOid: SECOND_COMMIT,
+    }));
+    expect(run.spies.markReady).toHaveBeenCalledWith(expect.objectContaining({
       headCommitOid: SECOND_COMMIT,
     }));
     expect(run.spies.cleanup).toHaveBeenCalledWith(branch, SECOND_COMMIT);
@@ -1458,6 +1464,142 @@ describe("AutopilotController start-through-shipping", () => {
     expect(run.spies.markReady).not.toHaveBeenCalled();
     expect(run.spies.cleanup).toHaveBeenCalledTimes(1);
   });
+
+  it("uses persisted exact-head proof when waiting-checks reconciliation finds the PR ready", async () => {
+    const run = harness({ pullRequestDraft: false });
+    const state = resumedState("waiting-required-checks");
+    state.ciObservations.push({
+      observedAt: "2026-07-21T12:29:00.000Z",
+      result: "passed",
+      headCommitOid: SECOND_COMMIT,
+      checks: [{ bucket: "pass", name: "test", state: "SUCCESS", link: null }],
+    });
+    run.store.state = state;
+
+    await expect(run.controller.resume(REPOSITORY, WORKFLOW_ID)).resolves.toMatchObject({
+      phase: "ready-for-human-review",
+    });
+    expect(run.spies.requiredChecks).not.toHaveBeenCalled();
+    expect(run.spies.markReady).not.toHaveBeenCalled();
+    expect(run.spies.cleanup).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    ["after gh pr ready", false, 0],
+    ["before gh pr ready", true, 1],
+  ] as const)(
+    "recovers %s with a fresh real GitHub adapter",
+    async (_cutPoint, initialDraft, expectedReadyCalls) => {
+      const commands: Array<{ executable: "gh" | "git"; args: string[] }> = [];
+      let draft = true;
+      const createAdapter = () => {
+        const adapter = new GitHubCliAdapter();
+        Object.defineProperty(adapter, "runner", {
+          value: async (request: { executable: "gh" | "git"; args: string[] }) => {
+            commands.push({ executable: request.executable, args: [...request.args] });
+            const ok = (stdout = "") => ({
+              exitCode: 0,
+              stdout,
+              stderr: "",
+              truncated: { stdout: false, stderr: false },
+            });
+            if (request.args[0] === "version") return ok("gh version 2.96.0\n");
+            if (request.args[0] === "auth") return ok();
+            if (request.args[0] === "repo") {
+              return ok(JSON.stringify({
+                nameWithOwner: "openai/claude-architect",
+                url: "https://github.com/openai/claude-architect",
+              }));
+            }
+            if (request.args[0] === "pr" && request.args[1] === "list") {
+              return ok(JSON.stringify([{
+                number: 42,
+                url: PR_URL,
+                baseRefName: "main",
+                headRefName: branch.branch,
+                headRefOid: SECOND_COMMIT,
+                headRepository: { nameWithOwner: "openai/claude-architect" },
+                isDraft: draft,
+              }]));
+            }
+            if (request.args[0] === "pr" && request.args[1] === "view") {
+              return ok(JSON.stringify({
+                number: 42,
+                url: PR_URL,
+                baseRefName: "main",
+                headRefName: branch.branch,
+                headRefOid: SECOND_COMMIT,
+                headRepository: { nameWithOwner: "openai/claude-architect" },
+                isDraft: draft,
+              }));
+            }
+            if (request.args[0] === "pr" && request.args[1] === "checks") {
+              return ok(JSON.stringify([
+                { bucket: "pass", name: "test", state: "SUCCESS", link: null },
+              ]));
+            }
+            if (request.args[0] === "pr" && request.args[1] === "ready") {
+              draft = false;
+              return ok();
+            }
+            throw new Error(`unexpected command: ${request.executable} ${request.args.join(" ")}`);
+          },
+        });
+        return adapter;
+      };
+      if (!initialDraft) {
+        const preCrashAdapter = createAdapter();
+        await preCrashAdapter.ensureDraftPullRequest({
+          checkoutPath: branch.worktreePath,
+          target: {
+            provider: "github",
+            repository: "openai/claude-architect",
+            canonicalHttpsUrl: "https://github.com/openai/claude-architect.git",
+          },
+          baseBranch: "main",
+          headBranch: branch.branch,
+          headCommitOid: SECOND_COMMIT,
+          title: "Ship reviewed workflow",
+          body: "Crash recovery fixture.",
+        });
+        await preCrashAdapter.markReady({
+          checkoutPath: branch.worktreePath,
+          target: {
+            provider: "github",
+            repository: "openai/claude-architect",
+            canonicalHttpsUrl: "https://github.com/openai/claude-architect.git",
+          },
+          pullRequestNumber: 42,
+          headCommitOid: SECOND_COMMIT,
+        });
+      }
+      const resumeCommandIndex = commands.length;
+      const run = harness({ hostingAdapter: createAdapter() });
+      const state = resumedState("waiting-required-checks");
+      state.phase = "marking-ready";
+      state.ciObservations.push({
+        observedAt: "2026-07-21T12:29:00.000Z",
+        result: "passed",
+        headCommitOid: SECOND_COMMIT,
+        checks: [{ bucket: "pass", name: "test", state: "SUCCESS", link: null }],
+      });
+      run.store.state = state;
+
+      await expect(run.controller.resume(REPOSITORY, WORKFLOW_ID)).resolves.toMatchObject({
+        phase: "ready-for-human-review",
+      });
+
+      expect(commands.slice(resumeCommandIndex)
+        .filter(command => command.args.slice(0, 2).join(" ") === "pr ready"))
+        .toHaveLength(expectedReadyCalls);
+      expect(commands.filter(command => command.args.slice(0, 2).join(" ") === "pr ready"))
+        .toHaveLength(1);
+      expect(commands.some(command => command.args.slice(0, 2).join(" ") === "pr create"))
+        .toBe(false);
+      expect(commands.some(command => command.executable === "git" && command.args.includes("push")))
+        .toBe(false);
+    },
+  );
 
   it("fails closed when incomplete cleanup cannot be reproven", async () => {
     const run = harness({

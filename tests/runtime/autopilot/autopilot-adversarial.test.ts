@@ -306,6 +306,9 @@ interface HarnessOptions {
   duplicatePullRequest?: boolean;
   pushHead?: string;
   afterEligibility?: (runId: string, state: AutopilotWorkflowState) => Promise<void>;
+  afterPromotion?: () => void;
+  afterRequiredChecks?: () => void;
+  pendingRequiredChecks?: boolean;
 }
 
 async function createHarness(options: HarnessOptions = {}) {
@@ -368,10 +371,13 @@ async function createHarness(options: HarnessOptions = {}) {
     },
     requiredChecks: async request => {
       hostingCalls.push({ operation: "checks", request });
+      options.afterRequiredChecks?.();
       return {
-        result: "passed",
+        result: options.pendingRequiredChecks ? "pending" : "passed",
         headCommitOid: options.checkHead ?? request.headCommitOid,
-        checks: [{ bucket: "pass", name: "test", state: "SUCCESS", link: null }],
+        checks: options.pendingRequiredChecks
+          ? [{ bucket: "pending", name: "test", state: "IN_PROGRESS", link: null }]
+          : [{ bucket: "pass", name: "test", state: "SUCCESS", link: null }],
       };
     },
     markReady: async request => {
@@ -432,12 +438,18 @@ async function createHarness(options: HarnessOptions = {}) {
         return eligibility;
       },
     },
-    promoter: new CandidatePromoter({
-      platformServices,
-      branchManager,
-      workflowStore,
-      now: () => NOW,
-    }),
+    promoter: {
+      async promote(request) {
+        const result = await new CandidatePromoter({
+          platformServices,
+          branchManager,
+          workflowStore,
+          now: () => NOW,
+        }).promote(request);
+        options.afterPromotion?.();
+        return result;
+      },
+    },
     finalBranchReviewer: new FinalBranchReviewer({
       platformServices,
       branchManager,
@@ -449,6 +461,7 @@ async function createHarness(options: HarnessOptions = {}) {
     hostingAdapter: new InMemoryHostingAdapter(hosting),
     requiredChecksPollIntervalMs: 100,
     sleep: async () => {},
+    ...(options.abortSignal === undefined ? {} : { abortSignal: options.abortSignal }),
   };
   return {
     controller: new AutopilotController(dependencies),
@@ -722,6 +735,39 @@ describe("autopilot adversarial trust boundaries", () => {
     expect(durable.cleanup).toBeNull();
     await expect(harness.branchManager.load(harness.workflowId)).resolves.not.toBeNull();
     expect(shippingMutations(harness.hostingCalls)).toEqual([]);
+  }, 120_000);
+
+  it("halts durably when cancellation fires after promotion and before push", async () => {
+    const abort = new AbortController();
+    const harness = await createHarness({
+      abortSignal: abort.signal,
+      afterPromotion: () => abort.abort(),
+    });
+
+    await expect(harness.controller.start(harness.fixture.checkout, autopilotSpec()))
+      .rejects.toMatchObject({ classification: "cancelled" });
+    await expect(harness.store.read()).resolves.toMatchObject({
+      phase: "cancelled",
+      terminal: { classification: "cancelled", reason: "cancelled" },
+    });
+    expect(shippingMutations(harness.hostingCalls)).toEqual([]);
+  }, 120_000);
+
+  it("halts during required-check polling before mark-ready", async () => {
+    const abort = new AbortController();
+    const harness = await createHarness({
+      abortSignal: abort.signal,
+      pendingRequiredChecks: true,
+      afterRequiredChecks: () => abort.abort(),
+    });
+
+    await expect(harness.controller.start(harness.fixture.checkout, autopilotSpec()))
+      .rejects.toMatchObject({ classification: "cancelled" });
+    await expect(harness.store.read()).resolves.toMatchObject({
+      phase: "cancelled",
+      terminal: { classification: "cancelled", reason: "cancelled" },
+    });
+    expect(harness.hostingCalls.filter(call => call.operation === "mark-ready")).toEqual([]);
   }, 120_000);
 
   it("bounds oversized producer output and fails closed before shipping", async () => {

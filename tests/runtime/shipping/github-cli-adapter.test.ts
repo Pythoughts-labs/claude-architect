@@ -212,6 +212,38 @@ it("exports only structured adapter operations and sanitized errors", () => {
   expect(GitHubCliAdapter.length).toBe(0);
 });
 
+it("does not spawn commands for pre-aborted adapter requests", async () => {
+  const calls: HostingCommandRequest[] = [];
+  const adapter = fakeAdapter(() => ok(), calls);
+  const abort = new AbortController();
+  abort.abort();
+
+  const operations = [
+    () => adapter.preflight({ checkoutPath: "/source/checkout", signal: abort.signal }),
+    () => adapter.pushBranch({ ...pushRequest(), signal: abort.signal }),
+    () => adapter.ensureDraftPullRequest({ ...draftRequest(), signal: abort.signal }),
+    () => adapter.requiredChecks({
+      checkoutPath: "/source/checkout",
+      target: TARGET,
+      pullRequestNumber: 17,
+      headCommitOid: HEAD,
+      signal: abort.signal,
+    }),
+    () => adapter.markReady({
+      checkoutPath: "/source/checkout",
+      target: TARGET,
+      pullRequestNumber: 17,
+      headCommitOid: HEAD,
+      signal: abort.signal,
+    }),
+  ];
+
+  for (const operation of operations) {
+    await expectClassification(operation(), "cancelled");
+  }
+  expect(calls).toEqual([]);
+});
+
 describe("GitHubCliAdapter preflight", () => {
   it("uses fixed gh argv and returns a canonical credential-free target", async () => {
     const calls: HostingCommandRequest[] = [];
@@ -467,6 +499,18 @@ describe("GitHubCliAdapter pull request lifecycle", () => {
     ]]);
   });
 
+  it("reconciles the one exact already-ready pull request without creating a duplicate", async () => {
+    const calls: HostingCommandRequest[] = [];
+    const adapter = fakeAdapter(request => request.args[1] === "list"
+      ? ok(JSON.stringify([pullRequestJson({ isDraft: false })]))
+      : (() => { throw new Error(`unexpected command: ${commandKey(request)}`); })(), calls);
+
+    await expect(adapter.ensureDraftPullRequest(draftRequest())).resolves.toEqual(
+      pullRequestIdentity({ draft: false }),
+    );
+    expect(calls.map(call => call.args[1])).toEqual(["list"]);
+  });
+
   it.each([
     ["a fork", pullRequestJson({ headRepository: { nameWithOwner: "attacker/project" } }),
       "draft-pull-request-identity-mismatch"],
@@ -682,7 +726,7 @@ describe("GitHubCliAdapter required checks", () => {
         pullRequestJson(),
         pullRequestJson({ headRefOid: OTHER_HEAD }),
       ], calls),
-      "required-checks-identity-mismatch",
+      "required-checks-head-mismatch",
     );
     expect(calls.map(call => call.args[1])).toEqual(["list", "view", "checks", "view"]);
   });
@@ -725,16 +769,30 @@ describe("GitHubCliAdapter required checks", () => {
 });
 
 describe("GitHubCliAdapter mark ready", () => {
-  it("refuses mutation until required checks have passed", async () => {
+  it("refuses mutation when the fresh required-check proof is not passing", async () => {
     const calls: HostingCommandRequest[] = [];
-    const adapter = fakeAdapter(request => request.args[1] === "list"
-      ? ok(JSON.stringify([pullRequestJson()]))
-      : ok(), calls);
+    const adapter = fakeAdapter(request => {
+      if (request.args[1] === "list" || request.args[1] === "view") {
+        return ok(JSON.stringify(request.args[1] === "list"
+          ? [pullRequestJson()]
+          : pullRequestJson()));
+      }
+      if (request.args[1] === "checks") {
+        return {
+          ...ok(checksJson([{
+            bucket: "pending", name: "unit", state: "IN_PROGRESS", link: null,
+          }])),
+          exitCode: 8,
+        };
+      }
+      throw new Error(`unexpected command: ${commandKey(request)}`);
+    }, calls);
     await adapter.ensureDraftPullRequest(draftRequest());
     await expectClassification(adapter.markReady({
       checkoutPath: "/source/checkout",
       target: TARGET,
       pullRequestNumber: 17,
+      headCommitOid: HEAD,
     }), "mark-ready-checks-not-passed");
     expect(calls.some(call => call.args[1] === "ready")).toBe(false);
   });
@@ -761,7 +819,7 @@ describe("GitHubCliAdapter mark ready", () => {
       target: TARGET,
       pullRequestNumber: 17,
       headCommitOid: HEAD,
-    }), "required-checks-identity-mismatch");
+    }), "required-checks-head-mismatch");
     expect(calls.some(call => call.args[1] === "ready")).toBe(false);
   });
 
@@ -796,7 +854,10 @@ describe("GitHubCliAdapter mark ready", () => {
       checkoutPath: "/source/checkout",
       target: TARGET,
       pullRequestNumber: 17,
-    }), "mark-ready-checks-not-passed");
+      headCommitOid: HEAD,
+    }), check.bucket === "pass"
+      ? "required-checks-response-invalid"
+      : "mark-ready-checks-not-passed");
     expect(calls.some(call => call.args[1] === "ready")).toBe(false);
   });
 
@@ -828,6 +889,7 @@ describe("GitHubCliAdapter mark ready", () => {
       checkoutPath: "/source/checkout",
       target: TARGET,
       pullRequestNumber: 17,
+      headCommitOid: HEAD,
     })).resolves.toEqual(pullRequestIdentity({ draft: false }));
     expect(calls.slice(1).map(call => call.args)).toEqual([
       [
@@ -851,12 +913,53 @@ describe("GitHubCliAdapter mark ready", () => {
         "--repo", "example/project",
         "--json", "number,url,baseRefName,headRefName,headRefOid,headRepository,isDraft",
       ],
+      [
+        "pr", "checks", "17",
+        "--repo", "example/project",
+        "--required",
+        "--json", "bucket,name,state,link",
+      ],
+      [
+        "pr", "view", "17",
+        "--repo", "example/project",
+        "--json", "number,url,baseRefName,headRefName,headRefOid,headRepository,isDraft",
+      ],
       ["pr", "ready", "17", "--repo", "example/project"],
       [
         "pr", "view", "17",
         "--repo", "example/project",
         "--json", "number,url,baseRefName,headRefName,headRefOid,headRepository,isDraft",
       ],
+    ]);
+  });
+
+  it("re-proves exact-head checks with a fresh adapter before marking ready", async () => {
+    const calls: HostingCommandRequest[] = [];
+    let ready = false;
+    const adapter = fakeAdapter(request => {
+      if (request.args[1] === "list") return ok(JSON.stringify([pullRequestJson()]));
+      if (request.args[1] === "checks") {
+        return ok(checksJson([{ bucket: "pass", name: "unit", state: "SUCCESS", link: null }]));
+      }
+      if (request.args[1] === "ready") {
+        ready = true;
+        return ok();
+      }
+      if (request.args[1] === "view") {
+        return ok(JSON.stringify(pullRequestJson({ isDraft: !ready })));
+      }
+      throw new Error(`unexpected command: ${commandKey(request)}`);
+    }, calls);
+    await adapter.ensureDraftPullRequest(draftRequest());
+
+    await expect(adapter.markReady({
+      checkoutPath: "/source/checkout",
+      target: TARGET,
+      pullRequestNumber: 17,
+      headCommitOid: HEAD,
+    })).resolves.toEqual(pullRequestIdentity({ draft: false }));
+    expect(calls.map(call => call.args[1])).toEqual([
+      "list", "view", "checks", "view", "ready", "view",
     ]);
   });
 
@@ -883,6 +986,7 @@ describe("GitHubCliAdapter mark ready", () => {
     });
     await adapter.markReady({
       checkoutPath: "/source/checkout", target: TARGET, pullRequestNumber: 17,
+      headCommitOid: HEAD,
     });
 
     await expectClassification(adapter.requiredChecks({
@@ -937,6 +1041,7 @@ describe("InMemoryHostingAdapter", () => {
       checkoutPath: "/source/checkout",
       target: TARGET,
       pullRequestNumber: 17,
+      headCommitOid: HEAD,
     })).resolves.toEqual({ ...identity, draft: false });
   });
 });

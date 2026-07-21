@@ -187,6 +187,7 @@ function markReadyRequest(overrides: Partial<MarkReadyRequest> = {}): MarkReadyR
     checkoutPath: "/source/checkout",
     target: TARGET,
     pullRequestNumber: 17,
+    headCommitOid: HEAD,
     ...overrides,
   };
 }
@@ -336,7 +337,7 @@ async function checksCase(
 
 async function markReadyCase(
   classification: HostingAdapterErrorClassification,
-  failedView: 3 | 4 | undefined,
+  failedView: 3 | undefined,
   failure: HostingCommandResult | Error,
 ): Promise<Scenario> {
   const calls: HostingCommandRequest[] = [];
@@ -355,7 +356,7 @@ async function markReadyCase(
         if (failure instanceof Error) throw failure;
         return failure;
       }
-      return result(JSON.stringify(pullRequestJson({ isDraft: views < 4 })));
+      return result(JSON.stringify(pullRequestJson({ isDraft: views < 3 })));
     }
     if (current === "pr-ready") {
       if (failedView === undefined) {
@@ -367,12 +368,9 @@ async function markReadyCase(
     throw new Error(`unexpected ${current} ${SECRET} ${LEAK_PATH}`);
   }, calls);
   await adapter.ensureDraftPullRequest(draftRequest({ checkoutPath: LEAK_PATH }));
-  await adapter.requiredChecks(checksRequest({ checkoutPath: LEAK_PATH }));
   const expectedStages = failedView === 3
-    ? ["pr-list", "pr-view", "pr-checks", "pr-view", "pr-view"]
-    : failedView === 4
-      ? ["pr-list", "pr-view", "pr-checks", "pr-view", "pr-view", "pr-ready", "pr-view"]
-      : ["pr-list", "pr-view", "pr-checks", "pr-view", "pr-view", "pr-ready"];
+    ? ["pr-list", "pr-view", "pr-checks", "pr-view", "pr-ready", "pr-view"]
+    : ["pr-list", "pr-view", "pr-checks", "pr-view", "pr-ready"];
   return {
     operation: adapter.markReady(markReadyRequest({ checkoutPath: LEAK_PATH })),
     calls,
@@ -381,6 +379,20 @@ async function markReadyCase(
 }
 
 const redCases: RedCase[] = [
+  {
+    classification: "cancelled",
+    create: () => {
+      const calls: HostingCommandRequest[] = [];
+      const adapter = fakeAdapter(() => result(), calls);
+      const abort = new AbortController();
+      abort.abort();
+      return {
+        operation: adapter.preflight({ checkoutPath: LEAK_PATH, signal: abort.signal }),
+        calls,
+        expectedStages: [],
+      };
+    },
+  },
   preflightCase("preflight-gh-unavailable", "version", new Error(`${SECRET} ${LEAK_PATH}`)),
   preflightCase("preflight-gh-version-invalid", "version", result("not a version")),
   preflightCase("preflight-gh-version-unsupported", "version", result("gh version 2.95.9\n")),
@@ -587,12 +599,18 @@ const redCases: RedCase[] = [
     classification: "mark-ready-checks-not-passed",
     create: async () => {
       const calls: HostingCommandRequest[] = [];
-      const adapter = fakeAdapter(request => result(JSON.stringify([pullRequestJson()])), calls);
+      const adapter = fakeAdapter(request => {
+        const current = stage(request);
+        if (current === "pr-list") return result(JSON.stringify([pullRequestJson()]));
+        if (current === "pr-view") return result(JSON.stringify(pullRequestJson()));
+        if (current === "pr-checks") return result("[]", { exitCode: 1 });
+        throw new Error(`unexpected ${current} ${SECRET} ${LEAK_PATH}`);
+      }, calls);
       await adapter.ensureDraftPullRequest(draftRequest({ checkoutPath: LEAK_PATH }));
       return {
         operation: adapter.markReady(markReadyRequest({ checkoutPath: LEAK_PATH })),
         calls,
-        expectedStages: ["pr-list"],
+        expectedStages: ["pr-list", "pr-view", "pr-checks", "pr-view"],
       };
     },
   },
@@ -631,6 +649,7 @@ const redCases: RedCase[] = [
 ];
 
 const allRedClassifications = [
+  "cancelled",
   "preflight-gh-unavailable",
   "preflight-gh-version-invalid",
   "preflight-gh-version-unsupported",

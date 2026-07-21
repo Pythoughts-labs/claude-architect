@@ -132,6 +132,7 @@ export interface AutopilotControllerDependencies {
   hostingAdapter: HostingAdapter;
   requiredChecksPollIntervalMs?: number;
   sleep?: (milliseconds: number) => Promise<void>;
+  abortSignal?: AbortSignal;
   emit?: (event: AutopilotControllerEvent) => void;
 }
 
@@ -433,6 +434,7 @@ export class AutopilotController {
   }
 
   async start(checkoutPath: string, value: unknown): Promise<AutopilotStartResult> {
+    this.throwIfAborted();
     const validated = this.validator(value);
     if (!validated.ok) {
       throw new AutopilotControllerError(
@@ -470,7 +472,12 @@ export class AutopilotController {
       let target: HostingTarget;
       this.dependencies.emit?.("preflight");
       try {
-        target = await this.dependencies.hostingAdapter.preflight({ checkoutPath });
+        target = await this.dependencies.hostingAdapter.preflight({
+          checkoutPath,
+          ...(this.dependencies.abortSignal === undefined
+            ? {}
+            : { signal: this.dependencies.abortSignal }),
+        });
       } catch (error) {
         throw new AutopilotControllerError(
           classificationOf(error, "preflight-failed"),
@@ -529,6 +536,7 @@ export class AutopilotController {
       });
       bootstrapCompleted = true;
       let expectedHead = branch.baseCommitOid;
+      await this.haltIfAborted(store, state);
 
       for (const [index, task] of spec.tasks.entries()) {
         if (state.phase === "preflighting") {
@@ -542,6 +550,7 @@ export class AutopilotController {
           });
         }
 
+        await this.haltIfAborted(store, state);
         this.dependencies.emit?.(`task:${task.id}`);
         const pipelineResult = await this.dependencies.pipelineRunner.run(
           branch.worktreePath,
@@ -557,6 +566,7 @@ export class AutopilotController {
           return await this.halt(store, state, "human-decision-required");
         }
 
+        await this.haltIfAborted(store, state);
         const snapshot = await this.dependencies.reviewSnapshotter.create({
           workflow: state,
           branch,
@@ -571,6 +581,7 @@ export class AutopilotController {
         if (!snapshotMatchesCandidate(expectedHead, pipelineResult, snapshot)) {
           return await this.halt(store, state, "candidate-evidence-mismatch");
         }
+        await this.haltIfAborted(store, state);
         const eligibility = await this.dependencies.eligibilityEvaluator.evaluate({
           workflow: state,
           branch,
@@ -599,6 +610,7 @@ export class AutopilotController {
           },
         });
 
+        await this.haltIfAborted(store, state);
         this.dependencies.emit?.(`promote:${task.id}`);
         const promotion = await this.dependencies.promoter.promote({
           workflowId,
@@ -632,8 +644,10 @@ export class AutopilotController {
             }
           },
         });
+        await this.haltIfAborted(store, state);
       }
 
+      await this.haltIfAborted(store, state);
       this.dependencies.emit?.("final-review");
       const report = await this.dependencies.finalBranchReviewer.review({
         workflowId,
@@ -674,12 +688,16 @@ export class AutopilotController {
         to: "pushing",
         update(draft) { draft.finalGate = finalGateFor(report); },
       });
+      await this.haltIfAborted(store, state);
       this.dependencies.emit?.("push");
       const pushed = await this.dependencies.hostingAdapter.pushBranch({
         checkoutPath: branch.worktreePath,
         target,
         branch: branch.branch,
         headCommitOid: expectedHead,
+        ...(this.dependencies.abortSignal === undefined
+          ? {}
+          : { signal: this.dependencies.abortSignal }),
       }).catch(async error =>
         await this.halt(store, state, classificationOf(error, "push-failed")));
       if (pushed.remoteHead !== expectedHead) {
@@ -690,6 +708,7 @@ export class AutopilotController {
         expectedRevision: state.revision,
         to: "creating-draft-pr",
       });
+      await this.haltIfAborted(store, state);
       this.dependencies.emit?.("draft-pr");
       const pullRequest = await this.dependencies.hostingAdapter.ensureDraftPullRequest({
         checkoutPath: branch.worktreePath,
@@ -699,6 +718,9 @@ export class AutopilotController {
         headCommitOid: expectedHead,
         title: spec.shipping.pullRequestTitle,
         body: spec.shipping.pullRequestBody,
+        ...(this.dependencies.abortSignal === undefined
+          ? {}
+          : { signal: this.dependencies.abortSignal }),
       }).catch(async error =>
         await this.halt(
           store,
@@ -719,6 +741,7 @@ export class AutopilotController {
       });
 
       while (true) {
+        await this.haltIfAborted(store, state);
         const beforePoll = Date.parse(this.now());
         if (!Number.isFinite(beforePoll) || beforePoll >= ciDeadlineMs) {
           return await this.halt(store, state, "required-checks-timeout");
@@ -728,6 +751,9 @@ export class AutopilotController {
           target,
           pullRequestNumber: pullRequest.number,
           headCommitOid: expectedHead,
+          ...(this.dependencies.abortSignal === undefined
+            ? {}
+            : { signal: this.dependencies.abortSignal }),
         }).catch(async error =>
           await this.halt(
             store,
@@ -750,6 +776,7 @@ export class AutopilotController {
             });
           },
         });
+        await this.haltIfAborted(store, state);
         if (!Number.isFinite(observedAtMs) || observedAtMs >= ciDeadlineMs) {
           return await this.halt(store, state, "required-checks-timeout");
         }
@@ -771,11 +798,16 @@ export class AutopilotController {
         expectedRevision: state.revision,
         to: "marking-ready",
       });
+      await this.haltIfAborted(store, state);
       this.dependencies.emit?.("mark-ready");
       const readyPullRequest = await this.dependencies.hostingAdapter.markReady({
         checkoutPath: branch.worktreePath,
         target,
         pullRequestNumber: pullRequest.number,
+        headCommitOid: expectedHead,
+        ...(this.dependencies.abortSignal === undefined
+          ? {}
+          : { signal: this.dependencies.abortSignal }),
       }).catch(async error =>
         await this.halt(store, state, classificationOf(error, "mark-ready-failed")));
       if (!pullRequestMatches(readyPullRequest, target, branch, expectedHead, false)
@@ -788,6 +820,7 @@ export class AutopilotController {
         expectedRevision: state.revision,
         to: "cleaning-up",
       });
+      await this.haltIfAborted(store, state);
       const cleanup = await this.cleanupBranch(store, state, branch, expectedHead);
       pendingCleanup = {
         store,
@@ -898,6 +931,7 @@ export class AutopilotController {
         await this.assertRepositoryIdentity(checkoutPath, workflowId, state);
         if (isTerminal(state)) return state;
         await store.adoptLease();
+        await this.haltIfAborted(store, state);
 
         const recordedWorkflow = recordedWorkflowFrom(await store.readIntentJournal());
         const loadedBranch = await this.dependencies.branchManager.load(workflowId);
@@ -935,7 +969,12 @@ export class AutopilotController {
 
         let target: HostingTarget;
         try {
-          target = await this.dependencies.hostingAdapter.preflight({ checkoutPath });
+          target = await this.dependencies.hostingAdapter.preflight({
+            checkoutPath,
+            ...(this.dependencies.abortSignal === undefined
+              ? {}
+              : { signal: this.dependencies.abortSignal }),
+          });
         } catch (error) {
           throw new AutopilotControllerError(
             classificationOf(error, "preflight-failed"),
@@ -1033,6 +1072,7 @@ export class AutopilotController {
       }
 
       if (state.phase === "running-task") {
+        await this.haltIfAborted(store, state);
         this.dependencies.emit?.(`task:${task.id}`);
         const pipelineResult = await this.dependencies.pipelineRunner.run(
           branch.worktreePath,
@@ -1047,6 +1087,7 @@ export class AutopilotController {
           || pipelineResult.gate.requiresHumanDecision) {
           return await this.halt(store, state, "human-decision-required");
         }
+        await this.haltIfAborted(store, state);
         const snapshot = await this.dependencies.reviewSnapshotter.create({
           workflow: state,
           branch,
@@ -1061,6 +1102,7 @@ export class AutopilotController {
         if (!snapshotMatchesCandidate(expectedHead, pipelineResult, snapshot)) {
           return await this.halt(store, state, "candidate-evidence-mismatch");
         }
+        await this.haltIfAborted(store, state);
         const eligibility = await this.dependencies.eligibilityEvaluator.evaluate({
           workflow: state,
           branch,
@@ -1088,6 +1130,7 @@ export class AutopilotController {
         });
       }
 
+      await this.haltIfAborted(store, state);
       const current = state.tasks[index]!;
       if (current.runId === null
         || current.candidateManifestHash === null
@@ -1123,9 +1166,11 @@ export class AutopilotController {
           if (nextPhase === "running-task") draft.tasks[index + 1]!.status = "running";
         },
       });
+      await this.haltIfAborted(store, state);
     }
 
     if (state.phase === "final-review") {
+      await this.haltIfAborted(store, state);
       this.dependencies.emit?.("final-review");
       const report = await this.dependencies.finalBranchReviewer.review({
         workflowId: state.workflowId,
@@ -1162,12 +1207,16 @@ export class AutopilotController {
     }
 
     if (state.phase === "pushing") {
+      await this.haltIfAborted(store, state);
       this.dependencies.emit?.("push");
       const pushed = await this.dependencies.hostingAdapter.pushBranch({
         checkoutPath: branch.worktreePath,
         target,
         branch: branch.branch,
         headCommitOid: expectedHead,
+        ...(this.dependencies.abortSignal === undefined
+          ? {}
+          : { signal: this.dependencies.abortSignal }),
       }).catch(async error =>
         await this.halt(store, state, classificationOf(error, "push-failed")));
       if (pushed.remoteHead !== expectedHead) {
@@ -1181,6 +1230,7 @@ export class AutopilotController {
 
     let pullRequest: PullRequestIdentity;
     if (state.phase === "creating-draft-pr") {
+      await this.haltIfAborted(store, state);
       this.dependencies.emit?.("draft-pr");
       pullRequest = await this.dependencies.hostingAdapter.ensureDraftPullRequest({
         checkoutPath: branch.worktreePath,
@@ -1190,6 +1240,9 @@ export class AutopilotController {
         headCommitOid: expectedHead,
         title: spec.shipping.pullRequestTitle,
         body: spec.shipping.pullRequestBody,
+        ...(this.dependencies.abortSignal === undefined
+          ? {}
+          : { signal: this.dependencies.abortSignal }),
       }).catch(async error =>
         await this.halt(
           store,
@@ -1236,6 +1289,9 @@ export class AutopilotController {
             headCommitOid: expectedHead,
             title: spec.shipping.pullRequestTitle,
             body: spec.shipping.pullRequestBody,
+            ...(this.dependencies.abortSignal === undefined
+              ? {}
+              : { signal: this.dependencies.abortSignal }),
           })
           .catch(async error =>
             await this.halt(
@@ -1243,19 +1299,20 @@ export class AutopilotController {
               state,
               classificationOf(error, "draft-pull-request-failed"),
             ));
-        const expectedDraft = state.phase === "waiting-required-checks";
         if (!pullRequestIdentityMatches(
           establishedPullRequest,
           target,
           branch,
           expectedHead,
-        ) || (expectedDraft && !establishedPullRequest.draft)
-          || establishedPullRequest.number !== pullRequest.number
+        ) || establishedPullRequest.number !== pullRequest.number
           || establishedPullRequest.url !== pullRequest.url) {
           return await this.halt(store, state, "draft-pull-request-identity-mismatch");
         }
         pullRequest = establishedPullRequest;
-        if (state.phase === "marking-ready" && !pullRequest.draft) {
+        if (!pullRequest.draft) {
+          if (!stateHasPassingChecks(state)) {
+            return await this.halt(store, state, "required-checks-proof-missing");
+          }
           state = await store.transition({
             expectedRevision: state.revision,
             to: "cleaning-up",
@@ -1270,6 +1327,7 @@ export class AutopilotController {
         return await this.halt(store, state, "required-checks-timeout");
       }
       while (true) {
+        await this.haltIfAborted(store, state);
         const beforePoll = Date.parse(this.now());
         if (!Number.isFinite(beforePoll) || beforePoll >= deadlineMs) {
           return await this.halt(store, state, "required-checks-timeout");
@@ -1279,6 +1337,9 @@ export class AutopilotController {
           target,
           pullRequestNumber: pullRequest.number,
           headCommitOid: expectedHead,
+          ...(this.dependencies.abortSignal === undefined
+            ? {}
+            : { signal: this.dependencies.abortSignal }),
         }).catch(async error =>
           await this.halt(store, state, classificationOf(error, "required-checks-failed")));
         this.dependencies.emit?.(`checks:${observation.result === "passed"
@@ -1297,6 +1358,7 @@ export class AutopilotController {
             });
           },
         });
+        await this.haltIfAborted(store, state);
         if (!Number.isFinite(observedAtMs) || observedAtMs >= deadlineMs) {
           return await this.halt(store, state, "required-checks-timeout");
         }
@@ -1320,11 +1382,16 @@ export class AutopilotController {
     }
 
     if (state.phase === "marking-ready") {
+      await this.haltIfAborted(store, state);
       this.dependencies.emit?.("mark-ready");
       const readyPullRequest = await this.dependencies.hostingAdapter.markReady({
         checkoutPath: branch.worktreePath,
         target,
         pullRequestNumber: pullRequest.number,
+        headCommitOid: expectedHead,
+        ...(this.dependencies.abortSignal === undefined
+          ? {}
+          : { signal: this.dependencies.abortSignal }),
       }).catch(async error =>
         await this.halt(store, state, classificationOf(error, "mark-ready-failed")));
       if (!pullRequestMatches(readyPullRequest, target, branch, expectedHead, false)
@@ -1344,6 +1411,7 @@ export class AutopilotController {
         "workflow phase cannot be safely resumed",
       );
     }
+    await this.haltIfAborted(store, state);
     const cleanup = await this.cleanupBranch(
       store,
       state,
@@ -1390,6 +1458,21 @@ export class AutopilotController {
       });
     }
     return cleanup;
+  }
+
+  private throwIfAborted(): void {
+    if (this.dependencies.abortSignal?.aborted) {
+      throw new AutopilotControllerError("cancelled");
+    }
+  }
+
+  private async haltIfAborted(
+    store: WorkflowStorePort,
+    state: AutopilotWorkflowState,
+  ): Promise<void> {
+    if (this.dependencies.abortSignal?.aborted) {
+      await this.halt(store, state, "cancelled");
+    }
   }
 
   private async halt(

@@ -27,6 +27,7 @@ const CREDENTIAL_HELPER_ARGS = [
 ] as const;
 
 export type HostingAdapterErrorClassification =
+  | "cancelled"
   | "preflight-gh-unavailable"
   | "preflight-gh-version-invalid"
   | "preflight-gh-version-unsupported"
@@ -119,6 +120,14 @@ export interface InMemoryHostingOperations {
 
 function fail(classification: HostingAdapterErrorClassification): never {
   throw new HostingAdapterError(classification);
+}
+
+function failCommand(
+  error: unknown,
+  classification: HostingAdapterErrorClassification,
+): never {
+  if (error instanceof HostingAdapterError && error.classification === "cancelled") throw error;
+  fail(classification);
 }
 
 function cleanExit(result: HostingCommandResult): boolean {
@@ -536,7 +545,9 @@ export class GitHubCliAdapter implements HostingAdapter {
     args: string[],
     cwd: string,
     env: Record<string, string>,
+    signal?: AbortSignal,
   ): Promise<HostingCommandResult> {
+    if (signal?.aborted) fail("cancelled");
     return this.runner({
       executable,
       args,
@@ -553,12 +564,15 @@ export class GitHubCliAdapter implements HostingAdapter {
         && canonicalRepository(request.expectedRepository) === null)) {
       fail("preflight-repository-identity-mismatch");
     }
+    if (request.signal?.aborted) fail("cancelled");
 
     let version: HostingCommandResult;
     try {
-      version = await this.run("gh", ["version"], request.checkoutPath, commandEnvironment());
-    } catch {
-      fail("preflight-gh-unavailable");
+      version = await this.run(
+        "gh", ["version"], request.checkoutPath, commandEnvironment(), request.signal,
+      );
+    } catch (error) {
+      failCommand(error, "preflight-gh-unavailable");
     }
     if (!cleanExit(version)) fail("preflight-gh-unavailable");
     const parsedVersion = parseVersion(version.stdout);
@@ -574,9 +588,10 @@ export class GitHubCliAdapter implements HostingAdapter {
         ["auth", "status", "--hostname", "github.com"],
         request.checkoutPath,
         commandEnvironment(),
+        request.signal,
       );
-    } catch {
-      fail("preflight-auth-failed");
+    } catch (error) {
+      failCommand(error, "preflight-auth-failed");
     }
     if (!cleanExit(auth)) fail("preflight-auth-failed");
 
@@ -587,9 +602,10 @@ export class GitHubCliAdapter implements HostingAdapter {
         ["repo", "view", "--json", "nameWithOwner,url"],
         request.checkoutPath,
         commandEnvironment(),
+        request.signal,
       );
-    } catch {
-      fail("preflight-repository-query-failed");
+    } catch (error) {
+      failCommand(error, "preflight-repository-query-failed");
     }
     if (!cleanExit(repositoryView)) fail("preflight-repository-query-failed");
 
@@ -631,6 +647,7 @@ export class GitHubCliAdapter implements HostingAdapter {
       || !validTarget(request.target)
       || !validBranch(request.branch)
       || !OID.test(request.headCommitOid)) fail("push-request-invalid");
+    if (request.signal?.aborted) fail("cancelled");
 
     let quarantine: string | undefined;
     try {
@@ -668,6 +685,7 @@ export class GitHubCliAdapter implements HostingAdapter {
         ],
         quarantine,
         environment,
+        request.signal,
       );
       if (!cleanExit(result)) fail("push-quarantine-init-failed");
 
@@ -676,6 +694,7 @@ export class GitHubCliAdapter implements HostingAdapter {
         ["bundle", "create", bundlePath, branchRef],
         request.checkoutPath,
         environment,
+        request.signal,
       );
       if (!cleanExit(result)) fail("push-bundle-create-failed");
 
@@ -684,6 +703,7 @@ export class GitHubCliAdapter implements HostingAdapter {
         ["bundle", "unbundle", bundlePath],
         quarantine,
         environment,
+        request.signal,
       );
       if (!cleanExit(result)) fail("push-bundle-import-failed");
       if (parseBundledHead(result.stdout, branchRef) !== request.headCommitOid) {
@@ -695,6 +715,7 @@ export class GitHubCliAdapter implements HostingAdapter {
         ["rev-parse", "--verify", `${request.headCommitOid}^{commit}`],
         quarantine,
         environment,
+        request.signal,
       );
       if (!cleanExit(result) || result.stdout.trim() !== request.headCommitOid) {
         fail("push-imported-oid-mismatch");
@@ -705,6 +726,7 @@ export class GitHubCliAdapter implements HostingAdapter {
         ["update-ref", branchRef, request.headCommitOid, "0".repeat(request.headCommitOid.length)],
         quarantine,
         environment,
+        request.signal,
       );
       if (!cleanExit(result)) fail("push-imported-oid-mismatch");
 
@@ -713,6 +735,7 @@ export class GitHubCliAdapter implements HostingAdapter {
         [...CREDENTIAL_HELPER_ARGS, "ls-remote", "--heads", request.target.canonicalHttpsUrl, branchRef],
         quarantine,
         remoteEnvironment,
+        request.signal,
       );
       if (!cleanExit(result)) fail("push-remote-precheck-failed");
       const remoteHead = parseRemoteHead(result.stdout, branchRef);
@@ -733,6 +756,7 @@ export class GitHubCliAdapter implements HostingAdapter {
           ],
           quarantine,
           remoteEnvironment,
+          request.signal,
         );
         if (!cleanExit(result)) fail("push-command-failed");
         outcome = { remoteHead: request.headCommitOid };
@@ -763,6 +787,7 @@ export class GitHubCliAdapter implements HostingAdapter {
       || !validPullRequestText(request.title, request.body)) {
       fail("draft-pull-request-request-invalid");
     }
+    if (request.signal?.aborted) fail("cancelled");
 
     let listed: HostingCommandResult;
     try {
@@ -778,9 +803,10 @@ export class GitHubCliAdapter implements HostingAdapter {
         ],
         request.checkoutPath,
         commandEnvironment(),
+        request.signal,
       );
-    } catch {
-      fail("draft-pull-request-list-failed");
+    } catch (error) {
+      failCommand(error, "draft-pull-request-list-failed");
     }
     if (!cleanExit(listed) || !boundedOutput(listed)) {
       fail("draft-pull-request-list-failed");
@@ -795,8 +821,9 @@ export class GitHubCliAdapter implements HostingAdapter {
     if (identities.length === 1) {
       const identity = identities[0]!;
       if (identity.baseBranch !== request.baseBranch
-        || identity.headBranch !== request.headBranch
-        || !identity.draft) fail("draft-pull-request-identity-mismatch");
+        || identity.headBranch !== request.headBranch) {
+        fail("draft-pull-request-identity-mismatch");
+      }
       if (identity.headCommitOid !== request.headCommitOid) {
         fail("draft-pull-request-head-mismatch");
       }
@@ -821,9 +848,10 @@ export class GitHubCliAdapter implements HostingAdapter {
         ],
         request.checkoutPath,
         commandEnvironment(),
+        request.signal,
       );
-    } catch {
-      fail("draft-pull-request-create-failed");
+    } catch (error) {
+      failCommand(error, "draft-pull-request-create-failed");
     }
     if (!cleanExit(created) || !boundedOutput(created)) {
       fail("draft-pull-request-create-failed");
@@ -840,6 +868,7 @@ export class GitHubCliAdapter implements HostingAdapter {
       createdNumber,
       "draft-pull-request-create-failed",
       "draft-pull-request-response-invalid",
+      request.signal,
     );
     if (identity.baseBranch !== request.baseBranch
       || identity.headBranch !== request.headBranch
@@ -858,6 +887,7 @@ export class GitHubCliAdapter implements HostingAdapter {
       || !OID.test(request.headCommitOid)) {
       fail("required-checks-request-invalid");
     }
+    if (request.signal?.aborted) fail("cancelled");
     const key = pullRequestKey(request.target.repository, request.pullRequestNumber);
     const expected = this.pullRequests.get(key);
     if (expected === undefined) fail("required-checks-identity-not-established");
@@ -869,6 +899,7 @@ export class GitHubCliAdapter implements HostingAdapter {
       request.pullRequestNumber,
       "required-checks-identity-query-failed",
       "required-checks-identity-response-invalid",
+      request.signal,
     ).catch(error => {
       this.checksPassed.delete(key);
       throw error;
@@ -894,9 +925,10 @@ export class GitHubCliAdapter implements HostingAdapter {
         ],
         request.checkoutPath,
         commandEnvironment(),
+        request.signal,
       );
-    } catch {
-      fail("required-checks-command-failed");
+    } catch (error) {
+      failCommand(error, "required-checks-command-failed");
     }
     if (!boundedOutput(result) || ![0, 1, 8].includes(result.exitCode ?? -1)) {
       fail("required-checks-command-failed");
@@ -908,7 +940,12 @@ export class GitHubCliAdapter implements HostingAdapter {
       request.pullRequestNumber,
       "required-checks-identity-query-failed",
       "required-checks-identity-response-invalid",
+      request.signal,
     );
+    if (after.headCommitOid !== request.headCommitOid) {
+      this.checksPassed.delete(key);
+      fail("required-checks-head-mismatch");
+    }
     if (!samePullRequestIdentity(after, before)) {
       this.checksPassed.delete(key);
       fail("required-checks-identity-mismatch");
@@ -939,24 +976,26 @@ export class GitHubCliAdapter implements HostingAdapter {
   async markReady(request: MarkReadyRequest): Promise<PullRequestIdentity> {
     if (!validCheckoutPath(request.checkoutPath)
       || !validTarget(request.target)
-      || !validPullRequestNumber(request.pullRequestNumber)) {
+      || !validPullRequestNumber(request.pullRequestNumber)
+      || !OID.test(request.headCommitOid)) {
       fail("mark-ready-request-invalid");
     }
+    if (request.signal?.aborted) fail("cancelled");
     const key = pullRequestKey(request.target.repository, request.pullRequestNumber);
     const expected = this.pullRequests.get(key);
     if (expected === undefined) fail("mark-ready-identity-not-established");
-    if (!this.checksPassed.has(key)) fail("mark-ready-checks-not-passed");
-
-    const live = await this.viewPullRequest(
-      request.checkoutPath,
-      request.target,
-      request.pullRequestNumber,
-      "mark-ready-identity-query-failed",
-      "mark-ready-identity-response-invalid",
-    );
-    if (!samePullRequestIdentity(live, expected)) {
-      this.checksPassed.delete(key);
-      fail("mark-ready-identity-mismatch");
+    const checks = await this.requiredChecks({
+      checkoutPath: request.checkoutPath,
+      target: request.target,
+      pullRequestNumber: request.pullRequestNumber,
+      headCommitOid: request.headCommitOid,
+      ...(request.signal === undefined ? {} : { signal: request.signal }),
+    });
+    if (checks.result !== "passed"
+      || checks.headCommitOid !== request.headCommitOid
+      || checks.checks.length === 0
+      || checks.checks.some(check => check.bucket !== "pass")) {
+      fail("mark-ready-checks-not-passed");
     }
 
     let ready: HostingCommandResult;
@@ -969,9 +1008,10 @@ export class GitHubCliAdapter implements HostingAdapter {
         ],
         request.checkoutPath,
         commandEnvironment(),
+        request.signal,
       );
-    } catch {
-      fail("mark-ready-command-failed");
+    } catch (error) {
+      failCommand(error, "mark-ready-command-failed");
     }
     if (!cleanExit(ready) || !boundedOutput(ready)) fail("mark-ready-command-failed");
 
@@ -981,6 +1021,7 @@ export class GitHubCliAdapter implements HostingAdapter {
       request.pullRequestNumber,
       "mark-ready-identity-query-failed",
       "mark-ready-identity-response-invalid",
+      request.signal,
     );
     const readyExpected = { ...expected, draft: false };
     if (!samePullRequestIdentity(updated, readyExpected)) {
@@ -998,6 +1039,7 @@ export class GitHubCliAdapter implements HostingAdapter {
     number: number,
     queryFailure: HostingAdapterErrorClassification,
     responseFailure: HostingAdapterErrorClassification,
+    signal?: AbortSignal,
   ): Promise<PullRequestIdentity> {
     let viewed: HostingCommandResult;
     try {
@@ -1010,9 +1052,10 @@ export class GitHubCliAdapter implements HostingAdapter {
         ],
         checkoutPath,
         commandEnvironment(),
+        signal,
       );
-    } catch {
-      fail(queryFailure);
+    } catch (error) {
+      failCommand(error, queryFailure);
     }
     if (!cleanExit(viewed) || !boundedOutput(viewed)) fail(queryFailure);
     const identity = parsePullRequestIdentity(parseJson(viewed.stdout), target);

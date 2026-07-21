@@ -33513,6 +33513,7 @@ var AutopilotController = class {
   pollIntervalMs;
   sleep;
   async start(checkoutPath, value) {
+    this.throwIfAborted();
     const validated = this.validator(value);
     if (!validated.ok) {
       throw new AutopilotControllerError(
@@ -33546,7 +33547,10 @@ var AutopilotController = class {
           let target;
           this.dependencies.emit?.("preflight");
           try {
-            target = await this.dependencies.hostingAdapter.preflight({ checkoutPath });
+            target = await this.dependencies.hostingAdapter.preflight({
+              checkoutPath,
+              ...this.dependencies.abortSignal === void 0 ? {} : { signal: this.dependencies.abortSignal }
+            });
           } catch (error2) {
             throw new AutopilotControllerError(
               classificationOf(error2, "preflight-failed"),
@@ -33602,6 +33606,7 @@ var AutopilotController = class {
           });
           bootstrapCompleted = true;
           let expectedHead2 = branch.baseCommitOid;
+          await this.haltIfAborted(store, state);
           for (const [index, task] of spec.tasks.entries()) {
             if (state.phase === "preflighting") {
               state = await store.transition({
@@ -33613,6 +33618,7 @@ var AutopilotController = class {
                 }
               });
             }
+            await this.haltIfAborted(store, state);
             this.dependencies.emit?.(`task:${task.id}`);
             const pipelineResult = await this.dependencies.pipelineRunner.run(
               branch.worktreePath,
@@ -33628,6 +33634,7 @@ var AutopilotController = class {
             if (pipelineResult.status === "human-decision-required" || pipelineResult.gate.requiresHumanDecision) {
               return await this.halt(store, state, "human-decision-required");
             }
+            await this.haltIfAborted(store, state);
             const snapshot = await this.dependencies.reviewSnapshotter.create({
               workflow: state,
               branch,
@@ -33641,6 +33648,7 @@ var AutopilotController = class {
             if (!snapshotMatchesCandidate(expectedHead2, pipelineResult, snapshot)) {
               return await this.halt(store, state, "candidate-evidence-mismatch");
             }
+            await this.haltIfAborted(store, state);
             const eligibility = await this.dependencies.eligibilityEvaluator.evaluate({
               workflow: state,
               branch,
@@ -33666,6 +33674,7 @@ var AutopilotController = class {
                 current.eligibilityHash = eligibilityHash;
               }
             });
+            await this.haltIfAborted(store, state);
             this.dependencies.emit?.(`promote:${task.id}`);
             const promotion = await this.dependencies.promoter.promote({
               workflowId,
@@ -33697,7 +33706,9 @@ var AutopilotController = class {
                 }
               }
             });
+            await this.haltIfAborted(store, state);
           }
+          await this.haltIfAborted(store, state);
           this.dependencies.emit?.("final-review");
           const report = await this.dependencies.finalBranchReviewer.review({
             workflowId,
@@ -33736,12 +33747,14 @@ var AutopilotController = class {
               draft.finalGate = finalGateFor(report);
             }
           });
+          await this.haltIfAborted(store, state);
           this.dependencies.emit?.("push");
           const pushed = await this.dependencies.hostingAdapter.pushBranch({
             checkoutPath: branch.worktreePath,
             target,
             branch: branch.branch,
-            headCommitOid: expectedHead2
+            headCommitOid: expectedHead2,
+            ...this.dependencies.abortSignal === void 0 ? {} : { signal: this.dependencies.abortSignal }
           }).catch(async (error2) => await this.halt(store, state, classificationOf(error2, "push-failed")));
           if (pushed.remoteHead !== expectedHead2) {
             return await this.halt(store, state, "push-head-mismatch");
@@ -33750,6 +33763,7 @@ var AutopilotController = class {
             expectedRevision: state.revision,
             to: "creating-draft-pr"
           });
+          await this.haltIfAborted(store, state);
           this.dependencies.emit?.("draft-pr");
           const pullRequest = await this.dependencies.hostingAdapter.ensureDraftPullRequest({
             checkoutPath: branch.worktreePath,
@@ -33758,7 +33772,8 @@ var AutopilotController = class {
             headBranch: branch.branch,
             headCommitOid: expectedHead2,
             title: spec.shipping.pullRequestTitle,
-            body: spec.shipping.pullRequestBody
+            body: spec.shipping.pullRequestBody,
+            ...this.dependencies.abortSignal === void 0 ? {} : { signal: this.dependencies.abortSignal }
           }).catch(async (error2) => await this.halt(
             store,
             state,
@@ -33776,6 +33791,7 @@ var AutopilotController = class {
             }
           });
           while (true) {
+            await this.haltIfAborted(store, state);
             const beforePoll = Date.parse(this.now());
             if (!Number.isFinite(beforePoll) || beforePoll >= ciDeadlineMs) {
               return await this.halt(store, state, "required-checks-timeout");
@@ -33784,7 +33800,8 @@ var AutopilotController = class {
               checkoutPath: branch.worktreePath,
               target,
               pullRequestNumber: pullRequest.number,
-              headCommitOid: expectedHead2
+              headCommitOid: expectedHead2,
+              ...this.dependencies.abortSignal === void 0 ? {} : { signal: this.dependencies.abortSignal }
             }).catch(async (error2) => await this.halt(
               store,
               state,
@@ -33804,6 +33821,7 @@ var AutopilotController = class {
                 });
               }
             });
+            await this.haltIfAborted(store, state);
             if (!Number.isFinite(observedAtMs) || observedAtMs >= ciDeadlineMs) {
               return await this.halt(store, state, "required-checks-timeout");
             }
@@ -33821,11 +33839,14 @@ var AutopilotController = class {
             expectedRevision: state.revision,
             to: "marking-ready"
           });
+          await this.haltIfAborted(store, state);
           this.dependencies.emit?.("mark-ready");
           const readyPullRequest = await this.dependencies.hostingAdapter.markReady({
             checkoutPath: branch.worktreePath,
             target,
-            pullRequestNumber: pullRequest.number
+            pullRequestNumber: pullRequest.number,
+            headCommitOid: expectedHead2,
+            ...this.dependencies.abortSignal === void 0 ? {} : { signal: this.dependencies.abortSignal }
           }).catch(async (error2) => await this.halt(store, state, classificationOf(error2, "mark-ready-failed")));
           if (!pullRequestMatches(readyPullRequest, target, branch, expectedHead2, false) || readyPullRequest.number !== pullRequest.number || readyPullRequest.url !== pullRequest.url) {
             return await this.halt(store, state, "mark-ready-identity-mismatch");
@@ -33834,6 +33855,7 @@ var AutopilotController = class {
             expectedRevision: state.revision,
             to: "cleaning-up"
           });
+          await this.haltIfAborted(store, state);
           const cleanup = await this.cleanupBranch(store, state, branch, expectedHead2);
           pendingCleanup = {
             store,
@@ -33930,6 +33952,7 @@ var AutopilotController = class {
         await this.assertRepositoryIdentity(checkoutPath, workflowId, state);
         if (isTerminal2(state)) return state;
         await store.adoptLease();
+        await this.haltIfAborted(store, state);
         const recordedWorkflow = recordedWorkflowFrom(await store.readIntentJournal());
         const loadedBranch = await this.dependencies.branchManager.load(workflowId);
         const branch = loadedBranch ?? (state.phase === "cleaning-up" ? recordedWorkflow.branch : null);
@@ -33961,7 +33984,10 @@ var AutopilotController = class {
         }
         let target;
         try {
-          target = await this.dependencies.hostingAdapter.preflight({ checkoutPath });
+          target = await this.dependencies.hostingAdapter.preflight({
+            checkoutPath,
+            ...this.dependencies.abortSignal === void 0 ? {} : { signal: this.dependencies.abortSignal }
+          });
         } catch (error2) {
           throw new AutopilotControllerError(
             classificationOf(error2, "preflight-failed"),
@@ -34041,6 +34067,7 @@ var AutopilotController = class {
         });
       }
       if (state.phase === "running-task") {
+        await this.haltIfAborted(store, state);
         this.dependencies.emit?.(`task:${task.id}`);
         const pipelineResult = await this.dependencies.pipelineRunner.run(
           branch.worktreePath,
@@ -34056,6 +34083,7 @@ var AutopilotController = class {
         if (pipelineResult.status === "human-decision-required" || pipelineResult.gate.requiresHumanDecision) {
           return await this.halt(store, state, "human-decision-required");
         }
+        await this.haltIfAborted(store, state);
         const snapshot = await this.dependencies.reviewSnapshotter.create({
           workflow: state,
           branch,
@@ -34069,6 +34097,7 @@ var AutopilotController = class {
         if (!snapshotMatchesCandidate(expectedHead2, pipelineResult, snapshot)) {
           return await this.halt(store, state, "candidate-evidence-mismatch");
         }
+        await this.haltIfAborted(store, state);
         const eligibility = await this.dependencies.eligibilityEvaluator.evaluate({
           workflow: state,
           branch,
@@ -34094,6 +34123,7 @@ var AutopilotController = class {
           }
         });
       }
+      await this.haltIfAborted(store, state);
       const current = state.tasks[index];
       if (current.runId === null || current.candidateManifestHash === null || current.eligibilityHash === null) {
         throw new AutopilotControllerError(
@@ -34126,8 +34156,10 @@ var AutopilotController = class {
           if (nextPhase === "running-task") draft.tasks[index + 1].status = "running";
         }
       });
+      await this.haltIfAborted(store, state);
     }
     if (state.phase === "final-review") {
+      await this.haltIfAborted(store, state);
       this.dependencies.emit?.("final-review");
       const report = await this.dependencies.finalBranchReviewer.review({
         workflowId: state.workflowId,
@@ -34164,12 +34196,14 @@ var AutopilotController = class {
       });
     }
     if (state.phase === "pushing") {
+      await this.haltIfAborted(store, state);
       this.dependencies.emit?.("push");
       const pushed = await this.dependencies.hostingAdapter.pushBranch({
         checkoutPath: branch.worktreePath,
         target,
         branch: branch.branch,
-        headCommitOid: expectedHead2
+        headCommitOid: expectedHead2,
+        ...this.dependencies.abortSignal === void 0 ? {} : { signal: this.dependencies.abortSignal }
       }).catch(async (error2) => await this.halt(store, state, classificationOf(error2, "push-failed")));
       if (pushed.remoteHead !== expectedHead2) {
         return await this.halt(store, state, "push-head-mismatch");
@@ -34181,6 +34215,7 @@ var AutopilotController = class {
     }
     let pullRequest;
     if (state.phase === "creating-draft-pr") {
+      await this.haltIfAborted(store, state);
       this.dependencies.emit?.("draft-pr");
       pullRequest = await this.dependencies.hostingAdapter.ensureDraftPullRequest({
         checkoutPath: branch.worktreePath,
@@ -34189,7 +34224,8 @@ var AutopilotController = class {
         headBranch: branch.branch,
         headCommitOid: expectedHead2,
         title: spec.shipping.pullRequestTitle,
-        body: spec.shipping.pullRequestBody
+        body: spec.shipping.pullRequestBody,
+        ...this.dependencies.abortSignal === void 0 ? {} : { signal: this.dependencies.abortSignal }
       }).catch(async (error2) => await this.halt(
         store,
         state,
@@ -34233,23 +34269,26 @@ var AutopilotController = class {
           headBranch: branch.branch,
           headCommitOid: expectedHead2,
           title: spec.shipping.pullRequestTitle,
-          body: spec.shipping.pullRequestBody
+          body: spec.shipping.pullRequestBody,
+          ...this.dependencies.abortSignal === void 0 ? {} : { signal: this.dependencies.abortSignal }
         }).catch(async (error2) => await this.halt(
           store,
           state,
           classificationOf(error2, "draft-pull-request-failed")
         ));
-        const expectedDraft = state.phase === "waiting-required-checks";
         if (!pullRequestIdentityMatches(
           establishedPullRequest,
           target,
           branch,
           expectedHead2
-        ) || expectedDraft && !establishedPullRequest.draft || establishedPullRequest.number !== pullRequest.number || establishedPullRequest.url !== pullRequest.url) {
+        ) || establishedPullRequest.number !== pullRequest.number || establishedPullRequest.url !== pullRequest.url) {
           return await this.halt(store, state, "draft-pull-request-identity-mismatch");
         }
         pullRequest = establishedPullRequest;
-        if (state.phase === "marking-ready" && !pullRequest.draft) {
+        if (!pullRequest.draft) {
+          if (!stateHasPassingChecks(state)) {
+            return await this.halt(store, state, "required-checks-proof-missing");
+          }
           state = await store.transition({
             expectedRevision: state.revision,
             to: "cleaning-up"
@@ -34263,6 +34302,7 @@ var AutopilotController = class {
         return await this.halt(store, state, "required-checks-timeout");
       }
       while (true) {
+        await this.haltIfAborted(store, state);
         const beforePoll = Date.parse(this.now());
         if (!Number.isFinite(beforePoll) || beforePoll >= deadlineMs) {
           return await this.halt(store, state, "required-checks-timeout");
@@ -34271,7 +34311,8 @@ var AutopilotController = class {
           checkoutPath: branch.worktreePath,
           target,
           pullRequestNumber: pullRequest.number,
-          headCommitOid: expectedHead2
+          headCommitOid: expectedHead2,
+          ...this.dependencies.abortSignal === void 0 ? {} : { signal: this.dependencies.abortSignal }
         }).catch(async (error2) => await this.halt(store, state, classificationOf(error2, "required-checks-failed")));
         this.dependencies.emit?.(`checks:${observation.result === "passed" ? "pass" : observation.result === "failed" ? "red" : observation.result}`);
         const observedAt = this.now();
@@ -34287,6 +34328,7 @@ var AutopilotController = class {
             });
           }
         });
+        await this.haltIfAborted(store, state);
         if (!Number.isFinite(observedAtMs) || observedAtMs >= deadlineMs) {
           return await this.halt(store, state, "required-checks-timeout");
         }
@@ -34306,11 +34348,14 @@ var AutopilotController = class {
       });
     }
     if (state.phase === "marking-ready") {
+      await this.haltIfAborted(store, state);
       this.dependencies.emit?.("mark-ready");
       const readyPullRequest = await this.dependencies.hostingAdapter.markReady({
         checkoutPath: branch.worktreePath,
         target,
-        pullRequestNumber: pullRequest.number
+        pullRequestNumber: pullRequest.number,
+        headCommitOid: expectedHead2,
+        ...this.dependencies.abortSignal === void 0 ? {} : { signal: this.dependencies.abortSignal }
       }).catch(async (error2) => await this.halt(store, state, classificationOf(error2, "mark-ready-failed")));
       if (!pullRequestMatches(readyPullRequest, target, branch, expectedHead2, false) || readyPullRequest.number !== pullRequest.number || readyPullRequest.url !== pullRequest.url) {
         return await this.halt(store, state, "mark-ready-identity-mismatch");
@@ -34326,6 +34371,7 @@ var AutopilotController = class {
         "workflow phase cannot be safely resumed"
       );
     }
+    await this.haltIfAborted(store, state);
     const cleanup = await this.cleanupBranch(
       store,
       state,
@@ -34361,6 +34407,16 @@ var AutopilotController = class {
       });
     }
     return cleanup;
+  }
+  throwIfAborted() {
+    if (this.dependencies.abortSignal?.aborted) {
+      throw new AutopilotControllerError("cancelled");
+    }
+  }
+  async haltIfAborted(store, state) {
+    if (this.dependencies.abortSignal?.aborted) {
+      await this.halt(store, state, "cancelled");
+    }
   }
   async halt(store, state, classification, update) {
     const phase = terminalPhase(classification);
@@ -38393,6 +38449,10 @@ var HostingAdapterError = class extends Error {
 function fail3(classification) {
   throw new HostingAdapterError(classification);
 }
+function failCommand(error2, classification) {
+  if (error2 instanceof HostingAdapterError && error2.classification === "cancelled") throw error2;
+  fail3(classification);
+}
 function cleanExit(result) {
   return result.exitCode === 0 && result.timedOut !== true && result.cancelled !== true && result.spawnError === void 0 && result.truncated?.stdout !== true && result.truncated?.stderr !== true;
 }
@@ -38664,7 +38724,8 @@ var GitHubCliAdapter = class {
     this.platformServices = getPlatformServices();
     this.runner = createHostingCommandRunner(this.platformServices);
   }
-  run(executable, args, cwd, env) {
+  run(executable, args, cwd, env, signal) {
+    if (signal?.aborted) fail3("cancelled");
     return this.runner({
       executable,
       args,
@@ -38678,11 +38739,18 @@ var GitHubCliAdapter = class {
     if (!validCheckoutPath(request.checkoutPath) || request.expectedRepository !== void 0 && canonicalRepository(request.expectedRepository) === null) {
       fail3("preflight-repository-identity-mismatch");
     }
+    if (request.signal?.aborted) fail3("cancelled");
     let version2;
     try {
-      version2 = await this.run("gh", ["version"], request.checkoutPath, commandEnvironment2());
-    } catch {
-      fail3("preflight-gh-unavailable");
+      version2 = await this.run(
+        "gh",
+        ["version"],
+        request.checkoutPath,
+        commandEnvironment2(),
+        request.signal
+      );
+    } catch (error2) {
+      failCommand(error2, "preflight-gh-unavailable");
     }
     if (!cleanExit(version2)) fail3("preflight-gh-unavailable");
     const parsedVersion = parseVersion5(version2.stdout);
@@ -38696,10 +38764,11 @@ var GitHubCliAdapter = class {
         "gh",
         ["auth", "status", "--hostname", "github.com"],
         request.checkoutPath,
-        commandEnvironment2()
+        commandEnvironment2(),
+        request.signal
       );
-    } catch {
-      fail3("preflight-auth-failed");
+    } catch (error2) {
+      failCommand(error2, "preflight-auth-failed");
     }
     if (!cleanExit(auth)) fail3("preflight-auth-failed");
     let repositoryView;
@@ -38708,10 +38777,11 @@ var GitHubCliAdapter = class {
         "gh",
         ["repo", "view", "--json", "nameWithOwner,url"],
         request.checkoutPath,
-        commandEnvironment2()
+        commandEnvironment2(),
+        request.signal
       );
-    } catch {
-      fail3("preflight-repository-query-failed");
+    } catch (error2) {
+      failCommand(error2, "preflight-repository-query-failed");
     }
     if (!cleanExit(repositoryView)) fail3("preflight-repository-query-failed");
     let parsed;
@@ -38746,6 +38816,7 @@ var GitHubCliAdapter = class {
   }
   async pushBranch(request) {
     if (!validCheckoutPath(request.checkoutPath) || !validTarget(request.target) || !validBranch(request.branch) || !OID2.test(request.headCommitOid)) fail3("push-request-invalid");
+    if (request.signal?.aborted) fail3("cancelled");
     let quarantine;
     try {
       quarantine = await this.platformServices.createSecureTempDirectory();
@@ -38780,21 +38851,24 @@ var GitHubCliAdapter = class {
           "."
         ],
         quarantine,
-        environment
+        environment,
+        request.signal
       );
       if (!cleanExit(result)) fail3("push-quarantine-init-failed");
       result = await this.run(
         "git",
         ["bundle", "create", bundlePath, branchRef],
         request.checkoutPath,
-        environment
+        environment,
+        request.signal
       );
       if (!cleanExit(result)) fail3("push-bundle-create-failed");
       result = await this.run(
         "git",
         ["bundle", "unbundle", bundlePath],
         quarantine,
-        environment
+        environment,
+        request.signal
       );
       if (!cleanExit(result)) fail3("push-bundle-import-failed");
       if (parseBundledHead(result.stdout, branchRef) !== request.headCommitOid) {
@@ -38804,7 +38878,8 @@ var GitHubCliAdapter = class {
         "git",
         ["rev-parse", "--verify", `${request.headCommitOid}^{commit}`],
         quarantine,
-        environment
+        environment,
+        request.signal
       );
       if (!cleanExit(result) || result.stdout.trim() !== request.headCommitOid) {
         fail3("push-imported-oid-mismatch");
@@ -38813,14 +38888,16 @@ var GitHubCliAdapter = class {
         "git",
         ["update-ref", branchRef, request.headCommitOid, "0".repeat(request.headCommitOid.length)],
         quarantine,
-        environment
+        environment,
+        request.signal
       );
       if (!cleanExit(result)) fail3("push-imported-oid-mismatch");
       result = await this.run(
         "git",
         [...CREDENTIAL_HELPER_ARGS, "ls-remote", "--heads", request.target.canonicalHttpsUrl, branchRef],
         quarantine,
-        remoteEnvironment
+        remoteEnvironment,
+        request.signal
       );
       if (!cleanExit(result)) fail3("push-remote-precheck-failed");
       const remoteHead = parseRemoteHead(result.stdout, branchRef);
@@ -38840,7 +38917,8 @@ var GitHubCliAdapter = class {
             `${branchRef}:${branchRef}`
           ],
           quarantine,
-          remoteEnvironment
+          remoteEnvironment,
+          request.signal
         );
         if (!cleanExit(result)) fail3("push-command-failed");
         outcome = { remoteHead: request.headCommitOid };
@@ -38860,6 +38938,7 @@ var GitHubCliAdapter = class {
     if (!validCheckoutPath(request.checkoutPath) || !validTarget(request.target) || !validBranch(request.baseBranch) || !validBranch(request.headBranch) || !OID2.test(request.headCommitOid) || !validPullRequestText(request.title, request.body)) {
       fail3("draft-pull-request-request-invalid");
     }
+    if (request.signal?.aborted) fail3("cancelled");
     let listed;
     try {
       listed = await this.run(
@@ -38879,10 +38958,11 @@ var GitHubCliAdapter = class {
           PR_JSON_FIELDS
         ],
         request.checkoutPath,
-        commandEnvironment2()
+        commandEnvironment2(),
+        request.signal
       );
-    } catch {
-      fail3("draft-pull-request-list-failed");
+    } catch (error2) {
+      failCommand(error2, "draft-pull-request-list-failed");
     }
     if (!cleanExit(listed) || !boundedOutput(listed)) {
       fail3("draft-pull-request-list-failed");
@@ -38896,7 +38976,9 @@ var GitHubCliAdapter = class {
     if (identities.length > 1) fail3("draft-pull-request-ambiguous");
     if (identities.length === 1) {
       const identity2 = identities[0];
-      if (identity2.baseBranch !== request.baseBranch || identity2.headBranch !== request.headBranch || !identity2.draft) fail3("draft-pull-request-identity-mismatch");
+      if (identity2.baseBranch !== request.baseBranch || identity2.headBranch !== request.headBranch) {
+        fail3("draft-pull-request-identity-mismatch");
+      }
       if (identity2.headCommitOid !== request.headCommitOid) {
         fail3("draft-pull-request-head-mismatch");
       }
@@ -38925,10 +39007,11 @@ var GitHubCliAdapter = class {
           request.body
         ],
         request.checkoutPath,
-        commandEnvironment2()
+        commandEnvironment2(),
+        request.signal
       );
-    } catch {
-      fail3("draft-pull-request-create-failed");
+    } catch (error2) {
+      failCommand(error2, "draft-pull-request-create-failed");
     }
     if (!cleanExit(created) || !boundedOutput(created)) {
       fail3("draft-pull-request-create-failed");
@@ -38943,7 +39026,8 @@ var GitHubCliAdapter = class {
       request.target,
       createdNumber,
       "draft-pull-request-create-failed",
-      "draft-pull-request-response-invalid"
+      "draft-pull-request-response-invalid",
+      request.signal
     );
     if (identity.baseBranch !== request.baseBranch || identity.headBranch !== request.headBranch || identity.headCommitOid !== request.headCommitOid || !identity.draft) fail3("draft-pull-request-identity-mismatch");
     const key = pullRequestKey(identity.repository, identity.number);
@@ -38955,6 +39039,7 @@ var GitHubCliAdapter = class {
     if (!validCheckoutPath(request.checkoutPath) || !validTarget(request.target) || !validPullRequestNumber(request.pullRequestNumber) || !OID2.test(request.headCommitOid)) {
       fail3("required-checks-request-invalid");
     }
+    if (request.signal?.aborted) fail3("cancelled");
     const key = pullRequestKey(request.target.repository, request.pullRequestNumber);
     const expected = this.pullRequests.get(key);
     if (expected === void 0) fail3("required-checks-identity-not-established");
@@ -38964,7 +39049,8 @@ var GitHubCliAdapter = class {
       request.target,
       request.pullRequestNumber,
       "required-checks-identity-query-failed",
-      "required-checks-identity-response-invalid"
+      "required-checks-identity-response-invalid",
+      request.signal
     ).catch((error2) => {
       this.checksPassed.delete(key);
       throw error2;
@@ -38992,10 +39078,11 @@ var GitHubCliAdapter = class {
           CHECK_JSON_FIELDS
         ],
         request.checkoutPath,
-        commandEnvironment2()
+        commandEnvironment2(),
+        request.signal
       );
-    } catch {
-      fail3("required-checks-command-failed");
+    } catch (error2) {
+      failCommand(error2, "required-checks-command-failed");
     }
     if (!boundedOutput(result) || ![0, 1, 8].includes(result.exitCode ?? -1)) {
       fail3("required-checks-command-failed");
@@ -39005,8 +39092,13 @@ var GitHubCliAdapter = class {
       request.target,
       request.pullRequestNumber,
       "required-checks-identity-query-failed",
-      "required-checks-identity-response-invalid"
+      "required-checks-identity-response-invalid",
+      request.signal
     );
+    if (after.headCommitOid !== request.headCommitOid) {
+      this.checksPassed.delete(key);
+      fail3("required-checks-head-mismatch");
+    }
     if (!samePullRequestIdentity(after, before)) {
       this.checksPassed.delete(key);
       fail3("required-checks-identity-mismatch");
@@ -39021,23 +39113,22 @@ var GitHubCliAdapter = class {
     return { result: aggregate, headCommitOid: request.headCommitOid, checks };
   }
   async markReady(request) {
-    if (!validCheckoutPath(request.checkoutPath) || !validTarget(request.target) || !validPullRequestNumber(request.pullRequestNumber)) {
+    if (!validCheckoutPath(request.checkoutPath) || !validTarget(request.target) || !validPullRequestNumber(request.pullRequestNumber) || !OID2.test(request.headCommitOid)) {
       fail3("mark-ready-request-invalid");
     }
+    if (request.signal?.aborted) fail3("cancelled");
     const key = pullRequestKey(request.target.repository, request.pullRequestNumber);
     const expected = this.pullRequests.get(key);
     if (expected === void 0) fail3("mark-ready-identity-not-established");
-    if (!this.checksPassed.has(key)) fail3("mark-ready-checks-not-passed");
-    const live = await this.viewPullRequest(
-      request.checkoutPath,
-      request.target,
-      request.pullRequestNumber,
-      "mark-ready-identity-query-failed",
-      "mark-ready-identity-response-invalid"
-    );
-    if (!samePullRequestIdentity(live, expected)) {
-      this.checksPassed.delete(key);
-      fail3("mark-ready-identity-mismatch");
+    const checks = await this.requiredChecks({
+      checkoutPath: request.checkoutPath,
+      target: request.target,
+      pullRequestNumber: request.pullRequestNumber,
+      headCommitOid: request.headCommitOid,
+      ...request.signal === void 0 ? {} : { signal: request.signal }
+    });
+    if (checks.result !== "passed" || checks.headCommitOid !== request.headCommitOid || checks.checks.length === 0 || checks.checks.some((check2) => check2.bucket !== "pass")) {
+      fail3("mark-ready-checks-not-passed");
     }
     let ready;
     try {
@@ -39051,10 +39142,11 @@ var GitHubCliAdapter = class {
           request.target.repository
         ],
         request.checkoutPath,
-        commandEnvironment2()
+        commandEnvironment2(),
+        request.signal
       );
-    } catch {
-      fail3("mark-ready-command-failed");
+    } catch (error2) {
+      failCommand(error2, "mark-ready-command-failed");
     }
     if (!cleanExit(ready) || !boundedOutput(ready)) fail3("mark-ready-command-failed");
     const updated = await this.viewPullRequest(
@@ -39062,7 +39154,8 @@ var GitHubCliAdapter = class {
       request.target,
       request.pullRequestNumber,
       "mark-ready-identity-query-failed",
-      "mark-ready-identity-response-invalid"
+      "mark-ready-identity-response-invalid",
+      request.signal
     );
     const readyExpected = { ...expected, draft: false };
     if (!samePullRequestIdentity(updated, readyExpected)) {
@@ -39073,7 +39166,7 @@ var GitHubCliAdapter = class {
     this.checksPassed.delete(key);
     return updated;
   }
-  async viewPullRequest(checkoutPath, target, number3, queryFailure, responseFailure) {
+  async viewPullRequest(checkoutPath, target, number3, queryFailure, responseFailure, signal) {
     let viewed;
     try {
       viewed = await this.run(
@@ -39088,10 +39181,11 @@ var GitHubCliAdapter = class {
           PR_JSON_FIELDS
         ],
         checkoutPath,
-        commandEnvironment2()
+        commandEnvironment2(),
+        signal
       );
-    } catch {
-      fail3(queryFailure);
+    } catch (error2) {
+      failCommand(error2, queryFailure);
     }
     if (!cleanExit(viewed) || !boundedOutput(viewed)) fail3(queryFailure);
     const identity = parsePullRequestIdentity(parseJson(viewed.stdout), target);
@@ -39252,6 +39346,7 @@ function createAutopilotController(deps) {
       workflowStore
     }),
     hostingAdapter: new GitHubCliAdapter(),
+    ...deps.abortSignal === void 0 ? {} : { abortSignal: deps.abortSignal },
     emit: (event) => deps.onProgress?.(event)
   });
 }
@@ -39268,9 +39363,13 @@ async function handleAutopilotStart(checkoutPath, input, deps = {}) {
   }
   try {
     throwIfAborted2(deps.abortSignal);
-    const result = await createAutopilotController(deps).start(checkoutPath, validation.spec);
+    const controller = createAutopilotController(deps);
+    const started = await controller.start(checkoutPath, validation.spec);
     throwIfAborted2(deps.abortSignal);
-    return { ok: true, result };
+    return {
+      ok: true,
+      result: await controller.status(checkoutPath, started.workflowId)
+    };
   } catch (error2) {
     return autopilotErrorResult(error2);
   }
@@ -39289,9 +39388,13 @@ async function handleAutopilotStatus(checkoutPath, workflowId, deps = {}) {
 async function handleAutopilotResume(checkoutPath, workflowId, deps = {}) {
   try {
     throwIfAborted2(deps.abortSignal);
-    const result = await createAutopilotController(deps).resume(checkoutPath, workflowId);
+    const controller = createAutopilotController(deps);
+    await controller.resume(checkoutPath, workflowId);
     throwIfAborted2(deps.abortSignal);
-    return { ok: true, result };
+    return {
+      ok: true,
+      result: await controller.status(checkoutPath, workflowId)
+    };
   } catch (error2) {
     return autopilotErrorResult(error2);
   }

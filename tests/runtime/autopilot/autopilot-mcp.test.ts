@@ -100,6 +100,19 @@ function workflowState(): AutopilotWorkflowState {
   };
 }
 
+function redactedWorkflowState(): AutopilotWorkflowState {
+  const state = workflowState();
+  state.repositoryIdentity = "[redacted]";
+  state.worktreePath = "[redacted]";
+  if (state.shipping.prUrl !== null) state.shipping.prUrl = "[redacted]";
+  for (const observation of state.ciObservations) {
+    for (const check of observation.checks) {
+      if (check.link !== null) check.link = "[redacted]";
+    }
+  }
+  return state;
+}
+
 function structured(result: Awaited<ReturnType<Client["callTool"]>>): Record<string, unknown> {
   return result.structuredContent ?? {};
 }
@@ -133,7 +146,7 @@ describe("autopilot MCP surface", () => {
     if (checkoutPath !== CHECKOUT) {
       throw new AutopilotControllerError("repository-identity-mismatch");
     }
-    return workflowState();
+    return redactedWorkflowState();
   });
   const resume = vi.fn(async () => workflowState());
 
@@ -194,6 +207,46 @@ describe("autopilot MCP surface", () => {
     expect(start).toHaveBeenCalledWith(CHECKOUT, validSpec());
     expect(status).toHaveBeenCalledWith(CHECKOUT, WORKFLOW_ID);
     expect(resume).toHaveBeenCalledWith(CHECKOUT, WORKFLOW_ID);
+  });
+
+  it("returns the status redaction projection from start and resume", async () => {
+    const sensitive = workflowState();
+    sensitive.shipping.prUrl = "https://github.com/example/repository/pull/42";
+    sensitive.ciObservations.push({
+      observedAt: NOW,
+      result: "passed",
+      headCommitOid: OID,
+      checks: [{
+        bucket: "pass",
+        name: "build",
+        state: "SUCCESS",
+        link: "https://github.com/example/repository/actions/runs/99",
+      }],
+    });
+    resume.mockResolvedValueOnce(sensitive);
+
+    const started = await client.callTool({
+      name: "autopilotStart",
+      arguments: { checkoutPath: CHECKOUT, spec: validSpec(), protocolVersion: PROTOCOL_VERSION },
+    });
+    const resumed = await client.callTool({
+      name: "autopilotResume",
+      arguments: { checkoutPath: CHECKOUT, workflowId: WORKFLOW_ID, protocolVersion: PROTOCOL_VERSION },
+    });
+
+    for (const output of [structured(started), structured(resumed)]) {
+      const serialized = JSON.stringify(output);
+      expect(serialized).not.toContain(`${CHECKOUT}/.git`);
+      expect(serialized).not.toContain("/state/autopilot-worktree");
+      expect(serialized).not.toContain("https://");
+      expect(output).toMatchObject({
+        ok: true,
+        result: {
+          repositoryIdentity: "[redacted]",
+          worktreePath: "[redacted]",
+        },
+      });
+    }
   });
 
   it.each(["authority", "gate", "hash", "branch", "argv"])(

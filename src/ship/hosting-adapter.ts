@@ -1,6 +1,7 @@
 export interface HostingPreflight {
   checkoutPath: string;
   expectedRepository?: string;
+  signal?: AbortSignal;
 }
 
 export interface HostingTarget {
@@ -14,6 +15,7 @@ export interface PushRequest {
   target: HostingTarget;
   branch: string;
   headCommitOid: string;
+  signal?: AbortSignal;
 }
 
 export interface DraftPullRequestRequest {
@@ -24,6 +26,7 @@ export interface DraftPullRequestRequest {
   headCommitOid: string;
   title: string;
   body: string;
+  signal?: AbortSignal;
 }
 
 export interface PullRequestIdentity {
@@ -41,6 +44,7 @@ export interface ChecksRequest {
   target: HostingTarget;
   pullRequestNumber: number;
   headCommitOid: string;
+  signal?: AbortSignal;
 }
 
 export type RequiredCheckBucket = "pass" | "pending" | "fail" | "cancel" | "skipping";
@@ -62,6 +66,8 @@ export interface MarkReadyRequest {
   checkoutPath: string;
   target: HostingTarget;
   pullRequestNumber: number;
+  headCommitOid: string;
+  signal?: AbortSignal;
 }
 
 export interface HostingAdapter {

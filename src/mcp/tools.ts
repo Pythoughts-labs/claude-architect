@@ -3,7 +3,6 @@ import {
   AutopilotController,
   AutopilotControllerError,
   type AutopilotControllerEvent,
-  type AutopilotStartResult,
   type AutopilotStatusResult,
 } from "../autopilot/autopilot-controller.js";
 import { WorkflowBranchManager } from "../autopilot/branch-manager.js";
@@ -229,6 +228,7 @@ function createAutopilotController(deps: ToolDependencies): Pick<
       workflowStore,
     }),
     hostingAdapter: new GitHubCliAdapter(),
+    ...(deps.abortSignal === undefined ? {} : { abortSignal: deps.abortSignal }),
     emit: (event: AutopilotControllerEvent) => deps.onProgress?.(event),
   });
 }
@@ -249,7 +249,7 @@ export async function handleAutopilotStart(
   input: unknown,
   deps: ToolDependencies = {},
 ): Promise<
-  | { ok: true; result: AutopilotStartResult }
+  | { ok: true; result: AutopilotStatusResult }
   | { ok: false; error: "invalid-spec"; validationErrors: Array<{ path: string; message: string }> }
   | ToolErrorResult
 > {
@@ -259,9 +259,13 @@ export async function handleAutopilotStart(
   }
   try {
     throwIfAborted(deps.abortSignal);
-    const result = await createAutopilotController(deps).start(checkoutPath, validation.spec);
+    const controller = createAutopilotController(deps);
+    const started = await controller.start(checkoutPath, validation.spec);
     throwIfAborted(deps.abortSignal);
-    return { ok: true, result };
+    return {
+      ok: true,
+      result: await controller.status(checkoutPath, started.workflowId),
+    };
   } catch (error) {
     return autopilotErrorResult(error);
   }
@@ -290,9 +294,13 @@ export async function handleAutopilotResume(
 ): Promise<{ ok: true; result: AutopilotStatusResult } | ToolErrorResult> {
   try {
     throwIfAborted(deps.abortSignal);
-    const result = await createAutopilotController(deps).resume(checkoutPath, workflowId);
+    const controller = createAutopilotController(deps);
+    await controller.resume(checkoutPath, workflowId);
     throwIfAborted(deps.abortSignal);
-    return { ok: true, result };
+    return {
+      ok: true,
+      result: await controller.status(checkoutPath, workflowId),
+    };
   } catch (error) {
     return autopilotErrorResult(error);
   }

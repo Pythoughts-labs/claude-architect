@@ -23,7 +23,7 @@ In practice that means three guarantees the plugin enforces in host code, not in
 
 ## Status
 
-> **Public beta:** Do not use Claude Architect unattended for production, destructive, or security-sensitive work. Review the complete candidate and verification evidence before integration.
+> **Public beta:** Do not use Claude Architect unattended for production, destructive, or security-sensitive work. In the manual lane, a human reviews the frozen candidate and verification evidence before integration. In autopilot, policy may authorize controlled integration into the workflow-owned feature branch; a human must review the complete PR before merge.
 
 The runtime and cross-platform lifecycle are evolving. Producer availability depends on the host OS, CLI version, authentication, requested lane, and proven execution capabilities.
 
