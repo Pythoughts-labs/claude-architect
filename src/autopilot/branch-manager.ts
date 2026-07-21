@@ -498,9 +498,17 @@ export class WorkflowBranchManager {
       }
       await rm(temporaryPath);
       temporaryExists = false;
-      const directoryHandle = await open(directory, constants.O_RDONLY);
+      const directoryHandle = await open(directory, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
       try {
         await directoryHandle.sync();
+      } catch (error) {
+        // Directory fsync is unsupported on Windows and returns EPERM/EISDIR/
+        // EINVAL/ENOTSUP; the ownership link and its temporary file were already
+        // durably synced above, so the rename remains crash-safe on POSIX.
+        const unsupportedOnWindows = process.platform === "win32"
+          && typeof error === "object" && error !== null && "code" in error
+          && ["EISDIR", "EINVAL", "ENOTSUP", "EPERM"].includes((error as { code?: string }).code ?? "");
+        if (!unsupportedOnWindows) throw error;
       } finally {
         await directoryHandle.close();
       }

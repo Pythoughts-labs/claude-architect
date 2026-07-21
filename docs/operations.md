@@ -10,7 +10,7 @@ Use `autopilotStart` once with the validated spec, retain its workflow ID, use `
 
 - `ready-for-human-review`: exact-head required checks were green, the PR was marked ready, and local cleanup succeeded; a human may now review and decide whether to merge;
 - `human-decision-required`: preserve evidence and ownership for human inspection;
-- `failed`: shipping authority was not established;
+- `failed`: the workflow failed closed before reaching a review-ready PR — during task execution, verification, promotion, final review, or shipping-authority establishment; preserved evidence identifies the failing stage;
 - `cancelled`: cancellation is durable and terminal, not resumable.
 
 Accepted, shipped, ready, and merged are distinct. Acceptance authorizes only workflow-branch integration. Shipped establishes the pushed head and draft PR. Ready establishes configured green checks for that exact head and marks the PR ready for review. Only a human can merge or advance `main`. The controller never automatically merges, deploys, releases, or deletes the remote workflow branch.

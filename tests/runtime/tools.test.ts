@@ -1009,8 +1009,12 @@ describe("MCP tool handlers", () => {
 
   it("fails closed when persisted review snapshot bytes differ from regeneration", async () => {
     const store = new FakeStore();
+    // Hoist `evidence` to the first key so the serialized bytes differ from
+    // expectedReviewSnapshot while the canonical, key-order-independent hash
+    // stays equal — exactly the archive inconsistency the tool must catch. The
+    // values are unchanged (same evidence reference), only their insertion order.
     store.reviewSnapshot = {
-      evidence: structuredClone(expectedReviewSnapshot.evidence),
+      evidence: expectedReviewSnapshot.evidence,
       ...expectedReviewSnapshot,
     };
     expect(reviewSnapshotHash(store.reviewSnapshot)).toBe(

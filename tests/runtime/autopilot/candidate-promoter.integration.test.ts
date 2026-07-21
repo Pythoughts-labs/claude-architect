@@ -1,7 +1,7 @@
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   advisorReportHash,
   autopilotEligibilityRecordHash,
@@ -18,10 +18,40 @@ import { reviewSnapshotHash } from "../../../src/runtime/review-snapshot.js";
 
 const temporaryPaths: string[] = [];
 const originalPluginData = process.env.CLAUDE_PLUGIN_DATA;
+const AMBIENT_GIT_ENVIRONMENT = /^(?:GIT_CONFIG_.*|GIT_(?:DIR|WORK_TREE|COMMON_DIR|INDEX_FILE|OBJECT_DIRECTORY|ALTERNATE_OBJECT_DIRECTORIES|CEILING_DIRECTORIES|DISCOVERY_ACROSS_FILESYSTEM|NAMESPACE))$/;
+let previousAmbientGitEnvironment = new Map<string, string>();
+
+beforeEach(async () => {
+  // Isolate ambient Git configuration exactly as branch-manager.test.ts and
+  // autopilot-e2e.test.ts do. This is the only suite proving exact-tree
+  // promotion against real Git, so a contributor's or CI's global config
+  // (includeIf, commit templates, ambient GIT_CONFIG_COUNT) must not leak into
+  // the very guarantee under test.
+  previousAmbientGitEnvironment = new Map(
+    Object.entries(process.env).filter(
+      (entry): entry is [string, string] => AMBIENT_GIT_ENVIRONMENT.test(entry[0])
+        && entry[1] !== undefined,
+    ),
+  );
+  for (const key of previousAmbientGitEnvironment.keys()) delete process.env[key];
+  const configRoot = await mkdtemp(path.join(tmpdir(), "candidate-promoter-gitconfig-"));
+  temporaryPaths.push(configRoot);
+  const globalConfig = path.join(configRoot, "global.gitconfig");
+  const systemConfig = path.join(configRoot, "system.gitconfig");
+  await writeFile(globalConfig, "");
+  await writeFile(systemConfig, "");
+  process.env.GIT_CONFIG_GLOBAL = globalConfig;
+  process.env.GIT_CONFIG_SYSTEM = systemConfig;
+  process.env.GIT_CONFIG_NOSYSTEM = "1";
+});
 
 afterEach(async () => {
   if (originalPluginData === undefined) delete process.env.CLAUDE_PLUGIN_DATA;
   else process.env.CLAUDE_PLUGIN_DATA = originalPluginData;
+  for (const key of Object.keys(process.env)) {
+    if (AMBIENT_GIT_ENVIRONMENT.test(key)) delete process.env[key];
+  }
+  for (const [key, value] of previousAmbientGitEnvironment) process.env[key] = value;
   await Promise.all(temporaryPaths.splice(0).map(entry =>
     rm(entry, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })));
 });

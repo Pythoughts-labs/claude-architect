@@ -274,6 +274,15 @@ async function readRegularFile(
   filename: string,
   parentIdentity?: DirectoryIdentity,
 ): Promise<string> {
+  // Reject a symlinked leaf on every platform. `O_NOFOLLOW` is the atomic guard
+  // on POSIX but is a no-op on Windows (`O_NOFOLLOW` is undefined there, so
+  // `NO_FOLLOW` is 0), which would otherwise let the open follow a symlink out
+  // of the archive. The pre-open lstat closes that Windows gap; the fd-identity
+  // checks below still defend against a POSIX TOCTOU swap.
+  const linkMetadata = await lstat(filename);
+  if (linkMetadata.isSymbolicLink()) {
+    throw new RuntimeError(`archive entry must not be a symbolic link: ${redact(filename)}`);
+  }
   const handle = await open(filename, constants.O_RDONLY | NO_FOLLOW);
   try {
     if (parentIdentity !== undefined) {

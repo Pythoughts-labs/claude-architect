@@ -28931,6 +28931,10 @@ async function syncDirectory2(directory) {
   }
 }
 async function readRegularFile(filename, parentIdentity) {
+  const linkMetadata = await lstat3(filename);
+  if (linkMetadata.isSymbolicLink()) {
+    throw new RuntimeError(`archive entry must not be a symbolic link: ${redact(filename)}`);
+  }
   const handle = await open5(filename, constants4.O_RDONLY | NO_FOLLOW3);
   try {
     if (parentIdentity !== void 0) {
@@ -31747,9 +31751,12 @@ var WorkflowBranchManager = class {
       }
       await rm6(temporaryPath);
       temporaryExists = false;
-      const directoryHandle = await open7(directory, constants6.O_RDONLY);
+      const directoryHandle = await open7(directory, constants6.O_RDONLY | (constants6.O_NOFOLLOW ?? 0));
       try {
         await directoryHandle.sync();
+      } catch (error2) {
+        const unsupportedOnWindows = process.platform === "win32" && typeof error2 === "object" && error2 !== null && "code" in error2 && ["EISDIR", "EINVAL", "ENOTSUP", "EPERM"].includes(error2.code ?? "");
+        if (!unsupportedOnWindows) throw error2;
       } finally {
         await directoryHandle.close();
       }
@@ -36570,136 +36577,144 @@ async function runAdvisorStage(args) {
     role: "advisor",
     detail: null
   });
-  const [archivedPipelineResult, archivedReviewSnapshot, archivedSpec] = await Promise.all([
-    store.readPipelineArtifact(args.runId, "pipeline-result"),
-    store.readReviewSnapshot(args.runId),
-    store.readPipelineArtifact(args.runId, "delegation-spec")
-  ]);
-  if (archivedPipelineResult === null) {
-    throw new RuntimeError("advisor stage requires a durable archived PipelineResult");
-  }
-  if (archivedReviewSnapshot === null) {
-    throw new RuntimeError("advisor stage requires a durable review snapshot");
-  }
-  if (archivedSpec === null) {
-    throw new RuntimeError("advisor stage requires a durable archived delegation specification");
-  }
-  if (!schemas4.delegationSpec(archivedSpec)) {
-    throw new RuntimeError("advisor stage archived delegation specification is invalid");
-  }
-  const suppliedSpec = redactRecord(structuredClone(args.spec));
-  if (canonicalArtifactHash(suppliedSpec) !== canonicalArtifactHash(archivedSpec)) {
-    throw new RuntimeError("advisor stage specification differs from the durable archived specification");
-  }
-  if (archivedPipelineResult.runId !== args.runId || archivedReviewSnapshot.runId !== args.runId) {
-    throw new RuntimeError("advisor stage run identity does not match its durable evidence");
-  }
-  if (args.pipelineResult !== void 0) {
-    assertSameFrozenArtifact(
-      "pipeline result",
-      pipelineResultHash(args.pipelineResult),
-      pipelineResultHash(archivedPipelineResult)
-    );
-  }
-  if (args.reviewSnapshot !== void 0) {
-    assertSameFrozenArtifact(
-      "review snapshot",
-      reviewSnapshotHash(args.reviewSnapshot),
-      reviewSnapshotHash(archivedReviewSnapshot)
-    );
-  }
-  const advisorSpec = {
-    ...structuredClone(archivedSpec),
-    context: ""
-  };
-  const pkg = {
-    spec: advisorSpec,
-    baselineCommit: archivedReviewSnapshot.baseCommitOid,
-    candidateCommit: archivedReviewSnapshot.candidateCommitOid,
-    candidateDiff: archivedReviewSnapshot.patch,
-    testEvidence: JSON.stringify({
-      evidence: archivedReviewSnapshot.evidence,
-      executedVerification: archivedReviewSnapshot.executedVerification,
-      finalVerification: archivedPipelineResult.verification
-    }),
-    advisorEvidence: frozenAdvisorEvidence(
-      advisorSpec,
-      archivedPipelineResult,
-      archivedReviewSnapshot
-    )
-  };
-  const advisorEvidenceText = JSON.stringify(pkg.advisorEvidence, null, 2);
-  let outcome;
-  if (!canRenderUntrustedBlockExactly(advisorEvidenceText)) {
-    const failedRoleLogRef = await store.writeLog(
-      "role-advisor-final",
-      "advisor was not launched: the exact frozen evidence package exceeds the bounded role input\n"
-    );
-    outcome = {
-      ok: false,
-      failure: "invalid-output",
-      failedRoleLogRef,
-      roleLogRefs: [failedRoleLogRef]
+  try {
+    const [archivedPipelineResult, archivedReviewSnapshot, archivedSpec] = await Promise.all([
+      store.readPipelineArtifact(args.runId, "pipeline-result"),
+      store.readReviewSnapshot(args.runId),
+      store.readPipelineArtifact(args.runId, "delegation-spec")
+    ]);
+    if (archivedPipelineResult === null) {
+      throw new RuntimeError("advisor stage requires a durable archived PipelineResult");
+    }
+    if (archivedReviewSnapshot === null) {
+      throw new RuntimeError("advisor stage requires a durable review snapshot");
+    }
+    if (archivedSpec === null) {
+      throw new RuntimeError("advisor stage requires a durable archived delegation specification");
+    }
+    if (!schemas4.delegationSpec(archivedSpec)) {
+      throw new RuntimeError("advisor stage archived delegation specification is invalid");
+    }
+    const suppliedSpec = redactRecord(structuredClone(args.spec));
+    if (canonicalArtifactHash(suppliedSpec) !== canonicalArtifactHash(archivedSpec)) {
+      throw new RuntimeError("advisor stage specification differs from the durable archived specification");
+    }
+    if (archivedPipelineResult.runId !== args.runId || archivedReviewSnapshot.runId !== args.runId) {
+      throw new RuntimeError("advisor stage run identity does not match its durable evidence");
+    }
+    if (args.pipelineResult !== void 0) {
+      assertSameFrozenArtifact(
+        "pipeline result",
+        pipelineResultHash(args.pipelineResult),
+        pipelineResultHash(archivedPipelineResult)
+      );
+    }
+    if (args.reviewSnapshot !== void 0) {
+      assertSameFrozenArtifact(
+        "review snapshot",
+        reviewSnapshotHash(args.reviewSnapshot),
+        reviewSnapshotHash(archivedReviewSnapshot)
+      );
+    }
+    const advisorSpec = {
+      ...structuredClone(archivedSpec),
+      context: ""
     };
-  } else {
-    try {
-      outcome = await runStructuredRole({
-        role: "advisor",
-        schema: schemas4.advisorReport,
-        logName: "role-advisor-final",
-        spec: advisorSpec,
-        pkg,
-        worktreePath: args.worktreePath,
-        deps: args.deps,
-        runId: args.runId,
-        store
-      });
-    } catch (error2) {
+    const pkg = {
+      spec: advisorSpec,
+      baselineCommit: archivedReviewSnapshot.baseCommitOid,
+      candidateCommit: archivedReviewSnapshot.candidateCommitOid,
+      candidateDiff: archivedReviewSnapshot.patch,
+      testEvidence: JSON.stringify({
+        evidence: archivedReviewSnapshot.evidence,
+        executedVerification: archivedReviewSnapshot.executedVerification,
+        finalVerification: archivedPipelineResult.verification
+      }),
+      advisorEvidence: frozenAdvisorEvidence(
+        advisorSpec,
+        archivedPipelineResult,
+        archivedReviewSnapshot
+      )
+    };
+    const advisorEvidenceText = JSON.stringify(pkg.advisorEvidence, null, 2);
+    let outcome;
+    if (!canRenderUntrustedBlockExactly(advisorEvidenceText)) {
       const failedRoleLogRef = await store.writeLog(
         "role-advisor-final",
-        `advisor execution failed before producing a classified result: ${advisorExecutionDiagnostic(error2)}
-`
+        "advisor was not launched: the exact frozen evidence package exceeds the bounded role input\n"
       );
       outcome = {
         ok: false,
-        failure: "producer-failure",
+        failure: "invalid-output",
         failedRoleLogRef,
         roleLogRefs: [failedRoleLogRef]
       };
+    } else {
+      try {
+        outcome = await runStructuredRole({
+          role: "advisor",
+          schema: schemas4.advisorReport,
+          logName: "role-advisor-final",
+          spec: advisorSpec,
+          pkg,
+          worktreePath: args.worktreePath,
+          deps: args.deps,
+          runId: args.runId,
+          store
+        });
+      } catch (error2) {
+        const failedRoleLogRef = await store.writeLog(
+          "role-advisor-final",
+          `advisor execution failed before producing a classified result: ${advisorExecutionDiagnostic(error2)}
+`
+        );
+        outcome = {
+          ok: false,
+          failure: "producer-failure",
+          failedRoleLogRef,
+          roleLogRefs: [failedRoleLogRef]
+        };
+      }
     }
-  }
-  const report = outcome.ok ? redactRecord(outcome.report) : failureReport(outcome.failure, outcome.failedRoleLogRef);
-  const eligibility = evaluateAutopilotEligibility(eligibilityInputFromArtifacts({
-    pipelineResult: archivedPipelineResult,
-    reviewSnapshot: archivedReviewSnapshot,
-    advisor: report,
-    evaluatedAt: args.evaluatedAt
-  }));
-  await transitionRunStatusSafely(statusStore, args.runId, "gating", {
-    role: "advisor"
-  });
-  await store.writePostPipelineAutopilotArtifacts({
-    pipelineResult: archivedPipelineResult,
-    reviewSnapshot: archivedReviewSnapshot,
-    advisorReport: report,
-    eligibility
-  });
-  advisorReportHash(report);
-  await transitionRunStatusSafely(
-    statusStore,
-    args.runId,
-    outcome.ok ? "done" : "failed",
-    {
+    const report = outcome.ok ? redactRecord(outcome.report) : failureReport(outcome.failure, outcome.failedRoleLogRef);
+    const eligibility = evaluateAutopilotEligibility(eligibilityInputFromArtifacts({
+      pipelineResult: archivedPipelineResult,
+      reviewSnapshot: archivedReviewSnapshot,
+      advisor: report,
+      evaluatedAt: args.evaluatedAt
+    }));
+    await transitionRunStatusSafely(statusStore, args.runId, "gating", {
+      role: "advisor"
+    });
+    await store.writePostPipelineAutopilotArtifacts({
+      pipelineResult: archivedPipelineResult,
+      reviewSnapshot: archivedReviewSnapshot,
+      advisorReport: report,
+      eligibility
+    });
+    advisorReportHash(report);
+    await transitionRunStatusSafely(
+      statusStore,
+      args.runId,
+      outcome.ok ? "done" : "failed",
+      {
+        role: "advisor",
+        detail: outcome.ok ? report.verdict : outcome.failure
+      }
+    );
+    return {
+      report,
+      eligibility,
+      failure: outcome.ok ? null : outcome.failure,
+      roleLogRefs: outcome.roleLogRefs
+    };
+  } catch (error2) {
+    await transitionRunStatusSafely(statusStore, args.runId, "failed", {
       role: "advisor",
-      detail: outcome.ok ? report.verdict : outcome.failure
-    }
-  );
-  return {
-    report,
-    eligibility,
-    failure: outcome.ok ? null : outcome.failure,
-    roleLogRefs: outcome.roleLogRefs
-  };
+      detail: error2 instanceof Error ? error2.message : "advisor stage failed unexpectedly"
+    });
+    throw error2;
+  }
 }
 
 // src/pipeline/pipeline-runtime.ts

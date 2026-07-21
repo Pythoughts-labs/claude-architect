@@ -31,7 +31,7 @@ The autopilot input schemas expose no eligibility, authority, gate, hash, branch
 
 - `src/runtime/*`, `src/git/*`, and `src/verify/*`: attempt isolation, frozen artifacts, scope/path/case-collision enforcement, independent verification, bounded evidence, and manual recovery.
 - `src/pipeline/*`: fresh implement/review/fix rounds and gates; roles cannot accept their own output.
-- `src/autopilot/eligibility.ts`: constructs current hash-bound eligibility from every required review, verification, advisor, artifact, and base gate.
+- `src/autopilot/autopilot-eligibility.ts`: constructs current hash-bound eligibility from every required review, verification, advisor, artifact, and base gate.
 - `src/autopilot/candidate-promoter.ts`: the only autopilot authority that consumes eligibility, records `accepted` with authority `autopilot-policy`, and performs Controlled Integration into the workflow branch.
 - `src/autopilot/final-branch-reviewer.ts`: reviews the whole workflow branch and evidence from cumulative task interactions.
 - `src/autopilot/autopilot-controller.ts`: phase machine through exact-head shipping, cleanup, and the four terminal classifications.

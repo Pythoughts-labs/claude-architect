@@ -129,6 +129,7 @@ export async function runAdvisorStage(args: RunAdvisorStageArgs): Promise<Adviso
     role: "advisor",
     detail: null,
   });
+  try {
   const [archivedPipelineResult, archivedReviewSnapshot, archivedSpec] = await Promise.all([
     store.readPipelineArtifact<PipelineResult>(args.runId, "pipeline-result"),
     store.readReviewSnapshot(args.runId),
@@ -267,4 +268,15 @@ export async function runAdvisorStage(args: RunAdvisorStageArgs): Promise<Adviso
     failure: outcome.ok ? null : outcome.failure,
     roleLogRefs: outcome.roleLogRefs,
   };
+  } catch (error) {
+    // Any pre-terminal throw — evidence validation, eligibility derivation, or a
+    // durable write — must move the run out of the "advisor" status into a
+    // terminal "failed" state, mirroring runPipelineWithLease. Without this the
+    // persisted RunStatus would stay "advisor" forever after an early guard.
+    await transitionRunStatusSafely(statusStore, args.runId, "failed", {
+      role: "advisor",
+      detail: error instanceof Error ? error.message : "advisor stage failed unexpectedly",
+    });
+    throw error;
+  }
 }
