@@ -201,6 +201,27 @@ afterEach(async () => {
 });
 
 describe("ArtifactStore", () => {
+  it("reads exact archived evidence bytes and rejects traversal or symlink escapes", async () => {
+    const store = new ArtifactStore("run-final-evidence");
+    await store.writePipelineArtifact("verification", { ok: true, count: 2 });
+    const expected = await readFile(
+      join(store.runDirectory, "pipeline", "verification.json"),
+      "utf8",
+    );
+
+    await expect(store.readEvidence("pipeline/verification.json")).resolves.toBe(expected);
+    await expect(store.listEvidenceReferences()).resolves.toEqual([
+      "pipeline/verification.json",
+    ]);
+    await expect(store.readEvidence("pipeline/missing.json")).resolves.toBeNull();
+    await expect(store.readEvidence("../decision.json")).rejects.toThrow(/invalid archived evidence/u);
+    const external = join(process.env.CLAUDE_PLUGIN_DATA!, "external-evidence.json");
+    await writeFile(external, "outside\n");
+    await symlink(external, join(store.runDirectory, "pipeline", "linked.json"));
+    await expect(store.readEvidence("pipeline/linked.json")).rejects.toThrow();
+    await expect(store.listEvidenceReferences()).rejects.toThrow(/symbolic links/u);
+  });
+
   it("atomically persists hash-bound advisor and eligibility artifacts without rewriting PipelineResult", async () => {
     const runId = "run-post-pipeline-autopilot";
     const store = new ArtifactStore(runId);

@@ -27791,6 +27791,8 @@ var PRUNE_BACKUP_REF_PREFIX = "refs/claude-architect/prune-backups/";
 var CLEANUP_JOURNAL = "cleanup.ndjson";
 var NO_FOLLOW2 = constants3.O_NOFOLLOW ?? 0;
 var MAX_ARCHIVE_FILE_BYTES = 8e6;
+var MAX_EVIDENCE_REFERENCES = 4096;
+var MAX_EVIDENCE_DEPTH = 16;
 var schemas = loadSchemas();
 var attemptResultSchema = schemas.attemptResult;
 var candidateDecisionSchema = schemas.candidateDecision;
@@ -28417,6 +28419,106 @@ var ArtifactStore = class _ArtifactStore {
       if (isMissing(error2)) return null;
       throw error2;
     }
+  }
+  /**
+   * Read immutable evidence bytes from this run without permitting traversal or
+   * following directory/file symlinks. Final cumulative review uses this
+   * narrow primitive so its hashes bind the exact archived bytes, not merely a
+   * caller-supplied reference.
+   */
+  async readEvidence(reference) {
+    if (typeof reference !== "string" || reference.length < 1 || reference.length > 1024 || path11.posix.isAbsolute(reference) || reference.includes("\\") || /[\0\r\n]/u.test(reference)) {
+      throw new RuntimeError("invalid archived evidence reference");
+    }
+    const components = reference.split("/");
+    if (components.some((component) => component === "" || component === "." || component === "..")) {
+      throw new RuntimeError("invalid archived evidence reference");
+    }
+    for (const component of components) validateComponent(component, "log name");
+    const run = await this.ensureExistingRunDirectory(this.runDirectory);
+    if (run === null) return null;
+    let directory = run;
+    try {
+      for (const component of components.slice(0, -1)) {
+        await assertDirectoryIdentity(directory.path, directory.identity);
+        const child = path11.join(directory.path, component);
+        const metadata = await lstat3(child);
+        if (metadata.isSymbolicLink() || !metadata.isDirectory()) {
+          throw new RuntimeError("archived evidence directory is not a plain directory");
+        }
+        const canonical = await realpath3(child);
+        if (!isWithin(run.path, canonical)) {
+          throw new RuntimeError("archived evidence reference escapes run directory");
+        }
+        directory = {
+          path: canonical,
+          identity: { dev: metadata.dev, ino: metadata.ino }
+        };
+        await assertDirectoryIdentity(directory.path, directory.identity);
+      }
+      const content = await readRegularFile(
+        path11.join(directory.path, components.at(-1)),
+        directory.identity
+      );
+      await assertDirectoryIdentity(run.path, run.identity);
+      return content;
+    } catch (error2) {
+      if (isMissing(error2)) return null;
+      throw error2;
+    }
+  }
+  /**
+   * Enumerate the complete run archive from the archive itself. Callers must
+   * not be able to omit review, repair, advisor, or promotion evidence by
+   * supplying only a hand-picked list of references.
+   */
+  async listEvidenceReferences() {
+    const run = await this.ensureExistingRunDirectory(this.runDirectory);
+    if (run === null) return [];
+    const references = [];
+    const walk = async (directory, components) => {
+      if (components.length > MAX_EVIDENCE_DEPTH) {
+        throw new RuntimeError("archived evidence nesting exceeds the supported limit");
+      }
+      await assertDirectoryIdentity(directory.path, directory.identity);
+      const names = (await readdir2(directory.path)).sort();
+      for (const name of names) {
+        validateComponent(name, "log name");
+        const child = path11.join(directory.path, name);
+        const metadata = await lstat3(child);
+        if (metadata.isSymbolicLink()) {
+          throw new RuntimeError("archived evidence must not contain symbolic links");
+        }
+        const reference = [...components, name].join("/");
+        if (reference.length > 1024) {
+          throw new RuntimeError("archived evidence reference is too long");
+        }
+        if (metadata.isDirectory()) {
+          const canonical = await realpath3(child);
+          if (!isWithin(run.path, canonical)) {
+            throw new RuntimeError("archived evidence directory escapes run directory");
+          }
+          const nested = {
+            path: canonical,
+            identity: { dev: metadata.dev, ino: metadata.ino }
+          };
+          await assertDirectoryIdentity(nested.path, nested.identity);
+          await walk(nested, [...components, name]);
+          continue;
+        }
+        if (!metadata.isFile()) {
+          throw new RuntimeError("archived evidence entry is not a regular file");
+        }
+        references.push(reference);
+        if (references.length > MAX_EVIDENCE_REFERENCES) {
+          throw new RuntimeError("archived evidence exceeds the supported file limit");
+        }
+      }
+      await assertDirectoryIdentity(directory.path, directory.identity);
+    };
+    await walk(run, []);
+    await assertDirectoryIdentity(run.path, run.identity);
+    return references.sort();
   }
   async writeResult(result) {
     if (result.runId !== this.runId) {
