@@ -5,10 +5,12 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import {
   computeChangedPathManifest,
+  manifestHashOf,
   parseRawDiff,
   splitNul,
   type RawDiffEntry,
 } from "../../src/git/changed-path-manifest.js";
+import type { ChangedPath } from "../../src/protocol/attempt-result.js";
 
 // Golden hashes are pinned literals (computed independently) so any change to the
 // canonical serialization — key order, JSON encoding, or hash algorithm — fails
@@ -176,6 +178,26 @@ describe("computeChangedPathManifest", () => {
         treeOutput: treeZ([]),
       })).toThrow("git diff-tree outputs disagree");
     });
+  });
+});
+
+describe("manifestHashOf", () => {
+  it("preserves the canonical hash after persisted entries reorder their object keys", () => {
+    const canonical: ChangedPath[] = [{
+      path: "a.txt",
+      changeType: "modified",
+      mode: "100644",
+      contentHash: OID_1,
+    }];
+    const alphabetized: ChangedPath[] = [{
+      changeType: "modified",
+      contentHash: OID_1,
+      mode: "100644",
+      path: "a.txt",
+    }];
+
+    expect(manifestHashOf(canonical)).toBe(GOLDEN1_HASH);
+    expect(manifestHashOf(alphabetized)).toBe(GOLDEN1_HASH);
   });
 });
 

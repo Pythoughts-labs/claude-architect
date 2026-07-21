@@ -27320,7 +27320,8 @@ function sortChangedPaths(changedPaths) {
   return changedPaths.sort((left, right) => left.path < right.path ? -1 : left.path > right.path ? 1 : 0);
 }
 function manifestHashOf(changedPaths) {
-  return createHash5("sha256").update(JSON.stringify(changedPaths)).digest("hex");
+  const canonical = changedPaths.map(({ path: path21, changeType: changeType2, mode, contentHash }) => ({ path: path21, changeType: changeType2, mode, contentHash }));
+  return createHash5("sha256").update(JSON.stringify(canonical)).digest("hex");
 }
 function computeChangedPathManifest(inputs) {
   const rawEntries = new Map(inputs.rawDiff.map((entry) => [entry.path, entry]));

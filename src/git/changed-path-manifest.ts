@@ -102,7 +102,13 @@ function sortChangedPaths(changedPaths: ChangedPath[]): ChangedPath[] {
  * self-consistency check) hash it here rather than re-deriving the encoding.
  */
 export function manifestHashOf(changedPaths: ChangedPath[]): string {
-  return createHash("sha256").update(JSON.stringify(changedPaths)).digest("hex");
+  // Serialize each entry with an explicit key order so the hash is a function
+  // of the manifest's values, not of the key insertion order of whichever
+  // in-memory copy (freshly computed vs reloaded from key-sorted persisted
+  // artifacts) the caller holds.
+  const canonical = changedPaths.map(({ path, changeType, mode, contentHash }) =>
+    ({ path, changeType, mode, contentHash }));
+  return createHash("sha256").update(JSON.stringify(canonical)).digest("hex");
 }
 
 /**
