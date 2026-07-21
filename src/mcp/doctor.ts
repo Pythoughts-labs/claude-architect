@@ -1,7 +1,17 @@
+import { createHash } from "node:crypto";
 import { constants } from "node:fs";
-import { open, readdir, type FileHandle } from "node:fs/promises";
+import { lstat, open, readdir, realpath, type FileHandle } from "node:fs/promises";
 import path from "node:path";
 import nodeProcess from "node:process";
+import type {
+  WorkflowBranchBootstrapOwnerRecord,
+  WorkflowBranchIdentity,
+} from "../autopilot/branch-manager.js";
+import type { AutopilotWorkflowState } from "../autopilot/types.js";
+import {
+  WorkflowStore,
+  type WorkflowOwnerRecord,
+} from "../autopilot/workflow-store.js";
 import { git as runGit } from "../git/git-exec.js";
 import type { PlatformServices } from "../platform/platform-services.js";
 import { CLEANUP_JOURNAL_LOCK_KEY } from "../platform/posix-platform-services.js";
@@ -25,7 +35,23 @@ const POSIX_HOME_PATH = /\/(?:Users|home)\/[^/\\\s"']+(?:\/[^/\\\s"']+)*/g;
 const WINDOWS_HOME_PATH = /[A-Za-z]:\\Users\\[^/\\\s"']+(?:\\[^/\\\s"']+)*/gi;
 const CHECKOUT_LOCK_NAME = /^([0-9a-f]{64})\.lock$/;
 const MAX_CHECKOUT_LOCK_BYTES = 4_096;
+const MAX_AUTOPILOT_OWNER_BYTES = 1_024;
+const MAX_AUTOPILOT_REGISTRATION_BYTES = 32_768;
+const MAX_AUTOPILOT_SCAN_ENTRIES = 1_024;
 const NO_FOLLOW = constants.O_NOFOLLOW ?? 0;
+const WORKFLOW_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u;
+const OID = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/u;
+
+const AUTOPILOT_ISSUE_ORDER = [
+  "autopilot-lock-held",
+  "autopilot-lock-leaked",
+  "autopilot-worktree-orphaned",
+  "autopilot-branch-mismatch",
+  "autopilot-promotion-incomplete",
+  "autopilot-remote-recovery-required",
+  "autopilot-pr-recovery-required",
+  "autopilot-state-malformed",
+] as const;
 
 interface CheckoutLockOwner {
   pid: number;
@@ -210,6 +236,421 @@ async function checkoutLockIssues(
   return [...issues];
 }
 
+type AutopilotIssue = typeof AUTOPILOT_ISSUE_ORDER[number];
+type OwnerStatus = "live" | "dead" | "unverifiable";
+type BoundedRead =
+  | { status: "missing" }
+  | { status: "malformed" }
+  | { status: "ok"; text: string };
+
+interface WorkflowBranchRegistration extends WorkflowBranchIdentity {
+  bootstrapOwner: WorkflowBranchBootstrapOwnerRecord;
+}
+
+interface RegistrationScan {
+  registrations: Map<string, WorkflowBranchRegistration>;
+  filenames: Set<string>;
+}
+
+function exactKeys(value: Record<string, unknown>, expected: readonly string[]): boolean {
+  const actual = Object.keys(value).sort();
+  const sortedExpected = [...expected].sort();
+  return actual.length === sortedExpected.length
+    && actual.every((key, index) => key === sortedExpected[index]);
+}
+
+async function readBoundedRegularFile(filename: string, maxBytes: number): Promise<BoundedRead> {
+  let handle: FileHandle | undefined;
+  let outcome: BoundedRead = { status: "malformed" };
+  try {
+    handle = await open(filename, constants.O_RDONLY | NO_FOLLOW);
+    const before = await handle.stat();
+    const named = await lstat(filename);
+    if (!before.isFile()
+      || before.nlink !== 1
+      || before.size > maxBytes
+      || !named.isFile()
+      || named.isSymbolicLink()
+      || named.nlink !== 1
+      || named.dev !== before.dev
+      || named.ino !== before.ino
+      || named.size !== before.size) return outcome;
+    const bytes = Buffer.alloc(before.size);
+    let offset = 0;
+    while (offset < bytes.length) {
+      const { bytesRead } = await handle.read(bytes, offset, bytes.length - offset, offset);
+      if (bytesRead === 0) break;
+      offset += bytesRead;
+    }
+    const after = await handle.stat();
+    const settledNamed = await lstat(filename);
+    if (offset !== before.size
+      || after.dev !== before.dev
+      || after.ino !== before.ino
+      || after.nlink !== 1
+      || after.size !== before.size
+      || after.mtimeMs !== before.mtimeMs
+      || after.ctimeMs !== before.ctimeMs
+      || settledNamed.dev !== before.dev
+      || settledNamed.ino !== before.ino
+      || settledNamed.nlink !== 1
+      || settledNamed.size !== before.size) return outcome;
+    outcome = { status: "ok", text: bytes.toString("utf8") };
+  } catch (error) {
+    if (errorCode(error) === "ENOENT") outcome = { status: "missing" };
+  } finally {
+    try {
+      await handle?.close();
+    } catch {
+      outcome = { status: "malformed" };
+    }
+  }
+  return outcome;
+}
+
+function parseOwner(
+  text: string,
+  workflowId: string,
+  timestampKey: "acquiredAt" | "createdAt",
+): WorkflowOwnerRecord | WorkflowBranchBootstrapOwnerRecord | null {
+  let value: unknown;
+  try {
+    value = JSON.parse(text) as unknown;
+  } catch {
+    return null;
+  }
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
+  const record = value as Record<string, unknown>;
+  if (!exactKeys(record, ["workflowId", "pid", "processToken", timestampKey])
+    || record.workflowId !== workflowId
+    || !Number.isSafeInteger(record.pid)
+    || (record.pid as number) < 1
+    || (record.processToken !== null
+      && (typeof record.processToken !== "string"
+        || record.processToken.length < 1
+        || record.processToken.length > 256))
+    || typeof record[timestampKey] !== "string"
+    || Number.isNaN(Date.parse(record[timestampKey] as string))) return null;
+  return record as unknown as WorkflowOwnerRecord | WorkflowBranchBootstrapOwnerRecord;
+}
+
+function isBootstrapOwner(
+  value: unknown,
+  workflowId: string,
+): value is WorkflowBranchBootstrapOwnerRecord {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+  const owner = value as Partial<WorkflowBranchBootstrapOwnerRecord>;
+  return owner.workflowId === workflowId
+    && Number.isSafeInteger(owner.pid)
+    && owner.pid! > 0
+    && (owner.processToken === null
+      || (typeof owner.processToken === "string"
+        && owner.processToken.length > 0
+        && owner.processToken.length <= 256))
+    && typeof owner.createdAt === "string"
+    && !Number.isNaN(Date.parse(owner.createdAt));
+}
+
+function parseRegistration(text: string): WorkflowBranchRegistration | null {
+  let value: unknown;
+  try {
+    value = JSON.parse(text) as unknown;
+  } catch {
+    return null;
+  }
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
+  const record = value as Partial<WorkflowBranchRegistration>;
+  if (record.ownershipVersion !== "1"
+    || typeof record.workflowId !== "string"
+    || !WORKFLOW_ID.test(record.workflowId)
+    || typeof record.checkoutPath !== "string"
+    || !path.isAbsolute(record.checkoutPath)
+    || typeof record.gitCommonDir !== "string"
+    || !path.isAbsolute(record.gitCommonDir)
+    || typeof record.repositoryIdentity !== "string"
+    || typeof record.worktreePath !== "string"
+    || !path.isAbsolute(record.worktreePath)
+    || typeof record.worktreeGitDir !== "string"
+    || !path.isAbsolute(record.worktreeGitDir)
+    || typeof record.branch !== "string"
+    || record.branchRef !== `refs/heads/${record.branch}`
+    || record.baseRef !== `refs/claude-architect/autopilot/${record.workflowId}/base`
+    || typeof record.baseBranch !== "string"
+    || typeof record.baseCommitOid !== "string"
+    || !OID.test(record.baseCommitOid)
+    || record.remote !== "origin"
+    || typeof record.remoteUrl !== "string"
+    || typeof record.ownerRepo !== "string"
+    || !isBootstrapOwner(record.bootstrapOwner, record.workflowId)) return null;
+  return record as WorkflowBranchRegistration;
+}
+
+async function ownerStatus(
+  owner: { pid: number; processToken: string | null },
+  ps: PlatformServices,
+  isProcessAlive: (pid: number) => boolean,
+): Promise<OwnerStatus> {
+  let alive: boolean;
+  try {
+    alive = isProcessAlive(owner.pid);
+  } catch {
+    return "unverifiable";
+  }
+  if (!alive) return "dead";
+  if (owner.processToken === null) return "unverifiable";
+  const token = await ps.getProcessStartToken(owner.pid).catch(() => null);
+  if (token === null) return "unverifiable";
+  return token === owner.processToken ? "live" : "dead";
+}
+
+function sameOwner(
+  lease: WorkflowOwnerRecord,
+  bootstrap: WorkflowBranchBootstrapOwnerRecord,
+): boolean {
+  return lease.workflowId === bootstrap.workflowId
+    && lease.pid === bootstrap.pid
+    && lease.processToken === bootstrap.processToken;
+}
+
+function registrationFilename(workflowId: string): string {
+  return `${createHash("sha256").update(workflowId).digest("hex")}.json`;
+}
+
+async function safeDirectoryEntries(
+  directory: string,
+  issues: Set<AutopilotIssue>,
+) {
+  try {
+    const metadata = await lstat(directory);
+    if (!metadata.isDirectory() || metadata.isSymbolicLink()) {
+      issues.add("autopilot-state-malformed");
+      return [];
+    }
+    const entries = await readdir(directory, { withFileTypes: true });
+    if (entries.length > MAX_AUTOPILOT_SCAN_ENTRIES) {
+      issues.add("autopilot-state-malformed");
+    }
+    return entries
+      .sort((left, right) => left.name.localeCompare(right.name))
+      .slice(0, MAX_AUTOPILOT_SCAN_ENTRIES);
+  } catch (error) {
+    if (errorCode(error) !== "ENOENT") issues.add("autopilot-state-malformed");
+    return [];
+  }
+}
+
+async function scanRegistrations(
+  stateRoot: string,
+  issues: Set<AutopilotIssue>,
+): Promise<RegistrationScan> {
+  const root = path.join(stateRoot, "autopilot-branches");
+  const entries = await safeDirectoryEntries(root, issues);
+  const registrations = new Map<string, WorkflowBranchRegistration>();
+  const filenames = new Set<string>();
+  for (const entry of entries) {
+    filenames.add(entry.name);
+    if (!entry.isFile()
+      || entry.isSymbolicLink()
+      || !/^[0-9a-f]{64}\.json$/u.test(entry.name)) {
+      issues.add("autopilot-state-malformed");
+      continue;
+    }
+    const read = await readBoundedRegularFile(
+      path.join(root, entry.name),
+      MAX_AUTOPILOT_REGISTRATION_BYTES,
+    );
+    if (read.status !== "ok") {
+      issues.add("autopilot-state-malformed");
+      continue;
+    }
+    const registration = parseRegistration(read.text);
+    if (registration === null
+      || entry.name !== registrationFilename(registration.workflowId)
+      || registrations.has(registration.workflowId)) {
+      issues.add("autopilot-state-malformed");
+      continue;
+    }
+    registrations.set(registration.workflowId, registration);
+  }
+  return { registrations, filenames };
+}
+
+function branchMatchesState(
+  registration: WorkflowBranchRegistration,
+  state: AutopilotWorkflowState,
+): boolean {
+  return registration.workflowId === state.workflowId
+    && registration.repositoryIdentity === state.repositoryIdentity
+    && registration.baseCommitOid === state.baseCommitOid
+    && registration.branchRef === state.workflowRef
+    && registration.worktreePath === state.worktreePath
+    && registration.branch === state.shipping.branch;
+}
+
+function expectedHead(state: AutopilotWorkflowState | null, registration: WorkflowBranchIdentity) {
+  if (state === null) return null;
+  const head = state.tasks
+    .slice(0, state.currentTaskIndex + 1)
+    .reduce((current, task) => task.promotionCommitOid ?? current, state.baseCommitOid);
+  return OID.test(head) ? head : registration.baseCommitOid;
+}
+
+async function observedBranchMatches(
+  registration: WorkflowBranchRegistration,
+  state: AutopilotWorkflowState | null,
+  git: typeof runGit,
+): Promise<boolean> {
+  try {
+    const [checkoutMetadata, worktreeMetadata] = await Promise.all([
+      lstat(registration.checkoutPath),
+      lstat(registration.worktreePath),
+    ]);
+    if (!checkoutMetadata.isDirectory()
+      || checkoutMetadata.isSymbolicLink()
+      || !worktreeMetadata.isDirectory()
+      || worktreeMetadata.isSymbolicLink()) return false;
+    const [checkout, worktree, common] = await Promise.all([
+      realpath(registration.checkoutPath),
+      realpath(registration.worktreePath),
+      realpath(registration.gitCommonDir),
+    ]);
+    if (checkout !== registration.checkoutPath
+      || worktree !== registration.worktreePath
+      || common !== registration.gitCommonDir) return false;
+
+    const [observedCommon, worktrees, symbolic, head, branchRef, baseRef] = await Promise.all([
+      git(registration.checkoutPath, ["rev-parse", "--path-format=absolute", "--git-common-dir"]),
+      git(registration.checkoutPath, ["worktree", "list", "--porcelain", "-z"]),
+      git(registration.worktreePath, ["symbolic-ref", "--quiet", "--short", "HEAD"]),
+      git(registration.worktreePath, ["rev-parse", "--verify", "HEAD"]),
+      git(registration.checkoutPath, ["rev-parse", "--verify", registration.branchRef]),
+      git(registration.checkoutPath, ["rev-parse", "--verify", registration.baseRef]),
+    ]);
+    if ([observedCommon, worktrees, symbolic, head, branchRef, baseRef].some(result =>
+      result.exitCode !== 0
+      || result.truncated?.stdout === true
+      || result.truncated?.stderr === true)) return false;
+    if (await realpath(observedCommon.stdout.trim()) !== registration.gitCommonDir
+      || symbolic.stdout.trim() !== registration.branch
+      || head.stdout.trim() !== branchRef.stdout.trim()
+      || baseRef.stdout.trim() !== registration.baseCommitOid) return false;
+    const stateHead = expectedHead(state, registration);
+    if (stateHead !== null && head.stdout.trim() !== stateHead) return false;
+    const fields = worktrees.stdout.split("\0");
+    const index = fields.indexOf(`worktree ${registration.worktreePath}`);
+    if (index === -1) return false;
+    const next = fields.findIndex((field, fieldIndex) =>
+      fieldIndex > index && field.startsWith("worktree "));
+    const record = fields.slice(index + 1, next === -1 ? undefined : next);
+    return record.includes(`HEAD ${head.stdout.trim()}`)
+      && record.includes(`branch ${registration.branchRef}`);
+  } catch {
+    return false;
+  }
+}
+
+async function autopilotIssues(
+  stateDir: string | undefined,
+  ps: PlatformServices,
+  isProcessAlive: (pid: number) => boolean,
+  git: typeof runGit,
+): Promise<string[]> {
+  if (stateDir === undefined) return [];
+  const stateRoot = path.resolve(stateDir);
+  const issues = new Set<AutopilotIssue>();
+  const registrationScan = await scanRegistrations(stateRoot, issues);
+  const workflowsRoot = path.join(stateRoot, "workflows");
+  const workflowEntries = await safeDirectoryEntries(workflowsRoot, issues);
+  const states = new Map<string, AutopilotWorkflowState>();
+
+  for (const entry of workflowEntries) {
+    if (!entry.isDirectory() || entry.isSymbolicLink() || !WORKFLOW_ID.test(entry.name)) {
+      issues.add("autopilot-state-malformed");
+      continue;
+    }
+    const workflowId = entry.name;
+    const store = new WorkflowStore(workflowId, { stateDirectory: stateRoot });
+    let state: AutopilotWorkflowState;
+    let journal;
+    try {
+      [state, journal] = await Promise.all([store.read(), store.readIntentJournal()]);
+      states.set(workflowId, state);
+    } catch {
+      issues.add("autopilot-state-malformed");
+      continue;
+    }
+    if (journal.tornTail) issues.add("autopilot-state-malformed");
+
+    if (journal.intents.some(intent =>
+      intent.intent.operation === "promote-candidate" && intent.completion === null)) {
+      issues.add("autopilot-promotion-incomplete");
+    }
+
+    const ownerRead = await readBoundedRegularFile(store.ownerPath, MAX_AUTOPILOT_OWNER_BYTES);
+    let lease: WorkflowOwnerRecord | null = null;
+    let leaseStatus: OwnerStatus | null = null;
+    if (ownerRead.status === "ok") {
+      const parsed = parseOwner(ownerRead.text, workflowId, "acquiredAt");
+      if (parsed === null || !("acquiredAt" in parsed)) {
+        issues.add("autopilot-state-malformed");
+      } else {
+        lease = parsed;
+        leaseStatus = await ownerStatus(lease, ps, isProcessAlive);
+        if (leaseStatus === "live") issues.add("autopilot-lock-held");
+        if (leaseStatus === "dead") issues.add("autopilot-lock-leaked");
+      }
+    } else if (ownerRead.status === "malformed") {
+      issues.add("autopilot-state-malformed");
+    }
+
+    const registration = registrationScan.registrations.get(workflowId) ?? null;
+    const expectedRegistrationName = registrationFilename(workflowId);
+    const registrationMissing = !registrationScan.filenames.has(expectedRegistrationName);
+    if (registration !== null && lease !== null && !sameOwner(lease, registration.bootstrapOwner)) {
+      issues.add("autopilot-state-malformed");
+    }
+    if (registration !== null && leaseStatus !== null) {
+      const bootstrapStatus = await ownerStatus(
+        registration.bootstrapOwner,
+        ps,
+        isProcessAlive,
+      );
+      if (bootstrapStatus !== leaseStatus) issues.add("autopilot-state-malformed");
+    }
+    if (leaseStatus === "dead" && state.phase === "pushing") {
+      issues.add("autopilot-remote-recovery-required");
+    }
+    if (leaseStatus === "dead"
+      && (state.phase === "creating-draft-pr" || state.phase === "marking-ready")) {
+      issues.add("autopilot-pr-recovery-required");
+    }
+
+    let worktreeExists = false;
+    try {
+      const metadata = await lstat(state.worktreePath);
+      worktreeExists = metadata.isDirectory() && !metadata.isSymbolicLink();
+      if (!worktreeExists) issues.add("autopilot-state-malformed");
+    } catch (error) {
+      if (errorCode(error) !== "ENOENT") issues.add("autopilot-state-malformed");
+    }
+    if (worktreeExists && registrationMissing) {
+      issues.add("autopilot-worktree-orphaned");
+    } else if (registration !== null
+      && (!branchMatchesState(registration, state)
+        || !await observedBranchMatches(registration, state, git))) {
+      issues.add("autopilot-branch-mismatch");
+    }
+  }
+
+  for (const [workflowId, registration] of registrationScan.registrations) {
+    if (states.has(workflowId)) continue;
+    if (!await observedBranchMatches(registration, null, git)) {
+      issues.add("autopilot-branch-mismatch");
+    }
+  }
+  return AUTOPILOT_ISSUE_ORDER.filter(issue => issues.has(issue));
+}
+
 export async function doctor(deps: DoctorDependencies = {}): Promise<DoctorResult> {
   const ps = deps.ps ?? getPlatformServices();
   const env = deps.env ?? process.env;
@@ -217,6 +658,7 @@ export async function doctor(deps: DoctorDependencies = {}): Promise<DoctorResul
   const arch = deps.arch ?? process.arch;
   const environmentType = deps.environmentType ?? detectEnvironmentType();
   const issues: string[] = [];
+  const gitRunner = deps.git ?? runGit;
   const sandboxBackends = SANDBOX_BACKENDS.map(backend => ({
     id: backend.id,
     kind: backend.kind,
@@ -247,10 +689,16 @@ export async function doctor(deps: DoctorDependencies = {}): Promise<DoctorResul
     ps,
     deps.isProcessAlive ?? defaultIsProcessAlive,
   ));
+  issues.push(...await autopilotIssues(
+    stateDir,
+    ps,
+    deps.isProcessAlive ?? defaultIsProcessAlive,
+    gitRunner,
+  ));
 
   let git: DoctorResult["git"] = { version: null, ok: false };
   try {
-    const result = await (deps.git ?? runGit)(process.cwd(), ["--version"]);
+    const result = await gitRunner(process.cwd(), ["--version"]);
     const version = result.exitCode === 0 && result.truncated?.stdout !== true
       ? gitVersion(result.stdout)
       : null;

@@ -12,6 +12,17 @@ import {
 } from "node:fs/promises";
 import path from "node:path";
 import nodeProcess from "node:process";
+import {
+  WorkflowBranchManager,
+  type WorkflowBranchIdentity,
+  type WorkflowBranchBootstrapOwnerRecord,
+} from "../autopilot/branch-manager.js";
+import type { AutopilotWorkflowState } from "../autopilot/types.js";
+import {
+  WorkflowStore,
+  type WorkflowIntentJournal,
+  type WorkflowOwnerRecord,
+} from "../autopilot/workflow-store.js";
 import { git, type GitResult } from "../git/git-exec.js";
 import { WorktreeManager } from "../git/worktree-manager.js";
 import type { PlatformServices } from "../platform/platform-services.js";
@@ -93,6 +104,24 @@ export interface RecoveryDependencies {
   delayMs?: (ms: number) => Promise<void>;
   graceMs?: number;
   git?: typeof git;
+}
+
+export type AutopilotRecoveryDisposition =
+  | "live-preserve"
+  | "resume"
+  | "finalize"
+  | "dispose"
+  | "human-decision-required";
+
+export interface AutopilotRecoveryResult {
+  workflowId: string;
+  disposition: AutopilotRecoveryDisposition;
+}
+
+export interface RecoveryResult {
+  recovered: string[];
+  quarantined: string[];
+  workflows?: AutopilotRecoveryResult[];
 }
 
 interface LockOwner {
@@ -2056,9 +2085,561 @@ async function lockIsOwnedByLiveProcess(
   return await lockOwnerStatus(owner, isProcessAlive, getProcessStartToken) !== "dead";
 }
 
+const WORKFLOW_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u;
+const TERMINAL_WORKFLOW_PHASES = new Set([
+  "ready-for-human-review",
+  "human-decision-required",
+  "failed",
+  "cancelled",
+]);
+
+type OwnerObservation =
+  | { presence: "absent" }
+  | { presence: "present"; status: LockOwnerStatus };
+
+interface BranchObservation {
+  presence: "absent" | "present" | "ambiguous";
+  identity: WorkflowBranchIdentity | null;
+  owner: WorkflowBranchBootstrapOwnerRecord | null;
+  ownerStatus: LockOwnerStatus | null;
+}
+
+function exactObjectKeys(value: Record<string, unknown>, expected: readonly string[]): boolean {
+  const actual = Object.keys(value).sort();
+  const sortedExpected = [...expected].sort();
+  return actual.length === sortedExpected.length
+    && actual.every((key, index) => key === sortedExpected[index]);
+}
+
+function parseWorkflowLease(text: string, workflowId: string): WorkflowOwnerRecord | null {
+  let value: unknown;
+  try {
+    value = JSON.parse(text) as unknown;
+  } catch {
+    return null;
+  }
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
+  const record = value as Record<string, unknown>;
+  if (!exactObjectKeys(record, ["workflowId", "pid", "processToken", "acquiredAt"])
+    || record.workflowId !== workflowId
+    || !Number.isSafeInteger(record.pid)
+    || (record.pid as number) < 1
+    || (record.processToken !== null
+      && (typeof record.processToken !== "string"
+        || record.processToken.length < 1
+        || record.processToken.length > 256))
+    || typeof record.acquiredAt !== "string"
+    || Number.isNaN(Date.parse(record.acquiredAt))) return null;
+  return record as unknown as WorkflowOwnerRecord;
+}
+
+async function observeWorkflowLease(
+  store: WorkflowStore,
+  isProcessAlive: (pid: number) => boolean,
+  getProcessStartToken: (pid: number) => Promise<string | null>,
+): Promise<OwnerObservation> {
+  const text = await readBoundedRegularFile(store.ownerPath).catch(() => undefined);
+  if (text === undefined) return { presence: "present", status: "unverifiable" };
+  if (text === null) return { presence: "absent" };
+  const record = parseWorkflowLease(text, store.workflowId);
+  if (record === null) return { presence: "present", status: "unverifiable" };
+  return {
+    presence: "present",
+    status: await lockOwnerStatus(record, isProcessAlive, getProcessStartToken)
+      .catch((): LockOwnerStatus => "unverifiable"),
+  };
+}
+
+function branchOwnershipPath(root: string, workflowId: string): string {
+  const name = createHash("sha256").update(workflowId).digest("hex");
+  return path.join(root, "autopilot-branches", `${name}.json`);
+}
+
+async function observeWorkflowBranch(
+  root: string,
+  workflowId: string,
+  manager: WorkflowBranchManager,
+  isProcessAlive: (pid: number) => boolean,
+  getProcessStartToken: (pid: number) => Promise<string | null>,
+): Promise<BranchObservation> {
+  const registration = await readBoundedRegularFile(branchOwnershipPath(root, workflowId))
+    .catch(() => undefined);
+  if (registration === undefined) {
+    return { presence: "ambiguous", identity: null, owner: null, ownerStatus: null };
+  }
+  if (registration === null) {
+    return { presence: "absent", identity: null, owner: null, ownerStatus: null };
+  }
+  const [identity, owner] = await Promise.all([
+    manager.load(workflowId),
+    manager.readBootstrapOwner(workflowId),
+  ]).catch(() => [null, null] as const);
+  if (identity === null || owner === null) {
+    return { presence: "ambiguous", identity: null, owner: null, ownerStatus: null };
+  }
+  return {
+    presence: "present",
+    identity,
+    owner,
+    ownerStatus: await lockOwnerStatus(owner, isProcessAlive, getProcessStartToken)
+      .catch((): LockOwnerStatus => "unverifiable"),
+  };
+}
+
+function isWorkflowBranchIdentity(value: unknown): value is WorkflowBranchIdentity {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+  const identity = value as Partial<WorkflowBranchIdentity>;
+  return identity.ownershipVersion === "1"
+    && typeof identity.workflowId === "string"
+    && WORKFLOW_ID.test(identity.workflowId)
+    && typeof identity.checkoutPath === "string"
+    && typeof identity.gitCommonDir === "string"
+    && typeof identity.repositoryIdentity === "string"
+    && typeof identity.worktreePath === "string"
+    && typeof identity.worktreeGitDir === "string"
+    && typeof identity.branch === "string"
+    && identity.branchRef === `refs/heads/${identity.branch}`
+    && identity.baseRef === `refs/claude-architect/autopilot/${identity.workflowId}/base`
+    && typeof identity.baseBranch === "string"
+    && typeof identity.baseCommitOid === "string"
+    && OID.test(identity.baseCommitOid)
+    && identity.remote === "origin"
+    && typeof identity.remoteUrl === "string"
+    && typeof identity.ownerRepo === "string";
+}
+
+function branchMatchesWorkflowState(
+  branch: WorkflowBranchIdentity,
+  state: AutopilotWorkflowState,
+): boolean {
+  return branch.workflowId === state.workflowId
+    && branch.repositoryIdentity === state.repositoryIdentity
+    && branch.baseCommitOid === state.baseCommitOid
+    && branch.branchRef === state.workflowRef
+    && branch.worktreePath === state.worktreePath
+    && branch.branch === state.shipping.branch;
+}
+
+function sameWorkflowBranch(
+  left: WorkflowBranchIdentity,
+  right: WorkflowBranchIdentity,
+): boolean {
+  return left.ownershipVersion === right.ownershipVersion
+    && left.workflowId === right.workflowId
+    && left.checkoutPath === right.checkoutPath
+    && left.gitCommonDir === right.gitCommonDir
+    && left.repositoryIdentity === right.repositoryIdentity
+    && left.worktreePath === right.worktreePath
+    && left.worktreeGitDir === right.worktreeGitDir
+    && left.branch === right.branch
+    && left.branchRef === right.branchRef
+    && left.baseRef === right.baseRef
+    && left.baseBranch === right.baseBranch
+    && left.baseCommitOid === right.baseCommitOid
+    && left.remote === right.remote
+    && left.remoteUrl === right.remoteUrl
+    && left.ownerRepo === right.ownerRepo;
+}
+
+function canonicalGithubRemote(raw: string): string | null {
+  let parsed: URL;
+  try {
+    parsed = new URL(raw);
+  } catch {
+    return null;
+  }
+  if (parsed.protocol !== "https:"
+    || parsed.hostname.toLowerCase() !== "github.com"
+    || parsed.port !== ""
+    || parsed.username !== ""
+    || parsed.password !== ""
+    || parsed.search !== ""
+    || parsed.hash !== ""
+    || parsed.pathname.includes("%")
+    || parsed.pathname.endsWith("/")
+    || parsed.pathname.includes("//")) return null;
+  const components = parsed.pathname.slice(1).split("/");
+  if (components.length !== 2) return null;
+  const owner = components[0]!;
+  const repository = components[1]!.endsWith(".git")
+    ? components[1]!.slice(0, -4)
+    : components[1]!;
+  const component = /^[A-Za-z0-9_.-]+$/u;
+  if (!component.test(owner)
+    || !component.test(repository)
+    || owner === "."
+    || owner === ".."
+    || repository === "."
+    || repository === "..") return null;
+  return `https://github.com/${owner.toLowerCase()}/${repository.toLowerCase()}.git`;
+}
+
+function recordedBranch(
+  journal: WorkflowIntentJournal,
+  state: AutopilotWorkflowState,
+): WorkflowBranchIdentity | null {
+  const recorded = journal.intents.find(status =>
+    status.intent.operation === "record-workflow-spec"
+    && status.intent.idempotencyKey === "workflow-spec");
+  const completion = recorded?.completion?.completion;
+  if (typeof completion !== "object" || completion === null || Array.isArray(completion)) {
+    return null;
+  }
+  const branch = (completion as { branch?: unknown }).branch;
+  return isWorkflowBranchIdentity(branch) && branchMatchesWorkflowState(branch, state)
+    ? branch
+    : null;
+}
+
+function expectedWorkflowHead(state: AutopilotWorkflowState): string | null {
+  const head = state.tasks
+    .slice(0, state.currentTaskIndex + 1)
+    .reduce((current, task) => task.promotionCommitOid ?? current, state.baseCommitOid);
+  return OID.test(head) ? head : null;
+}
+
+function cleanupIntent(
+  journal: WorkflowIntentJournal,
+  expectedHead: string,
+) {
+  const key = `cleanup:${expectedHead}`;
+  const intent = journal.intents.find(status =>
+    status.intent.operation === "cleanup-workflow-branch"
+    && status.intent.idempotencyKey === key);
+  if (intent === undefined
+    || intent.intent.expectedIdentities.headCommitOid !== expectedHead
+    || intent.completion?.failure !== null && intent.completion !== null) return null;
+  if (intent.completion !== null) {
+    const completion = intent.completion.completion;
+    if (typeof completion !== "object"
+      || completion === null
+      || Array.isArray(completion)
+      || (completion as { worktreeRemoved?: unknown }).worktreeRemoved !== true
+      || (completion as { refsRemoved?: unknown }).refsRemoved !== true) return null;
+  }
+  return intent;
+}
+
+async function isAbsent(filename: string): Promise<boolean | null> {
+  try {
+    await lstat(filename);
+    return false;
+  } catch (error) {
+    return isMissing(error) ? true : null;
+  }
+}
+
+async function cleanupIsDirectlyObserved(
+  branch: WorkflowBranchIdentity,
+  runGit: typeof git,
+): Promise<boolean> {
+  if (await isAbsent(branch.worktreePath) !== true) return false;
+  let canonicalCheckout: string;
+  let canonicalCommonDir: string;
+  try {
+    canonicalCheckout = await realpath(branch.checkoutPath);
+    canonicalCommonDir = await realpath(branch.gitCommonDir);
+  } catch {
+    return false;
+  }
+  if (canonicalCheckout !== branch.checkoutPath || canonicalCommonDir !== branch.gitCommonDir) {
+    return false;
+  }
+  const [commonDir, worktrees, branchRef, baseRef] = await Promise.all([
+    runGit(branch.checkoutPath, ["rev-parse", "--path-format=absolute", "--git-common-dir"]),
+    runGit(branch.checkoutPath, ["worktree", "list", "--porcelain", "-z"]),
+    runGit(branch.checkoutPath, ["show-ref", "--verify", "--quiet", branch.branchRef]),
+    runGit(branch.checkoutPath, ["show-ref", "--verify", "--quiet", branch.baseRef]),
+  ]);
+  if (commonDir.exitCode !== 0 || worktrees.exitCode !== 0
+    || branchRef.exitCode !== 1 || baseRef.exitCode !== 1) return false;
+  let observedCommonDir: string;
+  try {
+    observedCommonDir = await realpath(commonDir.stdout.trim());
+  } catch {
+    return false;
+  }
+  if (observedCommonDir !== branch.gitCommonDir) return false;
+  return !worktrees.stdout.split("\0").some(field =>
+    field === `worktree ${branch.worktreePath}`);
+}
+
+async function activeBranchIsDirectlyObserved(
+  branch: WorkflowBranchIdentity,
+  expectedHead: string,
+  runGit: typeof git,
+): Promise<boolean> {
+  let canonicalCheckout: string;
+  let canonicalWorktree: string;
+  let canonicalCommonDir: string;
+  try {
+    [canonicalCheckout, canonicalWorktree, canonicalCommonDir] = await Promise.all([
+      realpath(branch.checkoutPath),
+      realpath(branch.worktreePath),
+      realpath(branch.gitCommonDir),
+    ]);
+  } catch {
+    return false;
+  }
+  if (canonicalCheckout !== branch.checkoutPath
+    || canonicalWorktree !== branch.worktreePath
+    || canonicalCommonDir !== branch.gitCommonDir) return false;
+
+  const [commonDir, worktrees, symbolic, head, base, status, remote] = await Promise.all([
+    runGit(branch.checkoutPath, ["rev-parse", "--path-format=absolute", "--git-common-dir"]),
+    runGit(branch.checkoutPath, ["worktree", "list", "--porcelain", "-z"]),
+    runGit(branch.worktreePath, ["symbolic-ref", "--quiet", "--short", "HEAD"]),
+    runGit(branch.worktreePath, ["rev-parse", "--verify", "HEAD"]),
+    runGit(branch.checkoutPath, ["rev-parse", "--verify", branch.baseRef]),
+    runGit(branch.worktreePath, [
+      "status", "--porcelain=v1", "--untracked-files=all", "--ignore-submodules=none",
+    ]),
+    runGit(branch.checkoutPath, ["config", "--get", "remote.origin.url"]),
+  ]);
+  if (commonDir.exitCode !== 0
+    || worktrees.exitCode !== 0
+    || symbolic.exitCode !== 0
+    || head.exitCode !== 0
+    || base.exitCode !== 0
+    || status.exitCode !== 0
+    || remote.exitCode !== 0) return false;
+  let observedCommonDir: string;
+  try {
+    observedCommonDir = await realpath(commonDir.stdout.trim());
+  } catch {
+    return false;
+  }
+  if (observedCommonDir !== branch.gitCommonDir
+    || symbolic.stdout.trim() !== branch.branch
+    || head.stdout.trim() !== expectedHead
+    || base.stdout.trim() !== branch.baseCommitOid
+    || status.stdout !== ""
+    || canonicalGithubRemote(remote.stdout.trim()) !== branch.remoteUrl) return false;
+
+  const fields = worktrees.stdout.split("\0");
+  const registrationIndex = fields.indexOf(`worktree ${branch.worktreePath}`);
+  if (registrationIndex === -1) return false;
+  const nextRegistration = fields.findIndex((field, index) =>
+    index > registrationIndex && field.startsWith("worktree "));
+  const registration = fields.slice(
+    registrationIndex + 1,
+    nextRegistration === -1 ? undefined : nextRegistration,
+  );
+  return registration.includes(`HEAD ${expectedHead}`)
+    && registration.includes(`branch ${branch.branchRef}`);
+}
+
+async function workflowIds(root: string): Promise<string[]> {
+  const ids = new Set<string>();
+  const workflowsRoot = path.join(root, "workflows");
+  const workflowsIdentity = await plainDirectoryIdentity(workflowsRoot);
+  const workflowEntries = workflowsIdentity === null
+    ? []
+    : await readdir(workflowsRoot, { withFileTypes: true });
+  for (const entry of workflowEntries) {
+    if (entry.isDirectory() && !entry.isSymbolicLink() && WORKFLOW_ID.test(entry.name)) {
+      ids.add(entry.name);
+    }
+  }
+
+  const branchesRoot = path.join(root, "autopilot-branches");
+  const branchesIdentity = await plainDirectoryIdentity(branchesRoot);
+  const branchEntries = branchesIdentity === null
+    ? []
+    : await readdir(branchesRoot, { withFileTypes: true });
+  for (const entry of branchEntries) {
+    if (!entry.isFile() || entry.isSymbolicLink() || !/^[0-9a-f]{64}\.json$/u.test(entry.name)) {
+      continue;
+    }
+    const text = await readBoundedRegularFile(path.join(branchesRoot, entry.name));
+    if (text === null) continue;
+    let value: unknown;
+    try {
+      value = JSON.parse(text) as unknown;
+    } catch {
+      continue;
+    }
+    if (typeof value !== "object" || value === null || Array.isArray(value)) continue;
+    const workflowId = (value as { workflowId?: unknown }).workflowId;
+    if (typeof workflowId === "string"
+      && WORKFLOW_ID.test(workflowId)
+      && entry.name === path.basename(branchOwnershipPath(root, workflowId))) {
+      ids.add(workflowId);
+    }
+  }
+  return [...ids].sort((left, right) => left.localeCompare(right));
+}
+
+async function finalizeObservedWorkflow(
+  store: WorkflowStore,
+  state: AutopilotWorkflowState,
+  expectedHead: string,
+): Promise<void> {
+  await store.adoptLease();
+  let primaryError: unknown;
+  try {
+    await store.completeIntent({
+      expectedRevision: state.revision,
+      idempotencyKey: `cleanup:${expectedHead}`,
+      completion: { worktreeRemoved: true, refsRemoved: true },
+    });
+    const completedAt = new Date().toISOString();
+    await store.transition({
+      expectedRevision: state.revision,
+      to: "ready-for-human-review",
+      update(draft) {
+        draft.cleanup = {
+          status: "succeeded",
+          worktreeRemoved: true,
+          lockReleased: true,
+          error: null,
+          completedAt,
+        };
+        draft.terminal = {
+          classification: "ready-for-human-review",
+          reason: null,
+          evidenceRefs: draft.finalGate === null ? [] : [draft.finalGate.reportRef],
+          completedAt,
+        };
+      },
+    });
+  } catch (error) {
+    primaryError = error;
+    throw error;
+  } finally {
+    try {
+      await store.releaseLease();
+    } catch (releaseError) {
+      if (primaryError === undefined) throw releaseError;
+      throw new AggregateError(
+        [primaryError, releaseError],
+        "workflow finalization failed and its adopted lease could not be released",
+      );
+    }
+  }
+}
+
+async function recoverAutopilotWorkflows(
+  root: string,
+  dependencies: {
+    isProcessAlive: (pid: number) => boolean;
+    getProcessStartToken: (pid: number) => Promise<string | null>;
+    runGit: typeof git;
+  },
+): Promise<AutopilotRecoveryResult[]> {
+  const results: AutopilotRecoveryResult[] = [];
+  const branchManager = new WorkflowBranchManager({ git: dependencies.runGit });
+  for (const workflowId of await workflowIds(root)) {
+    const store = new WorkflowStore(workflowId, {
+      stateDirectory: root,
+      isProcessAlive: dependencies.isProcessAlive,
+      getProcessStartToken: dependencies.getProcessStartToken,
+    });
+    const [lease, branch] = await Promise.all([
+      observeWorkflowLease(
+        store,
+        dependencies.isProcessAlive,
+        dependencies.getProcessStartToken,
+      ),
+      observeWorkflowBranch(
+        root,
+        workflowId,
+        branchManager,
+        dependencies.isProcessAlive,
+        dependencies.getProcessStartToken,
+      ),
+    ]);
+
+    if ((lease.presence === "present" && lease.status === "live")
+      || branch.ownerStatus === "live") {
+      results.push({ workflowId, disposition: "live-preserve" });
+      continue;
+    }
+
+    const stateExists = await isAbsent(store.statePath);
+    if (stateExists === true) {
+      if (branch.presence === "present" && branch.ownerStatus === "dead"
+        && branch.identity !== null) {
+        const cleanup = await branchManager.cleanup(branch.identity, branch.identity.baseCommitOid);
+        results.push({
+          workflowId,
+          disposition: cleanup.ok && cleanup.worktreeRemoved && cleanup.refsRemoved
+            ? "dispose"
+            : "human-decision-required",
+        });
+      } else {
+        results.push({ workflowId, disposition: "human-decision-required" });
+      }
+      continue;
+    }
+    if (stateExists !== false) {
+      results.push({ workflowId, disposition: "human-decision-required" });
+      continue;
+    }
+
+    let state: AutopilotWorkflowState;
+    let journal: WorkflowIntentJournal;
+    try {
+      [state, journal] = await Promise.all([store.read(), store.readIntentJournal()]);
+    } catch {
+      results.push({ workflowId, disposition: "human-decision-required" });
+      continue;
+    }
+    if (TERMINAL_WORKFLOW_PHASES.has(state.phase)) continue;
+    if (lease.presence !== "present" || lease.status !== "dead"
+      || branch.presence === "ambiguous"
+      || branch.ownerStatus === "unverifiable") {
+      results.push({ workflowId, disposition: "human-decision-required" });
+      continue;
+    }
+
+    const recorded = recordedBranch(journal, state);
+    if (recorded === null) {
+      results.push({ workflowId, disposition: "human-decision-required" });
+      continue;
+    }
+    if (state.phase === "cleaning-up") {
+      const expectedHead = expectedWorkflowHead(state);
+      const intent = expectedHead === null ? null : cleanupIntent(journal, expectedHead);
+      const directlyObserved = expectedHead !== null
+        && state.finalGate?.headCommitOid === expectedHead
+        && branch.presence === "absent"
+        && await isAbsent(branchOwnershipPath(root, workflowId)) === true
+        && await cleanupIsDirectlyObserved(recorded, dependencies.runGit);
+      if (expectedHead === null || intent === null || !directlyObserved) {
+        results.push({ workflowId, disposition: "human-decision-required" });
+        continue;
+      }
+      await finalizeObservedWorkflow(store, state, expectedHead);
+      results.push({ workflowId, disposition: "finalize" });
+      continue;
+    }
+
+    if (branch.presence !== "present"
+      || branch.identity === null
+      || branch.ownerStatus !== "dead"
+      || !sameWorkflowBranch(branch.identity, recorded)) {
+      results.push({ workflowId, disposition: "human-decision-required" });
+      continue;
+    }
+    const expectedHead = expectedWorkflowHead(state);
+    if (expectedHead === null
+      || !await activeBranchIsDirectlyObserved(
+        branch.identity,
+        expectedHead,
+        dependencies.runGit,
+      )) {
+      results.push({ workflowId, disposition: "human-decision-required" });
+      continue;
+    }
+    results.push({ workflowId, disposition: "resume" });
+  }
+  return results;
+}
+
 export async function recoverStaleRuns(
   dependencies: RecoveryDependencies = {},
-): Promise<{ recovered: string[]; quarantined: string[] }> {
+): Promise<RecoveryResult> {
   const root = await stateRoot();
   // Recovery replays interrupted prunes under a checkout lease. Injected test
   // doubles may omit acquireCheckoutLock, so fall back to the selected platform
@@ -2294,7 +2875,14 @@ export async function recoverStaleRuns(
       isProcessAlive,
       pid => ps.getProcessStartToken(pid),
     );
-    return { recovered, quarantined };
+    const workflows = await recoverAutopilotWorkflows(root, {
+      isProcessAlive,
+      getProcessStartToken: pid => ps.getProcessStartToken(pid),
+      runGit,
+    });
+    return workflows.length === 0
+      ? { recovered, quarantined }
+      : { recovered, quarantined, workflows };
   } catch (error) {
     primaryError = error;
     throw error;
