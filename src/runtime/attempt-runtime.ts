@@ -36,6 +36,7 @@ import {
 } from "../producers/producer-registry.js";
 import { route } from "../producers/routing-policy.js";
 import { NestedDelegationError, RuntimeError } from "../util/errors.js";
+import { logger } from "../util/logger.js";
 import { verifyBaseline } from "../verify/baseline-verifier.js";
 import { ArtifactStore } from "./artifact-store.js";
 import {
@@ -353,6 +354,7 @@ export async function runAttempt(
   let tempHome: string | null = null;
   let builtEnvironment: BuiltEnvironment | null = null;
   let primaryError: unknown;
+  let archivedResult: AttemptResult | null = null;
   try {
     if (lock === null) {
       ownedLock = await ps.acquireCheckoutLock(canonical.canonical);
@@ -705,7 +707,7 @@ export async function runAttempt(
     }
 
     reportPhase(deps, "archiving result");
-    return await archiveTerminal({
+    archivedResult = await archiveTerminal({
       store,
       spec,
       runId,
@@ -728,6 +730,7 @@ export async function runAttempt(
       repositoryInstructions,
       packagedVerifier,
     });
+    return archivedResult;
   } catch (error) {
     primaryError = error;
     throw error;
@@ -738,6 +741,34 @@ export async function runAttempt(
       tempHome,
       lock: ownedLock,
     });
-    if (primaryError === undefined && cleanupError !== null) throw cleanupError;
+    if (cleanupError !== null) {
+      const detail = redact(
+        cleanupError instanceof Error ? cleanupError.message : String(cleanupError),
+      );
+      logger.warn("attempt resources could not be cleaned up", { error: detail });
+      if (archivedResult !== null) {
+        // The attempt reached a terminal result; a failure to tidy up afterwards
+        // must be recorded, not substituted for that outcome. The caller holds
+        // this exact object, so amending it in place keeps what it sees honest,
+        // and the durable record goes beside the archive rather than rewriting
+        // it — terminal artifacts are immutable by design.
+        archivedResult.evidence = { ...archivedResult.evidence, cleanupFailure: detail };
+        archivedResult.unresolvedIssues = [
+          ...archivedResult.unresolvedIssues,
+          "attempt-cleanup-failed",
+        ];
+        try {
+          await store.writeLog("cleanup-failure", `${detail}\n`);
+        } catch (writeError) {
+          // The in-memory result already carries the failure; a second write
+          // error must not replace the outcome either — but it must be visible.
+          logger.warn("cleanup failure could not be archived", {
+            error: redact(writeError instanceof Error ? writeError.message : String(writeError)),
+          });
+        }
+      } else if (primaryError === undefined) {
+        throw cleanupError;
+      }
+    }
   }
 }

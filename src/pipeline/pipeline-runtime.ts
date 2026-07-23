@@ -28,6 +28,7 @@ import {
   type PipelineActiveMarker,
 } from "../runtime/artifact-store.js";
 import { redact, redactRecord } from "../runtime/redaction.js";
+import { logger } from "../util/logger.js";
 import type { RunStartContext } from "../runtime/run-start.js";
 import { RuntimeError } from "../util/errors.js";
 import { globMatches } from "../util/glob.js";
@@ -548,28 +549,43 @@ async function archiveSliceExecutionError(args: {
   }
 }
 
+/**
+ * Removal itself retries and falls back inside WorktreeManager. What matters
+ * here is the disposition: a worktree that still cannot be removed is reported,
+ * never substituted for the outcome of the work it held. The Producer's process
+ * tree is already terminated by `supervise` before this runs.
+ */
+async function cleanupWorktree(
+  worktree: { path: string; cleanup(): Promise<void> },
+): Promise<unknown | null> {
+  try {
+    await worktree.cleanup();
+    return null;
+  } catch (error) {
+    return error;
+  }
+}
+
 async function withManagedWorktree<T>(args: {
   manager: WorktreeManager;
   commit: string;
   cleanupFailureMessage: string;
   run: (worktreePath: string) => Promise<T>;
+  onCleanupFailure?: (error: unknown) => void;
 }): Promise<T> {
   const worktree = await args.manager.create(args.commit);
-  let primaryError: unknown;
   try {
     return await args.run(worktree.path);
-  } catch (error) {
-    primaryError = error;
-    throw error;
   } finally {
-    try {
-      await worktree.cleanup();
-    } catch (cleanupError) {
-      if (primaryError === undefined) throw cleanupError;
-      throw new AggregateError(
-        [primaryError, cleanupError],
-        args.cleanupFailureMessage,
-      );
+    // A cleanup failure must stay visible without erasing the primary outcome.
+    // Replacing a graceful slice timeout with a hard runtime error loses the
+    // whole slice result and the salvage that goes with it.
+    const cleanupError = await cleanupWorktree(worktree);
+    if (cleanupError !== null) {
+      logger.warn(args.cleanupFailureMessage, {
+        error: redact(cleanupError instanceof Error ? cleanupError.message : String(cleanupError)),
+      });
+      args.onCleanupFailure?.(cleanupError);
     }
   }
 }
@@ -1061,7 +1077,6 @@ export async function verifyCandidate(args: {
     ps,
   );
   const fresh = await manager.create(args.candidateCommit);
-  let primaryError: unknown;
   try {
     const [diffText, nameOnly, nameStatus, status, ancestry] = await Promise.all([
       checkedGit(fresh.path, ["diff", `${args.baselineCommit}..${args.candidateCommit}`]),
@@ -1158,18 +1173,12 @@ export async function verifyCandidate(args: {
       },
       baselineDrift: ancestry.exitCode !== 0,
     };
-  } catch (error) {
-    primaryError = error;
-    throw error;
   } finally {
-    try {
-      await fresh.cleanup();
-    } catch (cleanupError) {
-      if (primaryError === undefined) throw cleanupError;
-      throw new AggregateError(
-        [primaryError, cleanupError],
-        "pipeline verification failed and its worktree could not be cleaned up",
-      );
+    const cleanupError = await cleanupWorktree(fresh);
+    if (cleanupError !== null) {
+      logger.warn("pipeline verification worktree could not be cleaned up", {
+        error: redact(cleanupError instanceof Error ? cleanupError.message : String(cleanupError)),
+      });
     }
   }
 }
@@ -1785,7 +1794,6 @@ async function runPipelineWithLease(
       ps,
     ).create(currentCandidateCommit);
     let gitObjectAccess: LinkedWorktreeGitAccess | null = null;
-    let primaryError: unknown;
     try {
       if (maxIncrements > 1) {
         try {
@@ -2074,18 +2082,12 @@ async function runPipelineWithLease(
         finalAttempt = promoted.attempt;
         currentCandidateCommit = promoted.candidateCommit;
       }
-    } catch (error) {
-      primaryError = error;
-      throw error;
     } finally {
-      try {
-        await candidateWorktree.cleanup();
-      } catch (cleanupError) {
-        if (primaryError === undefined) throw cleanupError;
-        throw new AggregateError(
-          [primaryError, cleanupError],
-          "pipeline rounds failed and their worktree could not be cleaned up",
-        );
+      const cleanupError = await cleanupWorktree(candidateWorktree);
+      if (cleanupError !== null) {
+        logger.warn("pipeline round worktree could not be cleaned up", {
+          error: redact(cleanupError instanceof Error ? cleanupError.message : String(cleanupError)),
+        });
       }
     }
 

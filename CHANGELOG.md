@@ -6,6 +6,18 @@ All notable changes to Claude Architect are recorded here. The format follows
 
 ## [Unreleased]
 
+- fix: a worktree that cannot be cleaned up no longer erases the outcome of the
+  work it held. A slice timeout previously came back as a hard runtime error with
+  the graceful result lost and an orphan directory left behind (dogfood finding
+  16); cleanup failures are now reported beside the result — in the run's
+  `logs/cleanup-failure.log` and the server log — while the attempt, verification,
+  and round outcomes stand. Terminal artifacts stay immutable.
+- fix: worktree removal retries on every platform, not only Windows, since a
+  Producer's test children can hold a worktree open anywhere. When Git still
+  refuses, the checkout is removed directly and its registration pruned, so
+  neither an orphan directory nor a dangling `.git/worktrees` entry survives. A
+  path Git no longer tracks is left untouched.
+
 - feat: both delegate handlers now name the tracked files that import the write
   allowlist but sit outside it, before dispatch. A delegation that changes an
   exported contract otherwise leaves its consumers unrepairable by the Producer

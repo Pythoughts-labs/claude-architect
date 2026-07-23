@@ -54,6 +54,34 @@ afterEach(async () => {
 });
 
 describe("WorktreeManager", () => {
+  it("removes a worktree git itself refuses to remove, leaving no registration", async () => {
+    const { directory, base } = await initRepo();
+    // Finding 16: a Producer's surviving test children held the worktree open,
+    // `git worktree remove` failed, and the orphan directory was left behind
+    // with its registration already pruned. Force the failure git-side and
+    // require both halves to end up clean.
+    let removeAttempts = 0;
+    const manager = new WorktreeManager(directory, "stuck", undefined, {
+      git: async (cwd, args) => {
+        if (args[0] === "worktree" && args[1] === "remove") {
+          removeAttempts += 1;
+          return { exitCode: 128, stdout: "", stderr: "fatal: worktree is dirty" };
+        }
+        return git(cwd, args);
+      },
+      delay: async () => {},
+    });
+    const worktree = await manager.create(base);
+    await writeFile(join(worktree.path, "held-open.txt"), "child still writing\n");
+
+    await worktree.cleanup();
+
+    expect(removeAttempts).toBeGreaterThan(1);
+    await expect(stat(worktree.path)).rejects.toMatchObject({ code: "ENOENT" });
+    // The mirror leak: a directory removed but its registration left dangling.
+    expect(await runGit(directory, ["worktree", "list"])).not.toContain("stuck");
+  });
+
   it("creates a detached attempt worktree under persistent plugin data and cleans it up", async () => {
     const { directory, base } = await initRepo();
     const manager = new WorktreeManager(directory, "run-123");
@@ -100,17 +128,20 @@ describe("WorktreeManager", () => {
     expect(delays).toEqual([250, 250]);
   });
 
-  it("throws after exhausting Windows worktree removal retries", async () => {
-    let calls = 0;
+  it("throws after exhausting worktree removal retries", async () => {
+    let removals = 0;
     const delays: number[] = [];
     const manager = new WorktreeManager("repo", "run-exhausted", { os: "win32" }, {
-      git: async () => { calls += 1; return failedGitResult; },
+      git: async (_cwd, args) => {
+        if (args[0] === "worktree" && args[1] === "remove") removals += 1;
+        return failedGitResult;
+      },
       delay: async milliseconds => { delays.push(milliseconds); },
     });
     const managedPath = join(process.env.CLAUDE_PLUGIN_DATA!, "worktrees", "run-exhausted");
 
     await expect(manager.remove(managedPath)).rejects.toThrow("git worktree remove failed: locked");
-    expect(calls).toBe(5);
+    expect(removals).toBe(5);
     expect(delays).toEqual([250, 250, 250, 250]);
   });
 

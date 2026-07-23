@@ -6,6 +6,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { git } from "../../src/git/git-exec.js";
 import { WorktreeManager } from "../../src/git/worktree-manager.js";
+import { ArtifactStore } from "../../src/runtime/artifact-store.js";
 import { verifyBaseline } from "../../src/verify/baseline-verifier.js";
 import type {
   CheckoutLock,
@@ -497,7 +498,7 @@ describe("runAttempt", () => {
     expect(fixture.releaseCalls()).toBe(0);
   });
 
-  it("does not release a borrowed checkout lease when attempt cleanup fails", async () => {
+  it("records a cleanup failure in the result instead of erasing the outcome", async () => {
     const repoRoot = await initRepo();
     const fixture = await borrowedLeaseFixture(repoRoot);
     const create = WorktreeManager.prototype.create;
@@ -513,8 +514,9 @@ describe("runAttempt", () => {
         };
       });
 
+    let result;
     try {
-      await expect(runAttempt(
+      result = await runAttempt(
         repoRoot,
         validSpec(),
         withBorrowedLease(dependencies(
@@ -522,11 +524,25 @@ describe("runAttempt", () => {
           "run-borrowed-lock-cleanup-failure",
           { ps: fixture.ps },
         ), fixture),
-      )).rejects.toThrow("attempt worktree cleanup failed");
+      );
     } finally {
       createSpy.mockRestore();
     }
 
+    // Failing to tidy up afterwards must not substitute for the attempt's own
+    // terminal outcome; it is recorded alongside it.
+    expect(result.status).toBe("verified-candidate");
+    expect(result.unresolvedIssues).toContain("attempt-cleanup-failed");
+    expect(result.evidence.cleanupFailure).toContain("attempt worktree cleanup failed");
+    // Terminal artifacts are immutable, so the durable record sits beside the
+    // archived result rather than rewriting it.
+    await expect(readFile(
+      join(process.env.CLAUDE_PLUGIN_DATA!, "runs", "run-borrowed-lock-cleanup-failure", "logs", "cleanup-failure.log"),
+      "utf8",
+    )).resolves.toContain("attempt worktree cleanup failed");
+    const archived = await new ArtifactStore("run-borrowed-lock-cleanup-failure")
+      .readResult("run-borrowed-lock-cleanup-failure");
+    expect(archived?.status).toBe("verified-candidate");
     expect(fixture.acquireCalls()).toBe(0);
     expect(fixture.releaseCalls()).toBe(0);
   });

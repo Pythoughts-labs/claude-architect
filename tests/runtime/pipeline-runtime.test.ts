@@ -3130,6 +3130,57 @@ describe("runPipeline", () => {
     expect(result.rounds.at(-1)?.fix).not.toBeNull();
   });
 
+  it("keeps the slice outcome when its worktree cannot be cleaned up", async () => {
+    const repo = await initSlicedRepo();
+    const runId = "pipeline-slice-cleanup-failure";
+    const spec = slicedSpec();
+    const initialRun = fakeAttempt(runId, async checkout => {
+      await writeFile(path.join(checkout, "slice-one.txt"), "slice one candidate\n");
+    });
+    // Producer test children can outlive their parent and hold the worktree
+    // open. Losing the whole slice result to that is finding 16.
+    const create = WorktreeManager.prototype.create;
+    let failedOnce = false;
+    vi.spyOn(WorktreeManager.prototype, "create").mockImplementation(async function (commit) {
+      const worktree = await create.call(this, commit);
+      if (failedOnce) return worktree;
+      failedOnce = true;
+      return {
+        ...worktree,
+        async cleanup() {
+          await worktree.cleanup();
+          throw new Error("worktree busy");
+        },
+      };
+    });
+    const deps = dependencies({
+      runId,
+      roleRunner: async args => {
+        if (args.role === "implementer") {
+          const candidateCommit = await commitRoleFile(
+            args,
+            "slice-two.txt",
+            "slice two candidate\n",
+          );
+          return success(fenced({
+            reportVersion: "1",
+            candidateCommit,
+            status: "complete",
+            summary: "slice complete",
+          }));
+        }
+        if (args.role === "reviewer-correctness") return success(fenced(approve));
+        throw new Error(`unexpected role ${args.role}`);
+      },
+    });
+    deps.runAttempt = initialRun;
+
+    const result = await runPipeline(repo, spec, deps);
+
+    expect(result.status).toBe("decision-ready");
+    expect(result.attempt.candidate).not.toBeNull();
+  }, 120_000);
+
   it("keeps a round whose reviews completed when its fix phase then fails", async () => {
     const repo = await initRepo();
     let reviewed = false;

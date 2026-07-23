@@ -24730,14 +24730,21 @@ async function applyCandidateTree(args) {
 import path14 from "node:path";
 
 // src/git/worktree-manager.ts
-import { mkdir as mkdir2 } from "node:fs/promises";
+import { mkdir as mkdir2, realpath as realpath2, rm as rm2 } from "node:fs/promises";
 import path6 from "node:path";
 var MAX_DIAGNOSTIC_LENGTH3 = 2e3;
-var WINDOWS_REMOVE_ATTEMPTS = 5;
-var WINDOWS_REMOVE_RETRY_DELAY_MS = 250;
+var REMOVE_ATTEMPTS = 5;
+var REMOVE_RETRY_DELAY_MS = 250;
 var SAFE_MANAGED_ID = /^[a-z0-9][a-z0-9._-]*$/;
 function delay2(milliseconds) {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
+async function canonicalize(candidate) {
+  try {
+    return await realpath2(candidate);
+  } catch {
+    return path6.resolve(candidate);
+  }
 }
 function failure(action, result) {
   const diagnostic = (result.stderr || result.stdout).trim().slice(0, MAX_DIAGNOSTIC_LENGTH3);
@@ -24786,13 +24793,29 @@ var WorktreeManager = class {
     }
     const runGit = this.dependencies.git ?? git;
     const wait = this.dependencies.delay ?? delay2;
-    const attempts = this.platformServices.os === "win32" ? WINDOWS_REMOVE_ATTEMPTS : 1;
-    for (let attempt = 1; attempt <= attempts; attempt += 1) {
-      const result = await runGit(this.repoRoot, ["worktree", "remove", "--force", worktreePath]);
-      if (result.exitCode === 0) return;
-      if (attempt === attempts) throw failure("git worktree remove", result);
-      await wait(WINDOWS_REMOVE_RETRY_DELAY_MS);
+    let lastResult = null;
+    for (let attempt = 1; attempt <= REMOVE_ATTEMPTS; attempt += 1) {
+      lastResult = await runGit(this.repoRoot, ["worktree", "remove", "--force", worktreePath]);
+      if (lastResult.exitCode === 0) return;
+      if (attempt < REMOVE_ATTEMPTS) await wait(REMOVE_RETRY_DELAY_MS);
     }
+    if (await this.isRegisteredWorktree(worktreePath)) {
+      try {
+        await rm2(worktreePath, { recursive: true, force: true });
+        const pruned = await runGit(this.repoRoot, ["worktree", "prune"]);
+        if (pruned.exitCode === 0) return;
+      } catch {
+      }
+    }
+    throw failure("git worktree remove", lastResult);
+  }
+  async isRegisteredWorktree(worktreePath) {
+    const runGit = this.dependencies.git ?? git;
+    const listed = await runGit(this.repoRoot, ["worktree", "list", "--porcelain"]);
+    if (listed.exitCode !== 0) return false;
+    const canonical = await canonicalize(worktreePath);
+    const registered = await Promise.all(listed.stdout.split(/\r?\n/u).filter((line) => line.startsWith("worktree ")).map((line) => canonicalize(line.slice("worktree ".length).trim())));
+    return registered.includes(canonical);
   }
 };
 
@@ -25451,10 +25474,10 @@ function checkVersionCompat(skillProtocolVersion) {
 
 // src/runtime/attempt-runtime.ts
 import { randomUUID as randomUUID4 } from "node:crypto";
-import { rm as rm6 } from "node:fs/promises";
+import { rm as rm7 } from "node:fs/promises";
 
 // src/git/candidate-tree.ts
-import { lstat as lstat2, mkdtemp as mkdtemp2, rm as rm2 } from "node:fs/promises";
+import { lstat as lstat2, mkdtemp as mkdtemp2, rm as rm3 } from "node:fs/promises";
 import { tmpdir as tmpdir5 } from "node:os";
 import path7 from "node:path";
 var MAX_DIAGNOSTIC_LENGTH4 = 2e3;
@@ -25649,7 +25672,7 @@ async function freezeCandidate(args) {
       }
     };
   } finally {
-    await rm2(indexDirectory, { recursive: true, force: true });
+    await rm3(indexDirectory, { recursive: true, force: true });
   }
 }
 
@@ -25821,7 +25844,7 @@ function route(preferences, reports) {
 import { randomUUID } from "node:crypto";
 
 // src/verify/project-verifier.ts
-import { realpath as realpath2 } from "node:fs/promises";
+import { realpath as realpath3 } from "node:fs/promises";
 import path9 from "node:path";
 
 // src/runtime/environment-policy.ts
@@ -26051,8 +26074,8 @@ async function resolveCommandCwd(worktreePath, commandCwd, os) {
   if (!isWithinScope(worktreePath, lexical, os)) return null;
   try {
     const [canonicalRoot, canonicalCwd] = await Promise.all([
-      realpath2(worktreePath),
-      realpath2(lexical)
+      realpath3(worktreePath),
+      realpath3(lexical)
     ]);
     return isWithinScope(canonicalRoot, canonicalCwd, os) ? canonicalCwd : null;
   } catch {
@@ -26376,9 +26399,9 @@ import {
   open as open3,
   opendir as opendir2,
   readdir,
-  realpath as realpath3,
+  realpath as realpath4,
   rename,
-  rm as rm3
+  rm as rm4
 } from "node:fs/promises";
 import path10 from "node:path";
 
@@ -26390,18 +26413,18 @@ function compareText(left, right) {
 function sha2562(value) {
   return createHash5("sha256").update(value).digest("hex");
 }
-function canonicalize(value) {
-  if (Array.isArray(value)) return value.map(canonicalize);
+function canonicalize2(value) {
+  if (Array.isArray(value)) return value.map(canonicalize2);
   if (value === null || typeof value !== "object") return value;
   const result = /* @__PURE__ */ Object.create(null);
   for (const key of Object.keys(value).sort(compareText)) {
     const child = value[key];
-    if (child !== void 0) result[key] = canonicalize(child);
+    if (child !== void 0) result[key] = canonicalize2(child);
   }
   return result;
 }
 function stableJson(value) {
-  return JSON.stringify(canonicalize(value));
+  return JSON.stringify(canonicalize2(value));
 }
 function preserveIdentity(value, label) {
   if (redact(value) !== value) {
@@ -26910,7 +26933,7 @@ var ArtifactStore = class {
   async ensureRunsRoot() {
     await ensurePlainDirectoryTree(path10.dirname(this.runsRoot));
     await ensurePlainDirectory(this.runsRoot);
-    return realpath3(this.runsRoot);
+    return realpath4(this.runsRoot);
   }
   async ensureRunDirectory(create) {
     const canonicalRunsRoot = await this.ensureRunsRoot();
@@ -26927,7 +26950,7 @@ var ArtifactStore = class {
         throw error2;
       }
     }
-    const canonicalRunDirectory = await realpath3(this.runDirectory);
+    const canonicalRunDirectory = await realpath4(this.runDirectory);
     if (!isWithin(canonicalRunsRoot, canonicalRunDirectory)) {
       throw new RuntimeError("archive directory escapes plugin data");
     }
@@ -26948,7 +26971,7 @@ var ArtifactStore = class {
       validateComponent(component, "log name");
       current = path10.join(current, component);
       await ensurePlainDirectory(current);
-      const canonicalCurrent = await realpath3(current);
+      const canonicalCurrent = await realpath4(current);
       if (!isWithin(canonicalRunDirectory, canonicalCurrent)) {
         throw new RuntimeError("archive directory escapes run directory");
       }
@@ -26992,7 +27015,7 @@ var ArtifactStore = class {
       await handle?.close();
       if (temporaryCreated) {
         await assertDirectoryIdentity(directory, directoryIdentity);
-        await rm3(temporaryPath, { force: true });
+        await rm4(temporaryPath, { force: true });
         await syncDirectory(directory);
         await assertDirectoryIdentity(directory, directoryIdentity);
       }
@@ -27035,7 +27058,7 @@ var ArtifactStore = class {
       await assertDirectoryIdentity(directory, directoryIdentity);
     } finally {
       await handle?.close();
-      if (temporaryCreated) await rm3(temporaryPath, { force: true });
+      if (temporaryCreated) await rm4(temporaryPath, { force: true });
     }
   }
   async writeLog(name, text) {
@@ -27133,7 +27156,7 @@ var ArtifactStore = class {
       if (metadata.isSymbolicLink() || !metadata.isDirectory()) {
         throw new RuntimeError(`archive directory must not be a symbolic link: ${redact(directory)}`);
       }
-      const canonicalDirectory = await realpath3(directory);
+      const canonicalDirectory = await realpath4(directory);
       if (!isWithin(canonicalRunsRoot, canonicalDirectory)) {
         throw new RuntimeError("archive directory escapes plugin data");
       }
@@ -27227,7 +27250,7 @@ var ArtifactStore = class {
   async clearPipelineActiveMarker() {
     const directory = await this.ensureRunDirectory(false);
     if (directory === null) return;
-    await rm3(path10.join(directory, "pipeline-active.json"), { force: true });
+    await rm4(path10.join(directory, "pipeline-active.json"), { force: true });
   }
   async list() {
     await this.ensureRunsRoot();
@@ -27276,7 +27299,7 @@ var ArtifactStore = class {
       throw new RuntimeError("archived candidate does not match its run manifest");
     }
     const repositoryTopLevel = await git(canonicalRepoRoot, ["rev-parse", "--show-toplevel"]);
-    if (repositoryTopLevel.exitCode !== 0 || await realpath3(repositoryTopLevel.stdout.trim()) !== canonicalRepoRoot) {
+    if (repositoryTopLevel.exitCode !== 0 || await realpath4(repositoryTopLevel.stdout.trim()) !== canonicalRepoRoot) {
       throw new RuntimeError("archived repository root is not a canonical repository root");
     }
     const commit = await git(canonicalRepoRoot, [
@@ -27447,7 +27470,7 @@ var ArtifactStore = class {
     await syncDirectory(this.runsRoot);
     await assertDirectoryIdentity(this.runsRoot, runsRootIdentity);
     await assertDirectoryIdentity(quarantinePath, entry.identity);
-    await rm3(quarantinePath, { recursive: true, force: false });
+    await rm4(quarantinePath, { recursive: true, force: false });
     await syncDirectory(this.runsRoot);
     await this.appendCleanupRecord({
       event: "prune-cleanup-complete",
@@ -27565,7 +27588,7 @@ var ArtifactStore = class {
         await assertDirectoryIdentity(this.runsRoot, runsRootIdentity);
         await assertDirectoryIdentity(quarantinePath, entry.identity);
         archiveRemovalCommitted = true;
-        await rm3(quarantinePath, { recursive: true, force: false });
+        await rm4(quarantinePath, { recursive: true, force: false });
         await syncDirectory(this.runsRoot);
         await transaction.commit();
         await this.appendCleanupRecord({
@@ -27670,7 +27693,7 @@ async function pruneRuns(policy = DEFAULT_PRUNE_POLICY, dependencies = {}) {
 }
 
 // src/runtime/producer-preflight.ts
-import { readFile as readFile3, rm as rm4 } from "node:fs/promises";
+import { readFile as readFile3, rm as rm5 } from "node:fs/promises";
 import path11 from "node:path";
 var PREFLIGHT_PROBE_FILE = "claude-architect-preflight.txt";
 var PREFLIGHT_TIMEOUT_MS = 18e4;
@@ -27786,7 +27809,7 @@ async function runProducerPreflight(args) {
     try {
       await worktree.cleanup();
     } catch {
-      await rm4(worktree.path, { recursive: true, force: true }).catch(() => {
+      await rm5(worktree.path, { recursive: true, force: true }).catch(() => {
       });
     }
   }
@@ -27889,9 +27912,9 @@ import {
   access as access3,
   lstat as lstat4,
   open as open4,
-  realpath as realpath4,
+  realpath as realpath5,
   rename as rename2,
-  rm as rm5
+  rm as rm6
 } from "node:fs/promises";
 import path12 from "node:path";
 import { fileURLToPath as fileURLToPath2 } from "node:url";
@@ -27936,7 +27959,7 @@ async function parentDeathWatchdogInvocation(executable, args) {
 function assertDirectoryIdentity2(target) {
   return Promise.all([
     lstat4(target.publicDirectory),
-    realpath4(target.publicDirectory)
+    realpath5(target.publicDirectory)
   ]).then(([metadata, canonical]) => {
     if (!metadata.isDirectory() || metadata.isSymbolicLink() || metadata.dev !== target.identity.dev || metadata.ino !== target.identity.ino || canonical !== target.canonicalDirectory) {
       throw new RuntimeError("run archive directory identity changed");
@@ -28000,12 +28023,12 @@ async function writeRunStart(target, record2, create) {
     await assertDirectoryIdentity2(target);
   } finally {
     await handle?.close();
-    if (created) await rm5(temporaryPath, { force: true });
+    if (created) await rm6(temporaryPath, { force: true });
   }
 }
 async function initializeRunStart(store, record2) {
   await store.writeLog("lifecycle", "attempt lock acquired\n");
-  const canonicalDirectory = await realpath4(store.runDirectory);
+  const canonicalDirectory = await realpath5(store.runDirectory);
   const metadata = await lstat4(store.runDirectory);
   if (!metadata.isDirectory() || metadata.isSymbolicLink()) {
     throw new RuntimeError("run archive directory is not a plain directory");
@@ -28222,7 +28245,7 @@ async function cleanupAttemptResources(args) {
   }
   if (args.tempHome !== null) {
     try {
-      await rm6(args.tempHome, { recursive: true, force: true });
+      await rm7(args.tempHome, { recursive: true, force: true });
     } catch (error2) {
       failures.push(error2);
     }
@@ -28252,6 +28275,7 @@ async function runAttempt(checkoutPath, spec, deps) {
   let tempHome = null;
   let builtEnvironment = null;
   let primaryError;
+  let archivedResult = null;
   try {
     if (lock === null) {
       ownedLock = await ps.acquireCheckoutLock(canonical.canonical);
@@ -28603,7 +28627,7 @@ async function runAttempt(checkoutPath, spec, deps) {
       }
     }
     reportPhase(deps, "archiving result");
-    return await archiveTerminal({
+    archivedResult = await archiveTerminal({
       store,
       spec,
       runId,
@@ -28626,6 +28650,7 @@ async function runAttempt(checkoutPath, spec, deps) {
       repositoryInstructions,
       packagedVerifier
     });
+    return archivedResult;
   } catch (error2) {
     primaryError = error2;
     throw error2;
@@ -28636,7 +28661,29 @@ async function runAttempt(checkoutPath, spec, deps) {
       tempHome,
       lock: ownedLock
     });
-    if (primaryError === void 0 && cleanupError !== null) throw cleanupError;
+    if (cleanupError !== null) {
+      const detail = redact(
+        cleanupError instanceof Error ? cleanupError.message : String(cleanupError)
+      );
+      logger.warn("attempt resources could not be cleaned up", { error: detail });
+      if (archivedResult !== null) {
+        archivedResult.evidence = { ...archivedResult.evidence, cleanupFailure: detail };
+        archivedResult.unresolvedIssues = [
+          ...archivedResult.unresolvedIssues,
+          "attempt-cleanup-failed"
+        ];
+        try {
+          await store.writeLog("cleanup-failure", `${detail}
+`);
+        } catch (writeError) {
+          logger.warn("cleanup failure could not be archived", {
+            error: redact(writeError instanceof Error ? writeError.message : String(writeError))
+          });
+        }
+      } else if (primaryError === void 0) {
+        throw cleanupError;
+      }
+    }
   }
 }
 
@@ -28981,7 +29028,7 @@ async function runSlicePhase(slices, startCommit, deps) {
 }
 
 // src/pipeline/role-runner.ts
-import { rm as rm7 } from "node:fs/promises";
+import { rm as rm8 } from "node:fs/promises";
 
 // src/pipeline/role-prompts.ts
 import { readFileSync as readFileSync2 } from "node:fs";
@@ -29160,7 +29207,7 @@ function buildRoleSpec(role, base, pkg) {
 }
 
 // src/pipeline/git-writable-roots.ts
-import { lstat as lstat5, mkdir as mkdir4, readFile as readFile5, realpath as realpath5 } from "node:fs/promises";
+import { lstat as lstat5, mkdir as mkdir4, readFile as readFile5, realpath as realpath6 } from "node:fs/promises";
 import path13 from "node:path";
 function invalidWritableRoots(message, cause) {
   return new RuntimeError(message, {
@@ -29205,7 +29252,7 @@ async function resolveLinkedWorktreeWritableRoots(worktreePath) {
     if (match === null) {
       throw invalidWritableRoots("linked worktree .git pointer is malformed");
     }
-    const gitDir = await realpath5(path13.resolve(worktreePath, match[1]));
+    const gitDir = await realpath6(path13.resolve(worktreePath, match[1]));
     await requirePlainDirectory(gitDir, "linked worktree private git directory");
     const commonDirPointer = path13.join(gitDir, "commondir");
     const commonDirValue = (await readStablePlainFile(
@@ -29215,19 +29262,19 @@ async function resolveLinkedWorktreeWritableRoots(worktreePath) {
     if (commonDirValue === "" || commonDirValue.includes("\0")) {
       throw invalidWritableRoots("linked worktree commondir pointer is malformed");
     }
-    const commonDir = await realpath5(path13.resolve(gitDir, commonDirValue));
+    const commonDir = await realpath6(path13.resolve(gitDir, commonDirValue));
     await requirePlainDirectory(commonDir, "common git directory");
-    const worktreesDir = await realpath5(path13.join(commonDir, "worktrees"));
+    const worktreesDir = await realpath6(path13.join(commonDir, "worktrees"));
     await requirePlainDirectory(worktreesDir, "common git worktrees directory");
     if (!isContainedBy(worktreesDir, gitDir)) {
       throw invalidWritableRoots("linked worktree private git directory escapes common git worktrees");
     }
-    const sharedObjectsDir = await realpath5(path13.join(commonDir, "objects"));
+    const sharedObjectsDir = await realpath6(path13.join(commonDir, "objects"));
     await requirePlainDirectory(sharedObjectsDir, "common git objects directory");
     const privateObjectsPath = path13.join(gitDir, "private-objects");
     await mkdir4(privateObjectsPath, { recursive: true, mode: 448 });
     await requirePlainDirectory(privateObjectsPath, "private git objects directory");
-    const privateObjectsDir = await realpath5(privateObjectsPath);
+    const privateObjectsDir = await realpath6(privateObjectsPath);
     if (!isContainedBy(gitDir, privateObjectsDir)) {
       throw invalidWritableRoots("private git objects directory escapes linked worktree git directory");
     }
@@ -29293,7 +29340,7 @@ async function cleanupProcessAttempt(tempHome, builtEnvironment) {
   }
   if (tempHome !== null) {
     try {
-      await rm7(tempHome, { recursive: true, force: true });
+      await rm8(tempHome, { recursive: true, force: true });
     } catch (error2) {
       failures.push(error2);
     }
@@ -29823,23 +29870,25 @@ async function archiveSliceExecutionError(args) {
     );
   }
 }
+async function cleanupWorktree(worktree) {
+  try {
+    await worktree.cleanup();
+    return null;
+  } catch (error2) {
+    return error2;
+  }
+}
 async function withManagedWorktree(args) {
   const worktree = await args.manager.create(args.commit);
-  let primaryError;
   try {
     return await args.run(worktree.path);
-  } catch (error2) {
-    primaryError = error2;
-    throw error2;
   } finally {
-    try {
-      await worktree.cleanup();
-    } catch (cleanupError) {
-      if (primaryError === void 0) throw cleanupError;
-      throw new AggregateError(
-        [primaryError, cleanupError],
-        args.cleanupFailureMessage
-      );
+    const cleanupError = await cleanupWorktree(worktree);
+    if (cleanupError !== null) {
+      logger.warn(args.cleanupFailureMessage, {
+        error: redact(cleanupError instanceof Error ? cleanupError.message : String(cleanupError))
+      });
+      args.onCleanupFailure?.(cleanupError);
     }
   }
 }
@@ -30199,7 +30248,6 @@ async function verifyCandidate(args) {
     ps
   );
   const fresh = await manager.create(args.candidateCommit);
-  let primaryError;
   try {
     const [diffText, nameOnly, nameStatus, status, ancestry] = await Promise.all([
       checkedGit4(fresh.path, ["diff", `${args.baselineCommit}..${args.candidateCommit}`]),
@@ -30288,18 +30336,12 @@ async function verifyCandidate(args) {
       },
       baselineDrift: ancestry.exitCode !== 0
     };
-  } catch (error2) {
-    primaryError = error2;
-    throw error2;
   } finally {
-    try {
-      await fresh.cleanup();
-    } catch (cleanupError) {
-      if (primaryError === void 0) throw cleanupError;
-      throw new AggregateError(
-        [primaryError, cleanupError],
-        "pipeline verification failed and its worktree could not be cleaned up"
-      );
+    const cleanupError = await cleanupWorktree(fresh);
+    if (cleanupError !== null) {
+      logger.warn("pipeline verification worktree could not be cleaned up", {
+        error: redact(cleanupError instanceof Error ? cleanupError.message : String(cleanupError))
+      });
     }
   }
 }
@@ -30844,7 +30886,6 @@ async function runPipelineWithLease(checkoutPath, spec, deps, ps, borrowedChecko
       ps
     ).create(currentCandidateCommit);
     let gitObjectAccess = null;
-    let primaryError;
     try {
       if (maxIncrements > 1) {
         try {
@@ -31116,18 +31157,12 @@ async function runPipelineWithLease(checkoutPath, spec, deps, ps, borrowedChecko
         finalAttempt = promoted.attempt;
         currentCandidateCommit = promoted.candidateCommit;
       }
-    } catch (error2) {
-      primaryError = error2;
-      throw error2;
     } finally {
-      try {
-        await candidateWorktree.cleanup();
-      } catch (cleanupError) {
-        if (primaryError === void 0) throw cleanupError;
-        throw new AggregateError(
-          [primaryError, cleanupError],
-          "pipeline rounds failed and their worktree could not be cleaned up"
-        );
+      const cleanupError = await cleanupWorktree(candidateWorktree);
+      if (cleanupError !== null) {
+        logger.warn("pipeline round worktree could not be cleaned up", {
+          error: redact(cleanupError instanceof Error ? cleanupError.message : String(cleanupError))
+        });
       }
     }
     notePhase("final verification");
@@ -31822,9 +31857,9 @@ import {
   mkdir as mkdir5,
   open as open5,
   readdir as readdir2,
-  realpath as realpath6,
+  realpath as realpath7,
   rename as rename3,
-  rm as rm8
+  rm as rm9
 } from "node:fs/promises";
 import path17 from "node:path";
 import nodeProcess4 from "node:process";
@@ -31864,7 +31899,7 @@ async function stateRoot() {
     if (!isPlainDirectory(metadata)) {
       throw new RuntimeError("plugin data directory must be a plain directory during recovery");
     }
-    await realpath6(root);
+    await realpath7(root);
     return root;
   } catch (error2) {
     if (isMissing2(error2)) return null;
@@ -31986,7 +32021,7 @@ function runGitError(action, result) {
   return new RuntimeError(`${action} failed${diagnostic ? `: ${diagnostic}` : ""}`);
 }
 async function validateGitCommonDir(commonDir) {
-  const canonical = await realpath6(commonDir);
+  const canonical = await realpath7(commonDir);
   if (canonical !== commonDir) {
     throw new RuntimeError("recorded Git common directory is no longer canonical");
   }
@@ -31996,7 +32031,7 @@ async function validateGitCommonDir(commonDir) {
     "--git-common-dir"
   ]);
   if (result.exitCode !== 0) throw runGitError("validate Git common directory", result);
-  const reported = await realpath6(result.stdout.trim());
+  const reported = await realpath7(result.stdout.trim());
   if (reported !== canonical) {
     throw new RuntimeError("recorded Git common directory no longer identifies the repository");
   }
@@ -32006,13 +32041,13 @@ async function validateRepositoryRoot(repoRoot) {
   if (!path17.isAbsolute(repoRoot)) {
     throw new RuntimeError("cleanup journal repository root is not absolute");
   }
-  const canonical = await realpath6(repoRoot);
+  const canonical = await realpath7(repoRoot);
   if (canonical !== repoRoot) {
     throw new RuntimeError("cleanup journal repository root is no longer canonical");
   }
   const result = await git(canonical, ["rev-parse", "--show-toplevel"]);
   if (result.exitCode !== 0) throw runGitError("validate cleanup repository", result);
-  if (await realpath6(result.stdout.trim()) !== canonical) {
+  if (await realpath7(result.stdout.trim()) !== canonical) {
     throw new RuntimeError("cleanup journal repository root is not the repository top level");
   }
   return canonical;
@@ -32553,7 +32588,7 @@ async function removePlainDirectory(directory, expected) {
   if (!isPlainDirectory(metadata) || !sameIdentity(metadata, expected)) {
     throw new RuntimeError("recovery directory identity changed before removal");
   }
-  await rm8(directory, { recursive: true, force: false });
+  await rm9(directory, { recursive: true, force: false });
 }
 async function createExactRef(repoRoot, ref, oid) {
   const result = await git(repoRoot, [
@@ -32692,7 +32727,7 @@ async function truncateCleanupTornTail(filename) {
 async function repositoryRootExists(repoRoot) {
   if (!path17.isAbsolute(repoRoot)) return true;
   try {
-    await realpath6(repoRoot);
+    await realpath7(repoRoot);
     return true;
   } catch (error2) {
     if (isMissing2(error2)) return false;
@@ -32743,7 +32778,7 @@ async function replayInterruptedPrunes(runsRoot, ps) {
     if (commonResult.exitCode !== 0) {
       throw runGitError("resolve cleanup repository identity", commonResult);
     }
-    const repositoryIdentity = await realpath6(commonResult.stdout.trim());
+    const repositoryIdentity = await realpath7(commonResult.stdout.trim());
     const lease = await ps.acquireCheckoutLock(repoRoot);
     let primaryError;
     try {
@@ -32931,7 +32966,7 @@ async function removeLockIfUnchanged(lockPath, handle, expectedIdentity, expecte
     expectedLinks
   )) return false;
   try {
-    await rm8(lockPath, { force: false });
+    await rm9(lockPath, { force: false });
     return true;
   } catch (error2) {
     if (isMissing2(error2)) return false;
