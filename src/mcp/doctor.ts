@@ -15,6 +15,7 @@ import {
 } from "../protocol/versions.js";
 import { redact, redactRecord } from "../runtime/redaction.js";
 import { probeCowSupport } from "../verify/dependency-link.js";
+import { checkLiveBundle, type LiveBundleStatus } from "./live-bundle.js";
 
 const POSIX_HOME_PATH = /\/(?:Users|home)\/[^/\\\s"']+(?:\/[^/\\\s"']+)*/g;
 const WINDOWS_HOME_PATH = /[A-Za-z]:\\Users\\[^/\\\s"']+(?:\\[^/\\\s"']+)*/gi;
@@ -49,6 +50,7 @@ export interface DoctorResult {
     state: "certified" | "tested" | "unsupported";
   }>;
   dependencyClone: { cowSupported: boolean; strategy: string };
+  liveBundle: LiveBundleStatus;
   runtimeVersion: string;
   schemaVersion: string;
   protocolVersion: string;
@@ -64,6 +66,9 @@ export interface DoctorDependencies {
   nodeVersion?: string;
   arch?: string;
   environmentType?: EnvironmentType;
+  /** Checkout the caller intends to delegate against; defaults to the server's cwd. */
+  checkoutPath?: string;
+  checkLiveBundle?: typeof checkLiveBundle;
 }
 
 function nodeIsSupported(version: string): boolean {
@@ -126,6 +131,23 @@ export async function doctor(deps: DoctorDependencies = {}): Promise<DoctorResul
     issues.push("dependency-clone-probe-failed");
   }
 
+  let liveBundle: LiveBundleStatus;
+  try {
+    liveBundle = await (deps.checkLiveBundle ?? checkLiveBundle)(
+      deps.checkoutPath ?? process.cwd(),
+    );
+  } catch {
+    liveBundle = {
+      selfHosted: false,
+      runningVersion: RUNTIME_VERSION,
+      repositoryVersion: null,
+      bundleMatches: null,
+      stale: false,
+    };
+    issues.push("live-bundle-probe-failed");
+  }
+  if (liveBundle.stale) issues.push("stale-live-bundle");
+
   let producers: CapabilityReport[] = [];
   try {
     producers = sanitizeCapabilityReports(await (deps.probeAll ?? probeProducers)({
@@ -149,6 +171,7 @@ export async function doctor(deps: DoctorDependencies = {}): Promise<DoctorResul
     producers,
     sandboxBackends,
     dependencyClone,
+    liveBundle,
     runtimeVersion: RUNTIME_VERSION,
     schemaVersion: DELEGATION_SPEC_VERSION,
     protocolVersion: PROTOCOL_VERSION,

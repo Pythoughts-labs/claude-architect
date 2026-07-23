@@ -439,6 +439,60 @@ describe("MCP tool handlers", () => {
     expect(phases).toEqual(["probing producers"]);
   });
 
+  it("warns the caller when the delegation runs a stale published bundle", async () => {
+    const phases: string[] = [];
+    const deps = dependencies();
+    let warnedBeforeAttempt = false;
+    deps.onProgress = message => phases.push(message);
+    deps.checkLiveBundle = async () => ({
+      selfHosted: true,
+      runningVersion: "0.27.0",
+      repositoryVersion: "0.29.0",
+      bundleMatches: false,
+      stale: true,
+    });
+    deps.runAttempt = async () => {
+      warnedBeforeAttempt = phases.length === 1;
+      return result;
+    };
+
+    const output = await handleDelegate("/repo", validSpec, deps);
+
+    expect(output.ok).toBe(true);
+    expect(phases[0]).toContain("stale-live-bundle");
+    expect(warnedBeforeAttempt).toBe(true);
+  });
+
+  it("stays silent when the running bundle matches the checkout", async () => {
+    const phases: string[] = [];
+    const deps = dependencies();
+    deps.onProgress = message => phases.push(message);
+    deps.checkLiveBundle = async () => ({
+      selfHosted: true,
+      runningVersion: "0.29.0",
+      repositoryVersion: "0.29.0",
+      bundleMatches: true,
+      stale: false,
+    });
+    deps.runAttempt = async () => result;
+
+    await handleDelegate("/repo", validSpec, deps);
+
+    expect(phases).toEqual([]);
+  });
+
+  it("never fails a delegation because the staleness probe threw", async () => {
+    const deps = dependencies();
+    deps.checkLiveBundle = async () => {
+      throw new Error("unreadable manifest");
+    };
+    deps.runAttempt = async () => result;
+
+    const output = await handleDelegate("/repo", validSpec, deps);
+
+    expect(output.ok).toBe(true);
+  });
+
   it("returns an actionable protocol mismatch without touching a producer", async () => {
     let attempted = false;
     const deps = dependencies();

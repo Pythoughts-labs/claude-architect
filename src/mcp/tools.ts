@@ -30,7 +30,9 @@ import {
 import type { RunManifest } from "../runtime/run-manifest.js";
 import { redact } from "../runtime/redaction.js";
 import { NestedDelegationError, RuntimeError } from "../util/errors.js";
+import { logger } from "../util/logger.js";
 import { AcceptanceVerifier } from "../verify/acceptance-verifier.js";
+import { checkLiveBundle, liveBundleDiagnostic } from "./live-bundle.js";
 import { boundIgnoredPathEvidence, withRepoLock } from "./serialize.js";
 
 export type RunDecision = RunDecisionRecord;
@@ -55,6 +57,7 @@ export interface ToolDependencies {
   now?: () => Date;
   /** Host progress reporting for long-running delegate calls. */
   onProgress?: (message: string) => void;
+  checkLiveBundle?: typeof checkLiveBundle;
 }
 
 export interface ToolErrorResult {
@@ -73,6 +76,27 @@ interface ArchivedRun {
 
 function services(deps: ToolDependencies): PlatformServices {
   return deps.ps ?? getPlatformServices();
+}
+
+/**
+ * Delegating against this repository runs the published server bundle, not the
+ * checkout under edit, so a committed fix can look like it did nothing. Advisory
+ * only — a staleness probe must never fail a delegation.
+ */
+async function warnOnStaleLiveBundle(
+  checkoutPath: string,
+  deps: ToolDependencies,
+): Promise<void> {
+  try {
+    const diagnostic = liveBundleDiagnostic(
+      await (deps.checkLiveBundle ?? checkLiveBundle)(checkoutPath),
+    );
+    if (diagnostic === null) return;
+    logger.warn(diagnostic);
+    deps.onProgress?.(diagnostic);
+  } catch {
+    // An unreadable manifest or bundle is not a delegation failure.
+  }
 }
 
 function storeFor(runId: string, deps: ToolDependencies): ToolArtifactStore {
@@ -275,6 +299,7 @@ export async function handleDelegate(
   try {
     const ps = services(deps);
     const canonical = await ps.canonicalizePath(checkoutPath);
+    await warnOnStaleLiveBundle(canonical.canonical, deps);
     const key = canonical.gitCommonDir ?? canonical.canonical;
     return await withRepoLock(key, async () => {
       const configured = deps.attemptDependencies ?? { verifier: new AcceptanceVerifier() };
@@ -343,6 +368,7 @@ export async function handleDelegatePipeline(
   try {
     const ps = services(deps);
     const canonical = await ps.canonicalizePath(checkoutPath);
+    await warnOnStaleLiveBundle(canonical.canonical, deps);
     const key = canonical.gitCommonDir ?? canonical.canonical;
     return await withRepoLock(key, async () => {
       const configured = deps.attemptDependencies ?? { verifier: new AcceptanceVerifier() };

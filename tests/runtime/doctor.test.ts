@@ -47,6 +47,14 @@ function codexReport(os: "darwin" | "win32"): CapabilityReport {
   };
 }
 
+const quietLiveBundle = {
+  selfHosted: false,
+  runningVersion: RUNTIME_VERSION,
+  repositoryVersion: null,
+  bundleMatches: null,
+  stale: false,
+} as const;
+
 describe("doctor", () => {
   it("reports runtime, Git, and Producer capability facts", async () => {
     const ps = platform("darwin");
@@ -65,6 +73,7 @@ describe("doctor", () => {
         return [codexReport("darwin")];
       },
       probeCowSupport: async () => ({ cowSupported: true, strategy: "clonefile" }),
+      checkLiveBundle: async () => quietLiveBundle,
     });
 
     expect(result).toEqual({
@@ -81,11 +90,55 @@ describe("doctor", () => {
         state: "certified",
       }],
       dependencyClone: { cowSupported: true, strategy: "clonefile" },
+      liveBundle: quietLiveBundle,
       runtimeVersion: RUNTIME_VERSION,
       schemaVersion: DELEGATION_SPEC_VERSION,
       protocolVersion: PROTOCOL_VERSION,
       issues: [],
     });
+  });
+
+  it("raises stale-live-bundle when delegating against a checkout the server predates", async () => {
+    const result = await doctor({
+      ps: platform("darwin"),
+      env: { CLAUDE_PLUGIN_DATA: "/plugin-data" },
+      nodeVersion: "22.17.0",
+      git: async () => ({ stdout: "git version 2.49.0\n", stderr: "", exitCode: 0 }),
+      probeAll: async () => [],
+      probeCowSupport: async () => ({ cowSupported: true, strategy: "clonefile" }),
+      checkoutPath: "/repo",
+      checkLiveBundle: async checkoutPath => {
+        expect(checkoutPath).toBe("/repo");
+        return {
+          selfHosted: true,
+          runningVersion: "0.27.0",
+          repositoryVersion: "0.29.0",
+          bundleMatches: false,
+          stale: true,
+        };
+      },
+    });
+
+    expect(result.issues).toContain("stale-live-bundle");
+    expect(result.liveBundle.repositoryVersion).toBe("0.29.0");
+  });
+
+  it("degrades to a probe-failed issue rather than failing when the check throws", async () => {
+    const result = await doctor({
+      ps: platform("darwin"),
+      env: { CLAUDE_PLUGIN_DATA: "/plugin-data" },
+      nodeVersion: "22.17.0",
+      git: async () => ({ stdout: "git version 2.49.0\n", stderr: "", exitCode: 0 }),
+      probeAll: async () => [],
+      probeCowSupport: async () => ({ cowSupported: true, strategy: "clonefile" }),
+      checkLiveBundle: async () => {
+        throw new Error("unreadable");
+      },
+    });
+
+    expect(result.issues).toContain("live-bundle-probe-failed");
+    expect(result.issues).not.toContain("stale-live-bundle");
+    expect(result.liveBundle.stale).toBe(false);
   });
 
   it("reports a redacted issue when the dependency clone probe fails", async () => {
