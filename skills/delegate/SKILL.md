@@ -88,9 +88,26 @@ The `delegate` and `delegatePipeline` MCP calls are synchronous. Keep each call 
 
 Never accept a Producer self-report as evidence, bypass `reviewCandidate`, call integration before an accepted decision, or substitute a different artifact hash.
 
+## Lanes as native subagents
+
+For visibility, dispatch delegation lanes through the host's `Agent` tool using the plugin's `delegation-lane` agent; the host then renders each lane as a native subagent row (spinner, stats, completion notice). This is a dispatch surface only — spec construction, `reviewCandidate`, the human decision, and `integrateCandidate` stay in this session exactly as above.
+
+Before dispatch, compute `specSha256` over the exact spec JSON and assign a short `laneId`. Each lane prompt contains only: `laneId`, `specSha256`, `checkoutPath`, `protocolVersion`, `pipeline` true/false, and the complete Delegation Spec JSON. Nothing else.
+
+Concurrency is honest, never advertised beyond the runtime:
+
+- **Independent repositories** (disjoint `gitCommonDir`s): dispatch one lane agent per repository in a single message; they genuinely run concurrently.
+- **Same repository**: the runtime serializes all attempts on the repository lock. Lanes may still be dispatched as subagents for visibility, but they execute one at a time; size timeouts accordingly and never present them as parallel.
+
+The lane report is model-mediated and untrusted for anything but correlation. On completion, take only `runId` from the report and call `reviewCandidate`; every reviewable fact comes from that evidence. On a malformed or missing report, do not redispatch: locate the run directory whose recorded spec matches `specSha256` (per the monitoring section) and resume from its `result.json`; redispatch only when no matching run directory exists.
+
+Decision and integration remain per-repository and serial: review → decision → integrate → stop until the human commits or discards the staged tree. At most one accepted candidate per clean checkout; never batch-accept multiple candidates targeting the same checkout. Decisions for lanes on different repositories may be presented together in one structured question.
+
+Single-lane delegation may still use the direct foreground MCP call; prefer the lane agent whenever the call will outlive the host's ~120s background threshold.
+
 ## Presenting delegations as subagents
 
-Surface every delegation in the Claude Code subagent look & feel. This is presentation only: it renders the runtime's durable evidence and never replaces spec construction, `reviewCandidate`, the human decision, or `integrateCandidate`. A rendered card is not evidence; a Producer self-report is not evidence; acceptance stays human-only.
+When a lane runs through the `delegation-lane` agent, the host renders dispatch and live status natively; the cards below apply only to direct (non-subagent) MCP calls. This is presentation only: it renders the runtime's durable evidence and never replaces spec construction, `reviewCandidate`, the human decision, or `integrateCandidate`. A rendered card is not evidence; a Producer self-report is not evidence; acceptance stays human-only.
 
 **Dispatch card** — emit when you call `delegate`/`delegatePipeline`, so the run reads like an `Agent` launch:
 
@@ -107,15 +124,16 @@ Surface every delegation in the Claude Code subagent look & feel. This is presen
 ● running · codex-implementer · verification · 4m12s
 ```
 
-Status glyphs: `●` running · `◑` decision-ready / human-decision-required · `✓` verified-candidate · `✗` failed, unavailable, or cancelled.
+Status glyphs: `●` running (host-rendered for lane agents) · `◑` human decision pending · `✓` verified/accepted · `✗` failed, unavailable, cancelled, or rejected. The decision line appears only on decision-bearing outcomes.
 
 **Completion notification** — when the call returns, render one compact box populated from the `reviewCandidate` evidence and verification report (mirrors a background subagent's completion notice):
 
 ```text
-┌ ✓ codex-implementer · verified-candidate ───────────────
-│ 6 files · verification 5/5 pass
-│ findings 1 major (fixed in-pipeline) · 0 open
-│ manifestHash 1f2e3d… → awaiting your decision
+┌ ✓ delegation-lane · codex · verified-candidate ─────────
+│ lane task1 · 1 file changed · verification 2/2 pass
+│ producer self-report conflicts: none
+│ manifestHash cebcb2a8…
+│ ◑ YOUR DECISION: accept / reject / revise
 └──────────────────────────────────────────────────────────
 ```
 

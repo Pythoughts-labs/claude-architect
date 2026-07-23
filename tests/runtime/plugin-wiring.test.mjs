@@ -70,6 +70,20 @@ describe("P0-A plugin wiring", () => {
     for (const rosterName of ["codex-implementer", "opencode-implementer", "pi-implementer", "pythinker-implementer"]) {
       assert.ok(skill.includes(`\`${rosterName}\``), `delegate skill must retain ${rosterName} in its selection roster`);
     }
+    const trustedLifecycleHeading = skill.indexOf("## Trusted MCP lifecycle");
+    const laneHeading = skill.indexOf("## Lanes as native subagents");
+    assert.ok(
+      trustedLifecycleHeading >= 0
+        && laneHeading > trustedLifecycleHeading
+        && !/^## /mu.test(skill.slice(trustedLifecycleHeading + 1, laneHeading)),
+      "lane-agent dispatch must immediately follow the trusted MCP lifecycle",
+    );
+    assert.ok(
+      skill.includes("**Same repository**: the runtime serializes all attempts on the repository lock."),
+      "skill must state same-repository serialization",
+    );
+    assert.ok(skill.includes("At most one accepted candidate per clean checkout; never batch-accept multiple candidates targeting the same checkout."));
+    assert.ok(skill.includes("compute `specSha256` over the exact spec JSON"), "skill must document lane correlation");
     assert.match(skill, /laneEligibility\.edit=false/u);
     assert.doesNotMatch(skill, /^## Legacy migration fallback$/mu);
 
