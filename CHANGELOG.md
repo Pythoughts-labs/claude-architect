@@ -6,7 +6,7 @@ All notable changes to Claude Architect are recorded here. The format follows
 
 ## [Unreleased]
 
-## 0.28.0
+## [0.28.0] - 2026-07-23
 
 - feat: new `delegation-lane` subagent — dispatch any delegation lane as a native Claude Code subagent for live visibility (spinner, stats, completion row). Produce-only by construction: its tool allowlist is exactly `delegate` + `delegatePipeline`; review, decision, and integration remain in the architect session with the human gate unchanged.
 - feat: `skills/delegate/SKILL.md` gains "Lanes as native subagents": `laneId`/`specSha256` correlation, honest same-repository serialization (the runtime lock is unchanged), one-accepted-candidate-per-clean-checkout rule, and the canonical decision card.
