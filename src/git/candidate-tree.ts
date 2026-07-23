@@ -4,6 +4,7 @@ import path from "node:path";
 import type { CandidateArtifact } from "../protocol/attempt-result.js";
 import { redact } from "../runtime/redaction.js";
 import { RuntimeError } from "../util/errors.js";
+import { globMatches } from "../util/glob.js";
 import { git, type GitResult } from "./git-exec.js";
 import { computeChangedPathManifest, parseRawDiff, splitNul } from "./changed-path-manifest.js";
 
@@ -97,32 +98,7 @@ async function inventoryWorktree(worktreePath: string): Promise<WorktreeInventor
   };
 }
 
-function escapeRegex(character: string): string {
-  return /[\\^$.*+?()[\]{}|]/.test(character) ? `\\${character}` : character;
-}
 
-function globMatches(pattern: string, candidate: string, caseInsensitive = false): boolean {
-  let expression = "^";
-  for (let index = 0; index < pattern.length; index += 1) {
-    const character = pattern[index]!;
-    if (character !== "*") {
-      expression += escapeRegex(character);
-      continue;
-    }
-    if (pattern[index + 1] !== "*") {
-      expression += "[^/]*";
-      continue;
-    }
-    index += 1;
-    if (pattern[index + 1] === "/") {
-      expression += "(?:.*/)?";
-      index += 1;
-    } else {
-      expression += ".*";
-    }
-  }
-  return new RegExp(`${expression}$`, caseInsensitive ? "i" : undefined).test(candidate);
-}
 
 function isAllowed(
   pathname: string,

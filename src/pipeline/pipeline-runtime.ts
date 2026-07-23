@@ -30,6 +30,7 @@ import {
 import { redact, redactRecord } from "../runtime/redaction.js";
 import type { RunStartContext } from "../runtime/run-start.js";
 import { RuntimeError } from "../util/errors.js";
+import { globMatches } from "../util/glob.js";
 import { AcceptanceVerifier } from "../verify/acceptance-verifier.js";
 import {
   recomputeManifest,
@@ -573,33 +574,7 @@ async function withManagedWorktree<T>(args: {
   }
 }
 
-function escapeRegex(character: string): string {
-  return /[\\^$.*+?()[\]{}|]/.test(character) ? `\\${character}` : character;
-}
 
-function globMatches(pattern: string, candidate: string): boolean {
-  let expression = "^";
-  for (let index = 0; index < pattern.length; index += 1) {
-    const character = pattern[index];
-    if (character === undefined) break;
-    if (character !== "*") {
-      expression += escapeRegex(character);
-      continue;
-    }
-    if (pattern[index + 1] !== "*") {
-      expression += "[^/]*";
-      continue;
-    }
-    index += 1;
-    if (pattern[index + 1] === "/") {
-      expression += "(?:.*/)?";
-      index += 1;
-    } else {
-      expression += ".*";
-    }
-  }
-  return new RegExp(`${expression}$`).test(candidate);
-}
 
 async function candidateArtifact(args: {
   worktreePath: string;

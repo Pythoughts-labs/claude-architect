@@ -481,6 +481,34 @@ describe("MCP tool handlers", () => {
     expect(phases).toEqual([]);
   });
 
+  it("names allowlist consumers the Producer could not repair", async () => {
+    const phases: string[] = [];
+    const deps = dependencies();
+    deps.onProgress = message => phases.push(message);
+    deps.checkAllowlistSufficiency = async () => ({
+      allowlisted: 2,
+      gaps: [{ path: "tests/runtime/e2e-pipeline.test.ts", imports: ["src/mcp/tools.ts"] }],
+      omitted: 0,
+    });
+    deps.runAttempt = async () => result;
+
+    const output = await handleDelegate("/repo", validSpec, deps);
+
+    expect(output.ok).toBe(true);
+    expect(phases.join("\n")).toContain("allowlist-consumers");
+    expect(phases.join("\n")).toContain("tests/runtime/e2e-pipeline.test.ts");
+  });
+
+  it("never fails a delegation because the allowlist analysis threw", async () => {
+    const deps = dependencies();
+    deps.checkAllowlistSufficiency = async () => {
+      throw new Error("ls-files exploded");
+    };
+    deps.runAttempt = async () => result;
+
+    await expect(handleDelegate("/repo", validSpec, deps)).resolves.toMatchObject({ ok: true });
+  });
+
   it("never fails a delegation because the staleness probe threw", async () => {
     const deps = dependencies();
     deps.checkLiveBundle = async () => {

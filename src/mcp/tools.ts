@@ -32,6 +32,10 @@ import { redact } from "../runtime/redaction.js";
 import { NestedDelegationError, RuntimeError } from "../util/errors.js";
 import { logger } from "../util/logger.js";
 import { AcceptanceVerifier } from "../verify/acceptance-verifier.js";
+import {
+  allowlistSufficiencyDiagnostic,
+  checkAllowlistSufficiency,
+} from "./allowlist-sufficiency.js";
 import { checkLiveBundle, liveBundleDiagnostic } from "./live-bundle.js";
 import { boundIgnoredPathEvidence, withRepoLock } from "./serialize.js";
 
@@ -58,6 +62,7 @@ export interface ToolDependencies {
   /** Host progress reporting for long-running delegate calls. */
   onProgress?: (message: string) => void;
   checkLiveBundle?: typeof checkLiveBundle;
+  checkAllowlistSufficiency?: typeof checkAllowlistSufficiency;
 }
 
 export interface ToolErrorResult {
@@ -96,6 +101,28 @@ async function warnOnStaleLiveBundle(
     deps.onProgress?.(diagnostic);
   } catch {
     // An unreadable manifest or bundle is not a delegation failure.
+  }
+}
+
+/**
+ * Spec-authoring feedback, not a gate: name the tracked files that consume the
+ * write allowlist but sit outside it, so a contract change does not surface as
+ * hand-fixing at integration time.
+ */
+async function warnOnAllowlistConsumers(
+  checkoutPath: string,
+  spec: DelegationSpec,
+  deps: ToolDependencies,
+): Promise<void> {
+  try {
+    const diagnostic = allowlistSufficiencyDiagnostic(
+      await (deps.checkAllowlistSufficiency ?? checkAllowlistSufficiency)(checkoutPath, spec),
+    );
+    if (diagnostic === null) return;
+    logger.warn(diagnostic);
+    deps.onProgress?.(diagnostic);
+  } catch {
+    // Advisory analysis must never fail a delegation.
   }
 }
 
@@ -300,6 +327,7 @@ export async function handleDelegate(
     const ps = services(deps);
     const canonical = await ps.canonicalizePath(checkoutPath);
     await warnOnStaleLiveBundle(canonical.canonical, deps);
+    await warnOnAllowlistConsumers(canonical.canonical, validation.spec, deps);
     const key = canonical.gitCommonDir ?? canonical.canonical;
     return await withRepoLock(key, async () => {
       const configured = deps.attemptDependencies ?? { verifier: new AcceptanceVerifier() };
@@ -369,6 +397,7 @@ export async function handleDelegatePipeline(
     const ps = services(deps);
     const canonical = await ps.canonicalizePath(checkoutPath);
     await warnOnStaleLiveBundle(canonical.canonical, deps);
+    await warnOnAllowlistConsumers(canonical.canonical, validation.spec, deps);
     const key = canonical.gitCommonDir ?? canonical.canonical;
     return await withRepoLock(key, async () => {
       const configured = deps.attemptDependencies ?? { verifier: new AcceptanceVerifier() };

@@ -70,6 +70,8 @@ Resolve ambiguity before calling the runtime. Do not give the Producer credentia
 
 ## Coordinator duties
 
+**Allowlist consumers:** Before dispatch the runtime reports tracked files that import the write allowlist but sit outside it. When a delegation changes an exported contract, either widen `writeAllowlist` to those consumers or add a repository-wide verification command — a src-only type gate plus focused tests compiles neither, so the breakage lands on the architect at integration time.
+
 When running multiple delegations, normalize reported blockers by phase, command id, and root cause. The moment two independent lanes report the same blocker, pause affected lanes and treat it as an architect-owned shared-environment defect. Reproduce it once against the clean baseline, fix it centrally, rerun the preflight to green, then resume or redispatch the unchanged specs. Never wait for remaining lanes to rediscover it, and never push shared-tooling fixes into individual Producer lanes.
 
 **Repository precondition:** delegation and controlled integration require an exact clean checkout; tracked or unignored changes must be committed before delegation, including tracked planning files such as `tasks/todo.md`. Git-ignored local planning files do not affect the clean check. Do not use skip-worktree or assume-unchanged flags as a workaround.

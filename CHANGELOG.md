@@ -6,6 +6,16 @@ All notable changes to Claude Architect are recorded here. The format follows
 
 ## [Unreleased]
 
+- feat: both delegate handlers now name the tracked files that import the write
+  allowlist but sit outside it, before dispatch. A delegation that changes an
+  exported contract otherwise leaves its consumers unrepairable by the Producer
+  and uncompiled by focused verification, surfacing as hand-fixing at integration
+  time (dogfood findings 22, 0.27.0 #1, autopilot #2). Advisory only.
+- refactor: the write-allowlist path matcher lived in three copies, two of which
+  enforce the write boundary. They now share `src/util/glob.ts`; a matcher that
+  can drift between the freeze check and the structural verifier is a hole
+  waiting to open.
+
 - feat: before an edit attempt spawns its Producer, the runtime probes the
   Producer's own shell and sandbox for the executables the spec's verification
   commands name, in a disposable worktree with the same temporary home, sandbox

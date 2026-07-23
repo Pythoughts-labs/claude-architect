@@ -3,6 +3,7 @@ import { computeChangedPathManifest, parseRawDiff, type RawDiffEntry } from "../
 import type { CandidateArtifact, ChangedPath } from "../protocol/attempt-result.js";
 import { redact } from "../runtime/redaction.js";
 import { RuntimeError } from "../util/errors.js";
+import { globMatches } from "../util/glob.js";
 
 const MAX_DIAGNOSTIC_LENGTH = 2_000;
 
@@ -40,32 +41,7 @@ async function checkedGit(cwd: string, args: string[]): Promise<string> {
   return result.stdout;
 }
 
-function escapeRegex(character: string): string {
-  return /[\\^$.*+?()[\]{}|]/.test(character) ? `\\${character}` : character;
-}
 
-function globMatches(pattern: string, candidate: string, caseInsensitive = false): boolean {
-  let expression = "^";
-  for (let index = 0; index < pattern.length; index += 1) {
-    const character = pattern[index]!;
-    if (character !== "*") {
-      expression += escapeRegex(character);
-      continue;
-    }
-    if (pattern[index + 1] !== "*") {
-      expression += "[^/]*";
-      continue;
-    }
-    index += 1;
-    if (pattern[index + 1] === "/") {
-      expression += "(?:.*/)?";
-      index += 1;
-    } else {
-      expression += ".*";
-    }
-  }
-  return new RegExp(`${expression}$`, caseInsensitive ? "i" : undefined).test(candidate);
-}
 
 function isAllowed(
   pathname: string,
