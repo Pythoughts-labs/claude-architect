@@ -16,11 +16,22 @@ import type {
   ProducerInvocation,
 } from "./producer-adapter.js";
 
-const CODEX_REQUIRED_ENV = [
+export const CODEX_REQUIRED_ENV = [
   "CODEX_HOME",
   "CODEX_API_KEY",
   "CODEX_ACCESS_TOKEN",
   "CODEX_CA_CERTIFICATE",
+  "SSL_CERT_FILE",
+] as const;
+
+// Glob patterns denied to the Producer shell. Codex needs these on its own
+// process to authenticate, but the delegated shell never does.
+export const CODEX_SHELL_ENV_EXCLUDE = [
+  "CODEX_HOME",
+  "CODEX_API_KEY",
+  "CODEX_ACCESS_TOKEN",
+  "CODEX_CA_CERTIFICATE",
+  "CODEX_MANAGED_*",
   "SSL_CERT_FILE",
 ] as const;
 const MULTI_AGENT_CONTROL =
@@ -252,6 +263,23 @@ export class CodexAdapter implements ProducerAdapter {
         ? ["GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES"]
         : []),
     ];
+    // `include_only` narrows the inherited set; it cannot add to it. Under
+    // inherit="none" the inherited set is empty, so the producer shell lost PATH
+    // entirely and could not resolve node, npx, or git — Producers then burned
+    // whole attempts inventing workarounds. inherit="core" delivers the
+    // already-sanitized PATH/HOME/TMPDIR/LANG/LC_ALL from the spawn environment
+    // without leaking CODEX_HOME or any other host variable, and `set` force-adds
+    // the non-core variables (nested-delegation guard, redirected Git objects)
+    // that "core" would otherwise drop.
+    const forcedShellEnvironment: Record<string, string> = {
+      CLAUDE_ARCHITECT_DELEGATED: "1",
+      ...(redirectedGitObjects
+        ? {
+          GIT_OBJECT_DIRECTORY: ctx.gitObjectDirectory!,
+          GIT_ALTERNATE_OBJECT_DIRECTORIES: ctx.gitAlternateObjectDirectories!,
+        }
+        : {}),
+    };
     const args = [
       "exec",
       "--json",
@@ -281,9 +309,20 @@ export class CodexAdapter implements ProducerAdapter {
           `sandbox_workspace_write.writable_roots=${JSON.stringify(ctx.extraWritableRoots)}`,
         ]),
       "-c",
-      'shell_environment_policy.inherit="none"',
+      'shell_environment_policy.inherit="core"',
       "-c",
       `shell_environment_policy.include_only=${JSON.stringify(shellEnvironment)}`,
+      "-c",
+      // Codex re-injects its own credential and packaging variables after the
+      // inherit filter runs, so the auth-store location would otherwise reach the
+      // Producer shell. Deny them explicitly.
+      `shell_environment_policy.exclude=${JSON.stringify(CODEX_SHELL_ENV_EXCLUDE)}`,
+      "-c",
+      `shell_environment_policy.set={${
+        Object.entries(forcedShellEnvironment)
+          .map(([name, value]) => `${name}=${quoteTomlString(value)}`)
+          .join(",")
+      }}`,
       "-c",
       'web_search="disabled"',
       "--cd",

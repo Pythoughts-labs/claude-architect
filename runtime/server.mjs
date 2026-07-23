@@ -22825,6 +22825,14 @@ var CODEX_REQUIRED_ENV = [
   "CODEX_CA_CERTIFICATE",
   "SSL_CERT_FILE"
 ];
+var CODEX_SHELL_ENV_EXCLUDE = [
+  "CODEX_HOME",
+  "CODEX_API_KEY",
+  "CODEX_ACCESS_TOKEN",
+  "CODEX_CA_CERTIFICATE",
+  "CODEX_MANAGED_*",
+  "SSL_CERT_FILE"
+];
 var MULTI_AGENT_CONTROL = "features.multi_agent_v2={enabled=false,max_concurrent_threads_per_session=1}";
 var VERSION_TIMEOUT_MS = 1e4;
 var VERSION_OUTPUT_LIMIT = 64 * 1024;
@@ -22996,6 +23004,13 @@ var CodexAdapter = class {
       "CLAUDE_ARCHITECT_DELEGATED",
       ...redirectedGitObjects ? ["GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES"] : []
     ];
+    const forcedShellEnvironment = {
+      CLAUDE_ARCHITECT_DELEGATED: "1",
+      ...redirectedGitObjects ? {
+        GIT_OBJECT_DIRECTORY: ctx.gitObjectDirectory,
+        GIT_ALTERNATE_OBJECT_DIRECTORIES: ctx.gitAlternateObjectDirectories
+      } : {}
+    };
     const args = [
       "exec",
       "--json",
@@ -23023,9 +23038,16 @@ var CodexAdapter = class {
         `sandbox_workspace_write.writable_roots=${JSON.stringify(ctx.extraWritableRoots)}`
       ],
       "-c",
-      'shell_environment_policy.inherit="none"',
+      'shell_environment_policy.inherit="core"',
       "-c",
       `shell_environment_policy.include_only=${JSON.stringify(shellEnvironment)}`,
+      "-c",
+      // Codex re-injects its own credential and packaging variables after the
+      // inherit filter runs, so the auth-store location would otherwise reach the
+      // Producer shell. Deny them explicitly.
+      `shell_environment_policy.exclude=${JSON.stringify(CODEX_SHELL_ENV_EXCLUDE)}`,
+      "-c",
+      `shell_environment_policy.set={${Object.entries(forcedShellEnvironment).map(([name, value]) => `${name}=${quoteTomlString(value)}`).join(",")}}`,
       "-c",
       'web_search="disabled"',
       "--cd",

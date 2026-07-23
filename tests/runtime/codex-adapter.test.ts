@@ -15,6 +15,8 @@ import { PosixPlatformServices } from "../../src/platform/posix-platform-service
 import type { DelegationSpec } from "../../src/protocol/delegation-spec.js";
 import {
   CODEX_EDIT_ACTION_PREAMBLE,
+  CODEX_REQUIRED_ENV,
+  CODEX_SHELL_ENV_EXCLUDE,
   CodexAdapter,
   defaultCodexEnv,
 } from "../../src/producers/codex-adapter.js";
@@ -233,6 +235,16 @@ describe("CodexAdapter", () => {
     expect(invocation.stdin).not.toContain(CODEX_EDIT_ACTION_PREAMBLE);
   });
 
+  it("denies every credential it hands Codex to the Producer shell", () => {
+    // Codex applies `include_only` as a filter over the inherited set rather than
+    // as an allowlist, so this denylist is the only thing keeping the auth store
+    // out of the Producer shell. Adding a credential to CODEX_REQUIRED_ENV
+    // without excluding it must fail here.
+    for (const name of CODEX_REQUIRED_ENV) {
+      expect(CODEX_SHELL_ENV_EXCLUDE as readonly string[]).toContain(name);
+    }
+  });
+
   it("carries the defaulted auth store on the invocation env", () => {
     const invocation = new CodexAdapter().buildInvocation(sampleSpec(), invocationContext());
     expect(invocation.env === undefined || typeof invocation.env === "object").toBe(true);
@@ -254,9 +266,16 @@ describe("CodexAdapter", () => {
       "multi_agent",
     ]);
     expect(invocation.args[controlIndex - 1]).toBe("-c");
-    expect(invocation.args).toContain('shell_environment_policy.inherit="none"');
+    expect(invocation.args).toContain('shell_environment_policy.inherit="core"');
     expect(invocation.args).toContain(
       'shell_environment_policy.include_only=["PATH","HOME","TMPDIR","LANG","LC_ALL","CLAUDE_ARCHITECT_DELEGATED"]',
+    );
+    expect(invocation.args).toContain(
+      'shell_environment_policy.exclude=["CODEX_HOME","CODEX_API_KEY","CODEX_ACCESS_TOKEN"'
+      + ',"CODEX_CA_CERTIFICATE","CODEX_MANAGED_*","SSL_CERT_FILE"]',
+    );
+    expect(invocation.args).toContain(
+      'shell_environment_policy.set={CLAUDE_ARCHITECT_DELEGATED="1"}',
     );
     expect(invocation.args).toContain("sandbox_workspace_write.exclude_tmpdir_env_var=true");
     expect(invocation.args).toContain("sandbox_workspace_write.exclude_slash_tmp=true");
@@ -303,6 +322,11 @@ describe("CodexAdapter", () => {
     });
     expect(invocation.args).toContain(
       'shell_environment_policy.include_only=["PATH","HOME","TMPDIR","LANG","LC_ALL","CLAUDE_ARCHITECT_DELEGATED","GIT_OBJECT_DIRECTORY","GIT_ALTERNATE_OBJECT_DIRECTORIES"]',
+    );
+    expect(invocation.args).toContain(
+      'shell_environment_policy.set={CLAUDE_ARCHITECT_DELEGATED="1"'
+      + ',GIT_OBJECT_DIRECTORY="/repo/.git/worktrees/fix/private-objects"'
+      + ',GIT_ALTERNATE_OBJECT_DIRECTORIES="/repo/.git/objects"}',
     );
   });
 
@@ -527,6 +551,88 @@ describe("CodexAdapter", () => {
       }
     },
     150_000,
+  );
+
+  it.skipIf(
+    process.platform === "win32"
+      || process.env.RUN_CODEX_SHELL_ENV_GATE !== "1",
+  )(
+    "proves the producer shell inherits a usable PATH and the delegation guard",
+    async () => {
+      const root = await mkdtemp(join(tmpdir(), "claude-architect-codex-env-"));
+      const worktreePath = join(root, "worktree");
+      const tempHome = join(root, "home");
+      const originalCodexHome = process.env.CODEX_HOME;
+      if (originalCodexHome === undefined) {
+        process.env.CODEX_HOME = join(homedir(), ".codex");
+      }
+      let builtEnvironment: ReturnType<typeof buildEnvironment> | undefined;
+
+      try {
+        await mkdir(worktreePath);
+        await mkdir(tempHome);
+        await execFileAsync("git", ["init", "-q"], { cwd: worktreePath });
+        const ps = new PosixPlatformServices();
+        const adapter = new CodexAdapter();
+        const os = process.platform === "darwin" ? "darwin" : "linux";
+        const report = await adapter.probe({
+          ps,
+          os,
+          arch: process.arch,
+          environmentType: "native",
+        });
+        expect(report.resolvedExecutable).not.toBeNull();
+        if (report.resolvedExecutable === null) return;
+        const spec = sampleSpec();
+        spec.objective = [
+          "This is an environment certification probe.",
+          "Use the shell exactly once to run:",
+          "env; command -v node; command -v git",
+          "Then write everything that command printed to probe-env.txt and stop.",
+        ].join(" ");
+        spec.writeAllowlist = ["**"];
+        spec.forbiddenScope = [];
+        spec.producerOverrides = { reasoningEffort: "low" };
+        const invocation = adapter.buildInvocation(spec, {
+          worktreePath,
+          runId: "run-shell-env-gate",
+          tempHome,
+          capabilityReport: report,
+          executable: report.resolvedExecutable,
+        });
+        builtEnvironment = buildEnvironment({
+          os,
+          adapterAllowlist: invocation.requiredEnv,
+          tempHome,
+        });
+        const supervisedExit = await supervise(ps, {
+          executable: invocation.executable,
+          args: invocation.args,
+          cwd: worktreePath,
+          env: builtEnvironment.env,
+          timeoutMs: 180_000,
+          ...(invocation.stdin === undefined ? {} : { stdin: invocation.stdin }),
+          maxOutputBytes: 2_000_000,
+        }, {});
+        const observed = await readFile(join(worktreePath, "probe-env.txt"), "utf8");
+        const context =
+          `stdout:\n${supervisedExit.stdout}\nstderr:\n${supervisedExit.stderr}`;
+
+        // The whole point of the gate: a Producer that cannot resolve the
+        // project toolchain cannot verify its own work.
+        expect(observed, context).toMatch(/^\/.*\/node$/mu);
+        expect(observed, context).toMatch(/^\/.*\/git$/mu);
+        expect(observed, context).toContain("CLAUDE_ARCHITECT_DELEGATED=1");
+        expect(observed, context).toContain(`HOME=${tempHome}`);
+        expect(observed, context).not.toContain("CODEX_HOME=");
+      } finally {
+        builtEnvironment?.secretRegistration.dispose();
+        if (originalCodexHome === undefined) delete process.env.CODEX_HOME;
+        else process.env.CODEX_HOME = originalCodexHome;
+        await rm(root, { recursive: true, force: true });
+      }
+    },
+    210_000,
   );
 
   it.skipIf(

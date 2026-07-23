@@ -6,6 +6,19 @@ All notable changes to Claude Architect are recorded here. The format follows
 
 ## [Unreleased]
 
+- fix: the Codex Producer shell no longer starts without a `PATH`. Codex applies
+  `include_only` as a filter over the inherited set, so `inherit="none"` yielded
+  an empty shell environment: Producers could not resolve `node`, `npx`, or
+  `git`, and burned whole attempts inventing workarounds. The adapter now uses
+  `inherit="core"` with `set` for the non-core variables (nested-delegation
+  guard, redirected Git object directories) and an explicit `exclude` for
+  Codex's own credential and packaging variables, which it re-injects after the
+  inherit filter runs.
+- test: new opt-in gate (`RUN_CODEX_SHELL_ENV_GATE=1`) proves against real Codex
+  that the Producer shell resolves `node` and `git`, carries
+  `CLAUDE_ARCHITECT_DELEGATED=1` and the per-attempt `HOME`, and never sees
+  `CODEX_HOME`.
+
 ## [0.28.0] - 2026-07-23
 
 - feat: new `delegation-lane` subagent — dispatch any delegation lane as a native Claude Code subagent for live visibility (spinner, stats, completion row). Produce-only by construction: its tool allowlist is exactly `delegate` + `delegatePipeline`; review, decision, and integration remain in the architect session with the human gate unchanged.
