@@ -6,6 +6,8 @@ All notable changes to Claude Architect are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.30.0] - 2026-07-24
+
 - fix: the pre-push tag gate now requires the **exact tagged commit** to have a
   completed, successful `ci` run containing a green Windows job. The previous
   gate consulted the branch's latest run and treated a still-running workflow as

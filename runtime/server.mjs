@@ -21933,7 +21933,7 @@ var StdioServerTransport = class {
 var PROTOCOL_VERSION = "1.4.0";
 var DELEGATION_SPEC_VERSION = "1";
 var ATTEMPT_RESULT_VERSION = "1";
-var RUNTIME_VERSION = "0.29.0";
+var RUNTIME_VERSION = "0.30.0";
 
 // src/platform/posix-platform-services.ts
 import { spawn, execFile } from "node:child_process";
