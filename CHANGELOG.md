@@ -6,6 +6,18 @@ All notable changes to Claude Architect are recorded here. The format follows
 
 ## [Unreleased]
 
+- fix: the pre-push tag gate now requires the **exact tagged commit** to have a
+  completed, successful `ci` run containing a green Windows job. The previous
+  gate consulted the branch's latest run and treated a still-running workflow as
+  "not failing", so `v0.29.0` was tagged while its own CI was mid-flight and
+  about to fail on Windows. Without `gh` the tag gate refuses rather than
+  degrading to a no-op.
+- fix: a baseline verification failure retains each command's stdout and stderr,
+  so it can be diagnosed without rerunning the attempt.
+- test: the plugin wiring check asserts the shipped bundle embeds no
+  worktree-relative `node_modules` paths, enforcing the rule that keeps
+  `runtime/server.mjs` out of Producer write allowlists.
+
 ## [0.29.0] - 2026-07-23
 
 - feat (protocol 1.4.0): slices may declare `dependsOn` — the 1-based indices of

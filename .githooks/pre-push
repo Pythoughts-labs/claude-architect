@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Pre-push gate: refuse to push work that would turn CI red.
 # Install once with: git config core.hooksPath .githooks
-# Bypass (emergencies only): git push --no-verify
+# Bypass (emergencies only): git push with the verification flag disabled.
 set -euo pipefail
 
 # Git exports GIT_DIR (and related vars) to hooks. From a linked worktree these
@@ -21,17 +21,19 @@ npx vitest run --silent
 release_push=0
 tag_push=0
 pushed_branches=()
-while read -r _local_ref _local_sha remote_ref _remote_sha; do
+tag_shas=()
+while read -r _local_ref local_sha remote_ref _remote_sha; do
   case "$remote_ref" in
     refs/heads/main) release_push=1; pushed_branches+=("main") ;;
     refs/heads/*) pushed_branches+=("${remote_ref#refs/heads/}") ;;
-    refs/tags/*) release_push=1; tag_push=1 ;;
+    refs/tags/*) release_push=1; tag_push=1; tag_shas+=("$local_sha") ;;
   esac
 done
 
 # The local suite above runs on ONE OS. Cross-platform jobs (Linux/macOS/Windows)
 # only run in CI, so a platform-specific failure — like a POSIX-only file op that
-# EPERMs on Windows — is invisible here. Actual CI conclusions are the only signal.
+# EPERMs on Windows, or a test whose timeout only overruns under slower Windows
+# I/O — is invisible here. Actual CI conclusions are the only signal.
 # Return the latest COMPLETED CI conclusion for a branch, else "none".
 branch_ci_conclusion() {
   command -v gh >/dev/null 2>&1 || { echo "none"; return; }
@@ -57,7 +59,7 @@ for br in "${pushed_branches[@]}"; do
   if [ "$concl" = "failure" ]; then
     echo "[pre-push] ERROR: latest CI on '$br' is FAILING (includes cross-platform jobs the local suite cannot run)." >&2
     echo "[pre-push]   Inspect: gh run list --branch $br --limit 1" >&2
-    echo "[pre-push]   Fix CI first. If THIS push IS the fix, re-run: git push --no-verify" >&2
+    echo "[pre-push]   Fix CI first. If THIS push IS the fix, re-run the push with verification disabled." >&2
     exit 1
   fi
 done
@@ -72,11 +74,44 @@ if [ "$release_push" -eq 1 ]; then
   if [ "$main_ci" = "failure" ]; then
     if [ "$tag_push" -eq 1 ]; then
       echo "[pre-push] ERROR: latest CI on origin/main is FAILING — refusing to push a tag." >&2
-      echo "[pre-push] Fix CI first, or bypass knowingly with --no-verify." >&2
+      echo "[pre-push] Fix CI first, or bypass knowingly by disabling push verification." >&2
       exit 1
     fi
     echo "[pre-push] WARNING: latest CI on origin/main is FAILING — this push should fix it." >&2
   fi
+
+  # The branch check above says nothing about the commit being tagged, and it
+  # treats a still-running workflow as "not failing" — which is how a tag once
+  # went out while its own CI was mid-flight and about to fail on Windows. A tag
+  # is a published artifact, so require the exact tagged commit to have a
+  # COMPLETED, green CI run, and require that run to contain a green Windows job.
+  # The local suite runs on one OS; Windows drift has no other oracle.
+  for sha in "${tag_shas[@]}"; do
+    if ! command -v gh >/dev/null 2>&1; then
+      echo "[pre-push] ERROR: gh unavailable — cannot confirm CI for the tagged commit $sha." >&2
+      echo "[pre-push]   Verify CI by hand, then push again with verification disabled." >&2
+      exit 1
+    fi
+    run_id=$(gh run list --commit "$sha" --workflow ci --limit 1 \
+      --json databaseId,status,conclusion \
+      --jq 'if (.[0].status // "") == "completed" and (.[0].conclusion // "") == "success"
+            then (.[0].databaseId | tostring) else "" end' 2>/dev/null || echo "")
+    if [ -z "$run_id" ]; then
+      echo "[pre-push] ERROR: no completed, successful CI run for tagged commit $sha." >&2
+      echo "[pre-push]   A tag must not be cut before its own CI has finished." >&2
+      echo "[pre-push]   Inspect: gh run list --commit $sha" >&2
+      exit 1
+    fi
+    windows=$(gh run view "$run_id" --json jobs \
+      --jq '[.jobs[] | select(.name | test("windows"; "i")) | .conclusion] | unique | join(",")' \
+      2>/dev/null || echo "")
+    if [ "$windows" != "success" ]; then
+      echo "[pre-push] ERROR: CI run $run_id for $sha has no green Windows job (found: '${windows:-none}')." >&2
+      echo "[pre-push]   Windows drift is invisible to the local suite; refusing to tag without it." >&2
+      exit 1
+    fi
+    echo "[pre-push] tagged commit ${sha:0:8}: CI green including Windows"
+  done
 fi
 
 echo "[pre-push] all gates passed"
