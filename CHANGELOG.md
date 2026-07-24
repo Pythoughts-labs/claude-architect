@@ -6,6 +6,8 @@ All notable changes to Claude Architect are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.29.0] - 2026-07-23
+
 - feat (protocol 1.4.0): slices may declare `dependsOn` — the 1-based indices of
   the slices they must observe — and a spec may raise `sliceConcurrency`. Slices
   run together only when their dependencies allow it *and* their write
