@@ -26379,8 +26379,17 @@ async function verifyBaseline(args) {
         cwd,
         ps,
         now,
+        logNamePrefix: "baseline-verification",
         ...args.abortSignal === void 0 ? {} : { abortSignal: args.abortSignal }
       });
+      const outputRefs = {};
+      if (args.store !== void 0) {
+        for (const log of executed.outputLogs) {
+          const ref = await args.store.writeLog(log.name, log.text);
+          if (log.name.endsWith("stdout")) outputRefs.stdoutRef = ref;
+          if (log.name.endsWith("stderr")) outputRefs.stderrRef = ref;
+        }
+      }
       throwIfAborted(args.abortSignal);
       const mutation = await scanCommandMutations({
         worktreePath: materialized.path,
@@ -26391,6 +26400,7 @@ async function verifyBaseline(args) {
       commands.push({
         id: executed.outcome.id,
         exitCode: executed.outcome.exitCode,
+        ...outputRefs,
         ok: (!executed.failed || command.expectBaselineFailure === true) && !mutation.mutated,
         ...mutation.mutated ? { mutation: { records: mutation.records, headChanged: mutation.headChanged } } : {}
       });
@@ -28337,6 +28347,7 @@ async function runAttempt(checkoutPath, spec, deps) {
           commands: spec.verification,
           ps,
           runId,
+          store,
           ...deps.abortSignal === void 0 ? {} : { abortSignal: deps.abortSignal }
         });
       } catch (error2) {

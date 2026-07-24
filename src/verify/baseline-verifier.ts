@@ -5,11 +5,15 @@ import { getPlatformServices } from "../platform/select-platform.js";
 import type { VerificationCommand } from "../protocol/delegation-spec.js";
 import { appliesToPlatform, executeCommand, resolveCommandCwd, scanCommandMutations } from "./project-verifier.js";
 import { linkPrimaryDependencies, type DependencyLink } from "./dependency-link.js";
+import type { ArtifactStore } from "../runtime/artifact-store.js";
 
 export interface BaselineCommandResult {
   id: string;
   exitCode: number | null;
   ok: boolean;
+  /** Archived output, so a baseline failure can be diagnosed without a rerun. */
+  stdoutRef?: string;
+  stderrRef?: string;
   mutation?: { records: string[]; headChanged: boolean };
 }
 
@@ -29,6 +33,8 @@ export interface BaselineVerifyArgs {
   runId?: string;
   verificationId?: () => string;
   abortSignal?: AbortSignal;
+  /** When present, each command's output is archived for post-hoc diagnosis. */
+  store?: Pick<ArtifactStore, "writeLog">;
 }
 
 function throwIfAborted(signal?: AbortSignal): void {
@@ -72,8 +78,20 @@ export async function verifyBaseline(args: BaselineVerifyArgs): Promise<Baseline
         cwd,
         ps,
         now,
+        logNamePrefix: "baseline-verification",
         ...(args.abortSignal === undefined ? {} : { abortSignal: args.abortSignal }),
       });
+      // A baseline failure with no retained output is undiagnosable without
+      // rerunning the whole attempt, which is how a mistyped guard command cost
+      // a full run. Archive first, then judge.
+      const outputRefs: { stdoutRef?: string; stderrRef?: string } = {};
+      if (args.store !== undefined) {
+        for (const log of executed.outputLogs) {
+          const ref = await args.store.writeLog(log.name, log.text);
+          if (log.name.endsWith("stdout")) outputRefs.stdoutRef = ref;
+          if (log.name.endsWith("stderr")) outputRefs.stderrRef = ref;
+        }
+      }
       throwIfAborted(args.abortSignal);
       const mutation = await scanCommandMutations({
         worktreePath: materialized.path,
@@ -86,6 +104,7 @@ export async function verifyBaseline(args: BaselineVerifyArgs): Promise<Baseline
       commands.push({
         id: executed.outcome.id,
         exitCode: executed.outcome.exitCode,
+        ...outputRefs,
         ok: (!executed.failed || command.expectBaselineFailure === true) && !mutation.mutated,
         ...(mutation.mutated
           ? { mutation: { records: mutation.records, headChanged: mutation.headChanged } }

@@ -400,6 +400,7 @@ export async function runAttempt(
         commands: spec.verification,
         ps,
         runId,
+        store,
         ...(deps.abortSignal === undefined ? {} : { abortSignal: deps.abortSignal }),
       });
     } catch (error) {

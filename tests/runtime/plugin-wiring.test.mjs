@@ -19,6 +19,14 @@ describe("P0-A plugin wiring", () => {
     }, "Claude plugin must register the packaged runtime bootstrap without a shell");
     assert.ok(fs.statSync(`${root}/runtime/bootstrap.mjs`).isFile(), "bootstrap must ship");
     assert.ok(fs.statSync(`${root}/runtime/server.mjs`).isFile(), "server bundle must ship");
+    // A bundle rebuilt inside a Producer worktree embeds worktree-relative
+    // module paths and diverges from a canonical repo-root build, which is why
+    // runtime/server.mjs stays out of Producer write allowlists.
+    const bundle = fs.readFileSync(`${root}/runtime/server.mjs`, "utf8");
+    assert.ok(
+      !/\.\.\/[^"'\n]*node_modules/u.test(bundle),
+      "committed bundle must not embed worktree-relative node_modules paths",
+    );
     if (process.platform !== "win32") {
       assert.ok(fs.statSync(`${root}/scripts/build-runtime.sh`).mode & 0o111, "build wrapper must be executable");
     }

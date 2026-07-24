@@ -171,4 +171,35 @@ describe("verifyBaseline", () => {
     }
     await expect(access(marker)).rejects.toMatchObject({ code: "ENOENT" });
   });
+
+  it("archives each command's output so a baseline failure can be diagnosed", async () => {
+    // A baseline failure with nothing retained forces a full rerun to find out
+    // which command failed and why — that cost a real run.
+    const repo = await fixture();
+    const written: { name: string; text: string }[] = [];
+    const result = await verifyBaseline({
+      ...repo,
+      commands: [{
+        id: "prints",
+        executable: process.execPath,
+        args: ["-e", "console.log('baseline says hello'); process.exit(3)"],
+        cwd: ".",
+        timeoutMs: 60_000,
+        network: "denied",
+        expectedExitCodes: [0],
+      }],
+      store: {
+        async writeLog(name: string, text: string) {
+          written.push({ name, text });
+          return `logs/${name}.log`;
+        },
+      },
+    });
+
+    expect(result.commands[0]?.ok).toBe(false);
+    expect(result.commands[0]?.stdoutRef).toMatch(/^logs\/.*stdout\.log$/u);
+    expect(result.commands[0]?.stderrRef).toMatch(/^logs\/.*stderr\.log$/u);
+    expect(written.find(log => log.name.endsWith("stdout"))?.text)
+      .toContain("baseline says hello");
+  }, 60_000);
 });
