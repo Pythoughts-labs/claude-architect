@@ -86,7 +86,11 @@ if [ "$release_push" -eq 1 ]; then
   # is a published artifact, so require the exact tagged commit to have a
   # COMPLETED, green CI run, and require that run to contain a green Windows job.
   # The local suite runs on one OS; Windows drift has no other oracle.
-  for sha in "${tag_shas[@]}"; do
+  for tag_sha in "${tag_shas[@]}"; do
+    # An annotated tag pushes the TAG OBJECT's sha; CI runs against the commit it
+    # points at. Dereference before asking about workflow runs, or every
+    # annotated tag looks like a commit CI has never seen.
+    sha=$(git rev-parse "${tag_sha}^{commit}" 2>/dev/null || echo "$tag_sha")
     if ! command -v gh >/dev/null 2>&1; then
       echo "[pre-push] ERROR: gh unavailable — cannot confirm CI for the tagged commit $sha." >&2
       echo "[pre-push]   Verify CI by hand, then push again with verification disabled." >&2
