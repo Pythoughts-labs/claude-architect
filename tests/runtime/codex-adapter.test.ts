@@ -595,7 +595,9 @@ describe("CodexAdapter", () => {
         "../../vendor/superpowers/skills/verification-before-completion/SKILL.md",
         import.meta.url,
       ));
-      const skillLines = (await readFile(skillPath, "utf8")).split("\n");
+      // Strip the trailing newline before splitting: the Producer counts lines the
+      // way `wc -l` does, so an unstripped split reports one line too many.
+      const skillLines = (await readFile(skillPath, "utf8")).replace(/\n$/u, "").split("\n");
       const probedLineNumber = 17;
       const expectedLine = skillLines[probedLineNumber - 1];
       expect(expectedLine).toBeDefined();
