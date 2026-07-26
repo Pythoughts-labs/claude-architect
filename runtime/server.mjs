@@ -22836,9 +22836,10 @@ function selectSandboxBackend(report) {
 }
 
 // src/producers/codex-adapter.ts
-import { existsSync as existsSync2 } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { existsSync as existsSync2, realpathSync } from "node:fs";
 import { open } from "node:fs/promises";
-import { homedir } from "node:os";
+import { homedir, tmpdir as tmpdir4 } from "node:os";
 import { join } from "node:path";
 
 // src/producers/skill-bootstrap.ts
@@ -22937,6 +22938,29 @@ var CODEX_SHELL_ENV_EXCLUDE = [
   "SSL_CERT_FILE"
 ];
 var MULTI_AGENT_CONTROL = "features.multi_agent_v2={enabled=false,max_concurrent_threads_per_session=1}";
+var darwinUserTempDirectory;
+function resolveDarwinUserTempDirectory() {
+  if (darwinUserTempDirectory !== void 0) return darwinUserTempDirectory;
+  try {
+    const raw = execFileSync("/usr/bin/getconf", ["DARWIN_USER_TEMP_DIR"], {
+      encoding: "utf8",
+      timeout: VERSION_TIMEOUT_MS
+    }).trim();
+    darwinUserTempDirectory = raw.length === 0 ? realpathSync(tmpdir4()) : realpathSync(raw);
+  } catch {
+    try {
+      darwinUserTempDirectory = realpathSync(tmpdir4());
+    } catch {
+      darwinUserTempDirectory = null;
+    }
+  }
+  return darwinUserTempDirectory;
+}
+function sandboxSupportWritableRoots(platform) {
+  if (platform !== "darwin") return [];
+  const temporaryDirectory = resolveDarwinUserTempDirectory();
+  return temporaryDirectory === null ? [] : [temporaryDirectory];
+}
 var VERSION_TIMEOUT_MS = 1e4;
 var VERSION_OUTPUT_LIMIT = 64 * 1024;
 function isRecord2(value) {
@@ -23116,6 +23140,10 @@ var CodexAdapter = class {
         GIT_ALTERNATE_OBJECT_DIRECTORIES: ctx.gitAlternateObjectDirectories
       } : {}
     };
+    const writableRoots = ctx.readOnly === true ? ctx.extraWritableRoots ?? [] : [.../* @__PURE__ */ new Set([
+      ...ctx.extraWritableRoots ?? [],
+      ...sandboxSupportWritableRoots(process.platform)
+    ])];
     const args = [
       "exec",
       "--json",
@@ -23138,9 +23166,9 @@ var CodexAdapter = class {
       "sandbox_workspace_write.exclude_tmpdir_env_var=true",
       "-c",
       "sandbox_workspace_write.exclude_slash_tmp=true",
-      ...ctx.extraWritableRoots === void 0 || ctx.extraWritableRoots.length === 0 ? [] : [
+      ...writableRoots.length === 0 ? [] : [
         "-c",
-        `sandbox_workspace_write.writable_roots=${JSON.stringify(ctx.extraWritableRoots)}`
+        `sandbox_workspace_write.writable_roots=${JSON.stringify(writableRoots)}`
       ],
       "-c",
       'shell_environment_policy.inherit="core"',
@@ -23903,7 +23931,7 @@ function redactValues(obj) {
 // src/verify/dependency-link.ts
 import { execFile as execFile3 } from "node:child_process";
 import { access, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
-import { tmpdir as tmpdir4 } from "node:os";
+import { tmpdir as tmpdir5 } from "node:os";
 import path3 from "node:path";
 import { promisify } from "node:util";
 var execFileAsync = promisify(execFile3);
@@ -23931,7 +23959,7 @@ async function probeCowSupport(dependencies = {}) {
   if (platform !== "darwin" && platform !== "linux") {
     return { cowSupported: false, strategy: "unsupported" };
   }
-  const probeRoot = await mkdtemp(path3.join(tmpdir4(), "ca-cow-probe-"));
+  const probeRoot = await mkdtemp(path3.join(tmpdir5(), "ca-cow-probe-"));
   try {
     const source = path3.join(probeRoot, "source");
     const target = path3.join(probeRoot, "target");
@@ -25602,7 +25630,7 @@ import { rm as rm7 } from "node:fs/promises";
 
 // src/git/candidate-tree.ts
 import { lstat as lstat2, mkdtemp as mkdtemp2, rm as rm3 } from "node:fs/promises";
-import { tmpdir as tmpdir5 } from "node:os";
+import { tmpdir as tmpdir6 } from "node:os";
 import path7 from "node:path";
 var MAX_DIAGNOSTIC_LENGTH4 = 2e3;
 var MAX_REJECT_PATHS = 25;
@@ -25702,7 +25730,7 @@ async function freezeCandidate(args) {
   if (await advisoryLstatScan(args.worktreePath, inventory.changedPaths)) {
     return { ok: false, reason: "modified-symlink" };
   }
-  const indexDirectory = await mkdtemp2(path7.join(tmpdir5(), "claude-architect-index-"));
+  const indexDirectory = await mkdtemp2(path7.join(tmpdir6(), "claude-architect-index-"));
   const indexFile = path7.join(indexDirectory, "index");
   try {
     await checkedGit2(args.worktreePath, ["read-tree", args.baseCommitOid], indexFile);
@@ -25801,7 +25829,7 @@ async function freezeCandidate(args) {
 }
 
 // src/platform/sandbox/seatbelt.ts
-import { realpathSync } from "node:fs";
+import { realpathSync as realpathSync2 } from "node:fs";
 import { homedir as homedir5 } from "node:os";
 import { join as join5 } from "node:path/posix";
 function buildReadOnlySeatbeltPolicy(args) {
@@ -25871,7 +25899,7 @@ function buildProfile(policy, additionalWritable) {
     ...additionalWritable
   ].filter((path19) => typeof path19 === "string" && path19.length > 0).flatMap((path19) => {
     try {
-      return [path19, realpathSync(path19)];
+      return [path19, realpathSync2(path19)];
     } catch {
       return [path19];
     }
@@ -29027,6 +29055,11 @@ function evaluateGates(input) {
     if (!v.workspaceClean) reasons.push("verify worktree dirty after checks");
     if (v.scopeViolations.length > 0) reasons.push(`out-of-scope diff: ${v.scopeViolations.join(", ")}`);
   }
+  const contradictions = input.contradictions ?? [];
+  if (contradictions.length > 0) {
+    reasons.push(`review is self-contradictory: ${contradictions.join("; ")}`);
+    requiresHumanDecision = true;
+  }
   if (!input.artifactsValid) reasons.push("missing or invalid artifact");
   if (input.baselineDrift) reasons.push("candidate no longer based on approved baseline");
   if (!input.finalRoundReviewed) {
@@ -29046,7 +29079,7 @@ function evaluateGates(input) {
 
 // src/pipeline/slice-composer.ts
 import { mkdtemp as mkdtemp3, rm as rm8 } from "node:fs/promises";
-import { tmpdir as tmpdir6 } from "node:os";
+import { tmpdir as tmpdir7 } from "node:os";
 import path13 from "node:path";
 var NULL_OID = "0000000000000000000000000000000000000000";
 function parseRawDiffEntries(raw) {
@@ -29101,7 +29134,7 @@ async function composeSliceOntoHead(args) {
       `slice ${args.sliceIndex} changed paths already written by its wave: ${collisions.join(", ")}`
     );
   }
-  const indexRoot = await mkdtemp3(path13.join(tmpdir6(), "ca-compose-"));
+  const indexRoot = await mkdtemp3(path13.join(tmpdir7(), "ca-compose-"));
   const indexFile = path13.join(indexRoot, "index");
   try {
     const options = { ...args.objectReadOptions, indexFile };
@@ -29192,6 +29225,13 @@ function routeSlice(input) {
   }
   if (reasons.length === 0) {
     return { route: "advance", reasons };
+  }
+  const contradictions = input.perSliceReview?.contradictions ?? [];
+  if (contradictions.length > 0) {
+    return {
+      route: "halt",
+      reasons: [...reasons, `review is self-contradictory, repair cannot converge: ${contradictions.join("; ")}`]
+    };
   }
   if (input.roundsUsed < input.maxRounds) {
     return { route: "repair", reasons };
@@ -31489,6 +31529,7 @@ async function runPipelineWithLease(checkoutPath, spec, deps, ps, borrowedChecko
       finalRoundReviewed: (lastRound?.fix ?? null) === null,
       artifactsValid: true,
       baselineDrift: verified.baselineDrift,
+      contradictions: lastRound?.consolidated.contradictions ?? [],
       ...incrementOutcome === void 0 ? {} : { incrementOutcome }
     });
     const result = {

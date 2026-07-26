@@ -57,6 +57,19 @@ export function routeSlice(input: SliceGateInput): SliceGateResult {
     return { route: 'advance', reasons };
   }
 
+  // Reviewers that demand different outcomes at one location leave no patch that
+  // satisfies both, so every repair round re-triggers the finding it just fixed.
+  // Halt on the spot and name the contradiction: spending the whole repair budget
+  // to arrive at the same place hides why it could never converge.
+  const contradictions = input.perSliceReview?.contradictions ?? [];
+  if (contradictions.length > 0) {
+    return {
+      route: 'halt',
+      reasons: [...reasons, `review is self-contradictory, repair cannot converge: ${
+        contradictions.join('; ')}`],
+    };
+  }
+
   if (input.roundsUsed < input.maxRounds) {
     return { route: 'repair', reasons };
   }

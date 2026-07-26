@@ -77,6 +77,57 @@ describe('routeSlice', () => {
     });
   });
 
+  it('halts immediately when the review contradicts itself', () => {
+    // Observed live: a slice whose review demanded conflicting outcomes at one
+    // location burned all three attempts and then halted as an ordinary blocking
+    // review, so nothing in the record said repair could never converge.
+    const result = routeSlice({
+      verification: verification(false),
+      perSliceReview: {
+        findings: [],
+        contradictions: ['conflicting required outcomes at src/a.ts:394-395: F-005, F-006'],
+      },
+      roundsUsed: 0,
+      maxRounds: 3,
+      hardBlocker: false,
+    });
+
+    expect(result.route).toBe('halt');
+    expect(result.reasons).toEqual([
+      'slice verification failed',
+      'review is self-contradictory, repair cannot converge: '
+      + 'conflicting required outcomes at src/a.ts:394-395: F-005, F-006',
+    ]);
+  });
+
+  it('still repairs when the review is blocking but consistent', () => {
+    expect(
+      routeSlice({
+        verification: verification(false),
+        perSliceReview: { findings: [], contradictions: [] },
+        roundsUsed: 0,
+        maxRounds: 3,
+        hardBlocker: false,
+      }),
+    ).toEqual({ route: 'repair', reasons: ['slice verification failed'] });
+  });
+
+  it('advances despite a contradiction when no gate is red', () => {
+    // A contradiction among findings that do not block must not invent a halt.
+    expect(
+      routeSlice({
+        verification: verification(true),
+        perSliceReview: {
+          findings: [],
+          contradictions: ['conflicting required outcomes at src/a.ts:1: F-001, F-002'],
+        },
+        roundsUsed: 0,
+        maxRounds: 3,
+        hardBlocker: false,
+      }),
+    ).toEqual({ route: 'advance', reasons: [] });
+  });
+
   it('halts on missing verification while rounds remain', () => {
     expect(
       routeSlice({

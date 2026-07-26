@@ -31,6 +31,20 @@ describe("evaluateGates", () => {
     expect(evaluateGates(base())).toEqual({ decisionReady: true, requiresHumanDecision: false, reasons: [] });
   });
 
+  it("routes a self-contradictory review to a human", () => {
+    // The non-sliced path consolidates contradictions and then ignored them, so
+    // an otherwise-clean round could be reported decision-ready even though no
+    // patch could satisfy both findings.
+    const gate = evaluateGates(base({
+      contradictions: ["conflicting required outcomes at src/a.ts:1: F-001, F-002"],
+    }));
+    expect(gate.decisionReady).toBe(false);
+    expect(gate.requiresHumanDecision).toBe(true);
+    expect(gate.reasons).toEqual([
+      "review is self-contradictory: conflicting required outcomes at src/a.ts:1: F-001, F-002",
+    ]);
+  });
+
   it("keeps the gate result byte-identical when incrementOutcome is absent", () => {
     const beforeIncrementOutcome = { decisionReady: true, requiresHumanDecision: false, reasons: [] };
     expect(JSON.stringify(evaluateGates(base()))).toBe(JSON.stringify(beforeIncrementOutcome));

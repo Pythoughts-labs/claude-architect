@@ -20,6 +20,7 @@ import {
   CODEX_SHELL_ENV_EXCLUDE,
   CodexAdapter,
   defaultCodexEnv,
+  sandboxSupportWritableRoots,
 } from "../../src/producers/codex-adapter.js";
 import { renderSkillBootstrap } from "../../src/producers/skill-bootstrap.js";
 import type {
@@ -238,6 +239,47 @@ describe("CodexAdapter", () => {
     })).toEqual({});
   });
 
+  function writableRootsOf(args: string[]): string[] {
+    const prefix = "sandbox_workspace_write.writable_roots=";
+    const rendered = args.find(arg => arg.startsWith(prefix));
+    return rendered === undefined ? [] : JSON.parse(rendered.slice(prefix.length)) as string[];
+  }
+
+  it("grants the edit lane the macOS xcrun cache directory and nothing more", () => {
+    // /usr/bin/git is a stub that resolves the real binary through xcrun and
+    // caches the answer in the per-user temp directory. The Producer shell is a
+    // login shell, so path_helper puts /usr/bin ahead of every inherited PATH
+    // entry and that stub is what runs. Denying the cache write made every git
+    // call re-run `xcodebuild -find git` — 1.01s against 0.012s cached.
+    const roots = sandboxSupportWritableRoots(process.platform);
+    if (process.platform !== "darwin") {
+      expect(roots).toEqual([]);
+      return;
+    }
+    expect(roots).toHaveLength(1);
+    expect(roots[0]!.startsWith("/")).toBe(true);
+
+    const invocation = new CodexAdapter().buildInvocation(sampleSpec(), invocationContext());
+    expect(writableRootsOf(invocation.args)).toContain(roots[0]);
+    // exclude_tmpdir_env_var is effectively neutralized wherever TMPDIR is this
+    // same directory, which is the macOS default; exclude_slash_tmp is what still
+    // does work, and it must stay.
+    expect(invocation.args).toContain("sandbox_workspace_write.exclude_slash_tmp=true");
+    expect(roots).not.toContain("/tmp");
+    expect(roots).not.toContain("/private/tmp");
+  });
+
+  it("adds no support roots to the read-only sandbox", () => {
+    // The read-only sandbox has no writable roots at all; handing it one would
+    // silently widen a lane whose whole purpose is that it cannot write.
+    const invocation = new CodexAdapter().buildInvocation(sampleSpec(), {
+      ...invocationContext(),
+      readOnly: true,
+    });
+    expect(invocation.args.some(arg =>
+      arg.startsWith("sandbox_workspace_write.writable_roots="))).toBe(false);
+  });
+
   it("uses the read-only sandbox when the context is a read-only role", () => {
     const invocation = new CodexAdapter().buildInvocation(sampleSpec(), {
       ...invocationContext(),
@@ -304,7 +346,7 @@ describe("CodexAdapter", () => {
     );
     expect(invocation.args).toContain("sandbox_workspace_write.exclude_tmpdir_env_var=true");
     expect(invocation.args).toContain("sandbox_workspace_write.exclude_slash_tmp=true");
-    expect(invocation.args.some(arg => arg.startsWith("sandbox_workspace_write.writable_roots="))).toBe(false);
+    expect(writableRootsOf(invocation.args)).toEqual(sandboxSupportWritableRoots(process.platform));
     expect(invocation.args.at(-1)).toBe("-");
     expect(invocation.args.join(" ")).not.toContain(spec.objective);
     expect(invocation.stdin).toContain(spec.objective);
@@ -336,12 +378,12 @@ describe("CodexAdapter", () => {
 
     const invocation = new CodexAdapter().buildInvocation(sampleSpec(), context);
 
-    expect(invocation.args).toContain(
-      'sandbox_workspace_write.writable_roots=["/repo/.git/worktrees/fix","/repo/.git/worktrees/fix/private-objects"]',
-    );
-    expect(invocation.args.join("\n")).not.toContain(
-      'sandbox_workspace_write.writable_roots=["/repo/.git/worktrees/fix","/repo/.git/objects"]',
-    );
+    expect(writableRootsOf(invocation.args)).toEqual([
+      "/repo/.git/worktrees/fix",
+      "/repo/.git/worktrees/fix/private-objects",
+      ...sandboxSupportWritableRoots(process.platform),
+    ]);
+    expect(writableRootsOf(invocation.args)).not.toContain("/repo/.git/objects");
     expect(invocation.env).toMatchObject({
       GIT_OBJECT_DIRECTORY: "/repo/.git/worktrees/fix/private-objects",
       GIT_ALTERNATE_OBJECT_DIRECTORIES: "/repo/.git/objects",

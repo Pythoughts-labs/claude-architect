@@ -1,6 +1,7 @@
-import { existsSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { existsSync, realpathSync } from "node:fs";
 import { open } from "node:fs/promises";
-import { homedir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { supervise } from "../platform/process-supervisor.js";
 import type { ResolvedExecutable } from "../platform/platform-services.js";
@@ -37,6 +38,58 @@ export const CODEX_SHELL_ENV_EXCLUDE = [
 ] as const;
 const MULTI_AGENT_CONTROL =
   "features.multi_agent_v2={enabled=false,max_concurrent_threads_per_session=1}";
+
+/**
+ * The macOS per-user temp directory, as `xcrun` resolves it — `confstr(3)` with
+ * `_CS_DARWIN_USER_TEMP_DIR`, which ignores TMPDIR. Node exposes no binding, so
+ * ask getconf once per process and cache the answer.
+ */
+let darwinUserTempDirectory: string | null | undefined;
+function resolveDarwinUserTempDirectory(): string | null {
+  if (darwinUserTempDirectory !== undefined) return darwinUserTempDirectory;
+  try {
+    const raw = execFileSync("/usr/bin/getconf", ["DARWIN_USER_TEMP_DIR"], {
+      encoding: "utf8",
+      timeout: VERSION_TIMEOUT_MS,
+    }).trim();
+    darwinUserTempDirectory = raw.length === 0 ? realpathSync(tmpdir()) : realpathSync(raw);
+  } catch {
+    // getconf is absent or the directory does not resolve. Fall back to the
+    // process temp directory; if that also fails the lane simply keeps the
+    // pre-existing (slow but correct) behavior.
+    try {
+      darwinUserTempDirectory = realpathSync(tmpdir());
+    } catch {
+      darwinUserTempDirectory = null;
+    }
+  }
+  return darwinUserTempDirectory;
+}
+
+/**
+ * Roots the Producer sandbox must be able to write for reasons unrelated to the
+ * task. On macOS with full Xcode selected, `/usr/bin/git` is a stub that resolves
+ * the real binary through `xcrun` and caches the answer in the per-user temp
+ * directory. The Producer shell is a login shell, so `path_helper` puts
+ * `/usr/bin` ahead of every inherited PATH entry and that stub is what runs. When
+ * the cache write is denied, *every* git invocation re-runs `xcodebuild -find git`
+ * — measured at 1.01s per call against 0.012s cached, which turned ordinary
+ * suites into hundreds of concurrent xcodebuild processes.
+ *
+ * Be precise about what this costs. `buildEnvironment` passes the host TMPDIR
+ * through unchanged, and on macOS TMPDIR is normally this same per-user
+ * directory, so where that holds `exclude_tmpdir_env_var` becomes a no-op and
+ * this reopens exactly what that flag closed. `exclude_slash_tmp` still stands,
+ * `/tmp` stays unwritable, and the repository and worktree confinement are
+ * untouched. Deliberate: xcrun resolves the cache through
+ * `confstr(_CS_DARWIN_USER_TEMP_DIR)` and ignores TMPDIR, so no narrower
+ * directory can carry it.
+ */
+export function sandboxSupportWritableRoots(platform: NodeJS.Platform): string[] {
+  if (platform !== "darwin") return [];
+  const temporaryDirectory = resolveDarwinUserTempDirectory();
+  return temporaryDirectory === null ? [] : [temporaryDirectory];
+}
 const VERSION_TIMEOUT_MS = 10_000;
 const VERSION_OUTPUT_LIMIT = 64 * 1024;
 
@@ -283,6 +336,14 @@ export class CodexAdapter implements ProducerAdapter {
         }
         : {}),
     };
+    // Read-only roles get Codex's read-only sandbox, which has no writable roots
+    // at all; the support roots below only make sense for the edit lane.
+    const writableRoots = ctx.readOnly === true
+      ? (ctx.extraWritableRoots ?? [])
+      : [...new Set([
+        ...(ctx.extraWritableRoots ?? []),
+        ...sandboxSupportWritableRoots(process.platform),
+      ])];
     const args = [
       "exec",
       "--json",
@@ -305,11 +366,11 @@ export class CodexAdapter implements ProducerAdapter {
       "sandbox_workspace_write.exclude_tmpdir_env_var=true",
       "-c",
       "sandbox_workspace_write.exclude_slash_tmp=true",
-      ...(ctx.extraWritableRoots === undefined || ctx.extraWritableRoots.length === 0
+      ...(writableRoots.length === 0
         ? []
         : [
           "-c",
-          `sandbox_workspace_write.writable_roots=${JSON.stringify(ctx.extraWritableRoots)}`,
+          `sandbox_workspace_write.writable_roots=${JSON.stringify(writableRoots)}`,
         ]),
       "-c",
       'shell_environment_policy.inherit="core"',

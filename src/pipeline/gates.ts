@@ -13,6 +13,8 @@ export interface GateInput {
   artifactsValid: boolean;
   baselineDrift: boolean;
   incrementOutcome?: IncrementOutcome;
+  /** Conflicting required outcomes the consolidator found in the final review. */
+  contradictions?: string[];
 }
 
 export interface GateResult {
@@ -57,6 +59,15 @@ export function evaluateGates(input: GateInput): GateResult {
     if (v.testsSkipped > 0) reasons.push(`${v.testsSkipped} test(s) newly skipped`);
     if (!v.workspaceClean) reasons.push("verify worktree dirty after checks");
     if (v.scopeViolations.length > 0) reasons.push(`out-of-scope diff: ${v.scopeViolations.join(", ")}`);
+  }
+
+  // Reviewers demanding different outcomes at one location leave no patch that
+  // satisfies both. A disposition that claims otherwise cannot be trusted, so
+  // route it to a human instead of letting the round loop chase itself.
+  const contradictions = input.contradictions ?? [];
+  if (contradictions.length > 0) {
+    reasons.push(`review is self-contradictory: ${contradictions.join("; ")}`);
+    requiresHumanDecision = true;
   }
 
   if (!input.artifactsValid) reasons.push("missing or invalid artifact");

@@ -2166,6 +2166,7 @@ async function runPipelineWithLease(
       finalRoundReviewed: (lastRound?.fix ?? null) === null,
       artifactsValid: true,
       baselineDrift: verified.baselineDrift,
+      contradictions: lastRound?.consolidated.contradictions ?? [],
       ...(incrementOutcome === undefined ? {} : { incrementOutcome }),
     });
     const result: PipelineResult = {
