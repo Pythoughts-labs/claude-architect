@@ -14,8 +14,23 @@ unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY GIT_COMMON_DIR G
 echo "[pre-push] typecheck"
 npx tsc --noEmit
 
-echo "[pre-push] full test suite"
-npx vitest run --silent
+# Bound the worker count. The default spawns one worker per core, and this
+# suite's real-Git integration tests contend under that load — a release was
+# once blocked by a flake that four bounded re-runs could not reproduce. A
+# gate that fails intermittently is not a gate. The bound also keeps the push
+# from saturating a machine that is doing other work.
+#
+# Keep the full output: --silent hid the identity of that flake, so the one
+# artifact needed to fix it did not exist. On failure the log path is printed.
+suite_log=$(mktemp -t claude-architect-prepush-suite)
+echo "[pre-push] full test suite (bounded to 4 workers)"
+if ! npx vitest run --maxWorkers=4 2>&1 | tee "$suite_log"; then
+  echo "[pre-push] ERROR: test suite failed. Full output: $suite_log" >&2
+  echo "[pre-push]   If this looks intermittent, do NOT simply push again:" >&2
+  echo "[pre-push]   an intermittent failure is a bug to fix, and re-pushing hides it." >&2
+  exit 1
+fi
+rm -f "$suite_log"
 
 # Record which refs are being pushed (stdin is consumed here; read it once).
 release_push=0
@@ -37,7 +52,11 @@ done
 # Return the latest COMPLETED CI conclusion for a branch, else "none".
 branch_ci_conclusion() {
   command -v gh >/dev/null 2>&1 || { echo "none"; return; }
-  gh run list --branch "$1" --limit 1 --json status,conclusion \
+  # Filter to the ci workflow. Without --workflow, --limit 1 returns whichever
+  # workflow ran most recently — CodeQL or Dependabot on this repository — so
+  # the gate reported an unrelated run's conclusion and would call the branch
+  # green while ci was red.
+  gh run list --branch "$1" --workflow ci --limit 1 --json status,conclusion \
     --jq 'if (.[0].status // "") == "completed" then (.[0].conclusion // "none") else "none" end' \
     2>/dev/null || echo "none"
 }
@@ -47,18 +66,18 @@ branch_ci_conclusion() {
 main_ci=$(branch_ci_conclusion main)
 if [ "$main_ci" = "failure" ]; then
   echo "[pre-push] WARNING: latest CI on origin/main is FAILING — a merge/rebase inherits its red." >&2
-  echo "[pre-push]   Inspect: gh run list --branch main --limit 1" >&2
+  echo "[pre-push]   Inspect: gh run list --branch main --workflow ci --limit 1" >&2
 fi
 
 # Refuse to stack more work on, or merge, a branch whose latest CI is already red
 # (e.g. a platform-only failure the local suite never sees). This turns "CI went
 # red and nobody noticed" into a hard stop at the next push.
-for br in "${pushed_branches[@]}"; do
+for br in ${pushed_branches[@]+"${pushed_branches[@]}"}; do
   [ "$br" = "main" ] && continue  # main handled by the release block below
   concl=$(branch_ci_conclusion "$br")
   if [ "$concl" = "failure" ]; then
     echo "[pre-push] ERROR: latest CI on '$br' is FAILING (includes cross-platform jobs the local suite cannot run)." >&2
-    echo "[pre-push]   Inspect: gh run list --branch $br --limit 1" >&2
+    echo "[pre-push]   Inspect: gh run list --branch $br --workflow ci --limit 1" >&2
     echo "[pre-push]   Fix CI first. If THIS push IS the fix, re-run the push with verification disabled." >&2
     exit 1
   fi
@@ -86,7 +105,7 @@ if [ "$release_push" -eq 1 ]; then
   # is a published artifact, so require the exact tagged commit to have a
   # COMPLETED, green CI run, and require that run to contain a green Windows job.
   # The local suite runs on one OS; Windows drift has no other oracle.
-  for tag_sha in "${tag_shas[@]}"; do
+  for tag_sha in ${tag_shas[@]+"${tag_shas[@]}"}; do
     # An annotated tag pushes the TAG OBJECT's sha; CI runs against the commit it
     # points at. Dereference before asking about workflow runs, or every
     # annotated tag looks like a commit CI has never seen.
