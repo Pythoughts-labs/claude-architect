@@ -21933,7 +21933,7 @@ var StdioServerTransport = class {
 var PROTOCOL_VERSION = "1.4.0";
 var DELEGATION_SPEC_VERSION = "1";
 var ATTEMPT_RESULT_VERSION = "1";
-var RUNTIME_VERSION = "0.31.0";
+var RUNTIME_VERSION = "0.32.0";
 
 // src/platform/posix-platform-services.ts
 import { spawn, execFile } from "node:child_process";
@@ -22691,9 +22691,20 @@ function filterNeutralizations(keys) {
   }
   return { args };
 }
+var resolvedGit = null;
+function gitSearchKey() {
+  return [process.env.PATH, process.env.Path, process.env.PATHEXT].join("\0");
+}
+async function resolveGit(platformServices) {
+  const key = gitSearchKey();
+  if (resolvedGit !== null && resolvedGit.key === key) return resolvedGit.executable;
+  const executable = await platformServices.resolveExecutable({ name: "git" });
+  resolvedGit = { key, executable };
+  return executable;
+}
 async function git(cwd, args, indexFileOrOptions) {
   const platformServices = getPlatformServices();
-  const executable = await platformServices.resolveExecutable({ name: "git" });
+  const executable = await resolveGit(platformServices);
   const nullDevice = process.platform === "win32" ? "NUL" : "/dev/null";
   const options = typeof indexFileOrOptions === "string" ? { indexFile: indexFileOrOptions } : indexFileOrOptions ?? {};
   const maxOutputBytes = options.maxOutputBytes ?? 8e6;
@@ -24084,11 +24095,16 @@ async function doctor(deps = {}) {
   if (env.CLAUDE_ARCHITECT_DELEGATED !== void 0) {
     issues.push("nested-delegation-marker-present");
   }
-  let git2 = { version: null, ok: false };
+  let git2 = { version: null, ok: false, path: null };
   try {
     const result = await (deps.git ?? git)(process.cwd(), ["--version"]);
     const version2 = result.exitCode === 0 && result.truncated?.stdout !== true ? gitVersion(result.stdout) : null;
-    git2 = { version: version2, ok: version2 !== null };
+    let path19 = null;
+    try {
+      path19 = (await ps.resolveExecutable({ name: "git" })).command;
+    } catch {
+    }
+    git2 = { version: version2, ok: version2 !== null, path: path19 };
   } catch {
   }
   if (!git2.ok) issues.push("git-unavailable");
@@ -31166,6 +31182,17 @@ async function runPipelineWithLease(checkoutPath, spec, deps, ps, borrowedChecko
         }
         try {
           for (let increment = 2; increment <= maxIncrements; increment += 1) {
+            if (deps.abortSignal?.aborted === true) {
+              return failedResult(
+                attempt,
+                rounds,
+                currentCandidateCommit,
+                `cancelled before increment ${increment}`,
+                "cancelled",
+                increments,
+                pipelineSlices
+              );
+            }
             notePhase(`increment ${increment}/${maxIncrements}`);
             const previousCandidateCommit = currentCandidateCommit;
             const diffText = await checkedGit4(candidateWorktree.path, [
@@ -31287,6 +31314,17 @@ async function runPipelineWithLease(checkoutPath, spec, deps, ps, borrowedChecko
         }
       }
       for (let round = 1; round <= maxRounds; round += 1) {
+        if (deps.abortSignal?.aborted === true) {
+          return failedResult(
+            attempt,
+            rounds,
+            currentCandidateCommit,
+            `cancelled before review round ${round}`,
+            "cancelled",
+            increments,
+            pipelineSlices
+          );
+        }
         notePhase(`review round ${round}/${maxRounds}`);
         const diffText = await checkedGit4(candidateWorktree.path, [
           "diff",
@@ -31956,7 +31994,8 @@ async function handleDelegate(checkoutPath, input, deps = {}) {
         ...configured,
         ps,
         verifier: configured.verifier ?? new AcceptanceVerifier(),
-        ...deps.onProgress === void 0 ? {} : { onPhase: deps.onProgress }
+        ...deps.onProgress === void 0 ? {} : { onPhase: deps.onProgress },
+        ...deps.abortSignal === void 0 ? {} : { abortSignal: deps.abortSignal }
       };
       const result = await (deps.runAttempt ?? runAttempt)(
         canonical.canonical,
@@ -32008,7 +32047,8 @@ async function handleDelegatePipeline(checkoutPath, input, deps = {}) {
         ...configured,
         ps,
         verifier: configured.verifier ?? new AcceptanceVerifier(),
-        ...deps.onProgress === void 0 ? {} : { onPhase: deps.onProgress }
+        ...deps.onProgress === void 0 ? {} : { onPhase: deps.onProgress },
+        ...deps.abortSignal === void 0 ? {} : { abortSignal: deps.abortSignal }
       };
       const pipelineDependencies = {
         ...attemptDependencies,
@@ -34036,7 +34076,10 @@ async function start(dependencies = {}) {
           {
             ...dependencies,
             skillProtocolVersion: protocolVersion,
-            ...onProgress === void 0 ? {} : { onProgress }
+            ...onProgress === void 0 ? {} : { onProgress },
+            // The caller's cancellation must reach the Producer tree; without
+            // it a cancelled request keeps running and keeps spawning.
+            abortSignal: extra.signal
           }
         ));
       } finally {
@@ -34079,7 +34122,10 @@ async function start(dependencies = {}) {
           {
             ...dependencies,
             skillProtocolVersion: protocolVersion,
-            ...onProgress === void 0 ? {} : { onProgress }
+            ...onProgress === void 0 ? {} : { onProgress },
+            // The caller's cancellation must reach the Producer tree; without
+            // it a cancelled request keeps running and keeps spawning.
+            abortSignal: extra.signal
           }
         ));
       } finally {

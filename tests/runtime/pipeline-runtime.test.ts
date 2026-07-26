@@ -2300,6 +2300,40 @@ describe("runPipeline", () => {
     expect(result.gate.reasons[0]).toContain("logs/role-implementer-increment3.log");
   }, 120_000);
 
+  it("stops instead of launching the next increment once cancelled", async () => {
+    // A cancellation landing between Producer runs previously did nothing: the
+    // loop launched the next increment regardless, so a caller who gave up on a
+    // run kept paying for Producers it no longer wanted.
+    const repo = await initRepo();
+    const controller = new AbortController();
+    const roles: string[] = [];
+    const roleRunner = incrementRoleRunner(async (args, _call) => {
+      roles.push(args.role);
+      return success(fenced({
+        reportVersion: "1",
+        candidateCommit: "c".repeat(40),
+        status: "complete",
+        summary: "should never run",
+      }));
+    });
+    const deps = dependencies({
+      runId: "pipeline-cancelled-increment",
+      roleRunner,
+      edit: async repoPath => {
+        await writeFile(path.join(repoPath, "a.txt"), "candidate\n");
+        controller.abort();
+      },
+    });
+    deps.abortSignal = controller.signal;
+
+    const result = await runPipeline(repo, implementationSpec(2), deps);
+
+    expect(result.status).toBe("failed");
+    expect(result.failure).toBe("cancelled");
+    expect(result.gate.reasons[0]).toContain("cancelled before increment 2");
+    expect(roles).toEqual([]);
+  }, 120_000);
+
   it("fails invalid increment output after one archived repair", async () => {
     const repo = await initRepo();
     const roleRunner = incrementRoleRunner(async (_args, call) =>

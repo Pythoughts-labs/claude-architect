@@ -78,7 +78,7 @@ describe("doctor", () => {
 
     expect(result).toEqual({
       node: { version: "22.17.0", ok: true },
-      git: { version: "2.49.0", ok: true },
+      git: { version: "2.49.0", ok: true, path: "/usr/local/bin/node" },
       producers: [codexReport("darwin")],
       sandboxBackends: [{
         id: "codex-native-sandbox",
@@ -174,7 +174,7 @@ describe("doctor", () => {
     });
 
     expect(result.node).toEqual({ version: "22.17.0", ok: true });
-    expect(result.git).toEqual({ version: null, ok: false });
+    expect(result.git).toEqual({ version: null, ok: false, path: null });
     expect(result.producers).toEqual([codexReport("win32")]);
     expect(result.issues).not.toContain("unsupported-platform");
     expect(result.issues).toEqual(expect.arrayContaining([

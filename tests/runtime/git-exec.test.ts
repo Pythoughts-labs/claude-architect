@@ -2,10 +2,39 @@ import { execFile } from "node:child_process";
 import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { git, type GitResult } from "../../src/git/git-exec.js";
+import { getPlatformServices } from "../../src/platform/select-platform.js";
 
 const temporaryPaths: string[] = [];
+
+describe("git executable resolution", () => {
+  it("resolves once per search environment and re-resolves when PATH changes", async () => {
+    // Resolution probes every PATH entry with fs.access, and git is the runtime's
+    // hottest subprocess. Caching must still honor a caller that installs a shim.
+    const services = getPlatformServices();
+    const { repo } = await makeRepo();
+    const spy = vi.spyOn(services, "resolveExecutable");
+    const originalPath = process.env.PATH;
+    try {
+      await expectGit(repo, ["rev-parse", "HEAD"]);
+      await expectGit(repo, ["rev-parse", "HEAD"]);
+      await expectGit(repo, ["status", "--porcelain"]);
+      const afterWarmCache = spy.mock.calls.length;
+
+      process.env.PATH = `${path.dirname(process.execPath)}${path.delimiter}${originalPath ?? ""}`;
+      await expectGit(repo, ["rev-parse", "HEAD"]);
+
+      expect(afterWarmCache).toBeLessThanOrEqual(1);
+      expect(spy.mock.calls.length).toBe(afterWarmCache + 1);
+    } finally {
+      if (originalPath === undefined) delete process.env.PATH;
+      else process.env.PATH = originalPath;
+      spy.mockRestore();
+    }
+  });
+});
+
 
 function rawGit(cwd: string, args: string[], env: NodeJS.ProcessEnv = {}): Promise<string> {
   return new Promise((resolve, reject) => {

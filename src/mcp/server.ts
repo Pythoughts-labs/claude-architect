@@ -211,6 +211,9 @@ export async function start(dependencies: ServerDependencies = {}): Promise<void
             ...dependencies,
             skillProtocolVersion: protocolVersion,
             ...(onProgress === undefined ? {} : { onProgress }),
+            // The caller's cancellation must reach the Producer tree; without
+            // it a cancelled request keeps running and keeps spawning.
+            abortSignal: extra.signal,
           },
         ));
       } finally {
@@ -255,6 +258,9 @@ export async function start(dependencies: ServerDependencies = {}): Promise<void
             ...dependencies,
             skillProtocolVersion: protocolVersion,
             ...(onProgress === undefined ? {} : { onProgress }),
+            // The caller's cancellation must reach the Producer tree; without
+            // it a cancelled request keeps running and keeps spawning.
+            abortSignal: extra.signal,
           },
         ));
       } finally {

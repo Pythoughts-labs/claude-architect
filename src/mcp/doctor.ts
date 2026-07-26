@@ -42,7 +42,7 @@ function sanitizeCapabilityReports(reports: CapabilityReport[]): CapabilityRepor
 
 export interface DoctorResult {
   node: { version: string; ok: boolean };
-  git: { version: string | null; ok: boolean };
+  git: { version: string | null; ok: boolean; path: string | null };
   producers: CapabilityReport[];
   sandboxBackends: Array<{
     id: string;
@@ -111,13 +111,22 @@ export async function doctor(deps: DoctorDependencies = {}): Promise<DoctorResul
     issues.push("nested-delegation-marker-present");
   }
 
-  let git: DoctorResult["git"] = { version: null, ok: false };
+  let git: DoctorResult["git"] = { version: null, ok: false, path: null };
   try {
     const result = await (deps.git ?? runGit)(process.cwd(), ["--version"]);
     const version = result.exitCode === 0 && result.truncated?.stdout !== true
       ? gitVersion(result.stdout)
       : null;
-    git = { version, ok: version !== null };
+    // Report which git actually resolved. A host whose PATH selects a wrapper
+    // rather than a real git behaves very differently under load, and that is
+    // invisible from a version string alone.
+    let path: string | null = null;
+    try {
+      path = (await ps.resolveExecutable({ name: "git" })).command;
+    } catch {
+      // Resolution failure is already covered by the git-unavailable issue.
+    }
+    git = { version, ok: version !== null, path };
   } catch {
     // The issue code below is the actionable diagnostic; external error text is not exposed.
   }

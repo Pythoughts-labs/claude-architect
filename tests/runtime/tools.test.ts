@@ -361,6 +361,23 @@ describe("handleDelegatePipeline", () => {
     expect(Array.isArray(seenSlices)).toBe(true);
     expect((seenSlices as Array<{ objective: string }>)[0]).toMatchObject({ objective: "slice one" });
   });
+
+  it("forwards the caller's abort signal into pipeline dependencies", async () => {
+    // Without this the runtime cannot be cancelled at all: every layer below
+    // already honors an AbortSignal, but nothing ever supplied one.
+    const controller = new AbortController();
+    const deps = dependencies();
+    deps.abortSignal = controller.signal;
+    let seenSignal: AbortSignal | undefined;
+    deps.runPipeline = async (_checkout, _spec, pipelineDeps) => {
+      seenSignal = pipelineDeps.abortSignal;
+      return pipelineResult;
+    };
+
+    await handleDelegatePipeline("/repo", validSpec, deps);
+
+    expect(seenSignal).toBe(controller.signal);
+  });
 });
 
 describe("MCP tool handlers", () => {
@@ -437,6 +454,21 @@ describe("MCP tool handlers", () => {
     await handleDelegate("/repo", validSpec, deps);
 
     expect(phases).toEqual(["probing producers"]);
+  });
+
+  it("forwards the caller's abort signal into the attempt dependencies", async () => {
+    const controller = new AbortController();
+    const deps = dependencies();
+    deps.abortSignal = controller.signal;
+    let seenSignal: AbortSignal | undefined;
+    deps.runAttempt = async (_checkout, _spec, attemptDeps) => {
+      seenSignal = attemptDeps.abortSignal;
+      return result;
+    };
+
+    await handleDelegate("/repo", validSpec, deps);
+
+    expect(seenSignal).toBe(controller.signal);
   });
 
   it("warns the caller when the delegation runs a stale published bundle", async () => {

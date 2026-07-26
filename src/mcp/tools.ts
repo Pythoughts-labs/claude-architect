@@ -61,6 +61,12 @@ export interface ToolDependencies {
   now?: () => Date;
   /** Host progress reporting for long-running delegate calls. */
   onProgress?: (message: string) => void;
+  /**
+   * Cancellation from the caller. Every layer below already honors an
+   * AbortSignal; without this the MCP boundary supplied none, so a cancelled
+   * request left the Producer tree running and the pipeline advancing.
+   */
+  abortSignal?: AbortSignal;
   checkLiveBundle?: typeof checkLiveBundle;
   checkAllowlistSufficiency?: typeof checkAllowlistSufficiency;
 }
@@ -336,6 +342,7 @@ export async function handleDelegate(
         ps,
         verifier: configured.verifier ?? new AcceptanceVerifier(),
         ...(deps.onProgress === undefined ? {} : { onPhase: deps.onProgress }),
+        ...(deps.abortSignal === undefined ? {} : { abortSignal: deps.abortSignal }),
       };
       const result = await (deps.runAttempt ?? executeAttempt)(
         canonical.canonical,
@@ -406,6 +413,7 @@ export async function handleDelegatePipeline(
         ps,
         verifier: configured.verifier ?? new AcceptanceVerifier(),
         ...(deps.onProgress === undefined ? {} : { onPhase: deps.onProgress }),
+        ...(deps.abortSignal === undefined ? {} : { abortSignal: deps.abortSignal }),
       };
       const pipelineDependencies: PipelineDependencies = {
         ...attemptDependencies,

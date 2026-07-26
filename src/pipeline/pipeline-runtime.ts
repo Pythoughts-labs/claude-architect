@@ -1839,6 +1839,20 @@ async function runPipelineWithLease(
 
         try {
           for (let increment = 2; increment <= maxIncrements; increment += 1) {
+            // A cancellation that lands between Producer runs must stop the
+            // pipeline here. Otherwise the loop keeps launching Producers even
+            // though the caller has already given up on the run.
+            if (deps.abortSignal?.aborted === true) {
+              return failedResult(
+                attempt,
+                rounds,
+                currentCandidateCommit,
+                `cancelled before increment ${increment}`,
+                "cancelled",
+                increments,
+                pipelineSlices,
+              );
+            }
             notePhase(`increment ${increment}/${maxIncrements}`);
             const previousCandidateCommit = currentCandidateCommit;
             const diffText = await checkedGit(candidateWorktree.path, [
@@ -1964,6 +1978,17 @@ async function runPipelineWithLease(
       }
 
       for (let round = 1; round <= maxRounds; round += 1) {
+        if (deps.abortSignal?.aborted === true) {
+          return failedResult(
+            attempt,
+            rounds,
+            currentCandidateCommit,
+            `cancelled before review round ${round}`,
+            "cancelled",
+            increments,
+            pipelineSlices,
+          );
+        }
         notePhase(`review round ${round}/${maxRounds}`);
         const diffText = await checkedGit(candidateWorktree.path, [
           "diff",

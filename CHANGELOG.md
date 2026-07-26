@@ -6,6 +6,23 @@ All notable changes to Claude Architect are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.32.0] - 2026-07-26
+
+- fix: a cancelled `delegate` or `delegatePipeline` request now actually stops
+  the run. Every layer below the MCP boundary already honored an `AbortSignal`,
+  but nothing supplied one, so cancelling a call left the Producer tree running
+  and the pipeline advancing — and because a killed Producer never looked
+  cancelled, the role runner retried it and launched a successor. The request's
+  signal is now threaded into attempt and pipeline dependencies, and the
+  increment and review-round loops stop rather than starting the next phase.
+- fix: `git` is resolved once per search environment instead of on every
+  invocation. Each call previously walked every `PATH` entry with an `fs.access`
+  probe; the cache is keyed on `PATH`/`Path`/`PATHEXT` so a caller that installs
+  a shim still resolves afresh.
+- feat: `doctor` reports the resolved `git` path alongside its version. A host
+  whose `PATH` selects a wrapper rather than a real git behaves very differently
+  under load, and that was invisible from the version string alone.
+
 ## [0.31.0] - 2026-07-26
 
 - feat: `/claude-architect:delegate` now separates architect-side Superpowers
