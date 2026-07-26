@@ -24,6 +24,7 @@ import type {
   ProbeContext,
 } from "../../src/producers/producer-adapter.js";
 import { PythinkerAdapter } from "../../src/producers/pythinker-adapter.js";
+import { renderSkillBootstrap } from "../../src/producers/skill-bootstrap.js";
 import { buildEnvironment } from "../../src/runtime/environment-policy.js";
 
 const execFileAsync = promisify(execFile);
@@ -65,6 +66,9 @@ function unavailablePlatformServices(): PlatformServices {
     async acquireCheckoutLock() {
       throw new Error("unexpected lock");
     },
+    async acquireCleanupJournalLock() {
+      throw new Error("unexpected cleanup journal lock");
+    },
     async createSecureTempDirectory() {
       throw new Error("unexpected temp directory");
     },
@@ -101,6 +105,9 @@ function versionPlatformServices(
     async terminateProcessTreeByPid() {},
     async acquireCheckoutLock() {
       throw new Error("unexpected lock");
+    },
+    async acquireCleanupJournalLock() {
+      throw new Error("unexpected cleanup journal lock");
     },
     async createSecureTempDirectory() {
       throw new Error("unexpected temp directory");
@@ -340,6 +347,18 @@ describe("PythinkerAdapter", () => {
 
     expect(promptArg).toBe(renderProducerPrompt(spec));
     expect(promptArg?.length).toBe(prompt.length);
+    expect(promptArg).toContain(renderSkillBootstrap());
+  });
+
+  it("omits the delegated skill bootstrap from read-only prompts", () => {
+    const invocation = new PythinkerAdapter({
+      env: {},
+      homeDirectory: "/hosthome",
+      hasAuthStore: () => false,
+    }).buildInvocation(sampleSpec(), { ...invocationContext(), readOnly: true });
+    const promptArg = invocation.args[invocation.args.indexOf("--prompt") + 1];
+
+    expect(promptArg).not.toContain("## Delegated procedure skills");
   });
 
   it("appends a model override to the invocation argv", () => {

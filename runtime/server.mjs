@@ -21933,7 +21933,7 @@ var StdioServerTransport = class {
 var PROTOCOL_VERSION = "1.4.0";
 var DELEGATION_SPEC_VERSION = "1";
 var ATTEMPT_RESULT_VERSION = "1";
-var RUNTIME_VERSION = "0.30.0";
+var RUNTIME_VERSION = "0.31.0";
 
 // src/platform/posix-platform-services.ts
 import { spawn, execFile } from "node:child_process";
@@ -22825,10 +22825,91 @@ function selectSandboxBackend(report) {
 }
 
 // src/producers/codex-adapter.ts
-import { existsSync } from "node:fs";
+import { existsSync as existsSync2 } from "node:fs";
 import { open } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
+
+// src/producers/skill-bootstrap.ts
+import { existsSync } from "node:fs";
+import { fileURLToPath as fileURLToPath2 } from "node:url";
+var OFFERED_SKILLS = [
+  {
+    name: "test-driven-development",
+    trigger: "Use for every behavior change or bug fix, before writing implementation code."
+  },
+  {
+    name: "systematic-debugging",
+    trigger: "Use when a test, build, or behavior fails unexpectedly, before proposing a fix."
+  },
+  {
+    name: "verification-before-completion",
+    trigger: "Use before claiming that work is complete or successful."
+  }
+];
+var FORBIDDEN_SKILLS = [
+  ["dispatching-parallel-agents", "nested delegation is forbidden"],
+  ["subagent-driven-development", "nested delegation is forbidden"],
+  [
+    "requesting-code-review",
+    "implementers cannot review their own work; review is an independent pipeline role"
+  ],
+  [
+    "receiving-code-review",
+    "implementers cannot review their own work; review is an independent pipeline role"
+  ],
+  [
+    "finishing-a-development-branch",
+    "only a human can accept a candidate, and src/integrate/ owns application"
+  ],
+  ["using-git-worktrees", "the attempt already runs inside a linked worktree"],
+  ["brainstorming", "there is no human in the Producer loop"],
+  [
+    "writing-plans",
+    "the Delegation Spec is the plan, and a plan-only run with zero edits is a failure"
+  ],
+  ["executing-plans", "it is a host-loop skill, not an attempt procedure"],
+  [
+    "using-superpowers",
+    "it is a host-loop skill and explicitly excludes dispatched subagents"
+  ],
+  ["writing-skills", "it is a host-loop skill, not an attempt procedure"]
+];
+function renderSkillBootstrap() {
+  const candidateRoots = [
+    new URL("../../vendor/superpowers/skills/", import.meta.url),
+    new URL("../vendor/superpowers/skills/", import.meta.url)
+  ];
+  const missingPaths = [];
+  for (const root of candidateRoots) {
+    const offered = OFFERED_SKILLS.map((skill) => ({
+      ...skill,
+      path: fileURLToPath2(new URL(`${skill.name}/SKILL.md`, root))
+    }));
+    const missing = offered.filter((skill) => !existsSync(skill.path));
+    if (missing.length > 0) {
+      missingPaths.push(...missing.map((skill) => skill.path));
+      continue;
+    }
+    return [
+      "## Delegated procedure skills",
+      "These are the only skill documents you may read. Read an offered skill when its trigger applies, using the exact absolute path. Do not search for or read repository agent rules or other skill documents.",
+      "",
+      "Offered skills:",
+      ...offered.map((skill) => `- ${skill.name} \u2014 Trigger: ${skill.trigger} Path: ${skill.path}`),
+      "",
+      "These paths are outside your worktree and are read-only. Never copy their contents into the repository, reference them from the candidate diff, or treat them as files under review.",
+      "",
+      "Forbidden skills:",
+      ...FORBIDDEN_SKILLS.map(([name, reason]) => `- ${name} \u2014 Forbidden because ${reason}.`)
+    ].join("\n");
+  }
+  throw new Error(
+    `Delegated skill bootstrap unavailable; missing vendored skill path(s): ${missingPaths.join(", ")}`
+  );
+}
+
+// src/producers/codex-adapter.ts
 var CODEX_REQUIRED_ENV = [
   "CODEX_HOME",
   "CODEX_API_KEY",
@@ -22910,7 +22991,7 @@ function renderList(values) {
 var CODEX_EDIT_ACTION_PREAMBLE = [
   "This is an action-first edit run.",
   "Constraints are fully pre-digested in this spec.",
-  "Do not read AGENTS.md, CLAUDE.md, SKILL.md, lessons files, or any agent-rule/skill documents.",
+  "Do not read repository AGENTS.md, CLAUDE.md, SKILL.md, lessons files, or any repository agent-rule/skill documents; the delegated skill files named below are permitted.",
   "Begin by opening the implementation files authorized in the spec.",
   "A plan-only final message with zero edits is a failed run."
 ].join("\n");
@@ -22940,6 +23021,8 @@ function renderPrompt(spec, readOnly) {
   ].join("\n");
   return readOnly ? prompt : `${CODEX_EDIT_ACTION_PREAMBLE}
 
+${renderSkillBootstrap()}
+
 ${prompt}`;
 }
 function resolveCodexStore(deps) {
@@ -22960,7 +23043,7 @@ var CodexAdapter = class {
   deps;
   producerId = "codex";
   hasAuthStore(directory) {
-    return (this.deps.hasAuthStore ?? ((store) => existsSync(join(store, "auth.json"))))(directory);
+    return (this.deps.hasAuthStore ?? ((store) => existsSync2(join(store, "auth.json"))))(directory);
   }
   async probe(ctx) {
     if (ctx.os === "win32") return unavailableReport(ctx, "unsupported-platform");
@@ -23163,7 +23246,7 @@ var CodexAdapter = class {
 };
 
 // src/producers/opencode-adapter.ts
-import { existsSync as existsSync2 } from "node:fs";
+import { existsSync as existsSync3 } from "node:fs";
 import { homedir as homedir2 } from "node:os";
 import { join as join2 } from "node:path";
 
@@ -23173,10 +23256,11 @@ var PLAIN_TEXT_LIMIT = 8e3;
 function renderList2(values) {
   return values.length === 0 ? "- (none)" : values.map((value) => `- ${value}`).join("\n");
 }
-function renderProducerPrompt(spec) {
+function renderProducerPrompt(spec, readOnly = false) {
   return [
     "You are an untrusted implementation Producer operating inside an isolated worktree.",
     "Do not delegate to other agents or expand the authorized scope.",
+    ...readOnly ? [] : ["", renderSkillBootstrap()],
     "",
     "Objective:",
     spec.objective,
@@ -23288,7 +23372,7 @@ var OpenCodeAdapter = class {
   structuredOutput = false;
   executionModes = ["edit"];
   hasAuthStore(directory) {
-    return (this.deps.hasAuthStore ?? ((store) => existsSync2(join2(store, "auth.json"))))(directory);
+    return (this.deps.hasAuthStore ?? ((store) => existsSync3(join2(store, "auth.json"))))(directory);
   }
   async probe(ctx) {
     if (ctx.os === "win32") return unavailableReport2(ctx, "unsupported-platform");
@@ -23350,7 +23434,7 @@ var OpenCodeAdapter = class {
     return {
       executable: ctx.executable,
       args,
-      stdin: renderProducerPrompt(spec),
+      stdin: renderProducerPrompt(spec, ctx.readOnly === true),
       requiredEnv: [...OPENCODE_REQUIRED_ENV],
       env: defaultOpenCodeEnv({
         env: this.deps.env,
@@ -23376,7 +23460,7 @@ var OpenCodeAdapter = class {
 };
 
 // src/producers/pi-adapter.ts
-import { existsSync as existsSync3 } from "node:fs";
+import { existsSync as existsSync4 } from "node:fs";
 import { homedir as homedir3 } from "node:os";
 import { join as join3 } from "node:path";
 var PI_REQUIRED_ENV = ["PI_API_KEY"];
@@ -23419,10 +23503,10 @@ var PiAdapter = class {
   structuredOutput = false;
   executionModes = ["edit"];
   hasAuthStore(directory) {
-    return (this.deps.hasAuthStore ?? ((store) => existsSync3(join3(store, "auth.json"))))(directory);
+    return (this.deps.hasAuthStore ?? ((store) => existsSync4(join3(store, "auth.json"))))(directory);
   }
   hasConfigDir(directory) {
-    return existsSync3(directory);
+    return existsSync4(directory);
   }
   async probe(ctx) {
     if (ctx.os === "win32") return unavailableReport3(ctx, "unsupported-platform");
@@ -23484,7 +23568,7 @@ var PiAdapter = class {
     return {
       executable: ctx.executable,
       args,
-      stdin: renderProducerPrompt(spec),
+      stdin: renderProducerPrompt(spec, ctx.readOnly === true),
       requiredEnv: [...PI_REQUIRED_ENV],
       env: defaultPiEnv({
         env: this.deps.env,
@@ -23510,7 +23594,7 @@ var PiAdapter = class {
 };
 
 // src/producers/pythinker-adapter.ts
-import { existsSync as existsSync4 } from "node:fs";
+import { existsSync as existsSync5 } from "node:fs";
 import { homedir as homedir4 } from "node:os";
 import { join as join4 } from "node:path";
 var VERSION_TIMEOUT_MS4 = 1e4;
@@ -23552,10 +23636,10 @@ var PythinkerAdapter = class {
   structuredOutput = false;
   executionModes = ["edit"];
   hasAuthStore(directory) {
-    return (this.deps.hasAuthStore ?? ((store) => existsSync4(join4(store, "auth.json"))))(directory);
+    return (this.deps.hasAuthStore ?? ((store) => existsSync5(join4(store, "auth.json"))))(directory);
   }
   hasConfigDir(directory) {
-    return existsSync4(directory);
+    return existsSync5(directory);
   }
   async probe(ctx) {
     if (ctx.os === "win32") return unavailableReport4(ctx, "unsupported-platform");
@@ -23607,7 +23691,7 @@ var PythinkerAdapter = class {
       "--work-dir",
       ctx.worktreePath,
       "--prompt",
-      renderProducerPrompt(spec)
+      renderProducerPrompt(spec, ctx.readOnly === true)
     ];
     if (spec.producerOverrides?.model !== void 0) {
       args.push("--model", spec.producerOverrides.model);
@@ -27951,7 +28035,7 @@ import {
   rm as rm6
 } from "node:fs/promises";
 import path12 from "node:path";
-import { fileURLToPath as fileURLToPath2 } from "node:url";
+import { fileURLToPath as fileURLToPath3 } from "node:url";
 var NO_FOLLOW2 = constants3.O_NOFOLLOW ?? 0;
 function errorCode3(error2) {
   return error2.code;
@@ -27965,7 +28049,7 @@ async function resolveWatchdogPath() {
   for (const candidate of candidates) {
     try {
       await access3(candidate);
-      return fileURLToPath2(candidate);
+      return fileURLToPath3(candidate);
     } catch (error2) {
       lastError = error2;
     }

@@ -29,6 +29,16 @@ for artifact in runtime/bootstrap.mjs runtime/server.mjs; do
   fi
 done
 
+for vendored_skill in \
+  vendor/superpowers/skills/systematic-debugging/SKILL.md \
+  vendor/superpowers/skills/test-driven-development/SKILL.md \
+  vendor/superpowers/skills/verification-before-completion/SKILL.md; do
+  if [[ ! -s "$vendored_skill" ]]; then
+    printf 'ERROR: missing or empty vendored skill %s.\n' "$vendored_skill" >&2
+    exit 1
+  fi
+done
+
 if [[ ! -s native/bin/win32-job-kill-x64.exe ]]; then
   printf 'ERROR: missing or empty native helper native/bin/win32-job-kill-x64.exe.\n' >&2
   exit 1

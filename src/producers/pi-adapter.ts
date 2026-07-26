@@ -154,7 +154,7 @@ export class PiAdapter implements ProducerAdapter {
     return {
       executable: ctx.executable,
       args,
-      stdin: renderProducerPrompt(spec),
+      stdin: renderProducerPrompt(spec, ctx.readOnly === true),
       requiredEnv: [...PI_REQUIRED_ENV],
       env: defaultPiEnv({
         env: this.deps.env,

@@ -6,6 +6,23 @@ All notable changes to Claude Architect are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.31.0] - 2026-07-26
+
+- feat: `/claude-architect:delegate` now separates architect-side Superpowers
+  planning and coordination from the three vendored Producer procedures:
+  test-driven development, systematic debugging, and verification before
+  completion. Release validation fails when any of their `SKILL.md` files is
+  missing or empty, and the README records the upstream 6.2.0 MIT attribution.
+- feat: every edit-lane Producer prompt now carries a delegated-skill bootstrap
+  naming those three procedures by absolute path, plus the skills that stay
+  forbidden by trust invariant — nested delegation, self-review, branch
+  acceptance, worktree creation, and the host-loop skills. Read-only lanes are
+  unchanged. The bootstrap resolves lazily, so an incomplete install fails the
+  edit lane instead of the whole runtime.
+- docs: spec authoring now requires bounding test parallelism for the commands a
+  Producer runs itself, not only for verification commands; an unbounded runner
+  inside an attempt fans out to one worker per core on top of the attempt.
+
 ## [0.30.0] - 2026-07-24
 
 - fix: the pre-push tag gate now requires the **exact tagged commit** to have a

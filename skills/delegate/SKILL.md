@@ -13,6 +13,18 @@ The current session is the architect. It owns requirements, the Delegation Spec,
 
 Always present this skill as `/claude-architect:delegate`. Never show a shorter command.
 
+## Superpowers across the trust boundary
+
+When the upstream Superpowers plugin is available to the architect, keep its host-loop skills on the architect side of the boundary: use `brainstorming` to clarify requirements before freezing the Delegation Spec, `writing-plans` to turn an agreed design into objectively checkable work or slices, `executing-plans` or `subagent-driven-development` only to coordinate the architect-owned workflow, and `verification-before-completion` before recording a decision on a candidate. Those skills do not grant a Producer permission to plan instead of editing, dispatch nested agents, review itself, accept a candidate, or integrate bytes. When the plugin is not installed, proceed without those skills rather than inventing or approximating them.
+
+Edit-lane Producers receive a deliberately smaller, vendored procedure subset:
+
+- `test-driven-development` for every behavior change or bug fix, before implementation code;
+- `systematic-debugging` when a test, build, or behavior fails unexpectedly, before proposing a fix;
+- `verification-before-completion` before claiming success.
+
+The runtime supplies the applicable Producer skills by absolute path inside each isolated attempt. Do not put architect-only Superpowers skills in the Delegation Spec or tell a Producer to discover skills from the operator's home directory. The Producer subset is vendored from [obra/superpowers](https://github.com/obra/superpowers), version 6.2.0, under the MIT license.
+
 ## Agent selection
 
 The delegated CLIs are the architect's **implementation agents** — the same subagent idiom Claude Code uses, except each agent launches an *untrusted Producer* through the trusted MCP runtime inside an isolated Git worktree. Present them as a selectable agent roster: the human picks one `subagent_type`, exactly one agent runs per attempt, and no agent may review or accept its own work.
@@ -63,6 +75,7 @@ Construct a candidate spec with every required field:
 - The final type-check must cover ALL touched typed files, including every added or modified test file; never scope it only to `src/` when tests or other typed paths may change.
 - Keep observable outcomes in `successCriteria`. Put reviewer-only, non-commandable concerns in `review.focus`; when present, `review.focus` must be a non-empty array of non-empty strings. No undocumented review keys are accepted.
 - Prefer explicit test file paths in verification args; directory args can resolve differently between the Producer sandbox and clean-room verification.
+- Bound the parallelism of every test command, and state the same bound in `context` for the commands the Producer runs on its own. Verification commands are not the only tests that execute: a Producer re-runs the suite inside its own shell, and an unbounded runner there fans out to one worker per core on top of the attempt itself. On a many-core host that has driven thousands of process spawns and starved the machine. For a Node repository, pass an explicit worker cap (for example `--maxWorkers=4`) rather than relying on a runner default.
 
 **Verification preflight:** The runtime runs every verification command against clean HEAD in a disposable worktree before dispatch, and separately probes the Producer's own shell for the executables those commands name — a Producer that cannot resolve `node` or `git` cannot verify its own work, and would otherwise discover that only after burning the whole attempt window. An unresolvable executable ends the attempt as `environment-defect` before the Producer runs; anything less definite proceeds and is recorded in evidence. The probe proves resolution, not configuration, and grants a candidate nothing: independent verification remains the backstop. Repair the spec if a command cannot start. A baseline failure unrelated to the task is an environment defect the architect repairs centrally before dispatching. Set `expectBaselineFailure: true` on any command that cannot pass at clean HEAD by design — one that reproduces the target bug, or one that exercises a file or test the candidate will create (it necessarily fails before that path exists).
 

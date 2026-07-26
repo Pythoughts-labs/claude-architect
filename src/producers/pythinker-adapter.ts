@@ -142,7 +142,7 @@ export class PythinkerAdapter implements ProducerAdapter {
       "--work-dir",
       ctx.worktreePath,
       "--prompt",
-      renderProducerPrompt(spec),
+      renderProducerPrompt(spec, ctx.readOnly === true),
     ];
     if (spec.producerOverrides?.model !== undefined) {
       args.push("--model", spec.producerOverrides.model);

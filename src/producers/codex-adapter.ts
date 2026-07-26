@@ -15,6 +15,7 @@ import type {
   ProducerConfigurationProfile,
   ProducerInvocation,
 } from "./producer-adapter.js";
+import { renderSkillBootstrap } from "./skill-bootstrap.js";
 
 export const CODEX_REQUIRED_ENV = [
   "CODEX_HOME",
@@ -122,7 +123,7 @@ function renderList(values: string[]): string {
 export const CODEX_EDIT_ACTION_PREAMBLE = [
   "This is an action-first edit run.",
   "Constraints are fully pre-digested in this spec.",
-  "Do not read AGENTS.md, CLAUDE.md, SKILL.md, lessons files, or any agent-rule/skill documents.",
+  "Do not read repository AGENTS.md, CLAUDE.md, SKILL.md, lessons files, or any repository agent-rule/skill documents; the delegated skill files named below are permitted.",
   "Begin by opening the implementation files authorized in the spec.",
   "A plan-only final message with zero edits is a failed run.",
 ].join("\n");
@@ -151,7 +152,9 @@ function renderPrompt(spec: DelegationSpec, readOnly: boolean): string {
     "",
     "Make only the requested edits. Return a concise final summary of the work performed.",
   ].join("\n");
-  return readOnly ? prompt : `${CODEX_EDIT_ACTION_PREAMBLE}\n\n${prompt}`;
+  return readOnly
+    ? prompt
+    : `${CODEX_EDIT_ACTION_PREAMBLE}\n\n${renderSkillBootstrap()}\n\n${prompt}`;
 }
 
 export interface DefaultCodexEnvDeps {

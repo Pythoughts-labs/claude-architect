@@ -3,6 +3,7 @@ import type { ResolvedExecutable, SupervisedExit } from "../platform/platform-se
 import { SANDBOX_BACKENDS } from "../platform/sandbox/backends.js";
 import type { DelegationSpec } from "../protocol/delegation-spec.js";
 import type { AdapterEvent, ProbeContext } from "./producer-adapter.js";
+import { renderSkillBootstrap } from "./skill-bootstrap.js";
 
 const PLAIN_TEXT_LIMIT = 8_000;
 
@@ -10,10 +11,11 @@ function renderList(values: string[]): string {
   return values.length === 0 ? "- (none)" : values.map(value => `- ${value}`).join("\n");
 }
 
-export function renderProducerPrompt(spec: DelegationSpec): string {
+export function renderProducerPrompt(spec: DelegationSpec, readOnly = false): string {
   return [
     "You are an untrusted implementation Producer operating inside an isolated worktree.",
     "Do not delegate to other agents or expand the authorized scope.",
+    ...(readOnly ? [] : ["", renderSkillBootstrap()]),
     "",
     "Objective:",
     spec.objective,

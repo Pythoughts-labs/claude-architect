@@ -149,7 +149,7 @@ export class OpenCodeAdapter implements ProducerAdapter {
     return {
       executable: ctx.executable,
       args,
-      stdin: renderProducerPrompt(spec),
+      stdin: renderProducerPrompt(spec, ctx.readOnly === true),
       requiredEnv: [...OPENCODE_REQUIRED_ENV],
       env: defaultOpenCodeEnv({
         env: this.deps.env,

@@ -16,6 +16,7 @@ import { wrapInvocationWithSeatbelt } from "../../src/platform/sandbox/seatbelt.
 import type { DelegationSpec } from "../../src/protocol/delegation-spec.js";
 import { PiAdapter } from "../../src/producers/pi-adapter.js";
 import { normalizePlainText } from "../../src/producers/plain-text.js";
+import { renderSkillBootstrap } from "../../src/producers/skill-bootstrap.js";
 import type {
   CapabilityReport,
   InvocationContext,
@@ -70,6 +71,9 @@ function unavailablePlatformServices(): PlatformServices {
     async acquireCheckoutLock() {
       throw new Error("unexpected lock");
     },
+    async acquireCleanupJournalLock() {
+      throw new Error("unexpected cleanup journal lock");
+    },
     async createSecureTempDirectory() {
       throw new Error("unexpected temp directory");
     },
@@ -106,6 +110,9 @@ function versionPlatformServices(
     async terminateProcessTreeByPid() {},
     async acquireCheckoutLock() {
       throw new Error("unexpected lock");
+    },
+    async acquireCleanupJournalLock() {
+      throw new Error("unexpected cleanup journal lock");
     },
     async createSecureTempDirectory() {
       throw new Error("unexpected temp directory");
@@ -308,8 +315,19 @@ describe("PiAdapter", () => {
     expect(invocation.stdin).toContain(spec.objective);
     expect(invocation.stdin).toContain(spec.context);
     expect(invocation.stdin).toContain("src/greeting.ts");
+    expect(invocation.stdin).toContain(renderSkillBootstrap());
     expect(invocation.requiredEnv).toEqual(["PI_API_KEY"]);
     expect(invocation.network).toBe("denied");
+  });
+
+  it("omits the delegated skill bootstrap from read-only prompts", () => {
+    const invocation = new PiAdapter({
+      env: {},
+      homeDirectory: "/hosthome",
+      hasAuthStore: () => false,
+    }).buildInvocation(sampleSpec(), { ...invocationContext(), readOnly: true });
+
+    expect(invocation.stdin).not.toContain("## Delegated procedure skills");
   });
 
   it("appends a model override to the invocation argv", () => {

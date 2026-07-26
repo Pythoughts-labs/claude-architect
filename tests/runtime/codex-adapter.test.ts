@@ -4,6 +4,7 @@ import { access, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promise
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { Readable } from "node:stream";
+import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { describe, expect, it } from "vitest";
 import type {
@@ -20,6 +21,7 @@ import {
   CodexAdapter,
   defaultCodexEnv,
 } from "../../src/producers/codex-adapter.js";
+import { renderSkillBootstrap } from "../../src/producers/skill-bootstrap.js";
 import type {
   CapabilityReport,
   InvocationContext,
@@ -60,9 +62,15 @@ function unavailablePlatformServices(): PlatformServices {
     },
     async requestCooperativeCancellation() {},
     async terminateProcessTree() {},
+    async getProcessStartToken() {
+      return null;
+    },
     async terminateProcessTreeByPid() {},
     async acquireCheckoutLock() {
       throw new Error("unexpected lock");
+    },
+    async acquireCleanupJournalLock() {
+      throw new Error("unexpected cleanup journal lock");
     },
     async createSecureTempDirectory() {
       throw new Error("unexpected temp directory");
@@ -94,9 +102,15 @@ function versionPlatformServices(
     },
     async requestCooperativeCancellation() {},
     async terminateProcessTree() {},
+    async getProcessStartToken() {
+      return null;
+    },
     async terminateProcessTreeByPid() {},
     async acquireCheckoutLock() {
       throw new Error("unexpected lock");
+    },
+    async acquireCleanupJournalLock() {
+      throw new Error("unexpected cleanup journal lock");
     },
     async createSecureTempDirectory() {
       throw new Error("unexpected temp directory");
@@ -233,6 +247,17 @@ describe("CodexAdapter", () => {
     expect(invocation.args[sandboxIndex + 1]).toBe("read-only");
     expect(invocation.args).not.toContain("workspace-write");
     expect(invocation.stdin).not.toContain(CODEX_EDIT_ACTION_PREAMBLE);
+    expect(invocation.stdin).not.toContain("## Delegated procedure skills");
+  });
+
+  it("keeps the edit preamble stable while allowing only delegated skill files", () => {
+    expect(CODEX_EDIT_ACTION_PREAMBLE.split("\n")).toEqual([
+      "This is an action-first edit run.",
+      "Constraints are fully pre-digested in this spec.",
+      "Do not read repository AGENTS.md, CLAUDE.md, SKILL.md, lessons files, or any repository agent-rule/skill documents; the delegated skill files named below are permitted.",
+      "Begin by opening the implementation files authorized in the spec.",
+      "A plan-only final message with zero edits is a failed run.",
+    ]);
   });
 
   it("denies every credential it hands Codex to the Producer shell", () => {
@@ -283,7 +308,8 @@ describe("CodexAdapter", () => {
     expect(invocation.args.at(-1)).toBe("-");
     expect(invocation.args.join(" ")).not.toContain(spec.objective);
     expect(invocation.stdin).toContain(spec.objective);
-    expect(invocation.stdin.startsWith(`${CODEX_EDIT_ACTION_PREAMBLE}\n\n`)).toBe(true);
+    expect(invocation.stdin?.startsWith(`${CODEX_EDIT_ACTION_PREAMBLE}\n\n`)).toBe(true);
+    expect(invocation.stdin).toContain(renderSkillBootstrap());
     expect(invocation.stdin).toContain(spec.context);
     expect(invocation.stdin).toContain("src/greeting.ts");
     expect(invocation.stdin).toContain(
@@ -551,6 +577,100 @@ describe("CodexAdapter", () => {
       }
     },
     150_000,
+  );
+
+  it.skipIf(
+    process.platform !== "darwin"
+      || process.arch !== "arm64"
+      || process.env.RUN_CODEX_SKILL_GATE !== "1",
+  )(
+    "proves the producer can read a vendored skill under the isolated HOME",
+    async () => {
+      // Asserting that the prompt contains the bootstrap would prove nothing: the
+      // failure mode is the Producer being unable to READ the vendored path under
+      // write confinement and a per-attempt HOME. So the probe demands output that
+      // is only derivable from the file's bytes — a line count and one interior
+      // line, neither of which is recallable from a public skill's training data.
+      const skillPath = fileURLToPath(new URL(
+        "../../vendor/superpowers/skills/verification-before-completion/SKILL.md",
+        import.meta.url,
+      ));
+      const skillLines = (await readFile(skillPath, "utf8")).split("\n");
+      const probedLineNumber = 17;
+      const expectedLine = skillLines[probedLineNumber - 1];
+      expect(expectedLine).toBeDefined();
+
+      const root = await mkdtemp(join(tmpdir(), "claude-architect-codex-skill-"));
+      const worktreePath = join(root, "worktree");
+      const tempHome = join(root, "home");
+      const proofPath = join(worktreePath, "skill-proof.txt");
+      const originalCodexHome = process.env.CODEX_HOME;
+      if (originalCodexHome === undefined) {
+        process.env.CODEX_HOME = join(homedir(), ".codex");
+      }
+      let builtEnvironment: ReturnType<typeof buildEnvironment> | undefined;
+
+      try {
+        await mkdir(worktreePath);
+        await mkdir(tempHome);
+        await execFileAsync("git", ["init", "-q"], { cwd: worktreePath });
+        const ps = new PosixPlatformServices();
+        const adapter = new CodexAdapter();
+        const report = await adapter.probe({
+          ps,
+          os: "darwin",
+          arch: process.arch,
+          environmentType: "native",
+        });
+        expect(report.resolvedExecutable).not.toBeNull();
+        if (report.resolvedExecutable === null) return;
+        const spec = sampleSpec();
+        spec.objective = [
+          "This is a delegated-skill certification probe.",
+          "Open the verification-before-completion skill at the absolute path given in the",
+          "delegated procedure skills section of this prompt, then write skill-proof.txt",
+          `containing exactly two lines: the file's total line count, then line ${probedLineNumber}`,
+          "of that file copied verbatim.",
+        ].join(" ");
+        spec.writeAllowlist = ["skill-proof.txt"];
+        spec.forbiddenScope = [];
+        spec.producerOverrides = { reasoningEffort: "low" };
+        const invocation = adapter.buildInvocation(spec, {
+          worktreePath,
+          runId: "run-skill-gate",
+          tempHome,
+          capabilityReport: report,
+          executable: report.resolvedExecutable,
+        });
+        expect(invocation.stdin).toContain(skillPath);
+        builtEnvironment = buildEnvironment({
+          os: "darwin",
+          adapterAllowlist: invocation.requiredEnv,
+          tempHome,
+        });
+        const supervisedExit = await supervise(ps, {
+          executable: invocation.executable,
+          args: invocation.args,
+          cwd: worktreePath,
+          env: builtEnvironment.env,
+          timeoutMs: 240_000,
+          ...(invocation.stdin === undefined ? {} : { stdin: invocation.stdin }),
+          maxOutputBytes: 1_000_000,
+        }, {});
+
+        const proof = await readFile(proofPath, "utf8");
+        const diagnostic =
+          `stdout:\n${supervisedExit.stdout}\nstderr:\n${supervisedExit.stderr}`;
+        expect(proof, diagnostic).toContain(String(skillLines.length));
+        expect(proof, diagnostic).toContain(expectedLine!);
+      } finally {
+        builtEnvironment?.secretRegistration.dispose();
+        if (originalCodexHome === undefined) delete process.env.CODEX_HOME;
+        else process.env.CODEX_HOME = originalCodexHome;
+        await rm(root, { recursive: true, force: true });
+      }
+    },
+    300_000,
   );
 
   it.skipIf(

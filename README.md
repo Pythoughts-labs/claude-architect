@@ -9,7 +9,7 @@
 <p align="center">
   <img alt="Claude Code" src="https://img.shields.io/badge/Claude_Code-plugin-d97757?style=flat-square&labelColor=0b0e14">
   <img alt="OpenCode" src="https://img.shields.io/badge/OpenCode-native-58a6ff?style=flat-square&labelColor=0b0e14">
-  <img alt="version" src="https://img.shields.io/badge/version-0.30.0-9aa4b2?style=flat-square&labelColor=0b0e14">
+  <img alt="version" src="https://img.shields.io/badge/version-0.31.0-9aa4b2?style=flat-square&labelColor=0b0e14">
   <img alt="license" src="https://img.shields.io/badge/license-MIT-3fb950?style=flat-square&labelColor=0b0e14">
 </p>
 
@@ -67,6 +67,16 @@ Open Claude Code in a Git repository and name the Producer you want:
 ```
 
 If no Producer is named, the skill asks you to choose Codex, OpenCode, Pi, or Pythinker. Pi, OpenCode, and Pythinker are harnesses that accept optional model and thinking/variant overrides; model selection within a harness lane is optional and otherwise defers to that CLI's configured default. For non-trivial work it uses the fresh-context review pipeline. Read the exact patch, findings, and verification output before deciding whether to accept.
+
+### Superpowers skill boundary
+
+Claude Architect can use host-side Superpowers skills such as brainstorming, writing plans, and executing plans to shape and coordinate a delegation. Producers do not inherit that host skill set. Each edit attempt is offered only the three task-scoped procedures compatible with the trust model:
+
+- `test-driven-development` for behavior changes and bug fixes;
+- `systematic-debugging` for unexpected test, build, or behavior failures;
+- `verification-before-completion` before a Producer claims success.
+
+This filtered subset is vendored from [obra/superpowers](https://github.com/obra/superpowers) version 6.2.0 under the MIT license so it remains available inside an isolated attempt. Skills that assume nested delegation, self-review, branch acceptance, or an interactive human remain unavailable to Producers; the architect and human retain those authorities.
 
 ### Lanes as native subagents
 
