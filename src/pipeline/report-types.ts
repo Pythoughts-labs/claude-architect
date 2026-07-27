@@ -69,7 +69,7 @@ export interface AdvisorReport {
   verdict: "approve" | "human-decision-required";
   rationale: string;
   risks: Array<{
-    severity: "blocker" | "major" | "minor" | "nit";
+    severity: FindingSeverity;
     claim: string;
     evidence: string;
   }>;

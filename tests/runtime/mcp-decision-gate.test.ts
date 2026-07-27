@@ -12,6 +12,7 @@ import type { AttemptResult, CandidateArtifact } from "../../src/protocol/attemp
 import { ArtifactStore } from "../../src/runtime/artifact-store.js";
 import type { CandidateDecisionV2 } from "../../src/protocol/candidate-decision.js";
 import type { RunManifest } from "../../src/runtime/run-manifest.js";
+import type { ReviewSnapshot } from "../../src/runtime/review-snapshot.js";
 
 function minimalResult(runId: string): AttemptResult {
   return {
@@ -130,6 +131,7 @@ async function decideVia(
   authority: "autonomous" | "human" = "autonomous",
 ): Promise<{ output: unknown; decision: CandidateDecisionV2 | null }> {
   let recorded: CandidateDecisionV2 | null = null;
+  let persistedSnapshot: ReviewSnapshot | null = null;
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   await start({
     transport: serverTransport,
@@ -149,8 +151,8 @@ async function decideVia(
         recorded = record;
       },
       readCandidateDecision: async () => recorded,
-      writeReviewSnapshot: async () => {},
-      readReviewSnapshot: async () => null,
+      writeReviewSnapshot: async snapshot => { persistedSnapshot = snapshot; },
+      readReviewSnapshot: async () => persistedSnapshot,
       readRunStartSpecSha256: async () => null,
       readPipelineActiveMarker: async () => null,
     }) as never,
@@ -208,6 +210,7 @@ describe("decideCandidate authority", () => {
   ] as const)(
     "reports a conflict when human confirmation meets an accepted %s archive",
     async decidedBy => {
+      let persistedSnapshot: ReviewSnapshot | null = null;
       const stateRoot = await mkdtemp(join(tmpdir(), "decision-authority-conflict-"));
       const previousStateRoot = process.env.CLAUDE_ARCHITECT_STATE_DIR;
       const previousPluginData = process.env.CLAUDE_PLUGIN_DATA;
@@ -245,8 +248,8 @@ describe("decideCandidate authority", () => {
               await persistentStore.writeCandidateDecisionRecord(record);
             },
             readCandidateDecision: async () => persistentStore.readCandidateDecision("decide-authority"),
-            writeReviewSnapshot: async () => {},
-            readReviewSnapshot: async () => null,
+            writeReviewSnapshot: async snapshot => { persistedSnapshot = snapshot; },
+            readReviewSnapshot: async () => persistedSnapshot,
             readRunStartSpecSha256: async () => null,
             readPipelineActiveMarker: async () => null,
           }) as never,

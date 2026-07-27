@@ -2367,8 +2367,8 @@ async function runPipelineWithLease(
       failure: null,
     };
     await store.writePipelineArtifact("pipeline-result", result);
-    // The terminal done/failed status is written by `runPipeline` once the lease
-    // is released, so it is not repeated here.
+    // The terminal done/failed status is written by `runPipeline` while it still
+    // holds the lease, before `finally` releases it, so it is not repeated here.
     await notePhase(`finished: ${result.status}`);
     authoritySafeToRelease = true;
     return result;
