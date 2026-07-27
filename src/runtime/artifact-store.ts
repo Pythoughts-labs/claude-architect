@@ -94,6 +94,18 @@ export interface PruneDependencies {
 
 export type RunDecisionValue = CandidateDecisionValue;
 
+/**
+ * How the runtime obtained a decision, as the MCP lifecycle observed it.
+ *
+ * Distinct from the authority persisted with the decision: this describes the
+ * mechanism the server used, and {@link decisionAuthorityFor} maps it onto the
+ * recorded authority. `caller-asserted` means the MCP caller supplied the
+ * decision and the runtime never confirmed a human made it — something an agent
+ * can do — so recording the distinction is what makes "who accepted this"
+ * answerable after the fact rather than assumed.
+ */
+export type DecisionProvenance = "human-elicitation" | "caller-asserted" | "policy-autonomous";
+
 type HumanCandidateDecisionV2Input = Omit<
   HumanCandidateDecisionV2,
   "decisionVersion" | "authority"
@@ -1310,6 +1322,20 @@ export class ArtifactStore {
       decisionVersion: "2",
       authority: "human",
     });
+    await this.writeCandidateDecision(decision, decision);
+  }
+
+  /**
+   * Persist a decision whose authority the caller already resolved.
+   *
+   * The MCP lifecycle derives the authority from how it obtained the decision —
+   * a human prompt, the autonomous policy, or an unconfirmed caller assertion —
+   * so it cannot go through `writeHumanDecision`, which hard-codes `human`.
+   * Validation is unchanged: the schema still rejects any authority outside the
+   * union, and the accept-only policy constraint still applies.
+   */
+  async writeCandidateDecisionRecord(record: CandidateDecisionV2): Promise<void> {
+    const decision = verifyCandidateDecisionV2(record);
     await this.writeCandidateDecision(decision, decision);
   }
 
