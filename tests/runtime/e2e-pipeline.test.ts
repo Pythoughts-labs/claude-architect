@@ -382,12 +382,15 @@ describe.runIf(process.platform === "darwin")("end-to-end review pipeline", () =
     const manifest = await new ArtifactStore(runId).readManifest(runId);
     expect(manifest).not.toBeNull();
     expect(manifest?.candidateManifestHash).not.toBeNull();
+    // Same authority as the first call: idempotence is about repeating a
+    // decision, and re-recording one under a different authority is a different
+    // claim about who decided, which the store refuses by design.
     await expect(handleDecideCandidate(
       repo,
       runId,
       "accepted",
       manifest!.candidateManifestHash!,
-      deps,
+      lifecycleDeps,
     )).resolves.toEqual({
       recorded: true,
     });
