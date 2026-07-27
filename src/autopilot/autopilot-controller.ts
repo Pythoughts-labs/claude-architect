@@ -455,7 +455,11 @@ export class AutopilotController {
     ).toISOString();
     const ciDeadlineMs = Date.parse(ciDeadlineAt);
     const workflowId = this.createWorkflowId();
-    let pendingCleanup: CleanupContext | null = null;
+    // Widened deliberately, like the bootstrap locals above: this is assigned
+    // inside the locked closure, which control-flow analysis cannot see, so a
+    // plain null initializer narrows it and the compiler stops checking the
+    // guard below.
+    let pendingCleanup = null as CleanupContext | null;
     // The widening assertion keeps the catch block below able to narrow this
     // variable: it is assigned inside the locked closure, which control-flow
     // analysis cannot see, so a plain null initializer would narrow to never.
@@ -922,7 +926,11 @@ export class AutopilotController {
     checkoutPath: string,
     workflowId: string,
   ): Promise<AutopilotWorkflowState> {
-    let pendingCleanup: CleanupContext | null = null;
+    // Widened deliberately, like the bootstrap locals above: this is assigned
+    // inside the locked closure, which control-flow analysis cannot see, so a
+    // plain null initializer narrows it and the compiler stops checking the
+    // guard below.
+    let pendingCleanup = null as CleanupContext | null;
     let outcome: AutopilotWorkflowState | CleanupContext;
     try {
       outcome = await this.dependencies.workflowLock.runExclusive(workflowId, async () => {

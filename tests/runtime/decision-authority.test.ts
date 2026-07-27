@@ -16,6 +16,7 @@ import type { AttemptResult, CandidateArtifact } from "../../src/protocol/attemp
 import { ArtifactStore } from "../../src/runtime/artifact-store.js";
 import type { CandidateDecisionV2 } from "../../src/protocol/candidate-decision.js";
 import type { RunManifest } from "../../src/runtime/run-manifest.js";
+import type { ReviewSnapshot } from "../../src/runtime/review-snapshot.js";
 
 describe("decisionAuthority", () => {
   it("defaults to autonomous when unset or empty", () => {
@@ -195,6 +196,7 @@ async function decideVia(
 ): Promise<{ output: unknown; decision: CandidateDecisionV2 | null }> {
   const root = await mkdtemp(join(tmpdir(), "decide-authority-"));
   let recorded: CandidateDecisionV2 | null = null;
+  let persistedSnapshot: ReviewSnapshot | null = null;
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   try {
     await start({
@@ -215,8 +217,8 @@ async function decideVia(
           recorded = record;
         },
         readCandidateDecision: async () => recorded,
-        writeReviewSnapshot: async () => {},
-        readReviewSnapshot: async () => null,
+        writeReviewSnapshot: async snapshot => { persistedSnapshot = snapshot; },
+        readReviewSnapshot: async () => persistedSnapshot,
         readRunStartSpecSha256: async () => null,
         readPipelineActiveMarker: async () => null,
       }) as never,

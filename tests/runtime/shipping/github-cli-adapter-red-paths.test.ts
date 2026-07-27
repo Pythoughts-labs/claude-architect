@@ -462,7 +462,10 @@ const redCases: RedCase[] = [
       };
     },
   },
-  draftCase("draft-pull-request-list-failed", "pr-list", result("", { cancelled: true })),
+  // A non-zero exit is the substantive failure. This case used to inject
+  // `cancelled: true`, which asserted the very conflation being fixed: an abort
+  // landing after spawn must classify as `cancelled`, not as a remote failure.
+  draftCase("draft-pull-request-list-failed", "pr-list", result("", { exitCode: 1 })),
   {
     classification: "draft-pull-request-response-invalid",
     create: () => {
@@ -820,4 +823,19 @@ it("pushes without setting an upstream", async () => {
   expect(argumentsUsed).not.toContain("--set-upstream");
   expect(argumentsUsed).not.toContain("-u");
   expect(calls.some(call => call.args.includes("remote"))).toBe(false);
+});
+
+// `cleanExit` folded `cancelled` in with a non-zero exit, so an abort that
+// landed AFTER spawn was reported as a substantive remote failure. The
+// `cancelled` classification was only ever produced by the pre-spawn signal
+// check, and autopilot's resume and terminal-state logic depends on telling
+// those apart.
+it("classifies a post-spawn cancellation as cancelled, not a remote failure", async () => {
+  const calls: HostingCommandRequest[] = [];
+  const adapter = fakeAdapter(() => result("", { cancelled: true }), calls);
+
+  const error = await adapter.ensureDraftPullRequest(draftRequest()).catch(cause => cause);
+
+  expect(error).toBeInstanceOf(HostingAdapterError);
+  expect(error).toMatchObject({ classification: "cancelled" });
 });

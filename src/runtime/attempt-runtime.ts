@@ -829,9 +829,14 @@ export async function runAttempt(
     return archivedResult;
   } catch (error) {
     primaryError = error;
-    await emitStatus("failed", {
-      detail: error instanceof Error ? error.message : "attempt failed unexpectedly",
-    });
+    // Guarded like every other status site: for a pipeline-managed run the
+    // pipeline owns the terminal status and writes `failed` itself, and writing
+    // it here too resets round/role from this thinner context.
+    if (!statusContext.pipelineManaged) {
+      await emitStatus("failed", {
+        detail: error instanceof Error ? error.message : "attempt failed unexpectedly",
+      });
+    }
     throw error;
   } finally {
     const cleanupError = await cleanupAttemptResources({

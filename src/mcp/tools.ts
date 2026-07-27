@@ -73,8 +73,15 @@ export type HumanDecisionRecord = Omit<
 export interface ToolArtifactStore {
   readResult(runId: string): Promise<AttemptResult | null>;
   readManifest(runId: string): Promise<RunManifest | null>;
-  writeReviewSnapshot?(snapshot: ReviewSnapshot): Promise<void>;
-  readReviewSnapshot?(runId: string): Promise<ReviewSnapshot | null>;
+  /**
+   * Required, not optional, for the same reason as `readRunStartSpecSha256`
+   * below: when these could be omitted, `sharedReviewSnapshot` would no-op the
+   * write, read nothing back, and return the in-memory snapshot — and the
+   * decision record then claimed an `evidenceHash` for bytes that were never
+   * persisted, which no later audit could re-verify.
+   */
+  writeReviewSnapshot(snapshot: ReviewSnapshot): Promise<void>;
+  readReviewSnapshot(runId: string): Promise<ReviewSnapshot | null>;
   writeHumanDecision(record: HumanDecisionRecord): Promise<void>;
   /** Persist a decision whose authority the lifecycle already resolved. */
   writeCandidateDecisionRecord(record: CandidateDecisionV2): Promise<void>;
@@ -844,19 +851,25 @@ async function sharedReviewSnapshot(
     git: deps.git ?? runGit,
     allowMissingAnchor,
   });
-  const persisted = await run.store.readReviewSnapshot?.(run.result.runId) ?? null;
+  const persisted = await run.store.readReviewSnapshot(run.result.runId);
   if (persisted !== null) {
     requireMatchingSnapshotBytes(regenerated, persisted);
     return persisted;
   }
 
-  await run.store.writeReviewSnapshot?.(regenerated);
-  const newlyPersisted = await run.store.readReviewSnapshot?.(run.result.runId) ?? null;
-  if (newlyPersisted !== null) {
-    requireMatchingSnapshotBytes(regenerated, newlyPersisted);
-    return newlyPersisted;
+  await run.store.writeReviewSnapshot(regenerated);
+  const newlyPersisted = await run.store.readReviewSnapshot(run.result.runId);
+  if (newlyPersisted === null) {
+    // The snapshot is what a decision's evidenceHash binds to. If it did not
+    // survive the write, fail closed rather than hashing bytes that only ever
+    // existed in memory.
+    throw runtimeError(
+      "review snapshot could not be persisted",
+      "archive-inconsistent",
+    );
   }
-  return regenerated;
+  requireMatchingSnapshotBytes(regenerated, newlyPersisted);
+  return newlyPersisted;
 }
 
 /**

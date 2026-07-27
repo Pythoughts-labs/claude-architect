@@ -11,6 +11,7 @@ import type { PlatformServices } from "../../src/platform/platform-services.js";
 import type { AttemptResult, CandidateArtifact } from "../../src/protocol/attempt-result.js";
 import { PROTOCOL_VERSION } from "../../src/protocol/versions.js";
 import type { RunManifest } from "../../src/runtime/run-manifest.js";
+import type { ReviewSnapshot } from "../../src/runtime/review-snapshot.js";
 
 const changedPaths: CandidateArtifact["changedPaths"] = [{
   path: "src/example.ts",
@@ -79,12 +80,17 @@ function gitResult(stdout = "", exitCode = 0): GitResult {
 }
 
 function dependencies(storedManifest: RunManifest): ToolDependencies {
+  let persistedSnapshot: ReviewSnapshot | null = null;
   const store: ToolArtifactStore = {
     readResult: async () => result,
     readManifest: async () => storedManifest,
     writeHumanDecision: async () => {},
     readCandidateDecision: async () => null,
     readPipelineActiveMarker: async () => null,
+    // The snapshot must actually round-trip: a store that drops it would let a
+    // decision bind an evidenceHash to bytes that were never persisted.
+    writeReviewSnapshot: async snapshot => { persistedSnapshot = snapshot; },
+    readReviewSnapshot: async () => persistedSnapshot,
   };
   const ps = {
     canonicalizePath: async (input: string) => ({
