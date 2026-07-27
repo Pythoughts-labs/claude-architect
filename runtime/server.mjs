@@ -32551,7 +32551,11 @@ async function readDecisionAdvisory(runId, deps = {}) {
   try {
     run = await loadArchivedRun(runId, deps);
   } catch (error2) {
-    return [`the pipeline gate outcome for this run could not be read: ${redact(error2 instanceof Error ? error2.message : String(error2))}`];
+    return {
+      warnings: [`the pipeline gate outcome for this run could not be read: ${redact(error2 instanceof Error ? error2.message : String(error2))}`],
+      verifiedClean: false,
+      unreadable: true
+    };
   }
   const refused = run.result.evidence.pipelineGateRefused;
   const incomplete = run.result.evidence.pipelineReviewIncomplete;
@@ -32564,7 +32568,11 @@ async function readDecisionAdvisory(runId, deps = {}) {
   if (isRecord4(incomplete) && typeof incomplete.reason === "string") {
     warnings.push(`the pipeline could not complete its own review: ${incomplete.reason}`);
   }
-  return warnings;
+  return {
+    warnings,
+    verifiedClean: run.result.status === "verified-candidate" && run.result.failure === null,
+    unreadable: false
+  };
 }
 async function handleDecideCandidate(checkoutPath, runId, decision, deps = {}) {
   try {
@@ -32607,8 +32615,8 @@ async function handleIntegrateCandidate(checkoutPath, runId, expectedArtifactHas
         return { integration: "aborted", detail: "no-accepted-decision" };
       }
       const artifact = requireVerifiedCandidate(run);
-      if (decision.decidedBy !== "human-elicitation") {
-        return { integration: "aborted", detail: "accepted-decision-not-human-confirmed" };
+      if (decision.decidedBy !== "human-elicitation" && decision.decidedBy !== "policy-autonomous") {
+        return { integration: "aborted", detail: "accepted-decision-not-confirmed" };
       }
       if (decision.candidateManifestHash != null && decision.candidateManifestHash !== expectedArtifactHash) {
         return { integration: "aborted", detail: "decision-artifact-mismatch" };
@@ -32627,6 +32635,32 @@ async function handleIntegrateCandidate(checkoutPath, runId, expectedArtifactHas
   } catch (error2) {
     return errorResult(error2);
   }
+}
+
+// src/mcp/decision-authority.ts
+var DECISION_AUTHORITY_ENV = "CLAUDE_ARCHITECT_DECISION_AUTHORITY";
+function decisionAuthority(env = process.env, warn = (message) => console.error(message)) {
+  const raw = env[DECISION_AUTHORITY_ENV];
+  if (raw === void 0 || raw === "") return "autonomous";
+  if (raw === "autonomous" || raw === "human") return raw;
+  warn(
+    `${DECISION_AUTHORITY_ENV}="${raw}" is not a recognized decision authority; requiring human confirmation. Valid values: "autonomous", "human".`
+  );
+  return "human";
+}
+function autonomousEligibility(authority, advisory) {
+  if (authority !== "autonomous") {
+    return { eligible: false, reasons: [`decision authority is "${authority}"`] };
+  }
+  const reasons = [];
+  if (advisory.unreadable) reasons.push("the candidate archive could not be read");
+  else {
+    if (!advisory.verifiedClean) {
+      reasons.push("the candidate is not an independently verified result");
+    }
+    reasons.push(...advisory.warnings);
+  }
+  return { eligible: reasons.length === 0, reasons };
 }
 
 // src/runtime/recovery-manager.ts
@@ -34708,7 +34742,7 @@ async function start(dependencies = {}) {
     "decideCandidate",
     {
       title: "Record a candidate decision",
-      description: "Record acceptance, rejection, or a revision request for a candidate. Requires human confirmation through MCP elicitation and fails closed without it.",
+      description: `Record acceptance, rejection, or a revision request for a candidate. An independently verified candidate with no advisory warnings is recorded without prompting; anything else requires human confirmation through MCP elicitation and fails closed without it. Set ${DECISION_AUTHORITY_ENV}=human to require confirmation for every decision.`,
       inputSchema: decideCandidateInputSchema,
       outputSchema: decisionOutput,
       // Rejection deletes the candidate anchor and acceptance authorizes writes
@@ -34716,18 +34750,23 @@ async function start(dependencies = {}) {
       annotations: { destructiveHint: true, idempotentHint: false, readOnlyHint: false }
     },
     async ({ checkoutPath, runId, decision }) => {
-      const confirmed = await confirmWithHuman(
-        server,
-        runId,
-        decision,
-        await readDecisionAdvisory(runId, dependencies)
+      const advisory = await readDecisionAdvisory(runId, dependencies);
+      const autonomy = autonomousEligibility(
+        (dependencies.decisionAuthority ?? decisionAuthority)(),
+        advisory
       );
-      if (!confirmed.ok) return toolOutput(confirmed.error);
+      if (!autonomy.eligible) {
+        const confirmed = await confirmWithHuman(server, runId, decision, advisory.warnings);
+        if (!confirmed.ok) return toolOutput(confirmed.error);
+      }
       return toolOutput(await handleDecideCandidate(
         checkoutPath,
         runId,
         decision,
-        { ...dependencies, decisionProvenance: "human-elicitation" }
+        {
+          ...dependencies,
+          decisionProvenance: autonomy.eligible ? "policy-autonomous" : "human-elicitation"
+        }
       ));
     }
   );

@@ -94,6 +94,7 @@ function fakePlatform(): PlatformServices {
  */
 async function decideVia(
   result: AttemptResult,
+  authority: "autonomous" | "human" = "autonomous",
 ): Promise<{ output: unknown; decision: RunDecisionRecord | null }> {
   let recorded: RunDecisionRecord | null = null;
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
@@ -102,6 +103,7 @@ async function decideVia(
     recoverStaleRuns: async () => ({ recovered: [], quarantined: [] }),
     pruneRuns: async () => {},
     ps: fakePlatform(),
+    decisionAuthority: () => authority,
     storeFactory: () => ({
       readResult: async () => result,
       readManifest: async () => ({
@@ -126,9 +128,20 @@ async function decideVia(
   return { output, decision: recorded };
 }
 
-describe("decideCandidate human authority", () => {
-  it("never records a clean candidate without human elicitation", async () => {
-    const { decision, output } = await decideVia(verifiedResult);
+describe("decideCandidate authority", () => {
+  // The client used here advertises NO elicitation capability, which is what
+  // makes these assertions discriminating: if the autonomous path regressed the
+  // server would try to prompt, fail closed, and record nothing.
+  it("records a clean candidate without prompting under the default authority", async () => {
+    const { decision } = await decideVia(verifiedResult);
+    expect(decision).not.toBeNull();
+    expect(decision?.decidedBy).toBe("policy-autonomous");
+  });
+
+  it("never records a clean candidate without elicitation under human authority", async () => {
+    // Same candidate, same client, only the authority differs — the mutation
+    // that proves the branch above is why no prompt happened.
+    const { decision, output } = await decideVia(verifiedResult, "human");
     expect(decision).toBeNull();
     expect(JSON.stringify(output)).toContain("elicitation");
   });
@@ -160,6 +173,7 @@ describe("decideCandidate human authority", () => {
           recoverStaleRuns: async () => ({ recovered: [], quarantined: [] }),
           pruneRuns: async () => {},
           ps: fakePlatform(),
+          decisionAuthority: () => "human" as const,
           storeFactory: () => ({
             readResult: async () => verifiedResult,
             readManifest: async () => ({

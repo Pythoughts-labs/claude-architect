@@ -962,11 +962,15 @@ describe("MCP tool handlers", () => {
       .resolves.toEqual({ integration: "aborted", detail: "decision-artifact-mismatch" });
   });
 
+  // `undefined` is a record written before provenance existed and
+  // `caller-asserted` is one the runtime never confirmed; in both the runtime
+  // does not know how the decision was reached. `policy-autonomous` is the
+  // opposite: the runtime knows exactly how, and it met every objective
+  // condition, so it integrates — see the case below.
   it.each([
     undefined,
     "caller-asserted",
-    "policy-autonomous",
-  ] as const)("refuses integration without human-confirmed acceptance provenance (%s)", async decidedBy => {
+  ] as const)("refuses integration on unknown acceptance provenance (%s)", async decidedBy => {
     const repoRoot = await createRepository();
     const store = new FakeStore(result, manifestFor(repoRoot));
     store.decision = {
@@ -989,9 +993,37 @@ describe("MCP tool handlers", () => {
       deps,
     )).resolves.toEqual({
       integration: "aborted",
-      detail: "accepted-decision-not-human-confirmed",
+      detail: "accepted-decision-not-confirmed",
     });
     expect(integrationCalls).toBe(0);
+  });
+
+  it("integrates an acceptance recorded by the autonomous decision authority", async () => {
+    // The mirror of the refusals above. Demanding `human-elicitation` here would
+    // make an autonomous acceptance unspendable, reintroducing the prompt that
+    // authority exists to remove.
+    const repoRoot = await createRepository();
+    const store = new FakeStore(result, manifestFor(repoRoot));
+    store.decision = {
+      decision: "accepted",
+      recordedAt: "2026-07-27T00:00:00.000Z",
+      decidedBy: "policy-autonomous",
+      candidateManifestHash: candidate.manifestHash,
+    };
+    let integrationCalls = 0;
+    const deps = dependencies(store, getPlatformServices());
+    deps.applyCandidateTree = async () => {
+      integrationCalls += 1;
+      return { integration: "applied", detail: "candidate tree applied" };
+    };
+
+    await expect(handleIntegrateCandidate(
+      repoRoot,
+      "run-tools",
+      candidate.manifestHash,
+      deps,
+    )).resolves.toEqual({ integration: "applied", detail: "candidate tree applied" });
+    expect(integrationCalls).toBe(1);
   });
 
   it("returns the manifest hash integration requires", async () => {

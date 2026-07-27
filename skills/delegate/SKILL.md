@@ -138,7 +138,7 @@ Single-lane delegation may still use the direct foreground MCP call; prefer the 
 
 ## Presenting delegations as subagents
 
-When a lane runs through the `delegation-lane` agent, the host renders dispatch and live status natively; the cards below apply only to direct (non-subagent) MCP calls. This is presentation only: it renders the runtime's durable evidence and never replaces spec construction, `reviewCandidate`, the human decision, or `integrateCandidate`. A rendered card is not evidence; a Producer self-report is not evidence; acceptance stays human-only.
+When a lane runs through the `delegation-lane` agent, the host renders dispatch and live status natively; the cards below apply only to direct (non-subagent) MCP calls. This is presentation only: it renders the runtime's durable evidence and never replaces spec construction, `reviewCandidate`, the recorded decision, or `integrateCandidate`. A rendered card is not evidence; a Producer self-report is not evidence; acceptance stays gated on independent verification and its provenance is always recorded.
 
 **Dispatch card** — emit when you call `delegate`/`delegatePipeline`, so the run reads like an `Agent` launch:
 

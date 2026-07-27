@@ -13,13 +13,13 @@
   <img alt="license" src="https://img.shields.io/badge/license-MIT-3fb950?style=flat-square&labelColor=0b0e14">
 </p>
 
-**Verified coding-agent delegation for Claude Code.** Claude stays the architect and reviewer — it writes the spec, judges the evidence, and asks you to decide. Implementation is delegated to fresh-context subagent implementers running on the coding CLI you choose — **Codex, OpenCode, Pi, or Pythinker** — each invocation starting clean with no inherited conversation state, inside an isolated Git worktree. The work comes back as a frozen, hash-anchored candidate that Claude reviews against independent verification evidence before a single byte can reach your checkout.
+**Verified coding-agent delegation for Claude Code.** Claude stays the architect and reviewer — it writes the spec, judges the evidence, and reports what landed. Implementation is delegated to fresh-context subagent implementers running on the coding CLI you choose — **Codex, OpenCode, Pi, or Pythinker** — each invocation starting clean with no inherited conversation state, inside an isolated Git worktree. The work comes back as a frozen, hash-anchored candidate that Claude reviews against independent verification evidence before a single byte can reach your checkout.
 
 In practice that means three guarantees the plugin enforces in host code, not in prompts:
 
 - **Isolation** — every Producer runs in a detached worktree with a sanitized environment, an explicit write allowlist, and OS sandboxing where certified. Out-of-scope changes are rejected at freeze time.
 - **Evidence over claims** — a Producer saying "tests pass" is never accepted; the runtime reruns your authorized verification commands in a clean worktree and records the real output.
-- **Human acceptance** — implementers cannot approve their own work. Review, decision, and hash-gated integration are separate steps, and integration stages the reviewed tree without committing it.
+- **Separated authority** — implementers cannot approve their own work. Review, decision, and hash-gated integration are separate steps, and integration stages the reviewed tree without committing it. A verified candidate is accepted without prompting by default; anything less still requires a human ([decision authority](#decision-authority)).
 
 ## Status
 
@@ -44,7 +44,7 @@ flowchart LR
     F -->|reject or revise| H[Discard or fresh attempt]
 ```
 
-All agent output is an untrusted candidate; implementers cannot approve their own work; only the human accepts.
+All agent output is an untrusted candidate, and implementers cannot approve their own work. A candidate that fails independent verification, or whose review gate refused it, can only be accepted by a human.
 
 ## Installation
 
@@ -84,8 +84,14 @@ Dispatch a delegation through the `delegation-lane` agent to watch it as a nativ
 
 - The lane agent is a courier: its only tools are `delegate` and `delegatePipeline`. It cannot read the repository, run commands, review, decide, or integrate.
 - Lanes against independent repositories run genuinely in parallel. Lanes against the same repository are serialized by the runtime's repository lock — they surface as subagents for visibility, but execute one at a time.
-- The runtime-issued `specSha256` is supplied back to lane dispatch so a valid-but-different spec fails before work starts. The lane's JSON report is used only to correlate (`laneId`, `specSha256`, `runId`); all reviewable evidence comes from `reviewCandidate`, and every acceptance stays human-only. At most one accepted candidate per clean checkout.
+- The runtime-issued `specSha256` is supplied back to lane dispatch so a valid-but-different spec fails before work starts. The lane's JSON report is used only to correlate (`laneId`, `specSha256`, `runId`); all reviewable evidence comes from `reviewCandidate`, and every acceptance is gated on independent verification with its provenance recorded. At most one accepted candidate per clean checkout.
 - Known limitation: the host injects project context (CLAUDE.md, git status) into custom subagents. The lane agent is instructed to ignore it; the enforced boundary is its tool allowlist, and the Producer itself only ever sees the spec through the trusted runtime.
+
+## Decision authority
+
+By default a delegation runs to completion without prompting: an independently verified candidate carrying no advisory warnings is accepted and recorded as `policy-autonomous`. Anything short of that — unverified, gate-refused, review-incomplete, or an unreadable archive — still requires a human through MCP elicitation and fails closed without it. Set `CLAUDE_ARCHITECT_DECISION_AUTHORITY=human` to require confirmation for every decision; an unrecognized value fails closed to `human` with a warning.
+
+What this does not relax: independent verification still decides what may be accepted at all, integration refuses any acceptance whose provenance is unknown, and it still aborts on a moved `HEAD`, a dirty tree, or a hash that does not match the reviewed artifact. Every decision records its provenance, so auditing which candidates went in without a person never requires inferring it.
 
 ## Available skills, agents, and MCP tools
 
@@ -107,7 +113,7 @@ Dispatch a delegation through the `delegation-lane` agent to watch it as a nativ
 
 Claude Architect separates authority across roles and artifacts. Producers receive bounded write scope in isolated worktrees. Candidate bytes are frozen and identified by hashes before independent verification. Reviewers operate in fresh context, and read-only roles lack mutation tools. The runtime rejects nested delegation, scope escapes, changed bases, mismatched anchors or trees, and unaccepted candidates. Integration stages reviewed bytes; it does not commit them.
 
-The central rule is deliberately simple: **all agent output is an untrusted candidate; implementers cannot approve their own work; only the human accepts.** Verification reduces risk but does not establish that a change is safe for your particular deployment.
+The central rule is deliberately simple: **all agent output is an untrusted candidate; implementers cannot approve their own work; and nothing unverified is accepted without a human.** Verification reduces risk but does not establish that a change is safe for your particular deployment.
 
 ## Permissions and external commands
 
