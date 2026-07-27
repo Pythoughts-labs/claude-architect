@@ -525,9 +525,12 @@ describe("AutopilotController end-to-end", () => {
     expect(await branchManager.load(WORKFLOW_ID)).toBeNull();
     await expect(lstat(store.ownerPath)).rejects.toMatchObject({ code: "ENOENT" });
     expect(await lockFiles(stateRoot)).toEqual([]);
+    // git prints its own path format, which is forward-slashed on Windows;
+    // resolve to the Node-canonical form the checkout path is recorded in.
     const registeredWorktrees = (await runGit(fixture.checkout, ["worktree", "list", "--porcelain"]))
-      .split(/\r?\n/u).filter(line => line.startsWith("worktree "));
-    expect(registeredWorktrees).toEqual([`worktree ${fixture.checkout}`]);
+      .split(/\r?\n/u).filter(line => line.startsWith("worktree "))
+      .map(line => path.resolve(line.slice("worktree ".length)));
+    expect(registeredWorktrees).toEqual([fixture.checkout]);
     const worktreesRoot = path.join(stateRoot, "worktrees");
     await expect(readdir(worktreesRoot)).resolves.toEqual([]);
   }, 120_000);

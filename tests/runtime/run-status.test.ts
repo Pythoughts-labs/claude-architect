@@ -18,6 +18,7 @@ import type { AttemptResult, CandidateArtifact, ChangedPath } from "../../src/pr
 import type { DelegationSpec, Slice } from "../../src/protocol/delegation-spec.js";
 import type { ResolvedExecutable } from "../../src/platform/platform-services.js";
 import { getPlatformServices } from "../../src/platform/select-platform.js";
+import { SANDBOX_BACKENDS } from "../../src/platform/sandbox/backends.js";
 import {
   type CapabilityReport,
   type InvocationContext,
@@ -44,6 +45,7 @@ const statusline = fileURLToPath(new URL("../../assets/statusline/delegation-sta
 const temporaryPaths: string[] = [];
 let previousPluginData: string | undefined;
 let previousNodeEnvironment: string | undefined;
+let sandboxState: "certified" | "tested" | "unsupported" | undefined;
 
 async function temporaryDirectory(prefix: string): Promise<string> {
   const directory = await mkdtemp(path.join(tmpdir(), prefix));
@@ -404,6 +406,20 @@ function observeDiskStatuses(): RunStatus[] {
   return statuses;
 }
 
+// These tests assert run-status plumbing, not write confinement. The fake
+// Producer reports the codex native sandbox, which is `unsupported` on Windows,
+// so the edit lane would be withheld and every attempt would end `unavailable`
+// before a single status transition was written. Pin the current platform to
+// `tested` for the duration of the test — the same fixture the autopilot suites
+// use — and restore the real matrix afterwards.
+function currentSandboxPlatform() {
+  const backend = SANDBOX_BACKENDS.find(candidate => candidate.id === "codex-native-sandbox");
+  return backend?.platforms.find(candidate =>
+    candidate.os === process.platform
+    && candidate.environmentType === "native"
+    && (candidate.arch === undefined || candidate.arch === process.arch));
+}
+
 beforeEach(async () => {
   previousPluginData = process.env.CLAUDE_PLUGIN_DATA;
   previousNodeEnvironment = process.env.NODE_ENV;
@@ -411,9 +427,16 @@ beforeEach(async () => {
   process.env.NODE_ENV = "test";
   delete process.env.CLAUDE_ARCHITECT_DELEGATED;
   clearRegisteredSecrets();
+  const platform = currentSandboxPlatform();
+  if (platform === undefined) throw new Error("no platform sandbox fixture");
+  sandboxState = platform.state;
+  platform.state = "tested";
 });
 
 afterEach(async () => {
+  const platform = currentSandboxPlatform();
+  if (platform !== undefined && sandboxState !== undefined) platform.state = sandboxState;
+  sandboxState = undefined;
   vi.restoreAllMocks();
   clearRegisteredSecrets();
   if (previousPluginData === undefined) delete process.env.CLAUDE_PLUGIN_DATA;

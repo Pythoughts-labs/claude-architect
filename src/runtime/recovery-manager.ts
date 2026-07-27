@@ -2294,6 +2294,15 @@ async function isAbsent(filename: string): Promise<boolean | null> {
   }
 }
 
+// `git worktree list --porcelain` reports the worktree path in git's own
+// format, which on Windows uses forward slashes while the recorded identity is
+// canonicalized by Node and uses backslashes. Resolve the reported path before
+// comparing so the registration is recognized on every platform.
+function isWorktreeRegistrationFor(field: string, worktreePath: string): boolean {
+  if (!field.startsWith("worktree ")) return false;
+  return path.resolve(field.slice("worktree ".length)) === worktreePath;
+}
+
 async function cleanupIsDirectlyObserved(
   branch: WorkflowBranchIdentity,
   runGit: typeof git,
@@ -2326,7 +2335,7 @@ async function cleanupIsDirectlyObserved(
   }
   if (observedCommonDir !== branch.gitCommonDir) return false;
   return !worktrees.stdout.split("\0").some(field =>
-    field === `worktree ${branch.worktreePath}`);
+    isWorktreeRegistrationFor(field, branch.worktreePath));
 }
 
 async function activeBranchIsDirectlyObserved(
@@ -2382,7 +2391,8 @@ async function activeBranchIsDirectlyObserved(
     || canonicalGithubRemote(remote.stdout.trim()) !== branch.remoteUrl) return false;
 
   const fields = worktrees.stdout.split("\0");
-  const registrationIndex = fields.indexOf(`worktree ${branch.worktreePath}`);
+  const registrationIndex = fields.findIndex(field =>
+    isWorktreeRegistrationFor(field, branch.worktreePath));
   if (registrationIndex === -1) return false;
   const nextRegistration = fields.findIndex((field, index) =>
     index > registrationIndex && field.startsWith("worktree "));

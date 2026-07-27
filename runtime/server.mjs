@@ -37088,7 +37088,7 @@ async function observedBranchMatches(registration, state, git2) {
     const stateHead = expectedHead(state, registration);
     if (stateHead !== null && head.stdout.trim() !== stateHead) return false;
     const fields = worktrees.stdout.split("\0");
-    const index = fields.indexOf(`worktree ${registration.worktreePath}`);
+    const index = fields.findIndex((field) => field.startsWith("worktree ") && path6.resolve(field.slice("worktree ".length)) === registration.worktreePath);
     if (index === -1) return false;
     const next = fields.findIndex((field, fieldIndex) => fieldIndex > index && field.startsWith("worktree "));
     const record2 = fields.slice(index + 1, next === -1 ? void 0 : next);
@@ -52589,6 +52589,10 @@ async function isAbsent(filename) {
     return isMissing3(error51) ? true : null;
   }
 }
+function isWorktreeRegistrationFor(field, worktreePath) {
+  if (!field.startsWith("worktree ")) return false;
+  return path24.resolve(field.slice("worktree ".length)) === worktreePath;
+}
 async function cleanupIsDirectlyObserved(branch, runGit) {
   if (await isAbsent(branch.worktreePath) !== true) return false;
   let canonicalCheckout;
@@ -52616,7 +52620,7 @@ async function cleanupIsDirectlyObserved(branch, runGit) {
     return false;
   }
   if (observedCommonDir !== branch.gitCommonDir) return false;
-  return !worktrees.stdout.split("\0").some((field) => field === `worktree ${branch.worktreePath}`);
+  return !worktrees.stdout.split("\0").some((field) => isWorktreeRegistrationFor(field, branch.worktreePath));
 }
 async function activeBranchIsDirectlyObserved(branch, expectedHead2, runGit) {
   let canonicalCheckout;
@@ -52655,7 +52659,7 @@ async function activeBranchIsDirectlyObserved(branch, expectedHead2, runGit) {
   }
   if (observedCommonDir !== branch.gitCommonDir || symbolic.stdout.trim() !== branch.branch || head.stdout.trim() !== expectedHead2 || base.stdout.trim() !== branch.baseCommitOid || status.stdout !== "" || canonicalGithubRemote(remote.stdout.trim()) !== branch.remoteUrl) return false;
   const fields = worktrees.stdout.split("\0");
-  const registrationIndex = fields.indexOf(`worktree ${branch.worktreePath}`);
+  const registrationIndex = fields.findIndex((field) => isWorktreeRegistrationFor(field, branch.worktreePath));
   if (registrationIndex === -1) return false;
   const nextRegistration = fields.findIndex((field, index) => index > registrationIndex && field.startsWith("worktree "));
   const registration = fields.slice(
