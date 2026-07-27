@@ -134,6 +134,13 @@ export interface AttemptRuntimeDependencies {
   onRunStart?: (context: RunStartContext) => void | Promise<void>;
   /** Host progress reporting only; never awaited and never affects the attempt. */
   onPhase?: (phase: string) => void;
+  /**
+   * Identity of the spec the *caller* dispatched, when that differs from the
+   * spec this attempt received. Slicing rewrites the spec before the attempt
+   * runs, so hashing the received spec recorded an identity the caller never
+   * held and `reviewCandidate`'s correspondence check could never match.
+   */
+  dispatchedSpecSha256?: string;
 }
 
 interface TerminalContext {
@@ -398,7 +405,7 @@ export async function runAttempt(
       pid: null,
       processToken: null,
       startedAt: new Date(startedAtMs).toISOString(),
-      specSha256: specSha256(spec),
+      specSha256: deps.dispatchedSpecSha256 ?? specSha256(spec),
     };
     const runStartContext = await initializeRunStart(store, runStart);
     await deps.onRunStart?.(runStartContext);

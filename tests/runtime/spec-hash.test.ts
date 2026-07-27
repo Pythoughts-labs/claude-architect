@@ -27,3 +27,18 @@ describe("spec identity", () => {
     expect(specSha256({ a: { b: 1 } })).not.toEqual(specSha256({ "a.b": 1 }));
   });
 });
+
+describe("dispatched identity survives slicing", () => {
+  it("a sliced spec does not hash as the spec the caller dispatched", () => {
+    // scopeSpecToSlice merges the slice over the spec and drops `slices`, so a
+    // sliced pipeline's attempt hashes a spec the caller never wrote. Recording
+    // that as the run's identity makes expectedSpecSha256 unmatchable — the
+    // correspondence check would reject every correct sliced run.
+    const spec = {
+      specVersion: "1", objective: "whole task",
+      slices: [{ objective: "part one" }],
+    };
+    const sliced = { specVersion: "1", objective: "part one" };
+    expect(specSha256(sliced)).not.toEqual(specSha256(spec));
+  });
+});

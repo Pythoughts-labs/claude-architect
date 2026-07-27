@@ -59,6 +59,7 @@ import {
   registerSecretValue,
 } from "../../src/runtime/redaction.js";
 import { recoverStaleRuns } from "../../src/runtime/recovery-manager.js";
+import { specSha256 } from "../../src/protocol/spec-hash.js";
 import { initializeRunStart } from "../../src/runtime/run-start.js";
 import { AcceptanceVerifier } from "../../src/verify/acceptance-verifier.js";
 
@@ -1108,6 +1109,34 @@ describe("runPipeline", () => {
     expect(lease.acquireCalls()).toBe(1);
     expect(lease.releaseCalls()).toBe(1);
     expect(lease.held()).toBe(false);
+  });
+
+  it("hands the attempt the dispatched spec hash, not the sliced spec's", async () => {
+    const repo = await initSlicedRepo();
+    const runId = "pipeline-slice-spec-hash";
+    const spec = slicedSpec();
+    const deps = dependencies({
+      runId,
+      edit: async checkout => {
+        await writeFile(path.join(checkout, "slice-one.txt"), "slice one candidate\n");
+      },
+    });
+    const realAttempt = deps.runAttempt!;
+    let handed: string | undefined;
+    deps.runAttempt = async (checkoutPath, receivedSpec, attemptDeps) => {
+      handed = attemptDeps?.dispatchedSpecSha256;
+      // The spec the attempt receives is the slice, which is exactly why the
+      // attempt must not derive the run's identity from it.
+      expect(specSha256(receivedSpec)).not.toBe(specSha256(spec));
+      return realAttempt(checkoutPath, receivedSpec, attemptDeps);
+    };
+
+    await runPipeline(repo, spec, deps).catch(() => undefined);
+
+    // scopeSpecToSlice merges the slice over the spec and drops `slices`, so
+    // hashing what the attempt receives recorded an identity no caller ever
+    // held, and reviewCandidate's correspondence check could never match it.
+    expect(handed).toBe(specSha256(spec));
   });
 
   it("establishes sliced lifecycle authority before the initial candidate is created", async () => {

@@ -25097,6 +25097,20 @@ var WorktreeManager = class {
   }
 };
 
+// src/protocol/spec-hash.ts
+import { createHash as createHash5 } from "node:crypto";
+function canonicalSpecJson(value) {
+  if (Array.isArray(value)) return `[${value.map(canonicalSpecJson).join(",")}]`;
+  if (typeof value === "object" && value !== null) {
+    const entries = Object.entries(value).filter(([, entry]) => entry !== void 0).sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0);
+    return `{${entries.map(([key, entry]) => `${JSON.stringify(key)}:${canonicalSpecJson(entry)}`).join(",")}}`;
+  }
+  return JSON.stringify(value) ?? "null";
+}
+function specSha256(spec) {
+  return createHash5("sha256").update(canonicalSpecJson(spec)).digest("hex");
+}
+
 // src/protocol/schema-loader.ts
 var import__ = __toESM(require__(), 1);
 
@@ -26103,20 +26117,6 @@ var FAILURE_PRECEDENCE = [
 function classifyFailure(s) {
   for (const reason of FAILURE_PRECEDENCE) if (s[reason]) return reason;
   return null;
-}
-
-// src/protocol/spec-hash.ts
-import { createHash as createHash5 } from "node:crypto";
-function canonicalSpecJson(value) {
-  if (Array.isArray(value)) return `[${value.map(canonicalSpecJson).join(",")}]`;
-  if (typeof value === "object" && value !== null) {
-    const entries = Object.entries(value).filter(([, entry]) => entry !== void 0).sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0);
-    return `{${entries.map(([key, entry]) => `${JSON.stringify(key)}:${canonicalSpecJson(entry)}`).join(",")}}`;
-  }
-  return JSON.stringify(value) ?? "null";
-}
-function specSha256(spec) {
-  return createHash5("sha256").update(canonicalSpecJson(spec)).digest("hex");
 }
 
 // src/producers/routing-policy.ts
@@ -28686,7 +28686,7 @@ async function runAttempt(checkoutPath, spec, deps) {
       pid: null,
       processToken: null,
       startedAt: new Date(startedAtMs).toISOString(),
-      specSha256: specSha256(spec)
+      specSha256: deps.dispatchedSpecSha256 ?? specSha256(spec)
     };
     const runStartContext = await initializeRunStart(store, runStart);
     await deps.onRunStart?.(runStartContext);
@@ -30957,6 +30957,10 @@ async function runPipelineWithLease(checkoutPath, spec, deps, ps, borrowedChecko
   const inheritedOnRunStart = deps.onRunStart;
   const attempt = await runAttemptFn(checkoutPath, initialSpec, {
     ...deps,
+    // The run's identity is the spec the caller dispatched. scopeSpecToSlice
+    // rewrites the spec for slice one, so hashing what the attempt receives
+    // would record an identity no caller ever held.
+    dispatchedSpecSha256: specSha256(spec),
     borrowedCheckoutLease,
     async onRunStart(context) {
       runStart = context;

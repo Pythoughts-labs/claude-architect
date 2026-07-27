@@ -18,6 +18,7 @@ import {
   type ReviewerKind,
   type Slice,
 } from "../protocol/delegation-spec.js";
+import { specSha256 } from "../protocol/spec-hash.js";
 import { loadSchemas } from "../protocol/schema-loader.js";
 import type { ProducerRegistry } from "../producers/producer-registry.js";
 import {
@@ -1271,6 +1272,10 @@ async function runPipelineWithLease(
   const inheritedOnRunStart = deps.onRunStart;
   const attempt = await runAttemptFn(checkoutPath, initialSpec, {
     ...deps,
+    // The run's identity is the spec the caller dispatched. scopeSpecToSlice
+    // rewrites the spec for slice one, so hashing what the attempt receives
+    // would record an identity no caller ever held.
+    dispatchedSpecSha256: specSha256(spec),
     borrowedCheckoutLease,
     async onRunStart(context) {
       runStart = context;

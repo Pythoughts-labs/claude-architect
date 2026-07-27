@@ -16,6 +16,12 @@ All notable changes to Claude Architect are recorded here. The format follows
   human control — it removes the supported path and pushes work to hand-applied
   changes outside the lifecycle, which is the outcome the gate exists to
   prevent.
+- A sliced pipeline records the spec hash the caller dispatched. `scopeSpecToSlice`
+  merges the slice over the spec and drops `slices`, so the attempt hashed a spec
+  no caller ever wrote — meaning `reviewCandidate`'s `expectedSpecSha256` check,
+  added in the same cycle, would have rejected every correct sliced run while
+  proving nothing about incorrect ones. The dispatched identity is now passed
+  down explicitly rather than derived from whatever spec the attempt receives.
 - `status.json` records a terminal phase. It named every phase a run entered and
   none of its completion, so "archiving result" meant both "currently archiving"
   and "finished long ago", leaving the one question the file exists to answer —
