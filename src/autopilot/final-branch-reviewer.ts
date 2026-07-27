@@ -54,7 +54,14 @@ import { WorkflowStore } from "./workflow-store.js";
 const OBJECT_ID = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/u;
 const SHA256 = /^[0-9a-f]{64}$/u;
 const NO_FOLLOW = constants.O_NOFOLLOW ?? 0;
+const MAX_FINAL_BRANCH_ARTIFACT_BYTES = 64 * 1024 * 1024;
 const MAX_TASK_EVIDENCE_REFS = 4_096;
+// The reference COUNT was bounded but the total bytes were not, and every frozen
+// byte is held in memory, written into one artifact file, and then serialized
+// into three model-backed role prompts. A run with large logs could exhaust
+// memory and blow the Producer input budget, so bound the aggregate and fail
+// closed rather than producing an artifact nothing can consume.
+const MAX_TASK_EVIDENCE_BYTES = 8 * 1024 * 1024;
 const REQUIRED_TASK_EVIDENCE_REFS = [
   "decision.json",
   "manifest.json",
@@ -399,6 +406,7 @@ async function freezeTaskEvidence(
       || task.evidenceRefs.some(reference => !archivedReferences.includes(reference))) {
       fail("missing-task-evidence", `task evidence archive is incomplete: ${task.taskId}`);
     }
+    let frozenBytes = 0;
     const frozen = await Promise.all(archivedReferences.map(async reference => {
       let content: string | null;
       try {
@@ -408,6 +416,13 @@ async function freezeTaskEvidence(
       }
       if (content === null) {
         fail("missing-task-evidence", `task evidence is missing: ${task.taskId}/${reference}`);
+      }
+      frozenBytes += Buffer.byteLength(content, "utf8");
+      if (frozenBytes > MAX_TASK_EVIDENCE_BYTES) {
+        fail(
+          "missing-task-evidence",
+          `task evidence exceeds the supported size: ${task.taskId}`,
+        );
       }
       return { reference, sha256: evidenceHash(content), content };
     }));
@@ -947,13 +962,19 @@ async function assertPersistedArtifact(
   workflowDirectory: string,
   artifact: CumulativeBranchArtifact,
 ): Promise<void> {
+  let handle: FileHandle | undefined;
   try {
     const destination = path.join(workflowDirectory, FINAL_BRANCH_ARTIFACT_REF);
-    const metadata = await lstat(destination);
-    if (!metadata.isFile() || metadata.isSymbolicLink() || metadata.nlink !== 1) {
+    // Open once and check THAT handle: `lstat` followed by `readFile` resolves
+    // the name twice, so a swap between the two calls would be read as durable
+    // evidence. The read is bounded for the same reason it is elsewhere.
+    handle = await open(destination, constants.O_RDONLY | NO_FOLLOW);
+    const metadata = await handle.stat();
+    if (!metadata.isFile() || metadata.nlink !== 1
+      || metadata.size > MAX_FINAL_BRANCH_ARTIFACT_BYTES) {
       fail("artifact-persistence-failed", "final branch artifact is not a safe regular file");
     }
-    const persisted = JSON.parse(await readFile(destination, "utf8")) as CumulativeBranchArtifact;
+    const persisted = JSON.parse(await handle.readFile("utf8")) as CumulativeBranchArtifact;
     const { branchArtifactHash, ...unhashed } = persisted;
     if (branchArtifactHash !== artifact.branchArtifactHash
       || branchArtifactHashOf(unhashed) !== artifact.branchArtifactHash
@@ -963,6 +984,8 @@ async function assertPersistedArtifact(
   } catch (error) {
     if (error instanceof FinalBranchReviewError) throw error;
     fail("artifact-persistence-failed", "final branch artifact is unavailable");
+  } finally {
+    await handle?.close();
   }
 }
 

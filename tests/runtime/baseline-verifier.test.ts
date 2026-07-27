@@ -26,6 +26,8 @@ async function fixture(): Promise<{ repoRoot: string; headCommitOid: string }> {
       test: "npm run unit",
       unit: "vitest run",
       "echo-vitest": "echo vitest",
+      // `run` is both the --registry VALUE and the subcommand.
+      collide: "npm --registry run run unit",
       cycle: "npm run cycle",
     },
   }));
@@ -246,6 +248,16 @@ describe("verifyBaseline", () => {
           args: ["custom/vitest.mjs"],
         },
         { ...command(0), id: "npm-cycle", executable: "npm", args: ["run", "cycle"] },
+        // `run` is BOTH the --registry value and the subcommand here. Resolving
+        // the subcommand by `indexOf` finds the option value at index 1 and
+        // reads the wrong script name, so a real vitest chain looked like a
+        // non-vitest command and the no-tests gate failed open.
+        {
+          ...command(0),
+          id: "npm-option-value-collides",
+          executable: "npm",
+          args: ["run", "collide"],
+        },
       ],
     });
 
@@ -272,6 +284,12 @@ describe("verifyBaseline", () => {
       { id: "npm-echo-script", exitCode: 0, ok: true },
       { id: "node-custom-vitest", exitCode: 0, ok: true },
       { id: "npm-cycle", exitCode: 0, ok: true },
+      {
+        id: "npm-option-value-collides",
+        exitCode: 0,
+        ok: false,
+        classification: "no-tests-collected",
+      },
     ]);
   });
 

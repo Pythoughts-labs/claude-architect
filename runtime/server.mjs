@@ -42865,7 +42865,9 @@ var WorkflowBranchManager = class {
 var OBJECT_ID = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/u;
 var SHA2563 = /^[0-9a-f]{64}$/u;
 var NO_FOLLOW5 = constants7.O_NOFOLLOW ?? 0;
+var MAX_FINAL_BRANCH_ARTIFACT_BYTES = 64 * 1024 * 1024;
 var MAX_TASK_EVIDENCE_REFS = 4096;
+var MAX_TASK_EVIDENCE_BYTES = 8 * 1024 * 1024;
 var REQUIRED_TASK_EVIDENCE_REFS = [
   "decision.json",
   "manifest.json",
@@ -43008,6 +43010,7 @@ async function freezeTaskEvidence(evidence, evidenceStore) {
     if (REQUIRED_TASK_EVIDENCE_REFS.some((reference) => !archivedReferences.includes(reference)) || task.evidenceRefs.some((reference) => !archivedReferences.includes(reference))) {
       fail2("missing-task-evidence", `task evidence archive is incomplete: ${task.taskId}`);
     }
+    let frozenBytes = 0;
     const frozen = await Promise.all(archivedReferences.map(async (reference) => {
       let content;
       try {
@@ -43017,6 +43020,13 @@ async function freezeTaskEvidence(evidence, evidenceStore) {
       }
       if (content === null) {
         fail2("missing-task-evidence", `task evidence is missing: ${task.taskId}/${reference}`);
+      }
+      frozenBytes += Buffer.byteLength(content, "utf8");
+      if (frozenBytes > MAX_TASK_EVIDENCE_BYTES) {
+        fail2(
+          "missing-task-evidence",
+          `task evidence exceeds the supported size: ${task.taskId}`
+        );
       }
       return { reference, sha256: evidenceHash(content), content };
     }));
@@ -43452,13 +43462,15 @@ async function persistFrozenArtifact(workflowDirectory, artifact) {
   }
 }
 async function assertPersistedArtifact(workflowDirectory, artifact) {
+  let handle;
   try {
     const destination = path17.join(workflowDirectory, FINAL_BRANCH_ARTIFACT_REF);
-    const metadata = await lstat8(destination);
-    if (!metadata.isFile() || metadata.isSymbolicLink() || metadata.nlink !== 1) {
+    handle = await open8(destination, constants7.O_RDONLY | NO_FOLLOW5);
+    const metadata = await handle.stat();
+    if (!metadata.isFile() || metadata.nlink !== 1 || metadata.size > MAX_FINAL_BRANCH_ARTIFACT_BYTES) {
       fail2("artifact-persistence-failed", "final branch artifact is not a safe regular file");
     }
-    const persisted = JSON.parse(await readFile4(destination, "utf8"));
+    const persisted = JSON.parse(await handle.readFile("utf8"));
     const { branchArtifactHash, ...unhashed } = persisted;
     if (branchArtifactHash !== artifact.branchArtifactHash || branchArtifactHashOf(unhashed) !== artifact.branchArtifactHash || canonicalArtifactHash(persisted) !== canonicalArtifactHash(artifact)) {
       fail2("artifact-persistence-failed", "final branch artifact does not match durable evidence");
@@ -43466,6 +43478,8 @@ async function assertPersistedArtifact(workflowDirectory, artifact) {
   } catch (error51) {
     if (error51 instanceof FinalBranchReviewError) throw error51;
     fail2("artifact-persistence-failed", "final branch artifact is unavailable");
+  } finally {
+    await handle?.close();
   }
 }
 var FinalBranchReviewer = class {
@@ -45909,7 +45923,7 @@ function throwIfAborted(signal) {
 function executableName(value) {
   return basename(value).toLowerCase().replace(/\.(?:cmd|exe|mjs|cjs|js)$/u, "");
 }
-function firstPositionalArgument(args) {
+function firstPositional(args) {
   const optionsWithValues = /* @__PURE__ */ new Set([
     "--call",
     "--conditions",
@@ -45926,14 +45940,20 @@ function firstPositionalArgument(args) {
   ]);
   for (let index = 0; index < args.length; index += 1) {
     const argument = args[index];
-    if (argument === "--") return args[index + 1];
+    if (argument === "--") {
+      const value = args[index + 1];
+      return value === void 0 ? void 0 : { value, index: index + 1 };
+    }
     if (optionsWithValues.has(argument)) {
       index += 1;
       continue;
     }
-    if (!argument.startsWith("-")) return argument;
+    if (!argument.startsWith("-")) return { value: argument, index };
   }
   return void 0;
+}
+function firstPositionalArgument(args) {
+  return firstPositional(args)?.value;
 }
 function nodeEntrypointInvokesVitest(value) {
   if (value === void 0) return false;
@@ -45942,9 +45962,9 @@ function nodeEntrypointInvokesVitest(value) {
 }
 function packageManagerScriptName(tokens, executableIndex) {
   const args = tokens.slice(executableIndex + 1);
-  const invocation = firstPositionalArgument(args);
-  if (invocation === void 0 || ["exec", "dlx"].includes(invocation)) return void 0;
-  return ["run", "run-script"].includes(invocation) ? firstPositionalArgument(args.slice(args.indexOf(invocation) + 1)) : invocation;
+  const invocation = firstPositional(args);
+  if (invocation === void 0 || ["exec", "dlx"].includes(invocation.value)) return void 0;
+  return ["run", "run-script"].includes(invocation.value) ? firstPositionalArgument(args.slice(invocation.index + 1)) : invocation.value;
 }
 function shellCommandInvokesVitest(command, scripts, visitedScripts) {
   return command.split(/(?:&&|\|\||[;|])/u).some((segment) => {
@@ -45962,10 +45982,9 @@ function shellCommandInvokesVitest(command, scripts, visitedScripts) {
     }
     if (["npm", "pnpm", "yarn"].includes(executable)) {
       const args = tokens.slice(index + 1);
-      const invocation = firstPositionalArgument(args);
-      if (["exec", "dlx"].includes(invocation ?? "")) {
-        const invocationIndex = args.indexOf(invocation);
-        return executableName(firstPositionalArgument(args.slice(invocationIndex + 1)) ?? "") === "vitest";
+      const invocation = firstPositional(args);
+      if (["exec", "dlx"].includes(invocation?.value ?? "")) {
+        return executableName(firstPositionalArgument(args.slice(invocation.index + 1)) ?? "") === "vitest";
       }
       const scriptName = packageManagerScriptName(tokens, index);
       if (scriptName === void 0 || visitedScripts.has(scriptName)) return false;
@@ -46006,13 +46025,14 @@ async function isVitestCommand(command, cwd) {
     return executableName(firstPositionalArgument(command.args) ?? "") === "vitest";
   }
   if (launcher === "npm" || launcher === "pnpm" || launcher === "yarn") {
-    const invocation = firstPositionalArgument(command.args);
+    const invocation = firstPositional(command.args);
     if (invocation === void 0) return false;
-    if (["exec", "dlx"].includes(invocation)) {
-      const invocationIndex = command.args.indexOf(invocation);
-      return executableName(firstPositionalArgument(command.args.slice(invocationIndex + 1)) ?? "") === "vitest";
+    if (["exec", "dlx"].includes(invocation.value)) {
+      return executableName(
+        firstPositionalArgument(command.args.slice(invocation.index + 1)) ?? ""
+      ) === "vitest";
     }
-    const scriptName = ["run", "run-script"].includes(invocation) ? firstPositionalArgument(command.args.slice(command.args.indexOf(invocation) + 1)) : invocation;
+    const scriptName = ["run", "run-script"].includes(invocation.value) ? firstPositionalArgument(command.args.slice(invocation.index + 1)) : invocation.value;
     return scriptName !== void 0 && packageScriptInvokesVitest(cwd, scriptName);
   }
   return false;

@@ -50,21 +50,34 @@ function executableName(value: string): string {
   return basename(value).toLowerCase().replace(/\.(?:cmd|exe|mjs|cjs|js)$/u, "");
 }
 
-function firstPositionalArgument(args: string[]): string | undefined {
+/**
+ * Resolves the first positional argument AND where it sits. Callers need the
+ * index to keep scanning after it: `args.indexOf(value)` finds the first token
+ * equal to that string, which may be an option's VALUE earlier in the array
+ * (`npm --registry run run`), and slicing from there reads the wrong argument.
+ */
+function firstPositional(args: string[]): { value: string; index: number } | undefined {
   const optionsWithValues = new Set([
     "--call", "--conditions", "--eval", "--import", "--loader", "--package", "--registry",
     "--require", "-c", "-e", "-p", "-r",
   ]);
   for (let index = 0; index < args.length; index += 1) {
     const argument = args[index]!;
-    if (argument === "--") return args[index + 1];
+    if (argument === "--") {
+      const value = args[index + 1];
+      return value === undefined ? undefined : { value, index: index + 1 };
+    }
     if (optionsWithValues.has(argument)) {
       index += 1;
       continue;
     }
-    if (!argument.startsWith("-")) return argument;
+    if (!argument.startsWith("-")) return { value: argument, index };
   }
   return undefined;
+}
+
+function firstPositionalArgument(args: string[]): string | undefined {
+  return firstPositional(args)?.value;
 }
 
 function nodeEntrypointInvokesVitest(value: string | undefined): boolean {
@@ -76,11 +89,11 @@ function nodeEntrypointInvokesVitest(value: string | undefined): boolean {
 
 function packageManagerScriptName(tokens: string[], executableIndex: number): string | undefined {
   const args = tokens.slice(executableIndex + 1);
-  const invocation = firstPositionalArgument(args);
-  if (invocation === undefined || ["exec", "dlx"].includes(invocation)) return undefined;
-  return ["run", "run-script"].includes(invocation)
-    ? firstPositionalArgument(args.slice(args.indexOf(invocation) + 1))
-    : invocation;
+  const invocation = firstPositional(args);
+  if (invocation === undefined || ["exec", "dlx"].includes(invocation.value)) return undefined;
+  return ["run", "run-script"].includes(invocation.value)
+    ? firstPositionalArgument(args.slice(invocation.index + 1))
+    : invocation.value;
 }
 
 function shellCommandInvokesVitest(
@@ -103,10 +116,9 @@ function shellCommandInvokesVitest(
     }
     if (["npm", "pnpm", "yarn"].includes(executable)) {
       const args = tokens.slice(index + 1);
-      const invocation = firstPositionalArgument(args);
-      if (["exec", "dlx"].includes(invocation ?? "")) {
-        const invocationIndex = args.indexOf(invocation!);
-        return executableName(firstPositionalArgument(args.slice(invocationIndex + 1)) ?? "")
+      const invocation = firstPositional(args);
+      if (["exec", "dlx"].includes(invocation?.value ?? "")) {
+        return executableName(firstPositionalArgument(args.slice(invocation!.index + 1)) ?? "")
           === "vitest";
       }
       const scriptName = packageManagerScriptName(tokens, index);
@@ -157,15 +169,16 @@ async function isVitestCommand(command: VerificationCommand, cwd: string): Promi
     return executableName(firstPositionalArgument(command.args) ?? "") === "vitest";
   }
   if (launcher === "npm" || launcher === "pnpm" || launcher === "yarn") {
-    const invocation = firstPositionalArgument(command.args);
+    const invocation = firstPositional(command.args);
     if (invocation === undefined) return false;
-    if (["exec", "dlx"].includes(invocation)) {
-      const invocationIndex = command.args.indexOf(invocation);
-      return executableName(firstPositionalArgument(command.args.slice(invocationIndex + 1)) ?? "") === "vitest";
+    if (["exec", "dlx"].includes(invocation.value)) {
+      return executableName(
+        firstPositionalArgument(command.args.slice(invocation.index + 1)) ?? "",
+      ) === "vitest";
     }
-    const scriptName = ["run", "run-script"].includes(invocation)
-      ? firstPositionalArgument(command.args.slice(command.args.indexOf(invocation) + 1))
-      : invocation;
+    const scriptName = ["run", "run-script"].includes(invocation.value)
+      ? firstPositionalArgument(command.args.slice(invocation.index + 1))
+      : invocation.value;
     return scriptName !== undefined && packageScriptInvokesVitest(cwd, scriptName);
   }
   return false;
