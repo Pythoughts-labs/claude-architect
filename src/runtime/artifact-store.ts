@@ -1266,7 +1266,9 @@ export class ArtifactStore {
           return;
         }
         const repositoryIdentity = canonical.gitCommonDir ?? canonical.canonical;
-        lease = await platformServices.acquireCheckoutLock(canonical.canonical);
+        lease = await platformServices.acquireCheckoutLock(
+          canonical.canonical, { runId: entry.runId },
+        );
         if (lease.repositoryIdentity !== repositoryIdentity) {
           throw new RuntimeError("checkout lease repository identity changed before pruning");
         }

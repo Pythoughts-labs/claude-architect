@@ -22014,9 +22014,33 @@ var logger = {
   error: (m, meta) => emit("error", m, meta)
 };
 
+// src/platform/lock-owner.ts
+function parseLockOwner(contents) {
+  const trimmed = contents.trim();
+  let value;
+  try {
+    value = JSON.parse(trimmed);
+  } catch {
+    return null;
+  }
+  if (typeof value !== "object" || value === null) return null;
+  const owner = value;
+  if (typeof owner.pid !== "number" || !Number.isSafeInteger(owner.pid) || owner.pid <= 1 || typeof owner.processToken !== "string" || owner.processToken.length === 0) return null;
+  return { pid: owner.pid, processToken: owner.processToken };
+}
+async function lockOwnerStatus(owner, isProcessAlive, getProcessStartToken) {
+  if (owner === null || !isProcessAlive(owner.pid)) return "dead";
+  if (owner.processToken === null) return "unverifiable";
+  const currentToken = await getProcessStartToken(owner.pid);
+  if (currentToken === null) return "unverifiable";
+  return currentToken === owner.processToken ? "live" : "dead";
+}
+
 // src/platform/posix-platform-services.ts
 var LOCK_RETRY_MS = 30;
 var LOCK_TIMEOUT_MS = 2500;
+var OWNER_PROBE_TIMEOUT_MS = 1e3;
+var SAFE_RUN_ID = /^[a-z0-9][a-z0-9._-]{0,127}$/;
 var CLEANUP_JOURNAL_LOCK_KEY = createHash("sha256").update("claude-architect:cleanup-journal:v1").digest("hex");
 function errorCode(error2) {
   return typeof error2 === "object" && error2 !== null && "code" in error2 ? String(error2.code) : void 0;
@@ -22024,17 +22048,25 @@ function errorCode(error2) {
 function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
-async function acquireWxFileLock(key, timeoutMessage, ownerToken = null) {
-  const lockDirectory = path.join(resolveStateDir(), "locks");
-  const lockPath = path.join(lockDirectory, `${key}.lock`);
-  await fs.mkdir(lockDirectory, { recursive: true });
+function lockFilePath(key) {
+  return path.join(resolveStateDir(), "locks", `${key}.lock`);
+}
+async function acquireWxFileLock(key, timeoutMessage, ownerToken = null, owner = {}) {
+  const lockPath = lockFilePath(key);
+  await fs.mkdir(path.dirname(lockPath), { recursive: true });
   const deadline = Date.now() + LOCK_TIMEOUT_MS;
   for (; ; ) {
     try {
       const handle = await fs.open(lockPath, "wx");
       const ownerPid = nodeProcess2.pid;
+      const record2 = {
+        pid: ownerPid,
+        processToken: ownerToken,
+        acquiredAt: (/* @__PURE__ */ new Date()).toISOString(),
+        ...owner.runId === void 0 ? {} : { runId: owner.runId }
+      };
       try {
-        await handle.writeFile(JSON.stringify({ pid: ownerPid, processToken: ownerToken }));
+        await handle.writeFile(JSON.stringify(record2));
       } finally {
         await handle.close();
       }
@@ -22062,6 +22094,89 @@ async function acquireWxFileLock(key, timeoutMessage, ownerToken = null) {
 }
 function isRecord(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+function processIsAlive(pid) {
+  try {
+    nodeProcess2.kill(pid, 0);
+    return true;
+  } catch (error2) {
+    return errorCode(error2) === "EPERM";
+  }
+}
+function heldFor(acquiredAt) {
+  if (typeof acquiredAt !== "string") return "";
+  const startedMs = Date.parse(acquiredAt);
+  if (!Number.isFinite(startedMs)) return "";
+  const elapsedMs = Date.now() - startedMs;
+  if (elapsedMs < 0) return "";
+  return `, held for ${Math.round(elapsedMs / 1e3)}s`;
+}
+function heldByRun(runId) {
+  return typeof runId === "string" && SAFE_RUN_ID.test(runId) ? `, run ${runId}` : "";
+}
+async function describeLockContention(key, getProcessStartToken) {
+  let contents;
+  try {
+    contents = await fs.readFile(lockFilePath(key), "utf8");
+  } catch {
+    return null;
+  }
+  const owner = parseLockOwner(contents);
+  if (owner === null) {
+    return `its owner cannot be identified, and startup recovery preserves a lock it cannot parse, so remove it by hand: ${lockFilePath(key)}`;
+  }
+  const annotations = (() => {
+    try {
+      return JSON.parse(contents.trim());
+    } catch {
+      return {};
+    }
+  })();
+  const extras = isRecord(annotations) ? `${heldByRun(annotations.runId)}${heldFor(annotations.acquiredAt)}` : "";
+  let status;
+  try {
+    status = await lockOwnerStatus(
+      owner,
+      processIsAlive,
+      (pid) => withTimeout(getProcessStartToken(pid), OWNER_PROBE_TIMEOUT_MS, null)
+    );
+  } catch {
+    return null;
+  }
+  if (status === "dead") {
+    return `it was left behind by a process that exited (pid ${owner.pid}${extras}); startup recovery reclaims it on the next server start`;
+  }
+  if (status === "unverifiable") {
+    return `it is held by pid ${owner.pid}${extras}, whose identity could not be verified; startup recovery preserves it until that changes`;
+  }
+  const self = owner.pid === nodeProcess2.pid ? " (this same process)" : "";
+  return `it is held by live pid ${owner.pid}${self}${extras}`;
+}
+function withTimeout(work, ms, fallback) {
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => resolve(fallback), ms);
+    void work.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      () => {
+        clearTimeout(timer);
+        resolve(fallback);
+      }
+    );
+  });
+}
+async function withLockContentionDetail(error2, key, getProcessStartToken) {
+  if (!(error2 instanceof RuntimeError)) return error2;
+  let description;
+  try {
+    description = await describeLockContention(key, getProcessStartToken);
+  } catch {
+    return error2;
+  }
+  if (description === null) return error2;
+  return new RuntimeError(`${error2.message} \u2014 ${description}`, { ...error2.detail, key });
 }
 async function gitCommonDir(cwd) {
   return new Promise((resolve, reject) => {
@@ -22190,12 +22305,21 @@ var PosixPlatformServices = class {
     }
     killProcessGroup(pid, "SIGKILL");
   }
-  async acquireCheckoutLock(checkout) {
+  async acquireCheckoutLock(checkout, owner = {}) {
     const { canonical, gitCommonDir: commonDir } = await this.canonicalizePath(checkout);
     const repositoryIdentity = commonDir ?? canonical;
     const key = createHash("sha256").update(repositoryIdentity).digest("hex");
     const ownerToken = await this.getProcessStartToken(nodeProcess2.pid);
-    const lock = await acquireWxFileLock(key, `checkout is locked: ${checkout}`, ownerToken);
+    let lock;
+    try {
+      lock = await acquireWxFileLock(key, `checkout is locked: ${checkout}`, ownerToken, owner);
+    } catch (error2) {
+      throw await withLockContentionDetail(
+        error2,
+        key,
+        (pid) => this.getProcessStartToken(pid)
+      );
+    }
     return { ...lock, repositoryIdentity };
   }
   async acquireCleanupJournalLock() {
@@ -22523,12 +22647,21 @@ var WindowsPlatformServices = class {
     }
     await this.runJobKillHelper(pid);
   }
-  async acquireCheckoutLock(checkout) {
+  async acquireCheckoutLock(checkout, owner = {}) {
     const { canonical, gitCommonDir: commonDir } = await this.canonicalizePath(checkout);
     const repositoryIdentity = commonDir ?? canonical;
     const key = createHash2("sha256").update(repositoryIdentity).digest("hex");
     const ownerToken = await this.getProcessStartToken(nodeProcess3.pid);
-    const lock = await acquireWxFileLock(key, `checkout is locked: ${checkout}`, ownerToken);
+    let lock;
+    try {
+      lock = await acquireWxFileLock(key, `checkout is locked: ${checkout}`, ownerToken, owner);
+    } catch (error2) {
+      throw await withLockContentionDetail(
+        error2,
+        key,
+        (pid) => this.getProcessStartToken(pid)
+      );
+    }
     return { ...lock, repositoryIdentity };
   }
   async acquireCleanupJournalLock() {
@@ -27734,7 +27867,10 @@ var ArtifactStore = class {
           return;
         }
         const repositoryIdentity = canonical.gitCommonDir ?? canonical.canonical;
-        lease = await platformServices.acquireCheckoutLock(canonical.canonical);
+        lease = await platformServices.acquireCheckoutLock(
+          canonical.canonical,
+          { runId: entry.runId }
+        );
         if (lease.repositoryIdentity !== repositoryIdentity) {
           throw new RuntimeError("checkout lease repository identity changed before pruning");
         }
@@ -28479,7 +28615,7 @@ async function runAttempt(checkoutPath, spec, deps) {
   let archivedResult = null;
   try {
     if (lock === null) {
-      ownedLock = await ps.acquireCheckoutLock(canonical.canonical);
+      ownedLock = await ps.acquireCheckoutLock(canonical.canonical, { runId });
       lock = ownedLock;
     }
     if (lock.repositoryIdentity !== repositoryIdentity) {
@@ -32007,7 +32143,7 @@ async function withCurrentArchivedRun(checkoutPath, runId, deps, fn, preserveRes
   const canonical = await ps.canonicalizePath(checkoutPath);
   const callerKey = canonical.gitCommonDir ?? canonical.canonical;
   return withRepoLock(callerKey, async () => {
-    const lock = await ps.acquireCheckoutLock(canonical.canonical);
+    const lock = await ps.acquireCheckoutLock(canonical.canonical, { runId });
     let action;
     try {
       if (lock.repositoryIdentity !== callerKey) {
@@ -32305,7 +32441,7 @@ import path18 from "node:path";
 import nodeProcess4 from "node:process";
 var NO_FOLLOW3 = constants4.O_NOFOLLOW ?? 0;
 var MAX_STATE_FILE_BYTES = 8e6;
-var SAFE_RUN_ID = /^[a-z0-9][a-z0-9._-]*$/;
+var SAFE_RUN_ID2 = /^[a-z0-9][a-z0-9._-]*$/;
 var LOCK_NAME = /^([0-9a-f]{64})\.lock$/;
 var OID = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/;
 var CANDIDATE_REF_PREFIX3 = "refs/claude-architect/candidates/";
@@ -32326,7 +32462,7 @@ function sameIdentity(metadata, expected) {
   return metadata.dev === expected.dev && metadata.ino === expected.ino;
 }
 function validateRunId(runId) {
-  if (typeof runId !== "string" || !SAFE_RUN_ID.test(runId)) {
+  if (typeof runId !== "string" || !SAFE_RUN_ID2.test(runId)) {
     throw new RuntimeError("recovery record has an invalid run id");
   }
 }
@@ -33324,26 +33460,6 @@ function defaultRequestCooperativeTermination(pid) {
 function defaultDelayMs(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
-function parseLockOwner(contents) {
-  const trimmed = contents.trim();
-  let value;
-  try {
-    value = JSON.parse(trimmed);
-  } catch {
-    return null;
-  }
-  if (typeof value !== "object" || value === null) return null;
-  const owner = value;
-  if (typeof owner.pid !== "number" || !Number.isSafeInteger(owner.pid) || owner.pid <= 1 || typeof owner.processToken !== "string" || owner.processToken.length === 0) return null;
-  return { pid: owner.pid, processToken: owner.processToken };
-}
-async function lockOwnerStatus(owner, isProcessAlive, getProcessStartToken) {
-  if (owner === null || !isProcessAlive(owner.pid)) return "dead";
-  if (owner.processToken === null) return "unverifiable";
-  const currentToken = await getProcessStartToken(owner.pid);
-  if (currentToken === null) return "unverifiable";
-  return currentToken === owner.processToken ? "live" : "dead";
-}
 async function readHandleBytes(handle, size) {
   const contents = Buffer.alloc(size);
   let offset = 0;
@@ -33867,7 +33983,7 @@ async function recoverStaleRuns(dependencies = {}) {
           }
           continue;
         }
-        if (!entry.isDirectory() || entry.isSymbolicLink() || !SAFE_RUN_ID.test(entry.name)) continue;
+        if (!entry.isDirectory() || entry.isSymbolicLink() || !SAFE_RUN_ID2.test(entry.name)) continue;
         try {
           const runDirectory = path18.join(runsRoot, entry.name);
           const runStartText = await readBoundedRegularFile(path18.join(runDirectory, "run-start.json"));

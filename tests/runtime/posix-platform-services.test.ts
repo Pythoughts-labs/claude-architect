@@ -91,10 +91,16 @@ describe("PosixPlatformServices", () => {
   it("blocks a second checkout lock until the first is released", async () => {
     const lockA = await ps.acquireCheckoutLock(repoPath);
     const lockPath = path.join(resolveStateDir(), "locks", `${lockA.key}.lock`);
-    await expect(fs.readFile(lockPath, "utf8").then(contents => JSON.parse(contents))).resolves.toEqual({
+    // Exact, not partial: recovery reclaims on pid and processToken alone, so an
+    // unexpected field appearing here is a change to what that decision sees.
+    // acquiredAt is diagnostic-only, and runId is absent because none was given.
+    const record: unknown = JSON.parse(await fs.readFile(lockPath, "utf8"));
+    expect(record).toEqual({
       pid: process.pid,
       processToken: await ps.getProcessStartToken(process.pid),
+      acquiredAt: expect.any(String),
     });
+    expect(Date.parse((record as { acquiredAt: string }).acquiredAt)).not.toBeNaN();
     let resolved = false;
     const pendingLockB = ps.acquireCheckoutLock(repoPath).then(lock => { resolved = true; return lock; });
     await delay(100);
@@ -112,9 +118,11 @@ describe("PosixPlatformServices", () => {
     const lockA = await ps.acquireCleanupJournalLock();
     expect(lockA.key).toBe(CLEANUP_JOURNAL_LOCK_KEY);
     const lockPath = path.join(resolveStateDir(), "locks", `${lockA.key}.lock`);
-    await expect(fs.readFile(lockPath, "utf8").then(contents => JSON.parse(contents))).resolves.toEqual({
+    const record: unknown = JSON.parse(await fs.readFile(lockPath, "utf8"));
+    expect(record).toEqual({
       pid: process.pid,
       processToken: await ps.getProcessStartToken(process.pid),
+      acquiredAt: expect.any(String),
     });
     let resolved = false;
     const pendingLockB = ps.acquireCleanupJournalLock().then(lock => { resolved = true; return lock; });

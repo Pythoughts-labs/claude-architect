@@ -244,7 +244,7 @@ async function withCurrentArchivedRun<T>(
   const canonical = await ps.canonicalizePath(checkoutPath);
   const callerKey = canonical.gitCommonDir ?? canonical.canonical;
   return withRepoLock(callerKey, async () => {
-    const lock = await ps.acquireCheckoutLock(canonical.canonical);
+    const lock = await ps.acquireCheckoutLock(canonical.canonical, { runId });
     let action: { ok: true; result: T } | { ok: false; error: unknown };
     try {
       if (lock.repositoryIdentity !== callerKey) {

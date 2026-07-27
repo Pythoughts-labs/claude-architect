@@ -47,6 +47,15 @@ All notable changes to Claude Architect are recorded here. The format follows
   a pipeline ten minutes into a slice was indistinguishable from one wedged at
   the lock. The write is awaited before the phase it names begins, so an
   interrupted run is locatable, and a failed write stays advisory.
+- A repository lock that times out now names its holder. `checkout is locked:
+  <path>` was the identical message for a live sibling session mid-attempt, a
+  lock file leaked by a process that died, and a record startup recovery refuses
+  to parse — situations that resolve themselves, resolve at the next server
+  start, and never resolve without a human, respectively. Lock records also
+  carry `acquiredAt` and, where the acquirer knows it, `runId`, so contention
+  reports how long the holder has had it and which run to look at. The probe is
+  best-effort and bounded: any failure leaves the original timeout untouched,
+  and the owner's process token is never disclosed.
 
 ### Added
 

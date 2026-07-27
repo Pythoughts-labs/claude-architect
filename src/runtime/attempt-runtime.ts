@@ -365,7 +365,7 @@ export async function runAttempt(
   let archivedResult: AttemptResult | null = null;
   try {
     if (lock === null) {
-      ownedLock = await ps.acquireCheckoutLock(canonical.canonical);
+      ownedLock = await ps.acquireCheckoutLock(canonical.canonical, { runId });
       lock = ownedLock;
     }
     if (lock.repositoryIdentity !== repositoryIdentity) {

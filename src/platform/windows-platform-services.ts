@@ -8,10 +8,12 @@ import { fileURLToPath } from "node:url";
 import { BoundedBuffer } from "../util/bounded-buffer.js";
 import { RuntimeError } from "../util/errors.js";
 import type {
-  CanonicalPath, CheckoutLock, ExecutableRequest, FileLock, PlatformServices, ResolvedExecutable,
-  SpawnRequest, SupervisedExit, SupervisedProcess,
+  CanonicalPath, CheckoutLock, ExecutableRequest, FileLock, LockOwnerAnnotation, PlatformServices,
+  ResolvedExecutable, SpawnRequest, SupervisedExit, SupervisedProcess,
 } from "./platform-services.js";
-import { acquireWxFileLock, CLEANUP_JOURNAL_LOCK_KEY } from "./posix-platform-services.js";
+import {
+  acquireWxFileLock, CLEANUP_JOURNAL_LOCK_KEY, withLockContentionDetail,
+} from "./posix-platform-services.js";
 import { normalizeWindowsEnv } from "./windows-env.js";
 
 const childHandles = new WeakMap<SupervisedProcess, ChildProcess>();
@@ -303,12 +305,22 @@ export class WindowsPlatformServices implements PlatformServices {
     }
     await this.runJobKillHelper(pid);
   }
-  async acquireCheckoutLock(checkout: string): Promise<CheckoutLock> {
+  async acquireCheckoutLock(
+    checkout: string,
+    owner: LockOwnerAnnotation = {},
+  ): Promise<CheckoutLock> {
     const { canonical, gitCommonDir: commonDir } = await this.canonicalizePath(checkout);
     const repositoryIdentity = commonDir ?? canonical;
     const key = createHash("sha256").update(repositoryIdentity).digest("hex");
     const ownerToken = await this.getProcessStartToken(nodeProcess.pid);
-    const lock = await acquireWxFileLock(key, `checkout is locked: ${checkout}`, ownerToken);
+    let lock;
+    try {
+      lock = await acquireWxFileLock(key, `checkout is locked: ${checkout}`, ownerToken, owner);
+    } catch (error) {
+      throw await withLockContentionDetail(
+        error, key, pid => this.getProcessStartToken(pid),
+      );
+    }
     return { ...lock, repositoryIdentity };
   }
 

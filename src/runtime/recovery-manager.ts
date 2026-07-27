@@ -14,6 +14,7 @@ import path from "node:path";
 import nodeProcess from "node:process";
 import { git, type GitResult } from "../git/git-exec.js";
 import { WorktreeManager } from "../git/worktree-manager.js";
+import { lockOwnerStatus, parseLockOwner } from "../platform/lock-owner.js";
 import type { PlatformServices } from "../platform/platform-services.js";
 import { CLEANUP_JOURNAL_LOCK_KEY } from "../platform/posix-platform-services.js";
 import { getPlatformServices } from "../platform/select-platform.js";
@@ -95,18 +96,11 @@ export interface RecoveryDependencies {
   git?: typeof git;
 }
 
-interface LockOwner {
-  pid: number;
-  processToken: string;
-}
-
 interface AcquiredLock {
   lockPath: string;
   identity: DirectoryIdentity;
   contents: Buffer;
 }
-
-type LockOwnerStatus = "dead" | "live" | "unverifiable";
 
 type DeadLockReclaimResult =
   | "reclaimed"
@@ -1449,30 +1443,6 @@ function defaultRequestCooperativeTermination(pid: number): void {
 
 function defaultDelayMs(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms));
-}
-
-function parseLockOwner(contents: string): LockOwner | null {
-  const trimmed = contents.trim();
-  let value: unknown;
-  try { value = JSON.parse(trimmed); }
-  catch { return null; }
-  if (typeof value !== "object" || value === null) return null;
-  const owner = value as { pid?: unknown; processToken?: unknown };
-  if (typeof owner.pid !== "number" || !Number.isSafeInteger(owner.pid) || owner.pid <= 1
-    || typeof owner.processToken !== "string" || owner.processToken.length === 0) return null;
-  return { pid: owner.pid, processToken: owner.processToken };
-}
-
-async function lockOwnerStatus(
-  owner: { pid: number; processToken: string | null } | null,
-  isProcessAlive: (pid: number) => boolean,
-  getProcessStartToken: (pid: number) => Promise<string | null>,
-): Promise<LockOwnerStatus> {
-  if (owner === null || !isProcessAlive(owner.pid)) return "dead";
-  if (owner.processToken === null) return "unverifiable";
-  const currentToken = await getProcessStartToken(owner.pid);
-  if (currentToken === null) return "unverifiable";
-  return currentToken === owner.processToken ? "live" : "dead";
 }
 
 async function readHandleBytes(

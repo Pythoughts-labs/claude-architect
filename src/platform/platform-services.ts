@@ -43,6 +43,13 @@ export interface CheckoutLock extends FileLock {
 }
 export interface CanonicalPath { input: string; canonical: string; gitCommonDir: string | null; }
 
+/**
+ * Diagnostic-only fields recorded alongside a lock's owner. They name the work
+ * that holds the lock so a contending caller can say which run to look at.
+ * Never consulted when deciding whether a lock may be reclaimed.
+ */
+export interface LockOwnerAnnotation { runId?: string }
+
 export interface PlatformServices {
   os: "darwin" | "linux" | "win32";
   resolveExecutable(request: ExecutableRequest): Promise<ResolvedExecutable>;
@@ -52,7 +59,7 @@ export interface PlatformServices {
   /** Opaque per-boot-stable identity for a live pid; null when dead/undeterminable. */
   getProcessStartToken(pid: number): Promise<string | null>;
   terminateProcessTreeByPid(pid: number, expectedToken?: string | null): Promise<void>;   // crash recovery: kill a tree by recorded pid (no live SupervisedProcess). POSIX: kill(-pid); ESRCH treated as success.
-  acquireCheckoutLock(checkout: string): Promise<CheckoutLock>;
+  acquireCheckoutLock(checkout: string, owner?: LockOwnerAnnotation): Promise<CheckoutLock>;
   /**
    * Cross-process mutex over the shared cleanup journal (state-dir scoped, fixed
    * key). All journal appends and the recovery torn-tail truncation acquire it so
