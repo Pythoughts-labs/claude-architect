@@ -4,7 +4,10 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { freezeCandidate } from "../../src/git/candidate-tree.js";
 import { git } from "../../src/git/git-exec.js";
-import type { PlatformServices } from "../../src/platform/platform-services.js";
+import type {
+  PlatformServices,
+  SupervisedProcess,
+} from "../../src/platform/platform-services.js";
 import { getPlatformServices } from "../../src/platform/select-platform.js";
 import type { CandidateArtifact } from "../../src/protocol/attempt-result.js";
 import type { VerificationCommand } from "../../src/protocol/delegation-spec.js";
@@ -414,27 +417,38 @@ describe("projectVerify", () => {
     expect(result.evidence.commands[0]?.truncated?.stderr).toBe(true);
   });
 
-  it("fails a timed-out command even when its SIGTERM handler exits zero", async () => {
+  it("fails a timed-out command even when the process exits zero", async () => {
     const fixture = await frozenFixture();
+    const ps = Object.create(getPlatformServices()) as PlatformServices;
+    ps.spawnSupervised = async (): Promise<SupervisedProcess> => ({
+      pid: 4242,
+      stdout: {} as NodeJS.ReadableStream,
+      stderr: {} as NodeJS.ReadableStream,
+      done: Promise.resolve({
+        exitCode: 0,
+        signal: null,
+        timedOut: true,
+        cancelled: false,
+        stdout: "",
+        stderr: "",
+        truncated: { stdout: false, stderr: false },
+      }),
+    });
 
     const result = await projectVerify({
       repoRoot: fixture.repoRoot,
       artifact: fixture.artifact,
       commands: [command({
         id: "timeout",
-        args: [
-          "-e",
-          "process.on('SIGTERM', () => process.exit(0)); setInterval(() => {}, 1000)",
-        ],
         timeoutMs: 100,
       })],
+      ps,
     });
 
-    // Windows termination is forced, so the SIGTERM handler never runs there;
-    // the timeout classification must fail the command either way.
-    expect(result.commandOutcomes[0]).toMatchObject(
-      process.platform === "win32" ? { timedOut: true } : { exitCode: 0, timedOut: true },
-    );
+    // Process-supervisor tests own signal delivery and escalation. This unit
+    // injects the exact ambiguous outcome deterministically so host load cannot
+    // prevent a child from installing its signal handler before a 100ms timer.
+    expect(result.commandOutcomes[0]).toMatchObject({ exitCode: 0, timedOut: true });
     expect(result.failures).toContain("command-failed:timeout");
   });
 
