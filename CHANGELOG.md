@@ -27,6 +27,53 @@ All notable changes to Claude Architect are recorded here. The format follows
   `issue.input` for both the wrong-value and the absent-key case. Both
   diagnostics are byte-identical to the previous behavior.
 
+## [0.41.0] - 2026-07-27
+
+### Added
+
+- Autopilot: a trusted controller that carries a multi-task workflow from spec
+  to a draft pull request without a mid-loop prompt. It owns branch management,
+  hash-bound eligibility, candidate promotion, cumulative final review of the
+  whole branch, exact-head push, draft-PR identity, required-check polling, and
+  recovery. Three MCP tools drive it — `autopilotStart`, `autopilotStatus`, and
+  `autopilotResume`. Only a human may merge.
+- An advisor stage between the pipeline and the decision gate, producing a
+  frozen `AdvisorReport` bound to the evidence it reasoned over.
+- `ReviewSnapshot`: the frozen, hash-bound bytes a reviewer sees.
+  `reviewCandidate` now returns this instead of a loose patch bundle, so the
+  decision and the review provably concern the same artifact.
+- A durable, typed `RunStatus` in `status.json` carrying mode, slice, round,
+  role, and Producer, plus an opt-in statusline that renders it.
+
+### Changed
+
+- **Protocol 1.4.0 → 2.0.0.** `decideCandidate` now requires
+  `expectedArtifactHash`, and `reviewCandidate` returns a `ReviewSnapshot`.
+- Candidate decisions are versioned records carrying the authority that made
+  them: `human`, `policy-autonomous`, `autopilot-policy`, or `caller-asserted`.
+  The autonomous authority shipped in 0.39.0 survives as a first-class value
+  rather than being recorded as a human decision — which candidates went in
+  without a person is answerable by reading the archive, never inferred.
+- Integration admits an acceptance only from an authority on the shared
+  integrable list. `caller-asserted` and pre-provenance records are refused:
+  both mean the runtime does not know how the decision was reached, which is a
+  different thing from knowing it was policy.
+- Terminality is expressed by the run phase rather than a separate flag, so a
+  finished run can no longer read as one still working.
+
+### Fixed
+
+- Decision archives written by 0.39.0 and 0.40.0 are readable again. The
+  candidate-decision parser accepted only the original two-field record, so
+  every archive the shipped runtime produced failed to parse — which would have
+  stranded recovery, integration, and prune's retain-undecided-runs branch.
+- A baseline command that collected no tests is no longer accepted as proof of
+  a red baseline. It cannot distinguish "the assertion failed" from "nothing
+  ran", in either direction.
+- The advisor role's prompt schema is stripped of `$schema` like every other
+  role's, so the runtime stops inducing the invalid Producer output it then
+  punishes.
+
 ## [0.40.0] - 2026-07-27
 
 ### Added
