@@ -6,6 +6,8 @@ All notable changes to Claude Architect are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.37.0] - 2026-07-27
+
 ### Fixed
 
 - A pipeline whose gate refused the candidate no longer archives an attempt that

@@ -129,8 +129,8 @@ describe("P0-A plugin wiring", () => {
     const marketplace = JSON.parse(read(".claude-plugin/marketplace.json"));
     const readme = read("README.md");
     const changelog = read("CHANGELOG.md");
-    assert.equal(plugin.version, "0.36.0");
-    assert.equal(marketplace.plugins[0].version, "0.36.0");
+    assert.equal(plugin.version, "0.37.0");
+    assert.equal(marketplace.plugins[0].version, "0.37.0");
     // Derived from plugin.json, not written out: a literal here is a seventh
     // place to edit on every bump, and it is the one that keeps being missed.
     assert.match(readme, new RegExp(`badge/version-${plugin.version.replace(/\./gu, "\\.")}-`, "u"));
