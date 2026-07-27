@@ -134,12 +134,22 @@ All dependencies track latest, with one deliberate pin. Provenance for future se
   `invalid_literal` no longer exists — the received value arrives as
   `issue.input` for both the wrong-value and the absent-key case, so branch on
   that rather than on an issue code.
-- **There is no MCP SDK v2.** A previous version of this policy said zod 4 must
-  wait for "the SDK v2 upgrade (v2 requires zod >= 4.2; still beta)". That was
-  wrong against the registry: `@modelcontextprotocol/sdk` publishes no `2.x` at
-  all, and its only dist-tag is `latest` on the 1.x line. Do not plan around a
-  v2. Verify a claimed version with `npm view <pkg> versions` before it becomes
-  a blocker in a plan.
+- **MCP SDK v2 is a rename, not a major version of this package.** It ships as
+  separate modular packages — `@modelcontextprotocol/server`,
+  `@modelcontextprotocol/client`, `@modelcontextprotocol/core` — at
+  `2.0.0-beta.5`, requiring `zod ^4.2.0`. `@modelcontextprotocol/sdk` itself
+  publishes no `2.x` and never will; its only dist-tag is `latest` on the 1.x
+  line, which remains the production-recommended path. Do not adopt v2 while it
+  is beta.
+
+  A cautionary note, because this cost real time: an earlier revision of this
+  bullet asserted "there is no MCP SDK v2" on the strength of
+  `npm view @modelcontextprotocol/sdk versions` returning zero `2.x`. That
+  command cannot see a v2 published under different package names, so a clean
+  negative from it proved nothing about the broader claim. When checking whether
+  a major version exists, check the package names the project actually
+  publishes under — a scoped-org listing or the repository's releases page —
+  not one package's version list.
 - `@hono/node-server` reaches this tree only through the SDK. SDK 1.29.0 pinned
   it to `^1.19.9`, which could not reach the `2.0.5` that patches
   GHSA-frvp-7c67-39w9 — which is why Dependabot's own update job failed rather
