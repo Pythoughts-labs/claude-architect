@@ -59,6 +59,40 @@ All notable changes to Claude Architect are recorded here. The format follows
   residual boundary accurately: the host is trusted to present elicitation and
   no cryptographic human identity is established.
 
+## [0.39.0] - 2026-07-27
+
+### Changed
+
+- **Delegation now runs to completion without asking permission, by default.**
+  Making acceptance human-only in 0.36.0 put a prompt on the happy path — the
+  case where the runtime had already proven everything it knows how to prove —
+  and a delegation that stops mid-flight to request permission is not
+  delegation. `decideCandidate` now records a decision without prompting when
+  the candidate is an independently verified result with no failure, no advisory
+  warnings, and a readable archive, marking it `decidedBy: "policy-autonomous"`.
+  Every other case — unverified, gate-refused, review-incomplete, or an archive
+  that could not be read — still raises MCP elicitation and fails closed without
+  it. Set `CLAUDE_ARCHITECT_DECISION_AUTHORITY=human` to require confirmation
+  for every decision; an unrecognized value fails closed to `human` with a
+  warning, so a typo cannot silently select the permissive mode.
+
+  Eligibility is a positive condition, deliberately not "no warnings were
+  raised": a plain `delegate` run carries neither pipeline-gate nor review
+  evidence, so keying autonomy off warning-absence would auto-accept whatever it
+  produced. An unreadable archive refuses rather than downgrading to a prompt —
+  under this policy a client may not advertise elicitation at all, so a silent
+  downgrade would dead-end the run with no path forward.
+
+  Human control moved to where it is load-bearing rather than disappearing.
+  Independent verification still gates what may be accepted at all, integration
+  still refuses a moved `HEAD`, a dirty tree, or a hash that does not match the
+  reviewed artifact, and the provenance of every decision is recorded, so
+  auditing which candidates went in without a person does not require inferring
+  it. `AGENTS.md`, `README.md`, `docs/SECURITY_MODEL.md`, and the delegate skill
+  were amended together — the trust invariant they stated is now the configured
+  authority they describe, so a later session cannot read the old text as law
+  and "fix" the code back.
+
 ## [0.38.0] - 2026-07-27
 
 ### Fixed
