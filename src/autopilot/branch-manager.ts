@@ -556,7 +556,16 @@ export class WorkflowBranchManager {
     const fetchedRef = `refs/claude-architect/autopilot/${request.workflowId}/fetch-${randomUUID()}`;
     const initial = await this.platformServices.canonicalizePath(request.checkoutPath);
     if (initial.gitCommonDir === null) fail("not-a-repository");
-    const lock = await this.platformServices.acquireCheckoutLock(initial.canonical);
+    // Lock acquisition sits before the classified block, so a contended
+    // checkout would otherwise escape as a raw RuntimeError. Windows locks fail
+    // fast where POSIX advisory locks tend to serialize, which made the losing
+    // creator's rejection type platform-dependent. Classify it either way.
+    let lock: CheckoutLock;
+    try {
+      lock = await this.platformServices.acquireCheckoutLock(initial.canonical);
+    } catch {
+      fail("checkout-locked");
+    }
     let attached: Awaited<ReturnType<WorktreeManager["createAttached"]>> | undefined;
     let refsCreated = false;
     let fetchedCreated = false;

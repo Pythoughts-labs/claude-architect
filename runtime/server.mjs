@@ -42287,7 +42287,12 @@ var WorkflowBranchManager = class {
     const fetchedRef = `refs/claude-architect/autopilot/${request.workflowId}/fetch-${randomUUID4()}`;
     const initial = await this.platformServices.canonicalizePath(request.checkoutPath);
     if (initial.gitCommonDir === null) fail("not-a-repository");
-    const lock = await this.platformServices.acquireCheckoutLock(initial.canonical);
+    let lock;
+    try {
+      lock = await this.platformServices.acquireCheckoutLock(initial.canonical);
+    } catch {
+      fail("checkout-locked");
+    }
     let attached;
     let refsCreated = false;
     let fetchedCreated = false;

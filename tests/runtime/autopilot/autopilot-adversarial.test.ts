@@ -807,7 +807,10 @@ describe("autopilot adversarial trust boundaries", () => {
     await expect(first).rejects.toMatchObject({ classification: "cancelled" });
     await expect(second).resolves.toMatchObject({ phase: "cancelled" });
     expect(shippingMutations(harness.hostingCalls)).toEqual([]);
-  }, 120_000);
+    // Same reason as the terminal-cancellation test above: aborting while the
+    // Producer is mid-flight pays for tearing down a live process tree, which
+    // is far slower on Windows than the 120s this suite assumed.
+  }, 240_000);
 
   it("allows exactly one concurrent start for the same workflow id", async () => {
     const harness = await createHarness();
