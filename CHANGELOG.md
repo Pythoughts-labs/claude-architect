@@ -20,6 +20,7 @@ All notable changes to Claude Architect are recorded here. The format follows
   it. Acceptance is still theirs to give: the gate advises, it does not veto.
 - A run whose archive cannot be read reports that as a warning at decision time
   instead of presenting an unknown candidate as an unflagged one.
+
 - `reviewCandidate` accepts `expectedSpecSha256` and proves the run it is asked
   about was started from that spec. A delegation lane reports its own `runId`
   and echoes back the spec hash it was handed, so both are claims by the party
@@ -40,6 +41,21 @@ All notable changes to Claude Architect are recorded here. The format follows
   161,874 bytes — 68% of a 238 KB response, against 26,683 bytes for the actual
   candidate patch. The guard was written, tested on one path, and inert on the
   other.
+
+### Security
+
+- `fast-uri` moves to 3.1.4, clearing the high-severity advisory. It arrives
+  through `ajv`, which is already at its latest release and declares
+  `fast-uri: ^3.0.1` — the patched version was always inside that range and the
+  lockfile had simply resolved lower, so nothing crossed a semver boundary.
+- The remaining moderate advisory (`@hono/node-server` path traversal in
+  `serve-static` on Windows) is left in place deliberately. It reaches the tree
+  through `@modelcontextprotocol/sdk`, and npm's proposed remedy is to *downgrade*
+  the SDK from 1.29.0 to 1.24.3. The vulnerable code neither ships nor runs here:
+  the runtime uses `StdioServerTransport`, so the HTTP transport is never
+  imported and `grep -c hono runtime/server.mjs` is 0, and `serve-static` is a
+  file server this project never invokes. The real fix is SDK v2, which requires
+  `zod >= 4.2` against a deliberate v3 pin (see AGENTS.md) and is still beta.
 
 ## [0.36.0] - 2026-07-27
 
