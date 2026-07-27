@@ -1,9 +1,31 @@
-import { describe, expect, it, vi } from "vitest";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { ArtifactStore } from "../../../src/runtime/artifact-store.js";
+import { initializeRunStart } from "../../../src/runtime/run-start.js";
 import { runAdvisorStage, type AdvisorStageStore } from "../../../src/pipeline/advisor-stage.js";
 import { buildRoleSpec } from "../../../src/pipeline/role-prompts.js";
 import type { PipelineDependencies } from "../../../src/pipeline/pipeline-runtime.js";
 import type { RoleRunArgs } from "../../../src/pipeline/role-runner.js";
 import { advisorReport, autopilotSpec, pipelineResult, reviewSnapshot } from "./autopilot-fixtures.js";
+
+const temporaryRoots: string[] = [];
+let previousPluginData: string | undefined;
+
+beforeEach(async () => {
+  previousPluginData = process.env.CLAUDE_PLUGIN_DATA;
+  const root = await mkdtemp(path.join(tmpdir(), "ca-advisor-stage-"));
+  temporaryRoots.push(root);
+  process.env.CLAUDE_PLUGIN_DATA = root;
+});
+
+afterEach(async () => {
+  if (previousPluginData === undefined) delete process.env.CLAUDE_PLUGIN_DATA;
+  else process.env.CLAUDE_PLUGIN_DATA = previousPluginData;
+  await Promise.all(temporaryRoots.splice(0).map(root =>
+    rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 })));
+});
 
 describe("runAdvisorStage", () => {
   it("uses only the exact durable package in a fresh read-only structured role", async () => {
@@ -251,6 +273,60 @@ describe("runAdvisorStage", () => {
       evaluatedAt: "2026-07-20T12:00:00.000Z",
       store,
     })).rejects.toThrow(/archive failed/u);
+  });
+
+  // The catch in runAdvisorStage exists so a pre-terminal throw does not leave
+  // the persisted RunStatus stuck on "advisor" forever, which is what makes an
+  // interrupted run recoverable. The throw-path tests asserted only that the
+  // promise rejected, never that the transition happened.
+  it("moves the run to a terminal status when an early guard throws", async () => {
+    const pipeline = pipelineResult();
+    const archivedSpec = autopilotSpec();
+    const statusStore = new ArtifactStore(pipeline.runId);
+    await initializeRunStart(statusStore, {
+      runId: pipeline.runId,
+      lockKey: "advisor-stage-lock",
+      canonicalCommonDir: "/repo/.git",
+      pid: null,
+      processToken: null,
+      startedAt: "2026-07-20T11:59:00.000Z",
+    });
+    // transitionRunStatusSafely only UPDATES an existing status, so the run
+    // needs one before the stage can move it to a terminal phase.
+    await statusStore.writeRunStatus({
+      statusVersion: "1",
+      runId: pipeline.runId,
+      mode: "single",
+      phase: "preflight",
+      sliceIndex: null,
+      sliceCount: null,
+      round: null,
+      role: null,
+      producerId: null,
+      startedAt: "2026-07-20T11:59:00.000Z",
+      updatedAt: "2026-07-20T11:59:00.000Z",
+      detail: null,
+    });
+    const store: AdvisorStageStore = {
+      async readPipelineArtifact<T>(_runId: string, name: string) {
+        return structuredClone(name === "delegation-spec" ? archivedSpec : pipeline) as T;
+      },
+      async readReviewSnapshot() { return structuredClone(reviewSnapshot()); },
+      async writeLog() { throw new Error("advisor must not launch"); },
+      async writePostPipelineAutopilotArtifacts() { throw new Error("must not persist"); },
+    };
+
+    await expect(runAdvisorStage({
+      runId: pipeline.runId,
+      spec: { ...archivedSpec, successCriteria: ["weakened"] },
+      worktreePath: "/candidate",
+      deps: {} as PipelineDependencies,
+      evaluatedAt: "2026-07-20T12:00:00.000Z",
+      store,
+    })).rejects.toThrow(/differs from the durable archived specification/u);
+
+    await expect(statusStore.readRunStatus(pipeline.runId))
+      .resolves.toMatchObject({ phase: "failed", role: "advisor" });
   });
 
   it("rejects caller-controlled criteria that differ from the archived specification", async () => {

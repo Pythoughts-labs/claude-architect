@@ -296,6 +296,17 @@ async function fixture(): Promise<Fixture> {
   };
 }
 
+/**
+ * A seam, not the thing under test. Its `revalidate` re-derives head and dirt
+ * from the real repository, which is enough to drive FinalBranchReviewer's
+ * head-bound phases -- but it is NOT the production
+ * `WorkflowBranchManager.revalidate`, which additionally proves ownership,
+ * remote identity, and worktree registration. Tests here prove that the
+ * reviewer calls revalidation with the right expected head and propagates its
+ * verdict; that real revalidation actually detects drift is proven against the
+ * production manager in branch-manager.test.ts ("classifies worktree dirt,
+ * branch drift, operation state, and base drift without repairs").
+ */
 function localBranchManager(f: FixtureCore): WorkflowBranchManager {
   const identity = {
     workflowId: f.workflowId,
@@ -625,7 +636,13 @@ describe("FinalBranchReviewer cumulative artifact", () => {
 
   it("detects head drift before verification executes", async () => {
     const f = await fixture();
-    const reviewer = reviewerFor(f);
+    const branchManager = localBranchManager(f);
+    const reviewer = new FinalBranchReviewer({
+      branchManager,
+      workflowStore: () => f.store,
+      evidenceStore: inMemoryEvidenceStore(new Map(), archivedRefsForFixture(f)),
+      taskEvidenceValidator: async () => {},
+    });
     const artifact = await reviewer.freezeCumulativeArtifact({
       workflowId: f.workflowId,
       expectedRevision: f.revision,
@@ -643,6 +660,12 @@ describe("FinalBranchReviewer cumulative artifact", () => {
       f.repo,
     )).rejects.toMatchObject({ classification: "head-changed" });
     expect(verification).not.toHaveBeenCalled();
+    // What this layer owns: revalidation is driven with the artifact's head,
+    // not with whatever the repository happens to be at now.
+    expect(branchManager.revalidate).toHaveBeenCalledWith(
+      expect.anything(),
+      artifact.headCommitOid,
+    );
   });
 
   it("detects head drift introduced during a later phase", async () => {
