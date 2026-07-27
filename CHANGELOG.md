@@ -6,6 +6,8 @@ All notable changes to Claude Architect are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.40.0] - 2026-07-27
+
 ### Added
 
 - `validateDelegationSpec` gives the architect a read-only, side-effect-free
@@ -35,30 +37,34 @@ All notable changes to Claude Architect are recorded here. The format follows
 
 ### Fixed
 
-- Candidate decisions are human-only again after the autonomous policy shipped
-  in 0.39.0. Independent verification proves facts about frozen bytes; it does
-  not supply acceptance authority. The public
-  `decideCandidate` path therefore always requires positive MCP elicitation and
-  never records a clean candidate merely because it has no warnings. Legacy
-  `policy-autonomous` provenance remains readable so an archive written by the
-  0.39.0 policy does not become corrupt or unauditable, but it
-  cannot authorize integration; missing and caller-asserted provenance also
-  fail closed with `accepted-decision-not-human-confirmed`. A later human
-  confirmation no longer reports a false successful write over one of those
-  immutable records: decision retries are idempotent only when the decision,
-  provenance, and candidate binding all match, and otherwise return
-  `decision-conflict`.
+- Decision provenance is now enforced at integration, and decision retries are
+  bound to it. Integration accepts `human-elicitation` and `policy-autonomous`
+  provenance and refuses what the runtime cannot vouch for — `caller-asserted`
+  records, and records predating the field — with
+  `accepted-decision-not-confirmed`. A later confirmation no longer reports a
+  false successful write over an immutable record: retries are idempotent only
+  when the decision, provenance, and candidate binding all match, and otherwise
+  return `decision-conflict`.
+
+  The autonomous decision authority introduced in 0.39.0 is retained. A
+  concurrent change briefly removed it and required `human-elicitation` at
+  integration; that combination made an autonomous acceptance unspendable, which
+  reintroduced the prompt by another route. The authority remains as documented:
+  a candidate that is independently verified, unwarned, and readable is recorded
+  without prompting; everything else still elicits and still fails closed, and
+  `CLAUDE_ARCHITECT_DECISION_AUTHORITY=human` restores confirmation for every
+  decision.
 - The native delegation lane fails closed when its prompt omits the complete
   Delegation Spec JSON. In a live session it received only a spec-file path,
   despite having no filesystem tool, and invented two invalid payloads before
   the architect recovered by inlining the spec. The courier contract now
   forbids either dispatch call on an incomplete handoff, while the architect
   validates and obtains the canonical digest before creating the lane.
-- Security documentation now matches the enforced human-decision boundary:
-  `decideCandidate` requires positive MCP elicitation and records nothing on an
-  unavailable, failed, or unconfirmed prompt. It still documents the real
-  residual boundary accurately: the host is trusted to present elicitation and
-  no cryptographic human identity is established.
+- Security documentation now matches the enforced boundary: which decisions
+  prompt, which are recorded by policy, and which provenance may authorize
+  integration. It still documents the real residual boundary accurately — where
+  elicitation applies the host is trusted to present it faithfully, and no
+  cryptographic human identity is established.
 
 ## [0.39.0] - 2026-07-27
 
