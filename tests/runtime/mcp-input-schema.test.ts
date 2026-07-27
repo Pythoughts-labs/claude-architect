@@ -40,17 +40,21 @@ describe.each([
   it("requires the exact protocol version", () => {
     expect(schema.safeParse(validInput).success).toBe(true);
 
-    for (const input of [
-      { checkoutPath: "/repo", spec: {} },
-      { ...validInput, protocolVersion: "1.0.0" },
-    ]) {
+    // Assert each case names what it actually received. An alternation over
+    // both spellings would pass even if the two branches collapsed into one —
+    // and they are separate branches in the error map, so a regression there
+    // would otherwise be invisible.
+    for (const [input, received] of [
+      [{ checkoutPath: "/repo", spec: {} }, "(missing)"],
+      [{ ...validInput, protocolVersion: "1.0.0" }, "1.0.0"],
+    ] as const) {
       const result = schema.safeParse(input);
       expect(result.success).toBe(false);
       if (result.success) continue;
       const diagnostic = result.error.issues.map(issue => issue.message).join("\n");
-      expect(diagnostic).toContain("protocol version mismatch");
-      expect(diagnostic).toContain(`expected ${PROTOCOL_VERSION}`);
-      expect(diagnostic).toMatch(/received (?:1\.0\.0|\(missing\))/u);
+      expect(diagnostic).toContain(
+        `protocol version mismatch: received ${received}, expected ${PROTOCOL_VERSION}`,
+      );
     }
   });
 

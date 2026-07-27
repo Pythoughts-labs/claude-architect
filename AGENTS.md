@@ -124,12 +124,37 @@ All dependencies track latest, with one deliberate pin. Provenance for future se
   `@typescript/native-preview` line, which is no longer installed); `npx tsc --noEmit`
   is the single type gate. tsconfig pins `types: ["node"]` because the native
   compiler does not auto-discover `@types` packages the way tsc 5.x did.
-- `zod` is pinned to latest **v3** on purpose: `@modelcontextprotocol/sdk` v1.x
-  declares `zod ^3` as a direct dependency, and mixing zod 4 into the tree causes
-  dual-copy `TS2589` type blowups (per the SDK's own troubleshooting docs, verified
-  via Context7 against /modelcontextprotocol/typescript-sdk). Move zod to v4 only
-  together with the SDK v2 upgrade (v2 requires zod >= 4.2; it is still beta as of
-  2026-07-19 — re-check before upgrading).
+- `zod` tracks latest **v4** as of 2026-07-27; the long-standing v3 pin is gone.
+  The original constraint was real: `@modelcontextprotocol/sdk` 1.29.0 and
+  earlier declared `zod ^3`, and mixing zod 4 into that tree causes dual-copy
+  `TS2589` type blowups (per the SDK's own troubleshooting docs, verified via
+  Context7 against /modelcontextprotocol/typescript-sdk). SDK 1.30.0 declares
+  `zod: "^3.25 || ^4.0"`, which removed it. Migration notes for future call
+  sites: `errorMap` is `error` and returns a string rather than an object, and
+  `invalid_literal` no longer exists — the received value arrives as
+  `issue.input` for both the wrong-value and the absent-key case, so branch on
+  that rather than on an issue code.
+- **MCP SDK v2 is a rename, not a major version of this package.** It ships as
+  separate modular packages — `@modelcontextprotocol/server`,
+  `@modelcontextprotocol/client`, `@modelcontextprotocol/core` — at
+  `2.0.0-beta.5`, requiring `zod ^4.2.0`. `@modelcontextprotocol/sdk` itself
+  publishes no `2.x` and never will; its only dist-tag is `latest` on the 1.x
+  line, which remains the production-recommended path. Do not adopt v2 while it
+  is beta.
+
+  A cautionary note, because this cost real time: an earlier revision of this
+  bullet asserted "there is no MCP SDK v2" on the strength of
+  `npm view @modelcontextprotocol/sdk versions` returning zero `2.x`. That
+  command cannot see a v2 published under different package names, so a clean
+  negative from it proved nothing about the broader claim. When checking whether
+  a major version exists, check the package names the project actually
+  publishes under — a scoped-org listing or the repository's releases page —
+  not one package's version list.
+- `@hono/node-server` reaches this tree only through the SDK. SDK 1.29.0 pinned
+  it to `^1.19.9`, which could not reach the `2.0.5` that patches
+  GHSA-frvp-7c67-39w9 — which is why Dependabot's own update job failed rather
+  than proposing a bump. SDK 1.30.0 declares `^1.19.9 || ^2.0.5`. Keep the
+  resolution at >= 2.0.5 (`npm why @hono/node-server`).
 - `vitest` 4.x — the `test(name, fn, { timeout })` options-object third argument was
   removed in v4; use a numeric third argument or options as the second argument.
 - `esbuild` tracks latest; any bump changes `runtime/server.mjs` bytes, so rebuild
