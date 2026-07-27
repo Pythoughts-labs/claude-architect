@@ -45,6 +45,38 @@ describe("Candidate Decision v2", () => {
     expect(validate({ ...validDecision, authority: "autopilot-policy" })).toBe(true);
   });
 
+  // `policy-autonomous` carries the same accept-only constraint as
+  // `autopilot-policy`, and `caller-asserted` carries none -- both were
+  // unexercised, so a schema change to either would have gone unnoticed.
+  it.each(["rejected", "revision-requested"] as const)(
+    "rejects a policy-autonomous %s decision",
+    decision => {
+      expect(loadSchemas().candidateDecision({
+        ...validDecision,
+        decision,
+        authority: "policy-autonomous",
+      })).toBe(false);
+    },
+  );
+
+  it("accepts a policy-autonomous accepted decision", () => {
+    expect(loadSchemas().candidateDecision({
+      ...validDecision,
+      authority: "policy-autonomous",
+    })).toBe(true);
+  });
+
+  it.each(["accepted", "rejected", "revision-requested"] as const)(
+    "accepts a caller-asserted %s decision",
+    decision => {
+      expect(loadSchemas().candidateDecision({
+        ...validDecision,
+        decision,
+        authority: "caller-asserted",
+      })).toBe(true);
+    },
+  );
+
   it.each(["rejected", "revision-requested"])(
     "rejects an autopilot-policy %s decision",
     decision => {

@@ -193,6 +193,13 @@ describe("decideCandidate authority", () => {
     const { decision } = await decideVia(verifiedResult);
     expect(decision).not.toBeNull();
     expect(decision?.authority).toBe("policy-autonomous");
+    // The binding between the decision and the exact reviewed bytes. Without
+    // this, a regression that recorded an unrelated hash -- or none -- would
+    // still satisfy every other assertion in this suite.
+    expect(decision).toMatchObject({
+      candidateManifestHash: candidate.manifestHash,
+      evidenceHash: expect.stringMatching(/^[0-9a-f]{64}$/u),
+    });
   });
 
   it("never records a clean candidate without elicitation under human authority", async () => {

@@ -689,7 +689,9 @@ describe("autopilot adversarial trust boundaries", () => {
     });
   });
 
-  it("rejects trailer/newline commit injection without creating extra headers", () => {
+  // Spec-level rejection only: no commit is created here, so this cannot speak
+  // to what the promoter would write.
+  it("rejects trailer and newline injection in a spec commit message", () => {
     for (const commitMessage of [
       "feat: safe\n\nCo-Authored-By: attacker <attacker@example.invalid>",
       "feat: safe\nInjected: header",
