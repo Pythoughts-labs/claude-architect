@@ -636,8 +636,14 @@ export async function runAttempt(
       }
     }
     if (spec.executionMode === "edit" && deps.producerPreflight !== false) {
+      // A second preflight, not a regression to the first: this one launches the
+      // Producer to probe its environment and can run for minutes, so it needs a
+      // durable status of its own. The detail is what tells the two apart.
       if (!statusContext.pipelineManaged) {
-        await emitStatus("preflight", { producerId: report.producerId });
+        await emitStatus("preflight", {
+          producerId: report.producerId,
+          detail: "probing producer environment",
+        });
       }
       await reportPhase(deps, "probing producer environment");
       const preflight = await (typeof deps.producerPreflight === "function"

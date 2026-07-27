@@ -293,6 +293,7 @@ describe("P0-A end-to-end vertical slice", () => {
       repoRoot,
       runId,
       "accepted",
+      candidate!.manifestHash,
       lifecycleDeps,
     )).resolves.toEqual({
       recorded: true,

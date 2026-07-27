@@ -471,14 +471,18 @@ describe("trusted run status", () => {
     slicedReviewCalls = 0;
     const result = await runAttempt(repo, validSpec(), attemptDependencies("status-attempt"));
     expect(result.status).toBe("verified-candidate");
+    // Two preflights: the run's own, then the Producer environment probe, which
+    // launches the Producer and is distinguished by its detail.
     expect(statuses.map(status => status.phase)).toEqual([
       "preflight",
       "baseline-verify",
+      "preflight",
       "implementing",
       "freezing",
       "verifying",
       "done",
     ]);
+    expect(statuses[2]?.detail).toBe("probing producer environment");
     expect(statuses.every(status => status.runId === "status-attempt")).toBe(true);
   });
 

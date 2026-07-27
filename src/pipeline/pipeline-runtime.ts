@@ -2367,12 +2367,8 @@ async function runPipelineWithLease(
       failure: null,
     };
     await store.writePipelineArtifact("pipeline-result", result);
-    // Terminality is carried by the phase itself. Without this the last status a
-    // finished pipeline recorded was the phase it was in when it ended, so a run
-    // that completed half an hour ago read as one still gating.
-    await emitPipelineStatus(result.status === "failed" ? "failed" : "done", {
-      detail: result.status,
-    });
+    // The terminal done/failed status is written by `runPipeline` once the lease
+    // is released, so it is not repeated here.
     await notePhase(`finished: ${result.status}`);
     authoritySafeToRelease = true;
     return result;
