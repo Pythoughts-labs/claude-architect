@@ -109,14 +109,14 @@ const gitReadOutput = z.object({
   diagnostic: z.string().optional(),
 });
 
+// zod 4 replaced `errorMap` with `error` and dropped `invalid_literal`; the
+// received value now arrives as `issue.input` for both the wrong-value and the
+// absent-key case, so branch on that rather than on an issue code.
 const protocolVersionInput = z.literal(PROTOCOL_VERSION, {
-  errorMap: issue => ({
-    message: "protocol version mismatch: received "
-      + (issue.code === z.ZodIssueCode.invalid_literal && issue.received !== undefined
-        ? String(issue.received)
-        : "(missing)")
-      + `, expected ${PROTOCOL_VERSION}`,
-  }),
+  error: issue =>
+    "protocol version mismatch: received "
+    + (issue.input === undefined ? "(missing)" : String(issue.input))
+    + `, expected ${PROTOCOL_VERSION}`,
 });
 
 export const delegateInputSchema = z.object({
