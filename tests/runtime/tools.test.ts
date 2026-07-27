@@ -1537,7 +1537,6 @@ describe("MCP tool handlers", () => {
       manifestHash: candidate.manifestHash,
       patch: "exact unredacted patch\n",
       changedPaths: candidate.changedPaths,
-      manifestHash: candidate.manifestHash,
       evidence: result.evidence,
       executedVerification: result.executedVerification,
     });

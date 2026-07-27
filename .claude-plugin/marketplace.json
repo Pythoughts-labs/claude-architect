@@ -34,8 +34,8 @@
         "pythinker",
         "advisor",
         "macos-arm64-certified",
-        "linux-pending-p0-b",
-        "windows-pending-p0-b"
+        "linux-tested",
+        "windows-unsupported"
       ]
     }
   ]
