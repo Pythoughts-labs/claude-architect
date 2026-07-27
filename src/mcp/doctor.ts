@@ -542,7 +542,10 @@ async function observedBranchMatches(
     const stateHead = expectedHead(state, registration);
     if (stateHead !== null && head.stdout.trim() !== stateHead) return false;
     const fields = worktrees.stdout.split("\0");
-    const index = fields.indexOf(`worktree ${registration.worktreePath}`);
+    // git reports its own path format here; on Windows that is forward-slashed
+    // while the recorded registration is Node-canonical. Resolve before compare.
+    const index = fields.findIndex(field => field.startsWith("worktree ")
+      && path.resolve(field.slice("worktree ".length)) === registration.worktreePath);
     if (index === -1) return false;
     const next = fields.findIndex((field, fieldIndex) =>
       fieldIndex > index && field.startsWith("worktree "));

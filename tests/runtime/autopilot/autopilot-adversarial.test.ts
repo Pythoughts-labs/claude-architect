@@ -742,7 +742,10 @@ describe("autopilot adversarial trust boundaries", () => {
     expect(durable.cleanup).toBeNull();
     await expect(harness.branchManager.load(harness.workflowId)).resolves.not.toBeNull();
     expect(shippingMutations(harness.hostingCalls)).toEqual([]);
-  }, 120_000);
+    // Unlike the sibling cancellation tests, this one aborts while the Producer
+    // is mid-flight, so it also pays for terminating a live process tree —
+    // markedly slower on Windows, where 120s was not enough.
+  }, 240_000);
 
   it("halts durably when cancellation fires after promotion and before push", async () => {
     const abort = new AbortController();
