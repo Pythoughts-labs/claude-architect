@@ -20,6 +20,13 @@ All notable changes to Claude Architect are recorded here. The format follows
   it. Acceptance is still theirs to give: the gate advises, it does not veto.
 - A run whose archive cannot be read reports that as a warning at decision time
   instead of presenting an unknown candidate as an unflagged one.
+- `delegatePipeline` bounds its ignored-path evidence. The 50-entry cap existed
+  and `delegate` applied it, but the helper reads `value.evidence` while a
+  pipeline's evidence sits at `result.attempt.evidence`, so this path returned
+  the list untouched. Measured on a real run: 2026 `node_modules` paths,
+  161,874 bytes — 68% of a 238 KB response, against 26,683 bytes for the actual
+  candidate patch. The guard was written, tested on one path, and inert on the
+  other.
 
 ## [0.36.0] - 2026-07-27
 

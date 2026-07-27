@@ -32343,7 +32343,10 @@ async function handleDelegatePipeline(checkoutPath, input, deps = {}) {
         validation.spec,
         pipelineDependencies
       );
-      return { ok: true, result: pipelineResult };
+      return {
+        ok: true,
+        result: { ...pipelineResult, attempt: boundIgnoredPathEvidence(pipelineResult.attempt) }
+      };
     });
   } catch (error2) {
     if (error2 instanceof NestedDelegationError) {

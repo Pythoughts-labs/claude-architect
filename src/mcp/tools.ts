@@ -465,7 +465,12 @@ export async function handleDelegatePipeline(
         validation.spec,
         pipelineDependencies,
       );
-      return { ok: true, result: pipelineResult };
+      // The bound reads `value.evidence`; a pipeline's lives one level deeper,
+      // so this path returned a repository-sized ignored-path list untouched.
+      return {
+        ok: true,
+        result: { ...pipelineResult, attempt: boundIgnoredPathEvidence(pipelineResult.attempt) },
+      };
     });
   } catch (error) {
     if (error instanceof NestedDelegationError) {

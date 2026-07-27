@@ -483,6 +483,44 @@ describe("MCP tool handlers", () => {
     expect(bigResult.evidence.ignoredPaths.length).toBe(500); // archived copy untouched
   });
 
+  it("bounds ignored-path evidence on the pipeline result too", async () => {
+    // The cap is applied to `value.evidence`, but a pipeline's evidence lives at
+    // `result.attempt.evidence`, so this path returned it unbounded. Measured on
+    // a real run: 2026 entries, 162 KB — 68% of a 238 KB response, all of it
+    // node_modules paths.
+    const deps = dependencies();
+    const bigAttempt = {
+      ...result,
+      evidence: {
+        ...result.evidence,
+        ignoredPaths: Array.from({ length: 500 }, (_, i) => `node_modules/pkg-${i}`),
+      },
+    };
+    deps.runPipeline = async () => ({
+      runId: "run-tools",
+      status: "decision-ready",
+      attempt: bigAttempt,
+      increments: [],
+      slices: [],
+      haltedSliceIndex: null,
+      rounds: [],
+      verification: null,
+      gate: { decisionReady: true, requiresHumanDecision: false, reasons: [] },
+      finalCandidateCommit: "c".repeat(40),
+      failure: null,
+    }) as never;
+
+    const output = await handleDelegatePipeline("/repo", validSpec, deps);
+
+    expect(output.ok).toBe(true);
+    const evidence = (output as {
+      result: { attempt: { evidence: Record<string, unknown> } };
+    }).result.attempt.evidence;
+    expect((evidence.ignoredPaths as string[]).length).toBe(50);
+    expect(evidence.ignoredPathsOmitted).toBe(450);
+    expect(bigAttempt.evidence.ignoredPaths.length).toBe(500); // archived copy untouched
+  });
+
   it("forwards host progress reporting into the attempt dependencies", async () => {
     const phases: string[] = [];
     const deps = dependencies();
