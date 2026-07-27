@@ -13,6 +13,8 @@ export interface RolePackage {
   testEvidence: string;
   progress?: string;
   findings?: Finding[];
+  /** Why the previous reply was rejected, when re-asking a role for output. */
+  outputRepair?: string;
 }
 
 function readSchemaText(name: string): string {
@@ -33,10 +35,25 @@ function readSchemaText(name: string): string {
   throw lastError;
 }
 
-const REVIEW_SCHEMA = readSchemaText("review-report.v1.json");
-const INCREMENT_SCHEMA = readSchemaText("increment-report.v1.json");
-const FIX_SCHEMA = readSchemaText("fix-report.v1.json");
-const VERIFY_SCHEMA = readSchemaText("verification-report.v1.json");
+/**
+ * Strip schema-level metadata before embedding a schema in a prompt.
+ *
+ * `$schema` is the first key in every schema file, and every report root is
+ * `additionalProperties: false`. A Producer asked to match the schema "exactly"
+ * copies that key into its reply, which validation then rejects — the runtime
+ * was inducing the invalid output it went on to punish.
+ */
+function promptSchemaText(name: string): string {
+  const parsed: unknown = JSON.parse(readSchemaText(name));
+  if (typeof parsed !== "object" || parsed === null) return readSchemaText(name);
+  const { $schema: _schema, $id: _id, ...rest } = parsed as Record<string, unknown>;
+  return JSON.stringify(rest, null, 2);
+}
+
+const REVIEW_SCHEMA = promptSchemaText("review-report.v1.json");
+const INCREMENT_SCHEMA = promptSchemaText("increment-report.v1.json");
+const FIX_SCHEMA = promptSchemaText("fix-report.v1.json");
+const VERIFY_SCHEMA = promptSchemaText("verification-report.v1.json");
 
 export const UNTRUSTED_SECTION_CHAR_CAP = 200_000;
 
@@ -131,7 +148,26 @@ function reviewerPrompt(rubric: string, pkg: RolePackage): string {
   ].join("\n\n");
 }
 
+/**
+ * Re-asking a role for output used to re-send the identical prompt, so a
+ * Producer whose reply failed validation had no way to know what to change and
+ * reproduced the same defect. The rejection detail is appended here — as
+ * untrusted data, since it echoes Producer-authored content back into a prompt.
+ */
 export function renderRolePrompt(role: PipelineRole, pkg: RolePackage): string {
+  const base = renderBaseRolePrompt(role, pkg);
+  if (pkg.outputRepair === undefined) return base;
+  return [
+    base,
+    "## Your previous reply was rejected",
+    "It did not satisfy the schema above. The validation errors follow. Reply again with"
+    + " ONLY the corrected fenced ```json block; do not include a `$schema` key or any"
+    + " property the schema does not define.",
+    untrustedBlock("validation-errors", pkg.outputRepair),
+  ].join("\n\n");
+}
+
+function renderBaseRolePrompt(role: PipelineRole, pkg: RolePackage): string {
   switch (role) {
     case "reviewer-correctness":
       return reviewerPrompt(CORRECTNESS_RUBRIC, pkg);

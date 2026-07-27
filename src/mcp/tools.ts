@@ -544,6 +544,40 @@ export async function handleReviewCandidate(
   }
 }
 
+/**
+ * Reads the pipeline gate's verdict for a run so the human confirming a
+ * decision sees it. Advisory and read-only; the authoritative checks run under
+ * the repository lock in `handleDecideCandidate`.
+ *
+ * A read failure is reported, never swallowed. Returning "no warnings" because
+ * the archive could not be read would present an unknown candidate as a clean
+ * one at exactly the moment that matters.
+ */
+export async function readDecisionAdvisory(
+  runId: string,
+  deps: ToolDependencies = {},
+): Promise<string[]> {
+  let run: ArchivedRun;
+  try { run = await loadArchivedRun(runId, deps); }
+  catch (error) {
+    return [`the pipeline gate outcome for this run could not be read: ${
+      redact(error instanceof Error ? error.message : String(error))}`];
+  }
+  const refused = run.result.evidence.pipelineGateRefused;
+  const incomplete = run.result.evidence.pipelineReviewIncomplete;
+  const warnings: string[] = [];
+  if (isRecord(refused) && Array.isArray(refused.reasons)) {
+    warnings.push(
+      `the pipeline gate did NOT clear this candidate: ${
+        refused.reasons.filter(r => typeof r === "string").join("; ")}`,
+    );
+  }
+  if (isRecord(incomplete) && typeof incomplete.reason === "string") {
+    warnings.push(`the pipeline could not complete its own review: ${incomplete.reason}`);
+  }
+  return warnings;
+}
+
 export async function handleDecideCandidate(
   checkoutPath: string,
   runId: string,

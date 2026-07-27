@@ -14,6 +14,7 @@ import {
   handleDecideCandidate,
   handleDelegatePipeline,
   handleIntegrateCandidate,
+  readDecisionAdvisory,
   type ToolDependencies,
 } from "../../src/mcp/tools.js";
 import { runPipeline } from "../../src/pipeline/pipeline-runtime.js";
@@ -402,5 +403,35 @@ describe.runIf(process.platform === "darwin")("end-to-end review pipeline", () =
     if (!result.ok) throw new Error("pipeline delegation unexpectedly failed");
     expect(result.result.rounds).toHaveLength(2);
     expect(adapter.calls).toEqual({ implement: 2, correctness: 2, systems: 2, fixer: 2 });
+  });
+
+  it("carries a refusing gate into the archived attempt the accept path reads", async () => {
+    const repo = await initRepo();
+    const runId = "e2e-pipeline-gate-refusal-durable";
+    const deps = dependencies(new FakeAdapter("blocked"), runId);
+
+    const result = await handleDelegatePipeline(repo, validSpec(), deps);
+    expect(result).toMatchObject({ ok: true, result: { status: "human-decision-required" } });
+    if (!result.ok) throw new Error("pipeline delegation unexpectedly failed");
+    expect(result.result.gate.decisionReady).toBe(false);
+
+    // The gate's refusal used to live only in the pipeline-result artifact. The
+    // accept path loads the archived attempt, so a candidate the gate rejected
+    // was indistinguishable there from one it cleared.
+    const archived = await new ArtifactStore(runId).readResult(runId);
+    expect(archived?.evidence.pipelineGateRefused).toMatchObject({
+      reasons: expect.arrayContaining([expect.any(String)]),
+    });
+
+    // And it has to reach the text the human reads before spending a decision.
+    await expect(readDecisionAdvisory(runId, deps)).resolves.toEqual([
+      expect.stringContaining("the pipeline gate did NOT clear this candidate"),
+    ]);
+  });
+
+  it("warns rather than reporting a clean candidate when the archive cannot be read", async () => {
+    await expect(readDecisionAdvisory("e2e-pipeline-no-such-run", {})).resolves.toEqual([
+      expect.stringContaining("could not be read"),
+    ]);
   });
 });

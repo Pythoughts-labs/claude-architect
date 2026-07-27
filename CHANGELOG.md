@@ -6,6 +6,21 @@ All notable changes to Claude Architect are recorded here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- A pipeline whose gate refused the candidate no longer archives an attempt that
+  looks clean. The gate's verdict lived only in the `pipeline-result` artifact,
+  but the accept path reads the archived *attempt* — which still said
+  `verified-candidate` with no failure — so "blocking findings survived a fix
+  round" or "clean-room verification failed" was invisible at decision time.
+  `archiveSlicedFailure` already recorded incompleteness in attempt evidence for
+  exactly this reason; the completed-but-refusing path did not. The refusal is
+  now written to `pipelineGateRefused`, surfaced by `reviewCandidate`, and shown
+  in the elicitation prompt, so a human cannot spend a decision without seeing
+  it. Acceptance is still theirs to give: the gate advises, it does not veto.
+- A run whose archive cannot be read reports that as a warning at decision time
+  instead of presenting an unknown candidate as an unflagged one.
+
 ## [0.36.0] - 2026-07-27
 
 ### Breaking

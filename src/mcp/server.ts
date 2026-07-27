@@ -16,6 +16,7 @@ import {
   handleDelegatePipeline,
   handleIntegrateCandidate,
   handleReviewCandidate,
+  readDecisionAdvisory,
   type ToolDependencies,
 } from "./tools.js";
 import { recoverStaleRuns } from "../runtime/recovery-manager.js";
@@ -162,6 +163,7 @@ export async function confirmWithHuman(
   server: Pick<McpServer, "server">,
   runId: string,
   decision: "accepted" | "rejected" | "revision-requested",
+  warnings: readonly string[] = [],
 ): Promise<{ ok: true } | { ok: false; error: { ok: false; error: string; diagnostic: string } }> {
   const capabilities = server.server.getClientCapabilities();
   if (capabilities?.elicitation === undefined) {
@@ -179,8 +181,12 @@ export async function confirmWithHuman(
   let response;
   try {
     response = await server.server.elicitInput({
+      // Warnings go in the message, not only in a tool result: this text is the
+      // last thing a human sees before the decision is spent, and a gate that
+      // refused the candidate has to be visible right here.
       message: `Claude Architect: record "${decision}" for candidate run ${runId}? `
-        + "Only you can decide this; review the candidate patch and verification evidence first.",
+        + "Only you can decide this; review the candidate patch and verification evidence first."
+        + (warnings.length === 0 ? "" : `\n\nWARNING — ${warnings.join("\nWARNING — ")}`),
       requestedSchema: {
         type: "object",
         properties: {
@@ -368,7 +374,10 @@ export async function start(dependencies: ServerDependencies = {}): Promise<void
       annotations: { destructiveHint: true, idempotentHint: false, readOnlyHint: false },
     },
     async ({ checkoutPath, runId, decision }) => {
-      const confirmed = await confirmWithHuman(server, runId, decision);
+      const confirmed = await confirmWithHuman(
+        server, runId, decision,
+        await readDecisionAdvisory(runId, dependencies),
+      );
       if (!confirmed.ok) return toolOutput(confirmed.error);
       return toolOutput(await handleDecideCandidate(
         checkoutPath,

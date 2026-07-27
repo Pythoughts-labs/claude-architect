@@ -328,10 +328,12 @@ async function runStructuredRole<T>(args: {
     initial.result.rawOutput,
     args.schema,
     async validationErrors => {
-      void validationErrors;
+      // Re-running with the identical arguments is a blind retry: the Producer
+      // cannot see why its reply was rejected, so it reproduces the defect and
+      // the round is spent for nothing. Carry the errors into the retry.
       const repair = await runArchivedRole(
         runner,
-        callArgs,
+        { ...callArgs, pkg: { ...callArgs.pkg, outputRepair: validationErrors } },
         args.store,
         `${args.logName}-repair`,
       );
@@ -2179,6 +2181,35 @@ async function runPipelineWithLease(
       }))),
       ...(incrementOutcome === undefined ? {} : { incrementOutcome }),
     });
+    // A refusing gate lived only in the pipeline-result artifact, which the
+    // accept path never reads: it loads the archived attempt, sees
+    // verified-candidate with no failure, and offers the candidate as clean.
+    // `archiveSlicedFailure` already records incompleteness in evidence for
+    // exactly this reason; a gate that completed and said no needs the same
+    // durability, or "blocking findings survived" is invisible at decision time.
+    if (!gate.decisionReady) {
+      const manifestForArchive = await store.readManifest(attempt.runId);
+      if (manifestForArchive === null) {
+        throw new RuntimeError(
+          "pipeline gate refused the candidate and the refusal could not be archived",
+          { reasons: gate.reasons },
+        );
+      }
+      finalAttempt = {
+        ...finalAttempt,
+        evidence: {
+          ...finalAttempt.evidence,
+          pipelineGateRefused: {
+            reasons: gate.reasons,
+            requiresHumanDecision: gate.requiresHumanDecision,
+          },
+        },
+      };
+      await store.promoteTerminalArtifacts({
+        result: finalAttempt,
+        manifest: manifestForArchive,
+      });
+    }
     const result: PipelineResult = {
       runId: attempt.runId,
       status: gate.decisionReady ? "decision-ready" : "human-decision-required",
