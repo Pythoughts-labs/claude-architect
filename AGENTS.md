@@ -124,12 +124,25 @@ All dependencies track latest, with one deliberate pin. Provenance for future se
   `@typescript/native-preview` line, which is no longer installed); `npx tsc --noEmit`
   is the single type gate. tsconfig pins `types: ["node"]` because the native
   compiler does not auto-discover `@types` packages the way tsc 5.x did.
-- `zod` is pinned to latest **v3** on purpose: `@modelcontextprotocol/sdk` v1.x
-  declares `zod ^3` as a direct dependency, and mixing zod 4 into the tree causes
-  dual-copy `TS2589` type blowups (per the SDK's own troubleshooting docs, verified
-  via Context7 against /modelcontextprotocol/typescript-sdk). Move zod to v4 only
-  together with the SDK v2 upgrade (v2 requires zod >= 4.2; it is still beta as of
-  2026-07-19 — re-check before upgrading).
+- `zod` is pinned to latest **v3**, and the reason narrowed on 2026-07-27. The
+  original constraint was real: `@modelcontextprotocol/sdk` 1.29.0 and earlier
+  declared `zod ^3`, and mixing zod 4 into that tree causes dual-copy `TS2589`
+  type blowups (per the SDK's own troubleshooting docs, verified via Context7
+  against /modelcontextprotocol/typescript-sdk). **SDK 1.30.0 declares
+  `zod: "^3.25 || ^4.0"`, so that blocker is gone.** The pin now stands only
+  until zod 4 is evaluated on its own merits; it is no longer waiting on the
+  SDK.
+- **There is no MCP SDK v2.** A previous version of this policy said zod 4 must
+  wait for "the SDK v2 upgrade (v2 requires zod >= 4.2; still beta)". That was
+  wrong against the registry: `@modelcontextprotocol/sdk` has 79 published
+  versions, zero `2.x`, and a single dist-tag `latest`. Do not plan around a v2.
+  Verify a claimed version with `npm view <pkg> versions` before it becomes a
+  blocker in a plan.
+- `@hono/node-server` reaches this tree only through the SDK. SDK 1.29.0 pinned
+  it to `^1.19.9`, which could not reach the `2.0.5` that patches
+  GHSA-frvp-7c67-39w9 — which is why Dependabot's own update job failed rather
+  than proposing a bump. SDK 1.30.0 declares `^1.19.9 || ^2.0.5`. Keep the
+  resolution at >= 2.0.5 (`npm why @hono/node-server`).
 - `vitest` 4.x — the `test(name, fn, { timeout })` options-object third argument was
   removed in v4; use a numeric third argument or options as the second argument.
 - `esbuild` tracks latest; any bump changes `runtime/server.mjs` bytes, so rebuild
