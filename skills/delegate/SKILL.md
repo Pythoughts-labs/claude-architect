@@ -109,14 +109,16 @@ The `delegate` and `delegatePipeline` MCP calls are synchronous. Keep each call 
 5. When the result is `verified-candidate`, call `reviewCandidate` with `checkoutPath` and the run id. Read the exact unredacted patch, changed-path manifest, and verification evidence; compare them with every success criterion and repository convention.
 6. Present the review outcome. Call `decideCandidate` with `checkoutPath`, the run id, and `accepted`, `rejected`, or `revision-requested`. Rejection discards the candidate anchor; a revision requires a new spec/attempt rather than editing frozen bytes.
 
-   **The runtime confirms the decision with the human itself.** `decideCandidate` raises an MCP elicitation prompt and records nothing unless a person confirms; `elicitation-unavailable`, `decision-not-confirmed`, and `elicitation-failed` all mean no decision was written. This applies to rejection and revision as well as acceptance — an agent that can discard a candidate can bury work. Do not treat a refused confirmation as a transient error to retry; report it and stop. The recorded decision carries `decidedBy` and the candidate `manifestHash` it binds to, and integration refuses an acceptance that names a different artifact.
+   **The runtime decides whether a person is asked, not you.** Under the default decision authority, an independently verified candidate with no advisory warnings is recorded without prompting and carries `decidedBy: "policy-autonomous"`. Every other case — unverified, gate-refused, review-incomplete, or an unreadable archive — raises an MCP elicitation prompt and records nothing unless a person confirms; `elicitation-unavailable`, `decision-not-confirmed`, and `elicitation-failed` all mean no decision was written. Do not treat a refused confirmation as a transient error to retry; report it and stop. The recorded decision carries `decidedBy` and the candidate `manifestHash` it binds to, and integration refuses an acceptance that names a different artifact.
 7. Only after an accepted decision, call `integrateCandidate` with `checkoutPath`, the run id, and the exact candidate `manifestHash` as `expectedArtifactHash`. Report `applied`, `conflicted`, or `aborted` truthfully. Integration stages the reviewed tree but does not commit it.
+
+**Run the delegation to completion without pausing to ask.** A delegation that stops mid-flight to request permission is not delegation. Once the user has asked for the work, carry it through review, decision, and integration in one go, then report what landed. Do not ask the user to confirm a step the runtime already gates; do not stop after `reviewCandidate` to ask whether to proceed. Stop and report only when the runtime itself refuses — a failed verification, a refused gate, an elicitation the client cannot satisfy, or an integration that reports `conflicted` or `aborted`. Those are outcomes to surface, not permissions to request.
 
 Never accept a Producer self-report as evidence, bypass `reviewCandidate`, call integration before an accepted decision, or substitute a different artifact hash.
 
 ## Lanes as native subagents
 
-For visibility, dispatch delegation lanes through the host's `Agent` tool using the plugin's `delegation-lane` agent; the host then renders each lane as a native subagent row (spinner, stats, completion notice). This is a dispatch surface only — spec construction, `reviewCandidate`, the human decision, and `integrateCandidate` stay in this session exactly as above.
+For visibility, dispatch delegation lanes through the host's `Agent` tool using the plugin's `delegation-lane` agent; the host then renders each lane as a native subagent row (spinner, stats, completion notice). This is a dispatch surface only — spec construction, `reviewCandidate`, the decision, and `integrateCandidate` stay in this session exactly as above.
 
 Before dispatch, compute `specSha256` over the exact spec JSON and assign a short `laneId`. Each lane prompt contains only: `laneId`, `specSha256`, `checkoutPath`, `protocolVersion`, `pipeline` true/false, and the complete Delegation Spec JSON. Nothing else.
 
@@ -133,7 +135,7 @@ Single-lane delegation may still use the direct foreground MCP call; prefer the 
 
 ## Presenting delegations as subagents
 
-When a lane runs through the `delegation-lane` agent, the host renders dispatch and live status natively; the cards below apply only to direct (non-subagent) MCP calls. This is presentation only: it renders the runtime's durable evidence and never replaces spec construction, `reviewCandidate`, the human decision, or `integrateCandidate`. A rendered card is not evidence; a Producer self-report is not evidence; acceptance stays human-only.
+When a lane runs through the `delegation-lane` agent, the host renders dispatch and live status natively; the cards below apply only to direct (non-subagent) MCP calls. This is presentation only: it renders the runtime's durable evidence and never replaces spec construction, `reviewCandidate`, the recorded decision, or `integrateCandidate`. A rendered card is not evidence; a Producer self-report is not evidence; acceptance stays gated on independent verification and its provenance is always recorded.
 
 **Dispatch card** — emit when you call `delegate`/`delegatePipeline`, so the run reads like an `Agent` launch:
 

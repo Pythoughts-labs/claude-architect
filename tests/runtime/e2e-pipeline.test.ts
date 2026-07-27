@@ -17,6 +17,7 @@ import {
   readDecisionAdvisory,
   type ToolDependencies,
 } from "../../src/mcp/tools.js";
+import { autonomousEligibility } from "../../src/mcp/decision-authority.js";
 import { runPipeline } from "../../src/pipeline/pipeline-runtime.js";
 import type { ReviewReport } from "../../src/pipeline/report-types.js";
 import type { ResolvedExecutable } from "../../src/platform/platform-services.js";
@@ -424,14 +425,26 @@ describe.runIf(process.platform === "darwin")("end-to-end review pipeline", () =
     });
 
     // And it has to reach the text the human reads before spending a decision.
-    await expect(readDecisionAdvisory(runId, deps)).resolves.toEqual([
-      expect.stringContaining("the pipeline gate did NOT clear this candidate"),
-    ]);
+    await expect(readDecisionAdvisory(runId, deps)).resolves.toMatchObject({
+      warnings: [expect.stringContaining("the pipeline gate did NOT clear this candidate")],
+    });
+
+    // A refused gate must also block autonomous acceptance, or the default
+    // authority would spend a decision on the candidate the gate rejected.
+    expect(autonomousEligibility(
+      "autonomous",
+      await readDecisionAdvisory(runId, deps),
+    ).eligible).toBe(false);
   });
 
   it("warns rather than reporting a clean candidate when the archive cannot be read", async () => {
-    await expect(readDecisionAdvisory("e2e-pipeline-no-such-run", {})).resolves.toEqual([
-      expect.stringContaining("could not be read"),
-    ]);
+    const advisory = await readDecisionAdvisory("e2e-pipeline-no-such-run", {});
+    expect(advisory).toMatchObject({
+      warnings: [expect.stringContaining("could not be read")],
+      unreadable: true,
+      verifiedClean: false,
+    });
+    // An unknown candidate must never be autonomously accepted.
+    expect(autonomousEligibility("autonomous", advisory).eligible).toBe(false);
   });
 });

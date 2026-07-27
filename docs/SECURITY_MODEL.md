@@ -32,9 +32,15 @@ Outside tests, state resolves only from `$CLAUDE_PLUGIN_DATA`. Runs are archived
 
 Pipeline roles are separate one-shot Producer invocations. Reviewer prompts explicitly treat diff and evidence blocks as untrusted. Correctness reviewers, systems reviewers, and the final verifier are configured read-only with no allowed writes and all paths forbidden; the Codex adapter requests its native read-only sandbox. The fixer is the only pipeline role permitted to edit, using the original policy. “Fresh context” means a new invocation with a role-specific prompt; it does not guarantee provider-side statelessness.
 
-## Human decision authentication
+## Decision authority and authentication
 
-`decideCandidate` is an MCP tool available to the controlling Claude session. The runtime records a decision and refuses acceptance unless the result is a verified candidate. It does not implement a separate user login, signature, hardware confirmation, or cryptographic identity proof. Therefore “human-only” is a workflow and UI trust assumption: Claude must present evidence and act on the human's instruction. Anyone able to control the Claude session or call its MCP tools can record a decision.
+`decideCandidate` is an MCP tool available to the controlling Claude session. The runtime records a decision and refuses acceptance unless the result is a verified candidate.
+
+Whether a person is prompted is governed by `CLAUDE_ARCHITECT_DECISION_AUTHORITY`. Unset or `autonomous` (the shipped default) records a decision without prompting for an independently verified candidate with no failure, no advisory warnings, and a readable archive; every other case raises MCP elicitation and fails closed without it. `human` requires elicitation for every decision. An unrecognized value fails closed to `human` with a warning, so a typo cannot silently select the permissive mode.
+
+Provenance is always recorded as `decidedBy`: `human-elicitation`, `policy-autonomous`, or `caller-asserted`. These are distinct on purpose — auditing which candidates went in without a person must not require inferring it.
+
+Even under `human`, this is a workflow and UI trust assumption rather than an authentication mechanism: there is no separate user login, signature, hardware confirmation, or cryptographic identity proof. Anyone able to control the Claude session or call its MCP tools can record a decision, and under the default authority a verified candidate needs no prompt at all. The load-bearing controls are elsewhere — independent verification gates what may be accepted, and integration refuses a moved `HEAD`, a dirty tree, or a hash that does not match the reviewed artifact.
 
 ## Atomic candidate integration
 

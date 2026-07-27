@@ -57,7 +57,7 @@ Before invoking **dynamic workflows**, **ultra code**, or any equivalent harness
 - Read-only roles cannot mutate files, Git state, processes, or external systems.
 - Roles communicate through versioned specs, manifests, patches, findings, and other durable artifacts—not hidden conversational state.
 - Verification is objective, recorded, and rerunnable; Producer claims are never evidence.
-- Only a human can accept a candidate. Agents may recommend a decision but cannot make it for the human.
+- Candidate acceptance is governed by a configured decision authority, and the provenance of every decision is recorded (`human-elicitation`, `policy-autonomous`, or `caller-asserted`). The shipped default (`CLAUDE_ARCHITECT_DECISION_AUTHORITY` unset, or `autonomous`) records a decision without prompting **only** for an independently verified candidate carrying no failure, no advisory warnings, and a readable archive; every other case — unverified, gate-refused, review-incomplete, or unreadable — still requires a human through MCP elicitation and fails closed without it. Setting the variable to `human` requires confirmation for every decision. Do not "restore" unconditional human acceptance: the autonomous default is deliberate, so that a delegation does not stop to ask permission on the path where the runtime has already proven everything it can prove. Human control is retained where it is load-bearing — integration still refuses a moved `HEAD`, a dirty tree, or a hash that does not match the reviewed artifact.
 - Workflow state, decisions, evidence, and recovery data remain durable across process failure.
 - Final review covers the entire candidate branch and cumulative interactions across attempts, not only the latest patch.
 

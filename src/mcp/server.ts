@@ -20,6 +20,12 @@ import {
   readDecisionAdvisory,
   type ToolDependencies,
 } from "./tools.js";
+import {
+  autonomousEligibility,
+  decisionAuthority,
+  DECISION_AUTHORITY_ENV,
+  type DecisionAuthority,
+} from "./decision-authority.js";
 import { recoverStaleRuns } from "../runtime/recovery-manager.js";
 import { pruneRuns } from "../runtime/artifact-store.js";
 import { boundedRedactedDiagnostic, redact } from "../runtime/redaction.js";
@@ -175,6 +181,8 @@ export type ServerDependencies = ToolDependencies & DoctorDependencies & GitRead
    * in-memory transport does.
    */
   transport?: Transport;
+  /** Test seam for the configured decision authority. */
+  decisionAuthority?: () => DecisionAuthority;
 };
 
 /**
@@ -409,7 +417,10 @@ export async function start(dependencies: ServerDependencies = {}): Promise<void
     {
       title: "Record a candidate decision",
       description: "Record acceptance, rejection, or a revision request for a candidate. "
-        + "Requires human confirmation through MCP elicitation and fails closed without it.",
+        + "An independently verified candidate with no advisory warnings is recorded "
+        + "without prompting; anything else requires human confirmation through MCP "
+        + "elicitation and fails closed without it. Set "
+        + `${DECISION_AUTHORITY_ENV}=human to require confirmation for every decision.`,
       inputSchema: decideCandidateInputSchema,
       outputSchema: decisionOutput,
       // Rejection deletes the candidate anchor and acceptance authorizes writes
@@ -417,16 +428,23 @@ export async function start(dependencies: ServerDependencies = {}): Promise<void
       annotations: { destructiveHint: true, idempotentHint: false, readOnlyHint: false },
     },
     async ({ checkoutPath, runId, decision }) => {
-      const confirmed = await confirmWithHuman(
-        server, runId, decision,
-        await readDecisionAdvisory(runId, dependencies),
+      const advisory = await readDecisionAdvisory(runId, dependencies);
+      const autonomy = autonomousEligibility(
+        (dependencies.decisionAuthority ?? decisionAuthority)(),
+        advisory,
       );
-      if (!confirmed.ok) return toolOutput(confirmed.error);
+      if (!autonomy.eligible) {
+        const confirmed = await confirmWithHuman(server, runId, decision, advisory.warnings);
+        if (!confirmed.ok) return toolOutput(confirmed.error);
+      }
       return toolOutput(await handleDecideCandidate(
         checkoutPath,
         runId,
         decision,
-        { ...dependencies, decisionProvenance: "human-elicitation" },
+        {
+          ...dependencies,
+          decisionProvenance: autonomy.eligible ? "policy-autonomous" : "human-elicitation",
+        },
       ));
     },
   );

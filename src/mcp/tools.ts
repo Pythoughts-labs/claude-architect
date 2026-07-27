@@ -643,15 +643,38 @@ export async function handleReviewCandidate(
  * the archive could not be read would present an unknown candidate as a clean
  * one at exactly the moment that matters.
  */
+export interface DecisionAdvisory {
+  /** Human-readable cautions to show whoever confirms the decision. */
+  warnings: string[];
+  /**
+   * The run is an independently verified candidate carrying no failure. This is
+   * a positive condition, deliberately not "warnings.length === 0": a plain
+   * `delegate` run has neither pipeline-gate evidence nor review evidence, so it
+   * produces zero warnings whether or not it verified. Autonomy must turn on
+   * what the run proved, never on the absence of a pipeline's paperwork.
+   */
+  verifiedClean: boolean;
+  /**
+   * The archive could not be read, so nothing about this candidate is known.
+   * Distinct from "verified false" — the difference decides whether autonomous
+   * acceptance may proceed or must refuse.
+   */
+  unreadable: boolean;
+}
+
 export async function readDecisionAdvisory(
   runId: string,
   deps: ToolDependencies = {},
-): Promise<string[]> {
+): Promise<DecisionAdvisory> {
   let run: ArchivedRun;
   try { run = await loadArchivedRun(runId, deps); }
   catch (error) {
-    return [`the pipeline gate outcome for this run could not be read: ${
-      redact(error instanceof Error ? error.message : String(error))}`];
+    return {
+      warnings: [`the pipeline gate outcome for this run could not be read: ${
+        redact(error instanceof Error ? error.message : String(error))}`],
+      verifiedClean: false,
+      unreadable: true,
+    };
   }
   const refused = run.result.evidence.pipelineGateRefused;
   const incomplete = run.result.evidence.pipelineReviewIncomplete;
@@ -665,7 +688,11 @@ export async function readDecisionAdvisory(
   if (isRecord(incomplete) && typeof incomplete.reason === "string") {
     warnings.push(`the pipeline could not complete its own review: ${incomplete.reason}`);
   }
-  return warnings;
+  return {
+    warnings,
+    verifiedClean: run.result.status === "verified-candidate" && run.result.failure === null,
+    unreadable: false,
+  };
 }
 
 export async function handleDecideCandidate(

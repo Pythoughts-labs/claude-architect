@@ -72,7 +72,16 @@ export type RunDecisionValue = "accepted" | "rejected" | "revision-requested";
  * field existed, a decision record was `{decision, recordedAt}` and an agent's
  * acceptance was indistinguishable from a person's, even after the fact.
  */
-export type DecisionProvenance = "human-elicitation" | "caller-asserted";
+/**
+ * `policy-autonomous` means no person was asked, deliberately: the configured
+ * decision authority is autonomous and the candidate met every objective
+ * condition for it (independently verified, no advisory warnings). It is a
+ * distinct value from `caller-asserted` on purpose — the latter means the
+ * runtime does not know how the decision was reached, while this one means the
+ * runtime knows exactly how, and it was a policy rather than a human. Auditing
+ * "which candidates went in without a person" must not require inferring it.
+ */
+export type DecisionProvenance = "human-elicitation" | "caller-asserted" | "policy-autonomous";
 
 export interface RunDecisionRecord {
   decision: RunDecisionValue;
@@ -875,7 +884,8 @@ export class ArtifactStore {
     if (!(["accepted", "rejected", "revision-requested"] as const).includes(record.decision)
       || !Number.isFinite(Date.parse(record.recordedAt))
       || (record.decidedBy !== undefined
-        && !(["human-elicitation", "caller-asserted"] as const).includes(record.decidedBy))
+        && !(["human-elicitation", "caller-asserted", "policy-autonomous"] as const)
+          .includes(record.decidedBy))
       || (record.candidateManifestHash !== undefined
         && record.candidateManifestHash !== null
         && !/^[0-9a-f]{64}$/u.test(record.candidateManifestHash))) {

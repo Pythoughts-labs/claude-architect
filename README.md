@@ -84,7 +84,9 @@ Dispatch a delegation through the `delegation-lane` agent to watch it as a nativ
 
 - The lane agent is a courier: its only tools are `delegate` and `delegatePipeline`. It cannot read the repository, run commands, review, decide, or integrate.
 - Lanes against independent repositories run genuinely in parallel. Lanes against the same repository are serialized by the runtime's repository lock — they surface as subagents for visibility, but execute one at a time.
-- The lane's JSON report is used only to correlate (`laneId`, `specSha256`, `runId`); all reviewable evidence comes from `reviewCandidate`, and every acceptance stays human-only. At most one accepted candidate per clean checkout.
+- The lane's JSON report is used only to correlate (`laneId`, `specSha256`, `runId`); all reviewable evidence comes from `reviewCandidate`, and every acceptance is gated on independent verification with its provenance recorded. At most one accepted candidate per clean checkout.
+
+By default a delegation runs to completion without prompting: an independently verified candidate carrying no advisory warnings is accepted and recorded as `policy-autonomous`. Anything short of that — unverified, gate-refused, review-incomplete, or an unreadable archive — still requires a human through MCP elicitation and fails closed without it. Set `CLAUDE_ARCHITECT_DECISION_AUTHORITY=human` to require confirmation for every decision. Integration is unchanged either way: it refuses a moved `HEAD`, a dirty tree, or a hash that does not match the reviewed artifact.
 - Known limitation: the host injects project context (CLAUDE.md, git status) into custom subagents. The lane agent is instructed to ignore it; the enforced boundary is its tool allowlist, and the Producer itself only ever sees the spec through the trusted runtime.
 
 ## Available skills, agents, and MCP tools
