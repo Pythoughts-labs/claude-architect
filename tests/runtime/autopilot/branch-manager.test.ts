@@ -13,6 +13,7 @@ import {
 } from "../../../src/autopilot/branch-manager.js";
 import { git, type GitResult } from "../../../src/git/git-exec.js";
 import { getPlatformServices } from "../../../src/platform/select-platform.js";
+import { RuntimeError } from "../../../src/util/errors.js";
 
 interface Fixture {
   repoRoot: string;
@@ -573,6 +574,27 @@ describe("WorkflowBranchManager", () => {
     await expectCreateFailure(fixture, "repository-identity-mismatch", manager);
   });
 
+  // Lock acquisition happens before the classified block, so a contended
+  // checkout escaped as a raw RuntimeError. Windows locks fail fast where POSIX
+  // advisory locks tend to serialize, which made the losing creator's rejection
+  // type depend on the platform rather than on what happened.
+  it("classifies a contended checkout lock instead of leaking a raw error", async () => {
+    const fixture = (await initFixture())!;
+    const selected = getPlatformServices();
+    const manager = new WorkflowBranchManager({
+      remoteTransport: localTransport(fixture.bareRemote),
+      platformServices: {
+        os: selected.os,
+        canonicalizePath: input => selected.canonicalizePath(input),
+        acquireCheckoutLock: async () => {
+          throw new RuntimeError("checkout is locked");
+        },
+      },
+    });
+
+    await expectCreateFailure(fixture, "checkout-locked", manager);
+  });
+
   it("fails closed while the branch ref lock is held and removes its fetched ref", async () => {
     const fixture = (await initFixture())!;
     const lockPath = path.join(
@@ -718,7 +740,9 @@ describe("WorkflowBranchManager", () => {
       ok: false,
       classification: "remote-base-changed",
     });
-  });
+    // Builds five separate repository fixtures and revalidates each; the 30s
+    // default is not enough for that much real git on Windows.
+  }, 120_000);
 
   it("revalidates ownership and remote identity without discarding staged recovery bytes", async () => {
     const fixture = (await initFixture())!;
