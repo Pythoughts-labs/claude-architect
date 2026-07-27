@@ -99,6 +99,44 @@ describe("verifyBaseline", () => {
     ]);
   });
 
+  // Without declared codes, a missing test file (pytest exit 4) satisfies the
+  // flag exactly as a test that ran and asserted false (exit 1) does — so the
+  // flag proves "something failed", not "the test is RED". Naming the codes is
+  // what turns it into a semantic proof.
+  it("accepts only the declared baseline failure exit codes", async () => {
+    const repo = await fixture();
+    const report = await verifyBaseline({
+      ...repo,
+      commands: [
+        {
+          ...command(1),
+          id: "genuine-red",
+          expectBaselineFailure: true,
+          baselineFailureExitCodes: [1],
+        },
+        {
+          ...command(4),
+          id: "collection-error",
+          expectBaselineFailure: true,
+          baselineFailureExitCodes: [1],
+        },
+      ],
+    });
+    expect(report.commands).toEqual([
+      { id: "genuine-red", exitCode: 1, ok: true },
+      { id: "collection-error", exitCode: 4, ok: false },
+    ]);
+  });
+
+  it("still accepts any completed failure when no codes are declared", async () => {
+    const repo = await fixture();
+    const report = await verifyBaseline({
+      ...repo,
+      commands: [{ ...command(4), id: "unscoped", expectBaselineFailure: true }],
+    });
+    expect(report.commands).toEqual([{ id: "unscoped", exitCode: 4, ok: true }]);
+  });
+
   // The flag declares the command cannot pass at clean HEAD by design. A green
   // run contradicts that declaration, so the fail-before/pass-after evidence the
   // flag exists to supply was never produced.

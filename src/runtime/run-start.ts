@@ -28,6 +28,13 @@ export interface RunStartRecord {
   pid: number | null;
   processToken: string | null;
   startedAt: string;
+  /**
+   * SHA-256 over the canonical spec JSON. Lane dispatch computes this to
+   * correlate a run whose report was lost or fabricated, but nothing persisted
+   * it, so the documented recovery ("find the run whose recorded spec matches")
+   * was impossible. Absent on records written before it was recorded.
+   */
+  specSha256?: string;
 }
 
 export interface RunStartTarget {

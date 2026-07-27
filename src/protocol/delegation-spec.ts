@@ -8,6 +8,13 @@ export interface VerificationCommand {
   network: "denied" | "allowed";
   expectedExitCodes: number[];
   expectBaselineFailure?: boolean;    // tolerate this command failing only on clean HEAD
+  /**
+   * Exit codes that count as the *intended* baseline failure. Without it any
+   * completed non-zero exit satisfies `expectBaselineFailure`, so a missing test
+   * file (pytest exit 4) proves the same thing as a test that ran and asserted
+   * false. Naming the codes turns the flag into a semantic RED proof.
+   */
+  baselineFailureExitCodes?: number[];
   /** "ignored-paths" permits Git-ignored byproducts (e.g. dependency installs); default "none". */
   allowedMutations?: "none" | "ignored-paths";
   platform?: { os?: Array<"darwin" | "linux" | "win32">; arch?: string[] };

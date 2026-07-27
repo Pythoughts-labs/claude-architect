@@ -462,6 +462,37 @@ describe("runAttempt", () => {
     });
   });
 
+  // run-start.json used to be written after baseline verification and Producer
+  // selection, so a run killed during either left log files behind with nothing
+  // naming the run, its lock, or the spec it came from.
+  it("archives run-start before baseline verification runs", async () => {
+    const repoRoot = await initRepo();
+    const runId = "run-start-precedes-baseline";
+    let runStartAtBaseline: unknown = null;
+
+    const deps = dependencies(new FakeAdapter(), runId);
+    deps.baselineVerifier = async args => {
+      runStartAtBaseline = await archivedJson(runId, "run-start.json");
+      return { baselineCommitOid: args.headCommitOid, commands: [], dependencyLink: "none" };
+    };
+
+    await runAttempt(repoRoot, validSpec(), deps);
+
+    expect(runStartAtBaseline).toMatchObject({ runId });
+  });
+
+  it("records the spec hash so a lost lane report can still be correlated", async () => {
+    const repoRoot = await initRepo();
+    const runId = "run-start-spec-hash";
+    const spec = validSpec();
+
+    await runAttempt(repoRoot, spec, dependencies(new FakeAdapter(), runId));
+
+    expect(await archivedJson(runId, "run-start.json")).toMatchObject({
+      specSha256: createHash("sha256").update(JSON.stringify(spec)).digest("hex"),
+    });
+  });
+
   it("does not release a borrowed checkout lease on a classified early return", async () => {
     const repoRoot = await initRepo();
     const fixture = await borrowedLeaseFixture(repoRoot);

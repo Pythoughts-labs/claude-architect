@@ -24280,7 +24280,7 @@ function gitChangedFiles(checkoutPath, deps = {}) {
 }
 
 // src/mcp/tools.ts
-import { createHash as createHash6 } from "node:crypto";
+import { createHash as createHash7 } from "node:crypto";
 
 // src/git/repo-preconditions.ts
 import { access as access2, lstat, opendir, readlink, realpath } from "node:fs/promises";
@@ -25074,6 +25074,11 @@ var delegation_spec_v1_default = {
           expectBaselineFailure: {
             type: "boolean"
           },
+          baselineFailureExitCodes: {
+            type: "array",
+            items: { type: "integer" },
+            minItems: 1
+          },
           platform: {
             type: "object",
             additionalProperties: false,
@@ -25625,7 +25630,7 @@ function checkVersionCompat(skillProtocolVersion) {
 }
 
 // src/runtime/attempt-runtime.ts
-import { randomUUID as randomUUID4 } from "node:crypto";
+import { createHash as createHash6, randomUUID as randomUUID4 } from "node:crypto";
 import { rm as rm7 } from "node:fs/promises";
 
 // src/git/candidate-tree.ts
@@ -26540,7 +26545,11 @@ async function verifyBaseline(args) {
         // declaration outright: the spec claims it cannot pass by design, so a
         // green run means the command does not prove what the spec says it
         // proves, and the fail-before/pass-after evidence is void either way.
-        ok: (command.expectBaselineFailure === true ? executed.failed && executed.terminal === "exited" : !executed.failed) && !mutation.mutated,
+        // When the spec names the codes that constitute the intended failure,
+        // demand one of them. Otherwise any completed non-zero exit satisfies the
+        // flag, so a missing test file proves the same thing as a test that ran
+        // and asserted false — which is not a RED proof at all.
+        ok: (command.expectBaselineFailure === true ? executed.failed && executed.terminal === "exited" && (command.baselineFailureExitCodes === void 0 || executed.outcome.exitCode !== null && command.baselineFailureExitCodes.includes(executed.outcome.exitCode)) : !executed.failed) && !mutation.mutated,
         ...mutation.mutated ? { mutation: { records: mutation.records, headChanged: mutation.headChanged } } : {}
       });
       throwIfAborted(args.abortSignal);
@@ -28468,6 +28477,17 @@ async function runAttempt(checkoutPath, spec, deps) {
         { reason: preconditions.reason, detail: preconditions.detail ?? [] }
       );
     }
+    const runStart = {
+      runId,
+      lockKey: lock.key,
+      canonicalCommonDir: preconditions.gitCommonDir,
+      pid: null,
+      processToken: null,
+      startedAt: new Date(startedAtMs).toISOString(),
+      specSha256: createHash6("sha256").update(JSON.stringify(spec)).digest("hex")
+    };
+    const runStartContext = await initializeRunStart(store, runStart);
+    await deps.onRunStart?.(runStartContext);
     const collected = deps.repositoryInstructions !== void 0 && deps.packagedVerifier !== void 0 ? null : await (deps.reproducibilityCollector ?? collectReproducibilityInputs)(
       canonical.canonical,
       preconditions.baseCommitOid
@@ -28607,16 +28627,6 @@ async function runAttempt(checkoutPath, spec, deps) {
         packagedVerifier
       });
     }
-    const runStart = {
-      runId,
-      lockKey: lock.key,
-      canonicalCommonDir: preconditions.gitCommonDir,
-      pid: null,
-      processToken: null,
-      startedAt: new Date(startedAtMs).toISOString()
-    };
-    const runStartContext = await initializeRunStart(store, runStart);
-    await deps.onRunStart?.(runStartContext);
     worktree = await new WorktreeManager(canonical.canonical, runId, ps).create(
       preconditions.baseCommitOid
     );
@@ -31931,7 +31941,7 @@ async function loadArchivedRun(runId, deps) {
   if (result.runId !== runId || manifest.runId !== runId) {
     throw runtimeError("archived run identity does not match", "archive-inconsistent");
   }
-  if (result.candidate !== null && (manifest.baseCommitOid !== result.candidate.baseCommitOid || manifest.candidateManifestHash !== result.candidate.manifestHash || result.candidate.manifestHash !== createHash6("sha256").update(JSON.stringify(result.candidate.changedPaths)).digest("hex"))) {
+  if (result.candidate !== null && (manifest.baseCommitOid !== result.candidate.baseCommitOid || manifest.candidateManifestHash !== result.candidate.manifestHash || result.candidate.manifestHash !== createHash7("sha256").update(JSON.stringify(result.candidate.changedPaths)).digest("hex"))) {
     throw runtimeError("archived candidate does not match its run manifest", "archive-inconsistent");
   }
   const canonical = await services2(deps).canonicalizePath(manifest.repoRoot);
@@ -32256,7 +32266,7 @@ async function handleIntegrateCandidate(checkoutPath, runId, expectedArtifactHas
 }
 
 // src/runtime/recovery-manager.ts
-import { createHash as createHash7, randomUUID as randomUUID5 } from "node:crypto";
+import { createHash as createHash8, randomUUID as randomUUID5 } from "node:crypto";
 import { constants as constants4 } from "node:fs";
 import {
   lstat as lstat6,
@@ -32408,7 +32418,7 @@ function parseRunStart(text, expectedRunId) {
   if (record2.runId !== expectedRunId || typeof record2.lockKey !== "string" || !/^[0-9a-f]{64}$/.test(record2.lockKey) || typeof record2.canonicalCommonDir !== "string" || !path18.isAbsolute(record2.canonicalCommonDir) || record2.pid !== null && (record2.pid === void 0 || !Number.isSafeInteger(record2.pid) || record2.pid <= 1) || record2.processToken !== void 0 && record2.processToken !== null && typeof record2.processToken !== "string" || typeof record2.startedAt !== "string" || !Number.isFinite(Date.parse(record2.startedAt))) {
     throw new RuntimeError("run-start recovery record is malformed");
   }
-  const expectedLockKey = createHash7("sha256").update(record2.canonicalCommonDir).digest("hex");
+  const expectedLockKey = createHash8("sha256").update(record2.canonicalCommonDir).digest("hex");
   if (record2.lockKey !== expectedLockKey) {
     throw new RuntimeError("run-start lock key does not match its canonical common directory");
   }
@@ -34050,6 +34060,7 @@ var reviewOutput = external_exports.object({
     mode: external_exports.string(),
     contentHash: external_exports.string().nullable()
   })).optional(),
+  manifestHash: external_exports.string().optional(),
   evidence: external_exports.record(external_exports.string(), external_exports.unknown()).optional(),
   executedVerification: external_exports.array(external_exports.record(external_exports.string(), external_exports.unknown())).optional(),
   ...errorOutputFields
@@ -34107,6 +34118,56 @@ var integrateCandidateInputSchema = external_exports.object({
   runId: external_exports.string(),
   expectedArtifactHash: external_exports.string()
 }).strict();
+async function confirmWithHuman(server, runId, decision) {
+  const capabilities = server.server.getClientCapabilities();
+  if (capabilities?.elicitation === void 0) {
+    return {
+      ok: false,
+      error: {
+        ok: false,
+        error: "elicitation-unavailable",
+        diagnostic: "this client does not support MCP elicitation, so the runtime cannot confirm a human made this decision; candidate decisions are human-only and fail closed"
+      }
+    };
+  }
+  let response;
+  try {
+    response = await server.server.elicitInput({
+      message: `Claude Architect: record "${decision}" for candidate run ${runId}? Only you can decide this; review the candidate patch and verification evidence first.`,
+      requestedSchema: {
+        type: "object",
+        properties: {
+          confirm: {
+            type: "boolean",
+            title: `Confirm "${decision}"`,
+            description: "Checked means you, the human, are recording this decision."
+          }
+        },
+        required: ["confirm"]
+      }
+    });
+  } catch (error2) {
+    return {
+      ok: false,
+      error: {
+        ok: false,
+        error: "elicitation-failed",
+        diagnostic: redact(error2 instanceof Error ? error2.message : String(error2))
+      }
+    };
+  }
+  if (response.action !== "accept" || response.content?.confirm !== true) {
+    return {
+      ok: false,
+      error: {
+        ok: false,
+        error: "decision-not-confirmed",
+        diagnostic: `no decision was recorded: the human did not confirm "${decision}"`
+      }
+    };
+  }
+  return { ok: true };
+}
 function toolOutput(value) {
   const structuredContent = value;
   return {
@@ -34237,16 +34298,23 @@ async function start(dependencies = {}) {
     "decideCandidate",
     {
       title: "Record a candidate decision",
-      description: "Record acceptance, rejection, or a revision request for a candidate.",
+      description: "Record acceptance, rejection, or a revision request for a candidate. Requires human confirmation through MCP elicitation and fails closed without it.",
       inputSchema: decideCandidateInputSchema,
-      outputSchema: decisionOutput
+      outputSchema: decisionOutput,
+      // Rejection deletes the candidate anchor and acceptance authorizes writes
+      // to the checkout; neither is a read-only probe a client may retry freely.
+      annotations: { destructiveHint: true, idempotentHint: false, readOnlyHint: false }
     },
-    async ({ checkoutPath, runId, decision }) => toolOutput(await handleDecideCandidate(
-      checkoutPath,
-      runId,
-      decision,
-      dependencies
-    ))
+    async ({ checkoutPath, runId, decision }) => {
+      const confirmed = await confirmWithHuman(server, runId, decision);
+      if (!confirmed.ok) return toolOutput(confirmed.error);
+      return toolOutput(await handleDecideCandidate(
+        checkoutPath,
+        runId,
+        decision,
+        { ...dependencies, decisionProvenance: "human-elicitation" }
+      ));
+    }
   );
   server.registerTool(
     "integrateCandidate",
@@ -34254,7 +34322,9 @@ async function start(dependencies = {}) {
       title: "Integrate an accepted candidate",
       description: "Apply an accepted candidate tree after revalidating its artifact hash.",
       inputSchema: integrateCandidateInputSchema,
-      outputSchema: integrationOutput
+      outputSchema: integrationOutput,
+      // Writes the reviewed tree into the user's checkout.
+      annotations: { destructiveHint: true, idempotentHint: false, readOnlyHint: false }
     },
     async ({ checkoutPath, runId, expectedArtifactHash }) => toolOutput(await handleIntegrateCandidate(
       checkoutPath,

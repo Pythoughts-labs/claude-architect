@@ -114,8 +114,16 @@ export async function verifyBaseline(args: BaselineVerifyArgs): Promise<Baseline
         // declaration outright: the spec claims it cannot pass by design, so a
         // green run means the command does not prove what the spec says it
         // proves, and the fail-before/pass-after evidence is void either way.
+        // When the spec names the codes that constitute the intended failure,
+        // demand one of them. Otherwise any completed non-zero exit satisfies the
+        // flag, so a missing test file proves the same thing as a test that ran
+        // and asserted false — which is not a RED proof at all.
         ok: (command.expectBaselineFailure === true
-          ? executed.failed && executed.terminal === "exited"
+          ? executed.failed
+            && executed.terminal === "exited"
+            && (command.baselineFailureExitCodes === undefined
+              || (executed.outcome.exitCode !== null
+                && command.baselineFailureExitCodes.includes(executed.outcome.exitCode)))
           : !executed.failed)
           && !mutation.mutated,
         ...(mutation.mutated

@@ -20,7 +20,7 @@ import {
 } from "./tools.js";
 import { recoverStaleRuns } from "../runtime/recovery-manager.js";
 import { pruneRuns } from "../runtime/artifact-store.js";
-import { boundedRedactedDiagnostic } from "../runtime/redaction.js";
+import { boundedRedactedDiagnostic, redact } from "../runtime/redaction.js";
 
 const errorOutputFields = {
   ok: z.literal(false).optional(),
@@ -71,6 +71,7 @@ const reviewOutput = z.object({
     mode: z.string(),
     contentHash: z.string().nullable(),
   })).optional(),
+  manifestHash: z.string().optional(),
   evidence: z.record(z.string(), z.unknown()).optional(),
   executedVerification: z.array(z.record(z.string(), z.unknown())).optional(),
   ...errorOutputFields,
@@ -143,6 +144,78 @@ export type ServerDependencies = ToolDependencies & DoctorDependencies & GitRead
   recoverStaleRuns?: typeof recoverStaleRuns;
   pruneRuns?: typeof pruneRuns;
 };
+
+/**
+ * Obtain the decision from a person, not from whatever called the tool.
+ *
+ * "Only a human can accept a candidate" was documented but structurally
+ * unenforced: `decideCandidate` recorded whatever its caller passed, and an
+ * agent is a caller. Elicitation is the only channel where the runtime itself
+ * reaches a person, so acceptance now depends on one.
+ *
+ * This fails closed. A client that does not advertise elicitation cannot record
+ * a decision at all — degrading to "trust the caller" would restore exactly the
+ * hole this closes, and silently. `rejected` and `revision-requested` are gated
+ * too: an agent that can freely discard a candidate can bury work it dislikes.
+ */
+export async function confirmWithHuman(
+  server: Pick<McpServer, "server">,
+  runId: string,
+  decision: "accepted" | "rejected" | "revision-requested",
+): Promise<{ ok: true } | { ok: false; error: { ok: false; error: string; diagnostic: string } }> {
+  const capabilities = server.server.getClientCapabilities();
+  if (capabilities?.elicitation === undefined) {
+    return {
+      ok: false,
+      error: {
+        ok: false,
+        error: "elicitation-unavailable",
+        diagnostic: "this client does not support MCP elicitation, so the runtime cannot confirm a "
+          + "human made this decision; candidate decisions are human-only and fail closed",
+      },
+    };
+  }
+
+  let response;
+  try {
+    response = await server.server.elicitInput({
+      message: `Claude Architect: record "${decision}" for candidate run ${runId}? `
+        + "Only you can decide this; review the candidate patch and verification evidence first.",
+      requestedSchema: {
+        type: "object",
+        properties: {
+          confirm: {
+            type: "boolean",
+            title: `Confirm "${decision}"`,
+            description: "Checked means you, the human, are recording this decision.",
+          },
+        },
+        required: ["confirm"],
+      },
+    });
+  } catch (error) {
+    return {
+      ok: false,
+      error: {
+        ok: false,
+        error: "elicitation-failed",
+        diagnostic: redact(error instanceof Error ? error.message : String(error)),
+      },
+    };
+  }
+
+  if (response.action !== "accept" || response.content?.confirm !== true) {
+    return {
+      ok: false,
+      error: {
+        ok: false,
+        error: "decision-not-confirmed",
+        diagnostic: `no decision was recorded: the human did not confirm "${decision}"`,
+      },
+    };
+  }
+  return { ok: true };
+}
 
 function toolOutput(value: object) {
   const structuredContent = value as Record<string, unknown>;
@@ -286,16 +359,24 @@ export async function start(dependencies: ServerDependencies = {}): Promise<void
     "decideCandidate",
     {
       title: "Record a candidate decision",
-      description: "Record acceptance, rejection, or a revision request for a candidate.",
+      description: "Record acceptance, rejection, or a revision request for a candidate. "
+        + "Requires human confirmation through MCP elicitation and fails closed without it.",
       inputSchema: decideCandidateInputSchema,
       outputSchema: decisionOutput,
+      // Rejection deletes the candidate anchor and acceptance authorizes writes
+      // to the checkout; neither is a read-only probe a client may retry freely.
+      annotations: { destructiveHint: true, idempotentHint: false, readOnlyHint: false },
     },
-    async ({ checkoutPath, runId, decision }) => toolOutput(await handleDecideCandidate(
-      checkoutPath,
-      runId,
-      decision,
-      dependencies,
-    )),
+    async ({ checkoutPath, runId, decision }) => {
+      const confirmed = await confirmWithHuman(server, runId, decision);
+      if (!confirmed.ok) return toolOutput(confirmed.error);
+      return toolOutput(await handleDecideCandidate(
+        checkoutPath,
+        runId,
+        decision,
+        { ...dependencies, decisionProvenance: "human-elicitation" },
+      ));
+    },
   );
   server.registerTool(
     "integrateCandidate",
@@ -304,6 +385,8 @@ export async function start(dependencies: ServerDependencies = {}): Promise<void
       description: "Apply an accepted candidate tree after revalidating its artifact hash.",
       inputSchema: integrateCandidateInputSchema,
       outputSchema: integrationOutput,
+      // Writes the reviewed tree into the user's checkout.
+      annotations: { destructiveHint: true, idempotentHint: false, readOnlyHint: false },
     },
     async ({ checkoutPath, runId, expectedArtifactHash }) => toolOutput(await handleIntegrateCandidate(
       checkoutPath,

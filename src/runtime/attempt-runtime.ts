@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { rm } from "node:fs/promises";
 import { freezeCandidate } from "../git/candidate-tree.js";
 import { git } from "../git/git-exec.js";
@@ -377,6 +377,22 @@ export async function runAttempt(
       );
     }
 
+    // Correlation must exist before any long phase can be interrupted. This
+    // record used to be written after baseline verification and Producer
+    // selection, so a run killed during either left log files with nothing
+    // naming the run, its lock, or its spec.
+    const runStart: RunStartRecord = {
+      runId,
+      lockKey: lock.key,
+      canonicalCommonDir: preconditions.gitCommonDir,
+      pid: null,
+      processToken: null,
+      startedAt: new Date(startedAtMs).toISOString(),
+      specSha256: createHash("sha256").update(JSON.stringify(spec)).digest("hex"),
+    };
+    const runStartContext = await initializeRunStart(store, runStart);
+    await deps.onRunStart?.(runStartContext);
+
     const collected = deps.repositoryInstructions !== undefined
       && deps.packagedVerifier !== undefined
       ? null
@@ -502,16 +518,6 @@ export async function runAttempt(
     });
   }
 
-    const runStart: RunStartRecord = {
-      runId,
-      lockKey: lock.key,
-      canonicalCommonDir: preconditions.gitCommonDir,
-      pid: null,
-      processToken: null,
-      startedAt: new Date(startedAtMs).toISOString(),
-    };
-    const runStartContext = await initializeRunStart(store, runStart);
-    await deps.onRunStart?.(runStartContext);
     worktree = await new WorktreeManager(canonical.canonical, runId, ps).create(
       preconditions.baseCommitOid,
     );

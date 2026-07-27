@@ -110,6 +110,11 @@
           "expectBaselineFailure": {
             "type": "boolean"
           },
+          "baselineFailureExitCodes": {
+            "type": "array",
+            "items": { "type": "integer" },
+            "minItems": 1
+          },
           "platform": {
             "type": "object",
             "additionalProperties": false,

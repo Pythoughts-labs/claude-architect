@@ -6,6 +6,49 @@ All notable changes to Claude Architect are recorded here. The format follows
 
 ## [Unreleased]
 
+### Breaking
+
+- `decideCandidate` now requires MCP elicitation and fails closed without it. The
+  runtime confirms the decision with a person itself rather than recording
+  whatever the caller passed — an agent is a caller, which is how architect
+  agents accepted and integrated their own candidates. Clients that do not
+  advertise the `elicitation` capability cannot record a decision at all;
+  degrading to caller-trust would silently restore the hole. Rejection and
+  revision are gated identically, because an agent that can discard a candidate
+  can bury work it dislikes.
+
+### Fixed
+
+- The consolidator no longer infers a contradiction from differently worded
+  required outcomes at one location. Complementary findings qualified, and a nit
+  beside a major differs textually by construction, so independently green,
+  reviewer-approved candidates were halted — a regression introduced in 0.33.0
+  when that signal became a hard stop. `detectNonConvergence` replaces it with an
+  observable property: a location whose *blocking* findings outlived a fix round.
+  The slice-level halt is removed outright, since a slice sees exactly one review
+  round and non-convergence is not observable there.
+- Decisions are auditable. `decision.json` was `{decision, recordedAt}` with no
+  actor, so a human's acceptance and an agent's were indistinguishable even
+  retrospectively. Records now carry `decidedBy` and the `candidateManifestHash`
+  they bind to, and `integrateCandidate` aborts with `decision-artifact-mismatch`
+  rather than spending an acceptance on a different artifact.
+- `reviewCandidate` returns `manifestHash`, the exact value `integrateCandidate`
+  requires, instead of forcing the architect to source it from another tool.
+- `decideCandidate` and `integrateCandidate` are annotated destructive.
+- `run-start.json` is archived before baseline verification instead of after it
+  and after Producer selection, so a run killed during either is still
+  correlatable. It now also records `specSha256`, which lane dispatch computes
+  for exactly that recovery but which nothing persisted — making the documented
+  "find the run whose recorded spec matches" impossible.
+
+### Added
+
+- `baselineFailureExitCodes` on a verification command narrows which exit codes
+  satisfy `expectBaselineFailure`. Without it any completed non-zero exit
+  qualifies, so a missing test file proves the same thing as a test that ran and
+  asserted false; declaring `[1]` for pytest makes the baseline a real
+  fail-before/pass-after proof. Omitting it preserves the previous behavior.
+
 ## [0.35.0] - 2026-07-27
 
 - fix: an ordinary verification failure no longer also claims the reported
