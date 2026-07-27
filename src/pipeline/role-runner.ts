@@ -55,7 +55,7 @@ export interface RoleRunResult {
   producerId: string | null;
 }
 
-export const READ_ONLY_ROLES = new Set<PipelineRole>([
+export const READ_ONLY_ROLES: ReadonlySet<PipelineRole> = new Set<PipelineRole>([
   "reviewer-correctness",
   "reviewer-systems",
   "verifier",

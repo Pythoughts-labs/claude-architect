@@ -156,7 +156,13 @@ describe("Autopilot Spec v1", () => {
   ] as const)("rejects %s", (_name, mutate) => {
     const spec = validAutopilotSpec();
     mutate(spec);
-    expect(validateAutopilotSpec(spec)).toMatchObject({ ok: false });
+    const result = validateAutopilotSpec(spec);
+    expect(result).toMatchObject({ ok: false });
+    // A rejection must always name a reason: schema errors are filtered when
+    // they are re-reported per task, and a filtered-to-empty list would reject
+    // the spec while telling the caller nothing.
+    if (result.ok) return;
+    expect(result.errors.length).toBeGreaterThan(0);
   }, 5_000);
 
   it("prefixes canonical Delegation Spec errors with the task id", () => {

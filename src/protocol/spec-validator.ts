@@ -264,6 +264,12 @@ export function validateAutopilotSpec(input: unknown): ValidateAutopilotResult {
     }
   }
 
+  if (!schemaValid && errors.length === 0) {
+    // Every schema error was filtered as a delegation error re-reported per
+    // task, but no task-level error replaced it. Rejecting with an empty list
+    // would give the caller no reason at all, so name the failure.
+    errors.push({ path: "#", message: "invalid autopilot spec" });
+  }
   if (!schemaValid || errors.length > 0) return { ok: false, errors };
   return { ok: true, spec: input as AutopilotSpec };
 }

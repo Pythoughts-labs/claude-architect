@@ -37581,6 +37581,9 @@ function validateAutopilotSpec(input) {
       }
     }
   }
+  if (!schemaValid && errors.length === 0) {
+    errors.push({ path: "#", message: "invalid autopilot spec" });
+  }
   if (!schemaValid || errors.length > 0) return { ok: false, errors };
   return { ok: true, spec: input };
 }
