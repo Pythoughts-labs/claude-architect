@@ -37,6 +37,21 @@ Follow upstream SDD except on these four points, where a trust invariant governs
 3. **Implementer self-review is not a review.** Upstream's implementer self-reviews before handing off. A Producer may summarize, but the gate is runtime verification plus `reviewCandidate`. Never let a self-report shorten the review.
 4. **The controller never fixes findings.** Upstream already says this to protect controller context; here it is also a trust rule. The architect authors specs and reviews bytes. It does not edit Producer output into shape.
 
+## Mapping to the Superpowers skills
+
+Each upstream skill keeps its meaning; delegation supplies the enforcement.
+
+| Superpowers skill | How it is realized here |
+| --- | --- |
+| `subagent-driven-development` | The loop itself, with the four divergences above. |
+| `dispatching-parallel-agents` | A repository is shared state. Lanes on **disjoint** repositories are genuinely independent and dispatch concurrently; lanes on the **same** repository serialize on the repository lock and must never be presented as parallel. |
+| `test-driven-development` | `expectBaselineFailure` is the fail-before/pass-after proof, and the runtime enforces it: the command must run at clean HEAD and must fail. A Producer's claim to have written a failing test first is not evidence. |
+| `systematic-debugging` | A failed verification is evidence to read, not a reason to re-dispatch. Start from `unresolvedIssues`, then the per-command `stdoutRef`/`stderrRef`, then the frozen patch. Re-running an unchanged spec is the delegation form of guessing. |
+| `verification-before-completion` | Independent verification runs on frozen bytes before any reviewer sees them, and `reviewCandidate` gates the human decision. Neither is skippable because the Producer says the work is done. |
+| `requesting-code-review` | `reviewCandidate` is the per-task review; the final whole-branch review covers the cumulative attempts. The reviewer never shares the implementer's context, so the independence upstream asks for is structural rather than conventional. |
+
+Two upstream assumptions do not survive the trust boundary, and the table above is where they break: an implementer cannot be resumed (fresh context per attempt), and a controller cannot close a task (only a human accepts).
+
 ## Setup
 
 1. **Isolated workspace.** Delegation already isolates each attempt, but the *branch* still needs a home. Use `superpowers:using-git-worktrees`, or confirm the current branch is not `main`/`master` without the user's explicit consent.

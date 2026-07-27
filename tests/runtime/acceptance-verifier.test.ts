@@ -307,6 +307,73 @@ describe("AcceptanceVerifier", () => {
     expect(result.failures).toContain("command-outcome-mismatch");
   });
 
+  // `command-outcome-mismatch` means the reported outcomes do not correspond to
+  // the commands the host declared — a trust-boundary signal. A command that ran
+  // and honestly reported a failing exit code corresponds perfectly; that is
+  // `command-failed:<id>`. Conflating the two fired the mismatch alongside every
+  // ordinary verification failure, which is 15 of 15 occurrences in the field.
+  it("reports a failing command without claiming the outcomes mismatch the spec", async () => {
+    const structural = vi.fn(async (): Promise<StructuralVerifyResult> => ({
+      ok: true,
+      failures: [],
+      manifestHash: artifact.manifestHash,
+    }));
+    const project = vi.fn(async (): Promise<ProjectVerifyResult> => ({
+      commandOutcomes: [{ ...outcome, exitCode: 1 }],
+      mutated: false,
+      failures: ["command-failed:check"],
+      evidence: {
+        commands: [{
+          id: "check",
+          confinement: "none",
+          networkPolicy: "unenforced",
+          requestedNetwork: "denied",
+          skipped: false,
+        }],
+        dependencyLink: "none",
+      },
+      outputLogs: [
+        { name: "verification-0-stdout", text: "" },
+        { name: "verification-0-stderr", text: "" },
+      ],
+    }));
+
+    const result = await new AcceptanceVerifier({ structural, project }).verify(args());
+
+    expect(result.ok).toBe(false);
+    expect(result.failures).toContain("command-failed:check");
+    expect(result.failures).not.toContain("command-outcome-mismatch");
+  });
+
+  // The counterpart: removing the pass/fail term must not disarm the check.
+  it("still reports a mismatch when a declared command has no outcome", async () => {
+    const structural = vi.fn(async (): Promise<StructuralVerifyResult> => ({
+      ok: true,
+      failures: [],
+      manifestHash: artifact.manifestHash,
+    }));
+    const project = vi.fn(async (): Promise<ProjectVerifyResult> => ({
+      commandOutcomes: [],
+      mutated: false,
+      failures: [],
+      evidence: {
+        commands: [{
+          id: "check",
+          confinement: "none",
+          networkPolicy: "unenforced",
+          requestedNetwork: "denied",
+          skipped: false,
+        }],
+        dependencyLink: "none",
+      },
+      outputLogs: [],
+    }));
+
+    const result = await new AcceptanceVerifier({ structural, project }).verify(args());
+
+    expect(result.failures).toContain("command-outcome-mismatch");
+  });
+
   it("accepts a platform-filtered command when skipped evidence accounts for it", async () => {
     const structural = vi.fn(async (): Promise<StructuralVerifyResult> => ({
       ok: true,

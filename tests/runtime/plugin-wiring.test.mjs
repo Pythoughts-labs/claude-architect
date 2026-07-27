@@ -129,9 +129,9 @@ describe("P0-A plugin wiring", () => {
     const marketplace = JSON.parse(read(".claude-plugin/marketplace.json"));
     const readme = read("README.md");
     const changelog = read("CHANGELOG.md");
-    assert.equal(plugin.version, "0.34.0");
-    assert.equal(marketplace.plugins[0].version, "0.34.0");
-    assert.match(readme, /badge\/version-0\.34\.0-/u);
+    assert.equal(plugin.version, "0.35.0");
+    assert.equal(marketplace.plugins[0].version, "0.35.0");
+    assert.match(readme, /badge\/version-0\.35\.0-/u);
     assert.doesNotMatch(
       readme,
       /`\/delegate`/u,
@@ -197,6 +197,18 @@ test("subagent-driven-delegation skill keeps the trust invariants that upstream 
   assert.match(sdd, /Gate before the next task/u,
     "SDD skill must gate the next task on a clean checkout after integration");
   assert.match(sdd, /confirm `git status` is clean/u);
+  // The skill claims to be the native Superpowers SDD surface, so every skill
+  // the methodology names must have a stated realization, not just SDD itself.
+  for (const upstream of [
+    "subagent-driven-development",
+    "dispatching-parallel-agents",
+    "test-driven-development",
+    "systematic-debugging",
+    "verification-before-completion",
+    "requesting-code-review",
+  ]) {
+    assert.ok(sdd.includes(`\`${upstream}\``), `SDD skill must map ${upstream}`);
+  }
   assert.doesNotMatch(sdd, /(^|[^:])\/subagent-driven-delegation\b/mu,
     "SDD skill must use the fully qualified command");
 

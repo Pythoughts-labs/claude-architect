@@ -21933,7 +21933,7 @@ var StdioServerTransport = class {
 var PROTOCOL_VERSION = "1.4.0";
 var DELEGATION_SPEC_VERSION = "1";
 var ATTEMPT_RESULT_VERSION = "1";
-var RUNTIME_VERSION = "0.34.0";
+var RUNTIME_VERSION = "0.35.0";
 
 // src/platform/posix-platform-services.ts
 import { spawn, execFile } from "node:child_process";
@@ -28904,7 +28904,7 @@ function outcomesMatchHostCommands(commands, outcomes, evidence, os, arch) {
     if (skipReason !== null) {
       return commandEvidence.skipped && commandEvidence.skipReason === skipReason && outcome === void 0;
     }
-    return !commandEvidence.skipped && outcome !== void 0 && outcome.exitCode !== null && !outcome.timedOut && command.expectedExitCodes.includes(outcome.exitCode);
+    return !commandEvidence.skipped && outcome !== void 0 && outcome.exitCode !== null && !outcome.timedOut;
   });
 }
 var AcceptanceVerifier = class {
@@ -32001,6 +32001,13 @@ async function requireInactivePipeline(run, runId) {
     );
   }
 }
+function unknownProducerErrors(preferences) {
+  const known = registry2.all().map((adapter) => adapter.producerId);
+  return preferences.flatMap((producerId, index) => known.includes(producerId) ? [] : [{
+    path: `#/producerPreferences/${index}`,
+    message: `unknown producer id ${JSON.stringify(producerId)}; expected one of ${known.map((id) => JSON.stringify(id)).join(", ")}`
+  }]);
+}
 function schemaCompatibility(input) {
   if (isRecord4(input) && input.specVersion !== void 0 && input.specVersion !== DELEGATION_SPEC_VERSION) {
     return {
@@ -32033,6 +32040,10 @@ async function handleDelegate(checkoutPath, input, deps = {}) {
       error: "invalid-specification",
       validationErrors: validation.errors
     };
+  }
+  const producerErrors = unknownProducerErrors(validation.spec.producerPreferences);
+  if (producerErrors.length > 0) {
+    return { ok: false, error: "invalid-specification", validationErrors: producerErrors };
   }
   try {
     const ps = services2(deps);
@@ -32086,6 +32097,10 @@ async function handleDelegatePipeline(checkoutPath, input, deps = {}) {
       error: "invalid-specification",
       validationErrors: validation.errors
     };
+  }
+  const producerErrors = unknownProducerErrors(validation.spec.producerPreferences);
+  if (producerErrors.length > 0) {
+    return { ok: false, error: "invalid-specification", validationErrors: producerErrors };
   }
   try {
     const ps = services2(deps);

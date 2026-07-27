@@ -6,6 +6,33 @@ All notable changes to Claude Architect are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.35.0] - 2026-07-27
+
+- fix: an ordinary verification failure no longer also claims the reported
+  outcomes mismatch the declared commands. `command-outcome-mismatch` is a
+  trust-boundary signal — the outcomes do not correspond to what the host asked
+  to run — but the predicate behind it also tested `expectedExitCodes`, so every
+  failing command raised it alongside `command-failed:<id>`. All 15 occurrences
+  in the local run archive were this false pairing; none coincided with a real
+  mismatch. The correspondence check now covers identity, count, skip semantics,
+  and whether a result was reported at all, and leaves pass/fail to
+  `command-failed`. This also restores the signal's meaning: a genuine mismatch
+  is no longer indistinguishable from a failing test.
+- fix: a producer id naming no shipped adapter is now rejected as a spec defect
+  before dispatch. `producerPreferences` is typed as plain strings, so an agent
+  name such as `codex-implementer` validated cleanly and surfaced much later as
+  `unavailable / no-eligible-producer` — which reads as "Codex is not installed"
+  rather than "that is not a producer id" — and bypassed the spec-repair loop
+  that exists so a malformed spec never reaches a Producer. Both `delegate` and
+  `delegatePipeline` now return `validationErrors` naming the offending index and
+  the ids the registry actually ships.
+- docs: `subagent-driven-delegation` now maps every Superpowers skill the
+  methodology names — `dispatching-parallel-agents`, `test-driven-development`,
+  `systematic-debugging`, `verification-before-completion`, and
+  `requesting-code-review` — to how delegation realizes it, including that a
+  repository is shared state, so same-repository lanes serialize and must never
+  be presented as parallel.
+
 ## [0.34.0] - 2026-07-26
 
 - fix: `expectBaselineFailure` no longer excuses a command that never ran. The

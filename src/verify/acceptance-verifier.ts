@@ -107,11 +107,17 @@ function outcomesMatchHostCommands(
         && commandEvidence.skipReason === skipReason
         && outcome === undefined;
     }
+    // Correspondence only: the command was not skipped, and it produced exactly
+    // one outcome that actually reported a result. Whether that result was the
+    // *expected* exit code is a pass/fail judgement, not a correspondence one,
+    // and `command-failed:<id>` already carries it. Testing `expectedExitCodes`
+    // here made every ordinary verification failure also claim the outcomes did
+    // not match the declared commands — a trust-boundary accusation — which
+    // masked the real signal and would have hidden a genuine mismatch.
     return !commandEvidence.skipped
       && outcome !== undefined
       && outcome.exitCode !== null
-      && !outcome.timedOut
-      && command.expectedExitCodes.includes(outcome.exitCode);
+      && !outcome.timedOut;
   });
 }
 

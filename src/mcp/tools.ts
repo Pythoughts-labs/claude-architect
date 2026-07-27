@@ -275,6 +275,31 @@ async function requireInactivePipeline(run: ArchivedRun, runId: string): Promise
   }
 }
 
+/**
+ * Reject producer ids that name no shipped adapter.
+ *
+ * The schema types `producerPreferences` as plain strings, so an agent name such
+ * as `codex-implementer` used to validate cleanly and only fail at routing time
+ * as `unavailable / no-eligible-producer` — a diagnostic that reads as "Codex is
+ * not installed" rather than "that is not a producer id". It also bypassed the
+ * documented spec-repair loop, which exists precisely so a malformed spec is
+ * corrected without ever touching a Producer. The registry is the single source
+ * of truth for the id set; do not restate it as a literal here.
+ */
+function unknownProducerErrors(
+  preferences: readonly string[],
+): Array<{ path: string; message: string }> {
+  const known = registry.all().map(adapter => adapter.producerId);
+  return preferences.flatMap((producerId, index) =>
+    known.includes(producerId)
+      ? []
+      : [{
+        path: `#/producerPreferences/${index}`,
+        message: `unknown producer id ${JSON.stringify(producerId)}; expected one of ${
+          known.map(id => JSON.stringify(id)).join(", ")}`,
+      }]);
+}
+
 function schemaCompatibility(input: unknown): { ok: true } | { ok: false; diagnostic: string } {
   if (isRecord(input)
     && input.specVersion !== undefined
@@ -327,6 +352,10 @@ export async function handleDelegate(
       error: "invalid-specification",
       validationErrors: validation.errors,
     };
+  }
+  const producerErrors = unknownProducerErrors(validation.spec.producerPreferences);
+  if (producerErrors.length > 0) {
+    return { ok: false, error: "invalid-specification", validationErrors: producerErrors };
   }
 
   try {
@@ -398,6 +427,10 @@ export async function handleDelegatePipeline(
       error: "invalid-specification",
       validationErrors: validation.errors,
     };
+  }
+  const producerErrors = unknownProducerErrors(validation.spec.producerPreferences);
+  if (producerErrors.length > 0) {
+    return { ok: false, error: "invalid-specification", validationErrors: producerErrors };
   }
 
   try {

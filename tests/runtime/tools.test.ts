@@ -396,6 +396,47 @@ describe("MCP tool handlers", () => {
     expect(attempted).toBe(false);
   });
 
+  // A producer id that names no adapter used to pass validation and surface much
+  // later as `unavailable / no-eligible-producer`, which reads as "Codex is not
+  // installed" rather than "you wrote an agent name where a producer id goes".
+  // Observed in the field: producerPreferences ["codex-implementer"].
+  it("rejects an unknown producer id as a spec defect before dispatch", async () => {
+    let attempted = false;
+    const deps = dependencies();
+    deps.runAttempt = async () => {
+      attempted = true;
+      return result;
+    };
+
+    const output = await handleDelegate(
+      "/repo",
+      { ...validSpec, producerPreferences: ["codex-implementer"] },
+      deps,
+    );
+
+    expect(output).toMatchObject({ ok: false, error: "invalid-specification" });
+    expect("validationErrors" in output && output.validationErrors).toEqual([
+      expect.objectContaining({ path: "#/producerPreferences/0" }),
+    ]);
+    expect(
+      "validationErrors" in output && output.validationErrors[0]?.message,
+    ).toMatch(/codex/u);
+    expect(attempted).toBe(false);
+  });
+
+  it("accepts every producer id the registry actually ships", async () => {
+    const deps = dependencies();
+    deps.runAttempt = async () => result;
+
+    const output = await handleDelegate(
+      "/repo",
+      { ...validSpec, producerPreferences: ["codex", "opencode", "pi", "pythinker"] },
+      deps,
+    );
+
+    expect(output).not.toMatchObject({ ok: false, error: "invalid-specification" });
+  });
+
   it("accepts a JSON-encoded string spec from schemaless MCP clients", async () => {
     const calls: string[] = [];
     const deps = dependencies();
