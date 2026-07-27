@@ -6,6 +6,22 @@ All notable changes to Claude Architect are recorded here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- Human decision elicitation waits 15 minutes instead of the MCP SDK's
+  60-second default request timeout. Making acceptance human-only in 0.36.0
+  passed no timeout option, so a person had one minute to read a candidate
+  patch, weigh verification evidence, and decide; live acceptance attempts
+  failed at exactly 60s. A gate that no human can pass in time does not enforce
+  human control — it removes the supported path and pushes work to hand-applied
+  changes outside the lifecycle, which is the outcome the gate exists to
+  prevent.
+- `status.json` records a terminal phase. It named every phase a run entered and
+  none of its completion, so "archiving result" meant both "currently archiving"
+  and "finished long ago", leaving the one question the file exists to answer —
+  is this run still alive — unanswerable. Runs now end at `finished: <status>`
+  with `terminal: true`, on the failure path as well.
+
 ## [0.37.0] - 2026-07-27
 
 ### Fixed

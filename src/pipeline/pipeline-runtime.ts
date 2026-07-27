@@ -1257,14 +1257,14 @@ async function runPipelineWithLease(
     startedAt: new Date().toISOString(),
     sliced: slices.length > 0,
   };
-  const notePhase = async (phase: string): Promise<void> => {
+  const notePhase = async (phase: string, terminal = false): Promise<void> => {
     // Best-effort progress; must never affect pipeline control flow.
     try { deps.onPhase?.(phase); } catch { /* progress reporting is advisory */ }
     // Durable too, and awaited: a pipeline ten minutes into a slice used to be
     // indistinguishable from one wedged at the lock, because the only persisted
     // lifecycle line was written once at startup. `store` is initialized before
     // any notePhase call.
-    try { await store?.writeRunPhase(phase); } catch { /* status is advisory */ }
+    try { await store?.writeRunPhase(phase, new Date(), terminal); } catch { /* status is advisory */ }
   };
   let runStart: RunStartContext | undefined;
   let slicedMarkerEstablished = false;
@@ -2224,6 +2224,7 @@ async function runPipelineWithLease(
       failure: null,
     };
     await store.writePipelineArtifact("pipeline-result", result);
+    await notePhase(`finished: ${result.status}`, true);
     authoritySafeToRelease = true;
     return result;
   } catch (error) {

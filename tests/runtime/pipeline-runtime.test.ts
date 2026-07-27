@@ -2848,6 +2848,8 @@ describe("runPipeline", () => {
       "review round 2/2",
       "final verification",
       "evaluating gate",
+      // Terminal, so a reader can tell a finished pipeline from a wedged one.
+      "finished: decision-ready",
     ]);
   });
 

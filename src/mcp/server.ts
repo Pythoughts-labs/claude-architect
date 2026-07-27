@@ -165,6 +165,15 @@ export type ServerDependencies = ToolDependencies & DoctorDependencies & GitRead
  * hole this closes, and silently. `rejected` and `revision-requested` are gated
  * too: an agent that can freely discard a candidate can bury work it dislikes.
  */
+/**
+ * How long a person gets to answer. The SDK's default request timeout is 60
+ * seconds, which is a machine-scale figure applied to a human-scale act: read
+ * the candidate patch, weigh the verification evidence, decide. Both acceptance
+ * attempts in a live session failed at exactly 60s, so making decisions
+ * human-only had made them unrecordable instead.
+ */
+const HUMAN_DECISION_TIMEOUT_MS = 15 * 60_000;
+
 export async function confirmWithHuman(
   server: Pick<McpServer, "server">,
   runId: string,
@@ -204,7 +213,7 @@ export async function confirmWithHuman(
         },
         required: ["confirm"],
       },
-    });
+    }, { timeout: HUMAN_DECISION_TIMEOUT_MS });
   } catch (error) {
     return {
       ok: false,

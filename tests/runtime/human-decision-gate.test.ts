@@ -91,3 +91,21 @@ describe("human decision gate", () => {
     expect(message).toContain("accepted");
   });
 });
+
+describe("elicitation timeout", () => {
+  // The MCP SDK's DEFAULT_REQUEST_TIMEOUT_MSEC is 60_000. Passing no options
+  // gave a person 60 seconds to read a candidate review and decide, so both
+  // acceptance attempts in a live session failed at exactly 60s. Making
+  // decisions human-only is worthless if the human cannot answer in time.
+  it("gives a person a human-scale window, not the SDK's 60-second default", async () => {
+    const elicitInput = vi.fn(async () => ({ action: "accept", content: { confirm: true } }));
+    const server = {
+      server: { getClientCapabilities: () => ({ elicitation: {} }), elicitInput },
+    } as unknown as Pick<McpServer, "server">;
+
+    await confirmWithHuman(server, "run-timeout", "accepted");
+
+    const options = elicitInput.mock.calls[0]?.[1] as { timeout?: number } | undefined;
+    expect(options?.timeout).toBeGreaterThanOrEqual(15 * 60_000);
+  });
+});

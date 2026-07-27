@@ -164,12 +164,13 @@ async function reportPhase(
   deps: AttemptRuntimeDependencies,
   phase: string,
   store?: ArtifactStore,
+  terminal = false,
 ): Promise<void> {
   try { deps.onPhase?.(phase); } catch { /* progress reporting must never affect the attempt */ }
   // Awaited, not fire-and-forget: the point is that the phase is on disk before
   // the long operation it names begins, so an interrupted run is locatable. A
   // failed write is still advisory and never affects the attempt.
-  try { await store?.writeRunPhase(phase); } catch { /* status is advisory */ }
+  try { await store?.writeRunPhase(phase, new Date(), terminal); } catch { /* status is advisory */ }
 }
 
 function hasEnvironmentMarker(environment: Record<string, string | undefined>): boolean {
@@ -746,9 +747,11 @@ export async function runAttempt(
       repositoryInstructions,
       packagedVerifier,
     });
+    await reportPhase(deps, `finished: ${archivedResult.status}`, store, true);
     return archivedResult;
   } catch (error) {
     primaryError = error;
+    await reportPhase(deps, "failed before archiving a result", store, true);
     throw error;
   } finally {
     const cleanupError = await cleanupAttemptResources({

@@ -27411,10 +27411,15 @@ var ArtifactStore = class {
    * wedged at the lock. Replaced rather than appended so the file stays a bounded
    * "where is this run now" answer.
    */
-  async writeRunPhase(phase, at = /* @__PURE__ */ new Date()) {
+  async writeRunPhase(phase, at = /* @__PURE__ */ new Date(), terminal = false) {
     await this.replaceJson("status.json", {
       phase: redact(phase).slice(0, 200),
-      at: at.toISOString()
+      at: at.toISOString(),
+      // Without this a finished run's status.json still names the last phase it
+      // entered, so "archiving result" meant both "currently archiving" and
+      // "finished half an hour ago". A reader could not tell a live run from a
+      // dead one, which is the single question the file exists to answer.
+      terminal
     });
   }
   async writePipelineArtifact(name, value) {
@@ -28467,13 +28472,13 @@ async function captureWorktreeSnapshot(worktreePath) {
     truncated
   };
 }
-async function reportPhase(deps, phase, store) {
+async function reportPhase(deps, phase, store, terminal = false) {
   try {
     deps.onPhase?.(phase);
   } catch {
   }
   try {
-    await store?.writeRunPhase(phase);
+    await store?.writeRunPhase(phase, /* @__PURE__ */ new Date(), terminal);
   } catch {
   }
 }
@@ -29031,9 +29036,11 @@ async function runAttempt(checkoutPath, spec, deps) {
       repositoryInstructions,
       packagedVerifier
     });
+    await reportPhase(deps, `finished: ${archivedResult.status}`, store, true);
     return archivedResult;
   } catch (error2) {
     primaryError = error2;
+    await reportPhase(deps, "failed before archiving a result", store, true);
     throw error2;
   } finally {
     const cleanupError = await cleanupAttemptResources({
@@ -30935,13 +30942,13 @@ async function runPipelineWithLease(checkoutPath, spec, deps, ps, borrowedChecko
     startedAt: (/* @__PURE__ */ new Date()).toISOString(),
     sliced: slices.length > 0
   };
-  const notePhase = async (phase) => {
+  const notePhase = async (phase, terminal = false) => {
     try {
       deps.onPhase?.(phase);
     } catch {
     }
     try {
-      await store?.writeRunPhase(phase);
+      await store?.writeRunPhase(phase, /* @__PURE__ */ new Date(), terminal);
     } catch {
     }
   };
@@ -31815,6 +31822,7 @@ async function runPipelineWithLease(checkoutPath, spec, deps, ps, borrowedChecko
       failure: null
     };
     await store.writePipelineArtifact("pipeline-result", result);
+    await notePhase(`finished: ${result.status}`, true);
     authoritySafeToRelease = true;
     return result;
   } catch (error2) {
@@ -34386,6 +34394,7 @@ var integrateCandidateInputSchema = external_exports.object({
   runId: external_exports.string(),
   expectedArtifactHash: external_exports.string()
 }).strict();
+var HUMAN_DECISION_TIMEOUT_MS = 15 * 6e4;
 async function confirmWithHuman(server, runId, decision, warnings = []) {
   const capabilities = server.server.getClientCapabilities();
   if (capabilities?.elicitation === void 0) {
@@ -34418,7 +34427,7 @@ WARNING \u2014 ${warnings.join("\nWARNING \u2014 ")}`),
         },
         required: ["confirm"]
       }
-    });
+    }, { timeout: HUMAN_DECISION_TIMEOUT_MS });
   } catch (error2) {
     return {
       ok: false,

@@ -702,10 +702,19 @@ export class ArtifactStore {
    * wedged at the lock. Replaced rather than appended so the file stays a bounded
    * "where is this run now" answer.
    */
-  async writeRunPhase(phase: string, at: Date = new Date()): Promise<void> {
+  async writeRunPhase(
+    phase: string,
+    at: Date = new Date(),
+    terminal = false,
+  ): Promise<void> {
     await this.replaceJson("status.json", {
       phase: redact(phase).slice(0, 200),
       at: at.toISOString(),
+      // Without this a finished run's status.json still names the last phase it
+      // entered, so "archiving result" meant both "currently archiving" and
+      // "finished half an hour ago". A reader could not tell a live run from a
+      // dead one, which is the single question the file exists to answer.
+      terminal,
     });
   }
 
