@@ -170,6 +170,18 @@ class IsolatedFakeProducer implements ProducerAdapter {
   }
 
   buildInvocation(spec: DelegationSpec, _context: InvocationContext): ProducerInvocation {
+    // The Producer environment probe runs before each real attempt and carries a
+    // rewritten objective. Labelling it keeps it visible here instead of being
+    // silently counted as the task it precedes.
+    if (spec.objective.includes("This is an environment probe")) {
+      this.invocations.push("probe");
+      return {
+        executable: nodeExecutable,
+        args: ["-e", "process.stdout.write('probe');"],
+        requiredEnv: [],
+        network: "denied",
+      };
+    }
     const task = spec.objective.includes("task one") ? "task-one" : "task-two";
     this.invocations.push(task);
     return {
@@ -474,7 +486,8 @@ describe("AutopilotController end-to-end", () => {
     expect(result.phase).toBe("ready-for-human-review");
     expect(result.terminal?.classification).toBe("ready-for-human-review");
     expect(result.tasks.map(task => task.status)).toEqual(["promoted", "promoted"]);
-    expect(producer.invocations).toEqual(["task-one", "task-two"]);
+    expect(producer.invocations.filter(name => name !== "probe"))
+      .toEqual(["task-one", "task-two"]);
     expect(shippingOrder).toEqual(["push", "draft-pr", "checks", "mark-ready"]);
     expect(shippedHead).toBe(result.headCommitOid);
     expect(await runGit(fixture.checkout, [
