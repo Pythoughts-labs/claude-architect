@@ -64,6 +64,11 @@ import {
   type RunStartRecord,
   withRunStartPidRecording,
 } from "./run-start.js";
+import {
+  writeRunStatusSafely,
+  type RunStatus,
+  type RunStatusPhase,
+} from "./run-status.js";
 
 const MAX_PRODUCER_OUTPUT_BYTES = 1_000_000;
 const MAX_SNAPSHOT_DIFF_BYTES = 100_000;
@@ -132,8 +137,8 @@ export interface AttemptRuntimeDependencies {
   /** Trusted runtime handoff; never derived from the delegation specification. */
   borrowedCheckoutLease?: CheckoutLock;
   onRunStart?: (context: RunStartContext) => void | Promise<void>;
-  /** Host progress reporting only; never awaited and never affects the attempt. */
-  onPhase?: (phase: string) => void;
+  /** Host progress reporting only; failures never affect the attempt. */
+  onPhase?: (phase: string) => void | Promise<void>;
   /**
    * Identity of the spec the *caller* dispatched, when that differs from the
    * spec this attempt received. Slicing rewrites the spec before the attempt
@@ -141,6 +146,13 @@ export interface AttemptRuntimeDependencies {
    * held and `reviewCandidate`'s correspondence check could never match.
    */
   dispatchedSpecSha256?: string;
+  /** Trusted pipeline-owned status context; never derived from Producer input. */
+  runStatus?: {
+    mode: RunStatus["mode"];
+    sliceIndex: number | null;
+    sliceCount: number | null;
+    pipelineManaged: boolean;
+  };
 }
 
 interface TerminalContext {
@@ -167,17 +179,11 @@ interface TerminalContext {
   packagedVerifier: PackagedVerifierInput;
 }
 
-async function reportPhase(
-  deps: AttemptRuntimeDependencies,
-  phase: string,
-  store?: ArtifactStore,
-  terminal = false,
-): Promise<void> {
-  try { deps.onPhase?.(phase); } catch { /* progress reporting must never affect the attempt */ }
-  // Awaited, not fire-and-forget: the point is that the phase is on disk before
-  // the long operation it names begins, so an interrupted run is locatable. A
-  // failed write is still advisory and never affects the attempt.
-  try { await store?.writeRunPhase(phase, new Date(), terminal); } catch { /* status is advisory */ }
+// Host-facing progress only. Durability belongs to `emitStatus`, which writes
+// the typed RunStatus the statusline and recovery read; this callback is a
+// courtesy to the caller and must never affect the attempt.
+async function reportPhase(deps: AttemptRuntimeDependencies, phase: string): Promise<void> {
+  try { await deps.onPhase?.(phase); } catch { /* progress reporting must never affect the attempt */ }
 }
 
 function hasEnvironmentMarker(environment: Record<string, string | undefined>): boolean {
@@ -363,6 +369,45 @@ export async function runAttempt(
   const startedAtMs = now();
   const runId = (deps.runId ?? randomUUID)();
   const store = new ArtifactStore(runId);
+  const inferredSlices = Array.isArray((spec as { slices?: unknown }).slices)
+    ? (spec as { slices: unknown[] }).slices.length
+    : 0;
+  const statusContext = deps.runStatus ?? {
+    mode: inferredSlices > 0 ? "sliced" as const : "single" as const,
+    sliceIndex: inferredSlices > 0 ? 1 : null,
+    sliceCount: inferredSlices > 0 ? inferredSlices : null,
+    pipelineManaged: false,
+  };
+  const startedAt = new Date(startedAtMs).toISOString();
+  const emitStatus = async (
+    phase: RunStatusPhase,
+    fields: Partial<Pick<RunStatus, "role" | "producerId" | "detail">> = {},
+  ): Promise<void> => {
+    await writeRunStatusSafely(store, {
+      statusVersion: "1",
+      runId,
+      mode: statusContext.mode,
+      phase,
+      sliceIndex: statusContext.sliceIndex,
+      sliceCount: statusContext.sliceCount,
+      round: null,
+      role: fields.role ?? null,
+      producerId: fields.producerId ?? null,
+      startedAt,
+      updatedAt: new Date(now()).toISOString(),
+      detail: fields.detail ?? null,
+    });
+  };
+  const archiveWithStatus = async (context: TerminalContext): Promise<AttemptResult> => {
+    const result = await archiveTerminal(context);
+    if (!statusContext.pipelineManaged) {
+      await emitStatus(result.status === "verified-candidate" ? "done" : "failed", {
+        producerId: result.producerId,
+        detail: result.summary,
+      });
+    }
+    return result;
+  };
   const canonical = await ps.canonicalizePath(checkoutPath);
   const repositoryIdentity = canonical.gitCommonDir ?? canonical.canonical;
   let lock: CheckoutLock | null = deps.borrowedCheckoutLease ?? null;
@@ -404,11 +449,12 @@ export async function runAttempt(
       canonicalCommonDir: preconditions.gitCommonDir,
       pid: null,
       processToken: null,
-      startedAt: new Date(startedAtMs).toISOString(),
+      startedAt,
       specSha256: deps.dispatchedSpecSha256 ?? specSha256(spec),
     };
     const runStartContext = await initializeRunStart(store, runStart);
     await deps.onRunStart?.(runStartContext);
+    if (!statusContext.pipelineManaged) await emitStatus("preflight");
 
     const collected = deps.repositoryInstructions !== undefined
       && deps.packagedVerifier !== undefined
@@ -423,8 +469,13 @@ export async function runAttempt(
 
   const executionMode = (spec as { executionMode: string }).executionMode;
   let baselineEvidence: Record<string, unknown> = { baseline: "skipped — read-only spec" };
+  if (!statusContext.pipelineManaged) {
+    await emitStatus("baseline-verify", {
+      detail: executionMode === "edit" ? null : "skipped for read-only execution",
+    });
+  }
   if (executionMode === "edit") {
-    await reportPhase(deps, "verifying baseline", store);
+    await reportPhase(deps, "verifying baseline");
     let baseline;
     try {
       baseline = await (deps.baselineVerifier ?? verifyBaseline)({
@@ -438,7 +489,7 @@ export async function runAttempt(
       });
     } catch (error) {
       if (!deps.abortSignal?.aborted) throw error;
-      return archiveTerminal({
+      return archiveWithStatus({
         store, spec, runId, startedAtMs, now,
         repoRoot: canonical.canonical, baseCommitOid: preconditions.baseCommitOid,
         signals: { cancelled: true }, report: null, profile: null, invocation: null,
@@ -454,7 +505,7 @@ export async function runAttempt(
     // archives run-start first; no separate early return is needed here.
     const baselineFailed = baseline.commands.some(command => !command.ok);
     if (baselineFailed) {
-      return archiveTerminal({
+      return archiveWithStatus({
         store, spec, runId, startedAtMs, now,
         repoRoot: canonical.canonical, baseCommitOid: preconditions.baseCommitOid,
         signals: { "environment-defect": true }, report: null, profile: null, invocation: null,
@@ -466,7 +517,7 @@ export async function runAttempt(
     }
   }
 
-  await reportPhase(deps, "probing producers", store);
+  await reportPhase(deps, "probing producers");
   const reports = await probeAll({
     ps,
     os: ps.os,
@@ -478,7 +529,7 @@ export async function runAttempt(
     const signals: FailureSignals = routing.reason === "authentication-required"
       ? { "authentication-required": true }
       : { unavailable: true };
-    return archiveTerminal({
+    return archiveWithStatus({
       store,
       spec,
       runId,
@@ -510,7 +561,7 @@ export async function runAttempt(
   const adapter: ProducerAdapter | undefined = producerRegistry.get(routing.producerId);
   const report = reports.find(candidate => candidate.producerId === routing.producerId) ?? null;
   if (adapter === undefined || report?.resolvedExecutable === null || report === null) {
-    return archiveTerminal({
+    return archiveWithStatus({
       store,
       spec,
       runId,
@@ -551,7 +602,7 @@ export async function runAttempt(
     if (spec.executionMode === "edit") {
       const selection = selectSandboxBackend(report);
       if (selection.backend === null) {
-        return await archiveTerminal({
+        return await archiveWithStatus({
           store,
           spec,
           runId,
@@ -585,7 +636,10 @@ export async function runAttempt(
       }
     }
     if (spec.executionMode === "edit" && deps.producerPreflight !== false) {
-      await reportPhase(deps, "probing producer environment", store);
+      if (!statusContext.pipelineManaged) {
+        await emitStatus("preflight", { producerId: report.producerId });
+      }
+      await reportPhase(deps, "probing producer environment");
       const preflight = await (typeof deps.producerPreflight === "function"
         ? deps.producerPreflight
         : runProducerPreflight)({
@@ -637,7 +691,10 @@ export async function runAttempt(
       invocation.executable,
       invocation.args,
     );
-    await reportPhase(deps, "producer running", store);
+    if (!statusContext.pipelineManaged) {
+      await emitStatus("implementing", { producerId: report.producerId });
+    }
+    await reportPhase(deps, "producer running");
     const exit = deps.abortSignal?.aborted === true
       ? preCancelledExit()
       : await supervise(recordingServices, {
@@ -670,7 +727,10 @@ export async function runAttempt(
     }
 
     if (!hasFailureSignal(signals)) {
-      await reportPhase(deps, "freezing candidate", store);
+      if (!statusContext.pipelineManaged) {
+        await emitStatus("freezing", { producerId: report.producerId });
+      }
+      await reportPhase(deps, "freezing candidate");
       const frozen = await freezeCandidate({
         repoRoot: canonical.canonical,
         worktreePath: worktree.path,
@@ -692,7 +752,10 @@ export async function runAttempt(
         candidate = frozen.artifact;
         evidence = { ...evidence, ...frozen.evidence };
         try {
-          await reportPhase(deps, "verifying candidate", store);
+          if (!statusContext.pipelineManaged) {
+            await emitStatus("verifying", { producerId: report.producerId });
+          }
+          await reportPhase(deps, "verifying candidate");
           const verification = await deps.verifier.verify({
             repoRoot: canonical.canonical,
             worktreePath: worktree.path,
@@ -730,8 +793,8 @@ export async function runAttempt(
       }
     }
 
-    await reportPhase(deps, "archiving result", store);
-    archivedResult = await archiveTerminal({
+    await reportPhase(deps, "archiving result");
+    archivedResult = await archiveWithStatus({
       store,
       spec,
       runId,
@@ -754,11 +817,15 @@ export async function runAttempt(
       repositoryInstructions,
       packagedVerifier,
     });
-    await reportPhase(deps, `finished: ${archivedResult.status}`, store, true);
+    // archiveWithStatus already recorded the terminal RunStatus; this is the
+    // host-facing echo of it.
+    await reportPhase(deps, `finished: ${archivedResult.status}`);
     return archivedResult;
   } catch (error) {
     primaryError = error;
-    await reportPhase(deps, "failed before archiving a result", store, true);
+    await emitStatus("failed", {
+      detail: error instanceof Error ? error.message : "attempt failed unexpectedly",
+    });
     throw error;
   } finally {
     const cleanupError = await cleanupAttemptResources({
