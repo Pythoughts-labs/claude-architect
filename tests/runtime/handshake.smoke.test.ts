@@ -10,6 +10,27 @@ import { PROTOCOL_VERSION } from "../../src/protocol/versions.js";
 const bootstrapPath = fileURLToPath(new URL("../../runtime/bootstrap.mjs", import.meta.url));
 const serverPath = fileURLToPath(new URL("../../runtime/server.mjs", import.meta.url));
 const temporaryPaths: string[] = [];
+const validSpec = {
+  specVersion: "1",
+  objective: "change one file",
+  context: "test",
+  writeAllowlist: ["src/**"],
+  forbiddenScope: [],
+  successCriteria: ["tests pass"],
+  verification: [{
+    id: "check",
+    executable: "node",
+    args: ["-e", "process.exit(0)"],
+    cwd: ".",
+    timeoutMs: 60_000,
+    network: "denied",
+    expectedExitCodes: [0],
+  }],
+  executionMode: "edit",
+  timeoutMs: 600_000,
+  producerPreferences: ["codex"],
+  expectedOutput: "candidate-patch",
+};
 
 interface JsonRpcResponse {
   jsonrpc: "2.0";
@@ -108,15 +129,23 @@ describe("MCP server handshake", () => {
       const listed = await request(2, "tools/list", {});
       const tools = listed.tools as Array<{ name: string; outputSchema?: Record<string, unknown> }>;
       const names = tools.map(tool => tool.name).sort();
-      const called = await request(3, "tools/call", {
+      const validated = await request(3, "tools/call", {
+        name: "validateDelegationSpec",
+        arguments: {
+          protocolVersion: PROTOCOL_VERSION,
+          spec: validSpec,
+        },
+      });
+      const called = await request(4, "tools/call", {
         name: "delegate",
         arguments: {
           checkoutPath: "/unused-invalid-spec",
           protocolVersion: PROTOCOL_VERSION,
-          spec: { specVersion: "1" },
+          spec: validSpec,
+          expectedSpecSha256: "0".repeat(64),
         },
       });
-      const diagnosed = await request(4, "tools/call", {
+      const diagnosed = await request(5, "tools/call", {
         name: "doctor",
         arguments: {},
       });
@@ -132,9 +161,18 @@ describe("MCP server handshake", () => {
         "gitStatus",
         "integrateCandidate",
         "reviewCandidate",
+        "validateDelegationSpec",
       ]);
       expect(tools.every(tool => tool.outputSchema !== undefined)).toBe(true);
-      expect(called.structuredContent).toMatchObject({ ok: false });
+      expect(validated.structuredContent).toEqual({
+        ok: true,
+        specSha256: "75d6bdadedf7b97cbae5bce0b3d401bfb77a6099cf158d6f8fe5b39f3964eb69",
+      });
+      expect(called.structuredContent).toEqual({
+        ok: false,
+        error: "spec-identity-mismatch",
+        diagnostic: "the validated Delegation Spec does not match expectedSpecSha256",
+      });
       expect(called.content).toEqual([{
         type: "text",
         text: JSON.stringify(called.structuredContent),

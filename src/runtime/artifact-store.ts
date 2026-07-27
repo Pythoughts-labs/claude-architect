@@ -73,13 +73,11 @@ export type RunDecisionValue = "accepted" | "rejected" | "revision-requested";
  * acceptance was indistinguishable from a person's, even after the fact.
  */
 /**
- * `policy-autonomous` means no person was asked, deliberately: the configured
- * decision authority is autonomous and the candidate met every objective
- * condition for it (independently verified, no advisory warnings). It is a
- * distinct value from `caller-asserted` on purpose — the latter means the
- * runtime does not know how the decision was reached, while this one means the
- * runtime knows exactly how, and it was a policy rather than a human. Auditing
- * "which candidates went in without a person" must not require inferring it.
+ * `policy-autonomous` is retained only so archives written by the autonomous
+ * decision policy shipped in 0.39.0 remain readable and auditable. The MCP
+ * lifecycle no longer writes this value, and integration rejects it (as well
+ * as missing or caller-asserted provenance); every current decision requires
+ * human elicitation.
  */
 export type DecisionProvenance = "human-elicitation" | "caller-asserted" | "policy-autonomous";
 
@@ -897,7 +895,18 @@ export class ArtifactStore {
     } catch (error) {
       const existing = await this.readDecision(this.runId);
       if (existing === null) throw error;
-      if (existing.decision === record.decision) return;
+      if (existing.decision === record.decision
+        && existing.decidedBy === record.decidedBy
+        && existing.candidateManifestHash === record.candidateManifestHash) {
+        return;
+      }
+      if (existing.decision === record.decision) {
+        throw new RuntimeError(
+          "candidate decision conflict: recorded provenance or candidate binding "
+            + "differs from attempted decision",
+          { toolError: "decision-conflict" },
+        );
+      }
       throw new RuntimeError(
         `candidate decision conflict: recorded ${existing.decision}, attempted ${record.decision}`,
         { toolError: "decision-conflict" },

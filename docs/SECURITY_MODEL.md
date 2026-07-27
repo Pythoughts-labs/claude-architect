@@ -34,13 +34,13 @@ Pipeline roles are separate one-shot Producer invocations. Reviewer prompts expl
 
 ## Decision authority and authentication
 
-`decideCandidate` is an MCP tool available to the controlling Claude session. The runtime records a decision and refuses acceptance unless the result is a verified candidate.
+`decideCandidate` is an MCP tool available to the controlling Claude session. The runtime refuses acceptance unless the result is a verified candidate, and records how every decision was reached as `decidedBy`.
 
-Whether a person is prompted is governed by `CLAUDE_ARCHITECT_DECISION_AUTHORITY`. Unset or `autonomous` (the shipped default) records a decision without prompting for an independently verified candidate with no failure, no advisory warnings, and a readable archive; every other case raises MCP elicitation and fails closed without it. `human` requires elicitation for every decision. An unrecognized value fails closed to `human` with a warning, so a typo cannot silently select the permissive mode.
+Whether a person is prompted is governed by `CLAUDE_ARCHITECT_DECISION_AUTHORITY`. Unset or `autonomous` (the shipped default) records a decision without prompting for an independently verified candidate with no failure, no advisory warnings, and a readable archive, marking it `policy-autonomous`. Every other case — and every decision under `human` — opens an MCP elicitation request and writes the decision only when the response both accepts the request and explicitly confirms it; a client without elicitation support, an unconfirmed response, or an elicitation failure leaves the candidate undecided. An unrecognized value for the variable fails closed to `human` with a warning.
 
-Provenance is always recorded as `decidedBy`: `human-elicitation`, `policy-autonomous`, or `caller-asserted`. These are distinct on purpose — auditing which candidates went in without a person must not require inferring it.
+Integration accepts `human-elicitation` and `policy-autonomous` provenance. It refuses provenance the runtime cannot vouch for: `caller-asserted` records, and provenance-less records predating the field. Decision records are immutable: a confirmation whose provenance or candidate binding differs from an existing record returns `decision-conflict` rather than claiming it replaced the older one.
 
-Even under `human`, this is a workflow and UI trust assumption rather than an authentication mechanism: there is no separate user login, signature, hardware confirmation, or cryptographic identity proof. Anyone able to control the Claude session or call its MCP tools can record a decision, and under the default authority a verified candidate needs no prompt at all. The load-bearing controls are elsewhere — independent verification gates what may be accepted, and integration refuses a moved `HEAD`, a dirty tree, or a hash that does not match the reviewed artifact.
+Elicitation, where it applies, is an enforced channel boundary, not cryptographic human identity. The plugin does not implement a separate login, signature, or hardware confirmation, and it relies on the MCP host to present elicitation faithfully. A compromised or modified host/client could synthesize a confirmation, so control of that trusted client remains equivalent to decision authority.
 
 ## Atomic candidate integration
 
@@ -67,4 +67,4 @@ Disable/remove the plugin through Claude Code's plugin manager, then remove its 
 - Redaction is best effort, not data-loss prevention.
 - A compromised Producer CLI, Node.js, Git binary, OS account, or Claude session can attack outside assumptions.
 - Allowlist validation occurs after execution as well as through sandbox policy; a missing/defective OS boundary is not repaired by post-run detection.
-- Human acceptance is not cryptographically authenticated, and integration does not commit or merge.
+- Acceptance is not cryptographically authenticated — a verified candidate is accepted by policy without a person under the default authority — and integration does not commit or merge.

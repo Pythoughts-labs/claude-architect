@@ -31812,7 +31812,7 @@ var StdioServerTransport = class {
 var PROTOCOL_VERSION = "1.4.0";
 var DELEGATION_SPEC_VERSION = "1";
 var ATTEMPT_RESULT_VERSION = "1";
-var RUNTIME_VERSION = "0.39.0";
+var RUNTIME_VERSION = "0.40.0";
 
 // src/platform/posix-platform-services.ts
 import { spawn, execFile } from "node:child_process";
@@ -37451,7 +37451,15 @@ var ArtifactStore = class {
     } catch (error51) {
       const existing = await this.readDecision(this.runId);
       if (existing === null) throw error51;
-      if (existing.decision === record2.decision) return;
+      if (existing.decision === record2.decision && existing.decidedBy === record2.decidedBy && existing.candidateManifestHash === record2.candidateManifestHash) {
+        return;
+      }
+      if (existing.decision === record2.decision) {
+        throw new RuntimeError(
+          "candidate decision conflict: recorded provenance or candidate binding differs from attempted decision",
+          { toolError: "decision-conflict" }
+        );
+      }
       throw new RuntimeError(
         `candidate decision conflict: recorded ${existing.decision}, attempted ${record2.decision}`,
         { toolError: "decision-conflict" }
@@ -42185,17 +42193,7 @@ function schemaCompatibility(input) {
   }
   return { ok: true };
 }
-function laneEnvelope(result) {
-  return {
-    runId: result.runId,
-    status: result.status,
-    producerId: result.producerId,
-    manifestHash: result.candidate?.manifestHash ?? null,
-    failure: result.failure,
-    durationMs: result.durationMs
-  };
-}
-async function handleDelegate(checkoutPath, input, deps = {}, responseMode = "full") {
+function validateDelegationSpecInput(input, deps) {
   const protocol = checkVersionCompat(deps.skillProtocolVersion ?? PROTOCOL_VERSION);
   if (!protocol.ok) return { ok: false, diagnostic: protocol.diagnostic };
   if (typeof input === "string") {
@@ -42223,6 +42221,53 @@ async function handleDelegate(checkoutPath, input, deps = {}, responseMode = "fu
   if (producerErrors.length > 0) {
     return { ok: false, error: "invalid-specification", validationErrors: producerErrors };
   }
+  return {
+    ok: true,
+    spec: validation.spec,
+    specSha256: specSha256(validation.spec)
+  };
+}
+async function handleValidateDelegationSpec(input, deps = {}) {
+  const validation = validateDelegationSpecInput(input, deps);
+  if (!validation.ok) return validation;
+  return { ok: true, specSha256: validation.specSha256 };
+}
+function requireExpectedSpecIdentity(actualSpecSha256, expectedSpecSha256) {
+  if (expectedSpecSha256 === void 0) return null;
+  if (!/^[0-9a-f]{64}$/u.test(expectedSpecSha256)) {
+    return {
+      ok: false,
+      error: "spec-identity-unverifiable",
+      diagnostic: "expectedSpecSha256 is not a sha-256 digest"
+    };
+  }
+  if (actualSpecSha256 !== expectedSpecSha256) {
+    return {
+      ok: false,
+      error: "spec-identity-mismatch",
+      diagnostic: "the validated Delegation Spec does not match expectedSpecSha256"
+    };
+  }
+  return null;
+}
+function laneEnvelope(result) {
+  return {
+    runId: result.runId,
+    status: result.status,
+    producerId: result.producerId,
+    manifestHash: result.candidate?.manifestHash ?? null,
+    failure: result.failure,
+    durationMs: result.durationMs
+  };
+}
+async function handleDelegate(checkoutPath, input, deps = {}, responseMode = "full", expectedSpecSha256) {
+  const validation = validateDelegationSpecInput(input, deps);
+  if (!validation.ok) return validation;
+  const identityError = requireExpectedSpecIdentity(
+    validation.specSha256,
+    expectedSpecSha256
+  );
+  if (identityError !== null) return identityError;
   try {
     const ps = services2(deps);
     const canonical = await ps.canonicalizePath(checkoutPath);
@@ -42255,34 +42300,14 @@ async function handleDelegate(checkoutPath, input, deps = {}, responseMode = "fu
     return errorResult(error51);
   }
 }
-async function handleDelegatePipeline(checkoutPath, input, deps = {}, responseMode = "full") {
-  const protocol = checkVersionCompat(deps.skillProtocolVersion ?? PROTOCOL_VERSION);
-  if (!protocol.ok) return { ok: false, diagnostic: protocol.diagnostic };
-  if (typeof input === "string") {
-    try {
-      input = JSON.parse(input);
-    } catch {
-      return {
-        ok: false,
-        error: "invalid-specification",
-        validationErrors: [{ path: "#", message: "string spec is not valid JSON" }]
-      };
-    }
-  }
-  const schema = schemaCompatibility(input);
-  if (!schema.ok) return schema;
-  const validation = validateSpec(input);
-  if (!validation.ok) {
-    return {
-      ok: false,
-      error: "invalid-specification",
-      validationErrors: validation.errors
-    };
-  }
-  const producerErrors = unknownProducerErrors(validation.spec.producerPreferences);
-  if (producerErrors.length > 0) {
-    return { ok: false, error: "invalid-specification", validationErrors: producerErrors };
-  }
+async function handleDelegatePipeline(checkoutPath, input, deps = {}, responseMode = "full", expectedSpecSha256) {
+  const validation = validateDelegationSpecInput(input, deps);
+  if (!validation.ok) return validation;
+  const identityError = requireExpectedSpecIdentity(
+    validation.specSha256,
+    expectedSpecSha256
+  );
+  if (identityError !== null) return identityError;
   try {
     const ps = services2(deps);
     const canonical = await ps.canonicalizePath(checkoutPath);
@@ -42462,12 +42487,16 @@ async function handleIntegrateCandidate(checkoutPath, runId, expectedArtifactHas
       if (decision?.decision !== "accepted") {
         return { integration: "aborted", detail: "no-accepted-decision" };
       }
+      const artifact = requireVerifiedCandidate(run);
+      if (decision.decidedBy !== "human-elicitation" && decision.decidedBy !== "policy-autonomous") {
+        return { integration: "aborted", detail: "accepted-decision-not-confirmed" };
+      }
       if (decision.candidateManifestHash != null && decision.candidateManifestHash !== expectedArtifactHash) {
         return { integration: "aborted", detail: "decision-artifact-mismatch" };
       }
       return (deps.applyCandidateTree ?? applyCandidateTree)({
         repoRoot: run.repoRoot,
-        artifact: requireVerifiedCandidate(run),
+        artifact,
         expectedArtifactHash,
         borrowedCheckoutLock: lock,
         platformServices: ps
@@ -44245,6 +44274,13 @@ var delegateOutput = external_exports.object({
   diagnostic: external_exports.string().optional(),
   error: external_exports.string().optional()
 });
+var validateDelegationSpecOutput = external_exports.object({
+  ok: external_exports.boolean(),
+  specSha256: external_exports.string().optional(),
+  validationErrors: external_exports.array(external_exports.object({ path: external_exports.string(), message: external_exports.string() })).optional(),
+  diagnostic: external_exports.string().optional(),
+  error: external_exports.string().optional()
+});
 var delegatePipelineOutput = external_exports.object({
   ok: external_exports.boolean(),
   result: external_exports.object({
@@ -44319,6 +44355,12 @@ var delegateInputSchema = external_exports.object({
   spec: external_exports.unknown(),
   protocolVersion: protocolVersionInput,
   /**
+   * Optional dispatch guard obtained from `validateDelegationSpec`. Omission is
+   * backward-compatible; lane dispatch supplies it to prevent a valid-but-
+   * different spec from starting work before review can detect substitution.
+   */
+  expectedSpecSha256: external_exports.string().optional(),
+  /**
    * "lane" returns only the correlation envelope a delegation lane reports.
    * A full result can exceed the host's inline-response limit, and the host then
    * offloads it to a file a lane — which has no filesystem tools by design —
@@ -44327,10 +44369,16 @@ var delegateInputSchema = external_exports.object({
    */
   responseMode: external_exports.enum(["full", "lane"]).optional()
 }).strict();
+var validateDelegationSpecInputSchema = external_exports.object({
+  spec: external_exports.unknown(),
+  protocolVersion: protocolVersionInput
+}).strict();
 var delegatePipelineInputSchema = external_exports.object({
   checkoutPath: external_exports.string(),
   spec: external_exports.unknown(),
   protocolVersion: protocolVersionInput,
+  /** See `delegateInputSchema.expectedSpecSha256`. */
+  expectedSpecSha256: external_exports.string().optional(),
   /**
    * "lane" returns only the correlation envelope a delegation lane reports.
    * A full result can exceed the host's inline-response limit, and the host then
@@ -44437,6 +44485,20 @@ async function start(dependencies = {}) {
   }
   const server = new McpServer({ name: "claude-architect", version: RUNTIME_VERSION });
   server.registerTool(
+    "validateDelegationSpec",
+    {
+      title: "Validate and identify a Delegation Spec",
+      description: "Validate a spec without starting a Producer and return its canonical digest.",
+      inputSchema: validateDelegationSpecInputSchema,
+      outputSchema: validateDelegationSpecOutput,
+      annotations: { destructiveHint: false, idempotentHint: true, readOnlyHint: true }
+    },
+    async ({ spec, protocolVersion }) => toolOutput(await handleValidateDelegationSpec(
+      spec,
+      { ...dependencies, skillProtocolVersion: protocolVersion }
+    ))
+  );
+  server.registerTool(
     "delegate",
     {
       title: "Delegate an implementation subtask",
@@ -44444,7 +44506,7 @@ async function start(dependencies = {}) {
       inputSchema: delegateInputSchema,
       outputSchema: delegateOutput
     },
-    async ({ checkoutPath, spec, protocolVersion, responseMode }, extra) => {
+    async ({ checkoutPath, spec, protocolVersion, responseMode, expectedSpecSha256 }, extra) => {
       const progressToken = extra._meta?.progressToken;
       const startedAt = Date.now();
       let step = 0;
@@ -44476,7 +44538,8 @@ async function start(dependencies = {}) {
             // it a cancelled request keeps running and keeps spawning.
             abortSignal: extra.signal
           },
-          responseMode ?? "full"
+          responseMode ?? "full",
+          expectedSpecSha256
         ));
       } finally {
         if (heartbeat !== void 0) clearInterval(heartbeat);
@@ -44491,7 +44554,7 @@ async function start(dependencies = {}) {
       inputSchema: delegatePipelineInputSchema,
       outputSchema: delegatePipelineOutput
     },
-    async ({ checkoutPath, spec, protocolVersion, responseMode }, extra) => {
+    async ({ checkoutPath, spec, protocolVersion, responseMode, expectedSpecSha256 }, extra) => {
       const progressToken = extra._meta?.progressToken;
       const startedAt = Date.now();
       let step = 0;
@@ -44523,7 +44586,8 @@ async function start(dependencies = {}) {
             // it a cancelled request keeps running and keeps spawning.
             abortSignal: extra.signal
           },
-          responseMode ?? "full"
+          responseMode ?? "full",
+          expectedSpecSha256
         ));
       } finally {
         if (heartbeat !== void 0) clearInterval(heartbeat);

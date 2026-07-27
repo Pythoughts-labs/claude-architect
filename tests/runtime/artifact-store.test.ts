@@ -526,6 +526,33 @@ describe("ArtifactStore", () => {
     });
   });
 
+  it("requires idempotent decision retries to match provenance and candidate binding", async () => {
+    const runId = "run-decision-authority";
+    const store = new ArtifactStore(runId);
+    const original = {
+      decision: "accepted" as const,
+      recordedAt: "2026-07-27T12:00:00.000Z",
+      decidedBy: "human-elicitation" as const,
+      candidateManifestHash: "a".repeat(64),
+    };
+    await store.writeDecision(original);
+    await store.writeDecision({
+      ...original,
+      recordedAt: "2026-07-27T12:01:00.000Z",
+    });
+
+    for (const conflicting of [
+      { ...original, decidedBy: "caller-asserted" as const },
+      { ...original, candidateManifestHash: "b".repeat(64) },
+    ]) {
+      await expect(store.writeDecision(conflicting)).rejects.toMatchObject({
+        message: expect.stringContaining("provenance or candidate binding"),
+        detail: { toolError: "decision-conflict" },
+      });
+    }
+    await expect(store.readDecision(runId)).resolves.toEqual(original);
+  });
+
   it("atomically preserves one decision when conflicting writers race", async () => {
     const runId = "run-decision-race";
     const firstStore = new ArtifactStore(runId);

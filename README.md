@@ -9,7 +9,7 @@
 <p align="center">
   <img alt="Claude Code" src="https://img.shields.io/badge/Claude_Code-plugin-d97757?style=flat-square&labelColor=0b0e14">
   <img alt="OpenCode" src="https://img.shields.io/badge/OpenCode-native-58a6ff?style=flat-square&labelColor=0b0e14">
-  <img alt="version" src="https://img.shields.io/badge/version-0.39.0-9aa4b2?style=flat-square&labelColor=0b0e14">
+  <img alt="version" src="https://img.shields.io/badge/version-0.40.0-9aa4b2?style=flat-square&labelColor=0b0e14">
   <img alt="license" src="https://img.shields.io/badge/license-MIT-3fb950?style=flat-square&labelColor=0b0e14">
 </p>
 
@@ -39,11 +39,9 @@ flowchart LR
     B --> C[Frozen candidate]
     C --> D[Independent verification]
     D --> E[Adversarial review]
-    E --> F{Decision}
-    F -->|verified and unwarned| G[Guarded integration]
-    F -->|anything less| I[Human decides]
-    I -->|accept| G
-    I -->|reject or revise| H[Discard or fresh attempt]
+    E --> F{Human decision}
+    F -->|accept| G[Guarded integration]
+    F -->|reject or revise| H[Discard or fresh attempt]
 ```
 
 All agent output is an untrusted candidate, and implementers cannot approve their own work. A candidate that fails independent verification, or whose review gate refused it, can only be accepted by a human.
@@ -86,15 +84,14 @@ Dispatch a delegation through the `delegation-lane` agent to watch it as a nativ
 
 - The lane agent is a courier: its only tools are `delegate` and `delegatePipeline`. It cannot read the repository, run commands, review, decide, or integrate.
 - Lanes against independent repositories run genuinely in parallel. Lanes against the same repository are serialized by the runtime's repository lock — they surface as subagents for visibility, but execute one at a time.
-- The lane's JSON report is used only to correlate (`laneId`, `specSha256`, `runId`); all reviewable evidence comes from `reviewCandidate`, and every acceptance is gated on independent verification with its provenance recorded. At most one accepted candidate per clean checkout.
-
+- The runtime-issued `specSha256` is supplied back to lane dispatch so a valid-but-different spec fails before work starts. The lane's JSON report is used only to correlate (`laneId`, `specSha256`, `runId`); all reviewable evidence comes from `reviewCandidate`, and every acceptance is gated on independent verification with its provenance recorded. At most one accepted candidate per clean checkout.
 - Known limitation: the host injects project context (CLAUDE.md, git status) into custom subagents. The lane agent is instructed to ignore it; the enforced boundary is its tool allowlist, and the Producer itself only ever sees the spec through the trusted runtime.
 
 ## Decision authority
 
 By default a delegation runs to completion without prompting: an independently verified candidate carrying no advisory warnings is accepted and recorded as `policy-autonomous`. Anything short of that — unverified, gate-refused, review-incomplete, or an unreadable archive — still requires a human through MCP elicitation and fails closed without it. Set `CLAUDE_ARCHITECT_DECISION_AUTHORITY=human` to require confirmation for every decision; an unrecognized value fails closed to `human` with a warning.
 
-What this does not relax: independent verification still decides what may be accepted at all, and integration still refuses a moved `HEAD`, a dirty tree, or a hash that does not match the reviewed artifact. Every decision records its provenance, so auditing which candidates went in without a person never requires inferring it.
+What this does not relax: independent verification still decides what may be accepted at all, integration refuses any acceptance whose provenance is unknown, and it still aborts on a moved `HEAD`, a dirty tree, or a hash that does not match the reviewed artifact. Every decision records its provenance, so auditing which candidates went in without a person never requires inferring it.
 
 ## Available skills, agents, and MCP tools
 
@@ -103,6 +100,7 @@ What this does not relax: independent verification still decides what may be acc
 | Skill | `/claude-architect:delegate` | Builds a versioned spec and drives delegation, review, decision, and guarded integration. |
 | Skill | `/claude-architect:subagent-driven-delegation` | Executes a multi-task plan with the Superpowers subagent-driven-development loop, using a verified Producer as the implementer for every task. |
 | Agent | `advisor` | Current strictly read-only commitment-boundary advisor. |
+| MCP | `validateDelegationSpec` | Validates a spec without starting a Producer and returns its canonical correlation digest. |
 | MCP | `delegate` | Runs one validated, isolated, independently verified attempt. |
 | MCP | `delegatePipeline` | Runs the fresh-context implement/review/repair pipeline. |
 | MCP | `reviewCandidate` | Returns the exact frozen patch and verification evidence. |
@@ -115,7 +113,7 @@ What this does not relax: independent verification still decides what may be acc
 
 Claude Architect separates authority across roles and artifacts. Producers receive bounded write scope in isolated worktrees. Candidate bytes are frozen and identified by hashes before independent verification. Reviewers operate in fresh context, and read-only roles lack mutation tools. The runtime rejects nested delegation, scope escapes, changed bases, mismatched anchors or trees, and unaccepted candidates. Integration stages reviewed bytes; it does not commit them.
 
-The central rule is deliberately simple: **all agent output is an untrusted candidate; implementers cannot approve their own work; only the human accepts.** Verification reduces risk but does not establish that a change is safe for your particular deployment.
+The central rule is deliberately simple: **all agent output is an untrusted candidate; implementers cannot approve their own work; and nothing unverified is accepted without a human.** Verification reduces risk but does not establish that a change is safe for your particular deployment.
 
 ## Permissions and external commands
 

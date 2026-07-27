@@ -20,8 +20,9 @@ Agent frontmatter restrictions constrain Claude Code's advisor wrapper. Implemen
 
 | Tool | Authority |
 |---|---|
-| `delegate` | Validate one spec, run one isolated Producer attempt, freeze and independently verify a candidate. |
-| `delegatePipeline` | Run implementation plus fresh-context correctness/systems review, fix rounds, gates, and clean-room verification. It never accepts or integrates automatically. |
+| `validateDelegationSpec` | Read-only validation of a Delegation Spec and derivation of its canonical correlation digest. It starts no Producer and touches no checkout. |
+| `delegate` | Validate one spec, optionally bind it to `expectedSpecSha256` before checkout access, run one isolated Producer attempt, freeze and independently verify a candidate. |
+| `delegatePipeline` | Optionally bind the spec to `expectedSpecSha256`, then run implementation plus fresh-context correctness/systems review, fix rounds, gates, and clean-room verification. It never accepts or integrates automatically. |
 | `reviewCandidate` | Read-only regeneration of the exact anchored patch, changed-path manifest, and evidence. |
 | `decideCandidate` | Record accepted/rejected/revision-requested. Acceptance requires a verified candidate; rejection removes its candidate anchor. |
 | `integrateCandidate` | Apply an accepted tree only after exact manifest-hash and identity revalidation. Stages changes; does not commit. |

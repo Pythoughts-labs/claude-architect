@@ -17,6 +17,7 @@ import {
   handleDelegatePipeline,
   handleIntegrateCandidate,
   handleReviewCandidate,
+  handleValidateDelegationSpec,
   readDecisionAdvisory,
   type ToolDependencies,
 } from "./tools.js";
@@ -38,6 +39,13 @@ const errorOutputFields = {
 const delegateOutput = z.object({
   ok: z.boolean(),
   result: z.record(z.string(), z.unknown()).optional(),
+  validationErrors: z.array(z.object({ path: z.string(), message: z.string() })).optional(),
+  diagnostic: z.string().optional(),
+  error: z.string().optional(),
+});
+const validateDelegationSpecOutput = z.object({
+  ok: z.boolean(),
+  specSha256: z.string().optional(),
   validationErrors: z.array(z.object({ path: z.string(), message: z.string() })).optional(),
   diagnostic: z.string().optional(),
   error: z.string().optional(),
@@ -124,6 +132,12 @@ export const delegateInputSchema = z.object({
   spec: z.unknown(),
   protocolVersion: protocolVersionInput,
   /**
+   * Optional dispatch guard obtained from `validateDelegationSpec`. Omission is
+   * backward-compatible; lane dispatch supplies it to prevent a valid-but-
+   * different spec from starting work before review can detect substitution.
+   */
+  expectedSpecSha256: z.string().optional(),
+  /**
    * "lane" returns only the correlation envelope a delegation lane reports.
    * A full result can exceed the host's inline-response limit, and the host then
    * offloads it to a file a lane — which has no filesystem tools by design —
@@ -133,10 +147,17 @@ export const delegateInputSchema = z.object({
   responseMode: z.enum(["full", "lane"]).optional(),
 }).strict();
 
+export const validateDelegationSpecInputSchema = z.object({
+  spec: z.unknown(),
+  protocolVersion: protocolVersionInput,
+}).strict();
+
 export const delegatePipelineInputSchema = z.object({
   checkoutPath: z.string(),
   spec: z.unknown(),
   protocolVersion: protocolVersionInput,
+  /** See `delegateInputSchema.expectedSpecSha256`. */
+  expectedSpecSha256: z.string().optional(),
   /**
    * "lane" returns only the correlation envelope a delegation lane reports.
    * A full result can exceed the host's inline-response limit, and the host then
@@ -302,6 +323,20 @@ export async function start(dependencies: ServerDependencies = {}): Promise<void
 
   const server = new McpServer({ name: "claude-architect", version: RUNTIME_VERSION });
   server.registerTool(
+    "validateDelegationSpec",
+    {
+      title: "Validate and identify a Delegation Spec",
+      description: "Validate a spec without starting a Producer and return its canonical digest.",
+      inputSchema: validateDelegationSpecInputSchema,
+      outputSchema: validateDelegationSpecOutput,
+      annotations: { destructiveHint: false, idempotentHint: true, readOnlyHint: true },
+    },
+    async ({ spec, protocolVersion }) => toolOutput(await handleValidateDelegationSpec(
+      spec,
+      { ...dependencies, skillProtocolVersion: protocolVersion },
+    )),
+  );
+  server.registerTool(
     "delegate",
     {
       title: "Delegate an implementation subtask",
@@ -309,7 +344,7 @@ export async function start(dependencies: ServerDependencies = {}): Promise<void
       inputSchema: delegateInputSchema,
       outputSchema: delegateOutput,
     },
-    async ({ checkoutPath, spec, protocolVersion, responseMode }, extra) => {
+    async ({ checkoutPath, spec, protocolVersion, responseMode, expectedSpecSha256 }, extra) => {
       const progressToken = extra._meta?.progressToken;
       const startedAt = Date.now();
       let step = 0;
@@ -343,6 +378,7 @@ export async function start(dependencies: ServerDependencies = {}): Promise<void
             abortSignal: extra.signal,
           },
           responseMode ?? "full",
+          expectedSpecSha256,
         ));
       } finally {
         if (heartbeat !== undefined) clearInterval(heartbeat);
@@ -357,7 +393,7 @@ export async function start(dependencies: ServerDependencies = {}): Promise<void
       inputSchema: delegatePipelineInputSchema,
       outputSchema: delegatePipelineOutput,
     },
-    async ({ checkoutPath, spec, protocolVersion, responseMode }, extra) => {
+    async ({ checkoutPath, spec, protocolVersion, responseMode, expectedSpecSha256 }, extra) => {
       const progressToken = extra._meta?.progressToken;
       const startedAt = Date.now();
       let step = 0;
@@ -391,6 +427,7 @@ export async function start(dependencies: ServerDependencies = {}): Promise<void
             abortSignal: extra.signal,
           },
           responseMode ?? "full",
+          expectedSpecSha256,
         ));
       } finally {
         if (heartbeat !== undefined) clearInterval(heartbeat);

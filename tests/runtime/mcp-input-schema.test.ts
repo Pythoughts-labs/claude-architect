@@ -5,6 +5,7 @@ import {
   delegatePipelineInputSchema,
   integrateCandidateInputSchema,
   reviewCandidateInputSchema,
+  validateDelegationSpecInputSchema,
 } from "../../src/mcp/server.js";
 import { PROTOCOL_VERSION } from "../../src/protocol/versions.js";
 
@@ -13,6 +14,24 @@ const validInput = {
   spec: { specVersion: "1" },
   protocolVersion: PROTOCOL_VERSION,
 };
+
+describe("validateDelegationSpec MCP input", () => {
+  it("requires only the exact protocol version and spec", () => {
+    expect(validateDelegationSpecInputSchema.safeParse({
+      spec: validInput.spec,
+      protocolVersion: PROTOCOL_VERSION,
+    }).success).toBe(true);
+    expect(validateDelegationSpecInputSchema.safeParse({
+      checkoutPath: "/repo",
+      spec: validInput.spec,
+      protocolVersion: PROTOCOL_VERSION,
+    }).success).toBe(false);
+    expect(validateDelegationSpecInputSchema.safeParse({
+      spec: validInput.spec,
+      protocolVersion: "1.0.0",
+    }).success).toBe(false);
+  });
+});
 
 describe.each([
   ["delegate", delegateInputSchema],
@@ -43,6 +62,17 @@ describe.each([
     const result = schema.safeParse({ ...validInput, protocolVersions: PROTOCOL_VERSION });
     expect(result.success).toBe(false);
     if (!result.success) expect(result.error.issues[0]?.code).toBe("unrecognized_keys");
+  });
+
+  it("accepts an optional expected canonical spec digest", () => {
+    expect(schema.safeParse({
+      ...validInput,
+      expectedSpecSha256: "a".repeat(64),
+    }).success).toBe(true);
+    expect(schema.safeParse({
+      ...validInput,
+      expectedSpecSha256: 42,
+    }).success).toBe(false);
   });
 });
 

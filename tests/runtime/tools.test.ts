@@ -12,6 +12,7 @@ import {
   handleDelegatePipeline,
   handleIntegrateCandidate,
   handleReviewCandidate,
+  handleValidateDelegationSpec,
   type RunDecision,
   type ToolArtifactStore,
   type ToolDependencies,
@@ -163,7 +164,11 @@ class FakeStore implements ToolArtifactStore {
   }
 
   async writeDecision(decision: RunDecision): Promise<void> {
-    if (this.decision?.decision === decision.decision) return;
+    if (this.decision?.decision === decision.decision
+      && this.decision.decidedBy === decision.decidedBy
+      && this.decision.candidateManifestHash === decision.candidateManifestHash) {
+      return;
+    }
     if (this.decision !== null) {
       throw new RuntimeError(
         `candidate decision conflict: recorded ${this.decision.decision}, attempted ${decision.decision}`,
@@ -233,6 +238,146 @@ function dependencies(
     }),
   };
 }
+
+describe("handleValidateDelegationSpec", () => {
+  it("returns the runtime's canonical digest without starting a run", async () => {
+    let attempts = 0;
+    const deps = dependencies();
+    deps.runAttempt = async () => {
+      attempts += 1;
+      return result;
+    };
+
+    const reordered = {
+      expectedOutput: validSpec.expectedOutput,
+      producerPreferences: validSpec.producerPreferences,
+      timeoutMs: validSpec.timeoutMs,
+      executionMode: validSpec.executionMode,
+      verification: validSpec.verification,
+      successCriteria: validSpec.successCriteria,
+      forbiddenScope: validSpec.forbiddenScope,
+      writeAllowlist: validSpec.writeAllowlist,
+      context: validSpec.context,
+      objective: validSpec.objective,
+      specVersion: validSpec.specVersion,
+    };
+
+    await expect(handleValidateDelegationSpec(validSpec, deps)).resolves.toEqual({
+      ok: true,
+      specSha256: "75d6bdadedf7b97cbae5bce0b3d401bfb77a6099cf158d6f8fe5b39f3964eb69",
+    });
+    await expect(handleValidateDelegationSpec(reordered, deps)).resolves.toEqual({
+      ok: true,
+      specSha256: "75d6bdadedf7b97cbae5bce0b3d401bfb77a6099cf158d6f8fe5b39f3964eb69",
+    });
+    expect(attempts).toBe(0);
+  });
+
+  it("rejects unknown producers before any attempt starts", async () => {
+    let attempts = 0;
+    const deps = dependencies();
+    deps.runAttempt = async () => {
+      attempts += 1;
+      return result;
+    };
+
+    await expect(handleValidateDelegationSpec({
+      ...validSpec,
+      producerPreferences: ["codex-implementer"],
+    }, deps)).resolves.toEqual({
+      ok: false,
+      error: "invalid-specification",
+      validationErrors: [{
+        path: "#/producerPreferences/0",
+        message: expect.stringContaining("unknown producer id"),
+      }],
+    });
+    expect(attempts).toBe(0);
+  });
+});
+
+describe.each(["delegate", "delegatePipeline"])("%s spec identity", operation => {
+  it("starts work when the expected digest matches", async () => {
+    const deps = dependencies();
+    deps.runPipeline = async () => pipelineResult;
+
+    const output = operation === "delegate"
+      ? await handleDelegate(
+        "/repo",
+        validSpec,
+        deps,
+        "full",
+        "75d6bdadedf7b97cbae5bce0b3d401bfb77a6099cf158d6f8fe5b39f3964eb69",
+      )
+      : await handleDelegatePipeline(
+        "/repo",
+        validSpec,
+        deps,
+        "full",
+        "75d6bdadedf7b97cbae5bce0b3d401bfb77a6099cf158d6f8fe5b39f3964eb69",
+      );
+
+    expect(output).toMatchObject({ ok: true });
+  });
+
+  it("rejects a different valid spec before touching the checkout or starting work", async () => {
+    let checkoutReads = 0;
+    let attempts = 0;
+    let pipelines = 0;
+    const basePlatform = fakePlatform();
+    const deps = dependencies();
+    deps.ps = {
+      ...basePlatform,
+      canonicalizePath: async input => {
+        checkoutReads += 1;
+        return basePlatform.canonicalizePath(input);
+      },
+    };
+    deps.runAttempt = async () => {
+      attempts += 1;
+      return result;
+    };
+    deps.runPipeline = async () => {
+      pipelines += 1;
+      return pipelineResult;
+    };
+
+    const output = operation === "delegate"
+      ? await handleDelegate("/repo", validSpec, deps, "full", "0".repeat(64))
+      : await handleDelegatePipeline("/repo", validSpec, deps, "full", "0".repeat(64));
+
+    expect(output).toEqual({
+      ok: false,
+      error: "spec-identity-mismatch",
+      diagnostic: "the validated Delegation Spec does not match expectedSpecSha256",
+    });
+    expect({ checkoutReads, attempts, pipelines }).toEqual({
+      checkoutReads: 0,
+      attempts: 0,
+      pipelines: 0,
+    });
+  });
+
+  it("rejects a malformed expected digest before checkout access", async () => {
+    const deps = dependencies();
+    deps.ps = {
+      ...fakePlatform(),
+      canonicalizePath: async () => {
+        throw new Error("checkout must not be read");
+      },
+    };
+
+    const output = operation === "delegate"
+      ? await handleDelegate("/repo", validSpec, deps, "full", "not-a-digest")
+      : await handleDelegatePipeline("/repo", validSpec, deps, "full", "not-a-digest");
+
+    expect(output).toEqual({
+      ok: false,
+      error: "spec-identity-unverifiable",
+      diagnostic: "expectedSpecSha256 is not a sha-256 digest",
+    });
+  });
+});
 
 type LifecycleOperation = "review" | "decide" | "integrate";
 
@@ -747,7 +892,10 @@ describe("MCP tool handlers", () => {
     const repoRoot = await createRepository();
     const linkedWorktree = await createLinkedWorktree(repoRoot);
     const store = new FakeStore(result, manifestFor(repoRoot));
-    const deps = dependencies(store, getPlatformServices());
+    const deps = {
+      ...dependencies(store, getPlatformServices()),
+      decisionProvenance: "human-elicitation" as const,
+    };
 
     for (const checkoutPath of [repoRoot, linkedWorktree]) {
       await expect(handleReviewCandidate(checkoutPath, "run-tools", deps)).resolves.toMatchObject({
@@ -804,11 +952,78 @@ describe("MCP tool handlers", () => {
   it("refuses to spend an acceptance on a different artifact", async () => {
     const repoRoot = await createRepository();
     const store = new FakeStore(result, manifestFor(repoRoot));
-    const deps = dependencies(store, getPlatformServices());
+    const deps = {
+      ...dependencies(store, getPlatformServices()),
+      decisionProvenance: "human-elicitation" as const,
+    };
     await handleDecideCandidate(repoRoot, "run-tools", "accepted", deps);
 
     await expect(handleIntegrateCandidate(repoRoot, "run-tools", "f".repeat(64), deps))
       .resolves.toEqual({ integration: "aborted", detail: "decision-artifact-mismatch" });
+  });
+
+  // `undefined` is a record written before provenance existed and
+  // `caller-asserted` is one the runtime never confirmed; in both the runtime
+  // does not know how the decision was reached. `policy-autonomous` is the
+  // opposite: the runtime knows exactly how, and it met every objective
+  // condition, so it integrates — see the case below.
+  it.each([
+    undefined,
+    "caller-asserted",
+  ] as const)("refuses integration on unknown acceptance provenance (%s)", async decidedBy => {
+    const repoRoot = await createRepository();
+    const store = new FakeStore(result, manifestFor(repoRoot));
+    store.decision = {
+      decision: "accepted",
+      recordedAt: "2026-07-27T00:00:00.000Z",
+      ...(decidedBy === undefined ? {} : { decidedBy }),
+      candidateManifestHash: candidate.manifestHash,
+    };
+    let integrationCalls = 0;
+    const deps = dependencies(store, getPlatformServices());
+    deps.applyCandidateTree = async () => {
+      integrationCalls += 1;
+      return { integration: "applied", detail: "candidate tree applied" };
+    };
+
+    await expect(handleIntegrateCandidate(
+      repoRoot,
+      "run-tools",
+      candidate.manifestHash,
+      deps,
+    )).resolves.toEqual({
+      integration: "aborted",
+      detail: "accepted-decision-not-confirmed",
+    });
+    expect(integrationCalls).toBe(0);
+  });
+
+  it("integrates an acceptance recorded by the autonomous decision authority", async () => {
+    // The mirror of the refusals above. Demanding `human-elicitation` here would
+    // make an autonomous acceptance unspendable, reintroducing the prompt that
+    // authority exists to remove.
+    const repoRoot = await createRepository();
+    const store = new FakeStore(result, manifestFor(repoRoot));
+    store.decision = {
+      decision: "accepted",
+      recordedAt: "2026-07-27T00:00:00.000Z",
+      decidedBy: "policy-autonomous",
+      candidateManifestHash: candidate.manifestHash,
+    };
+    let integrationCalls = 0;
+    const deps = dependencies(store, getPlatformServices());
+    deps.applyCandidateTree = async () => {
+      integrationCalls += 1;
+      return { integration: "applied", detail: "candidate tree applied" };
+    };
+
+    await expect(handleIntegrateCandidate(
+      repoRoot,
+      "run-tools",
+      candidate.manifestHash,
+      deps,
+    )).resolves.toEqual({ integration: "applied", detail: "candidate tree applied" });
+    expect(integrationCalls).toBe(1);
   });
 
   it("returns the manifest hash integration requires", async () => {
@@ -870,7 +1085,11 @@ describe("MCP tool handlers", () => {
       const platformServices = getPlatformServices();
       const store = new FakeStore(result, manifestFor(repoRoot));
       if (operation === "integrate") {
-        store.decision = { decision: "accepted", recordedAt: "2026-07-19T00:00:00.000Z" };
+        store.decision = {
+          decision: "accepted",
+          recordedAt: "2026-07-19T00:00:00.000Z",
+          decidedBy: "human-elicitation",
+        };
       }
       let markAcquiring!: () => void;
       const acquisitionStarted = new Promise<void>(resolve => { markAcquiring = resolve; });
@@ -1149,7 +1368,10 @@ describe("MCP tool handlers", () => {
 
   it("persists decisions and gates integration on the latest accepted decision", async () => {
     const store = new FakeStore();
-    const deps = dependencies(store);
+    const deps = {
+      ...dependencies(store),
+      decisionProvenance: "human-elicitation" as const,
+    };
     let integrationCalls = 0;
     deps.applyCandidateTree = async args => {
       integrationCalls += 1;
@@ -1190,7 +1412,11 @@ describe("MCP tool handlers", () => {
 
   it("passes the exact lifecycle checkout lease into integration without nested ownership", async () => {
     const store = new FakeStore();
-    store.decision = { decision: "accepted", recordedAt: "2026-07-18T12:01:00.000Z" };
+    store.decision = {
+      decision: "accepted",
+      recordedAt: "2026-07-18T12:01:00.000Z",
+      decidedBy: "human-elicitation",
+    };
     let held = false;
     let acquireCalls = 0;
     let releaseCalls = 0;
@@ -1329,7 +1555,11 @@ describe("MCP tool handlers", () => {
 
   it("preserves an applied integration result when lifecycle lease release fails", async () => {
     const store = new FakeStore();
-    store.decision = { decision: "accepted", recordedAt: "2026-07-18T12:01:00.000Z" };
+    store.decision = {
+      decision: "accepted",
+      recordedAt: "2026-07-18T12:01:00.000Z",
+      decidedBy: "human-elicitation",
+    };
     let releaseCalls = 0;
     const ps = {
       ...fakePlatform(),
@@ -1441,7 +1671,11 @@ describe("MCP tool handlers", () => {
       error: "candidate-not-verified",
       diagnostic: "candidate did not complete independent verification",
     });
-    store.decision = { decision: "accepted", recordedAt: "2026-07-14T00:00:00.000Z" };
+    store.decision = {
+      decision: "accepted",
+      recordedAt: "2026-07-14T00:00:00.000Z",
+      decidedBy: "human-elicitation",
+    };
     await expect(handleIntegrateCandidate(
       "/canonical/repo",
       "run-tools",

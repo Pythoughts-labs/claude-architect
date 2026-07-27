@@ -355,6 +355,10 @@ describe.runIf(process.platform === "darwin")("end-to-end review pipeline", () =
     const runId = "e2e-pipeline-full-lifecycle";
     const adapter = new FakeAdapter("fixed");
     const deps = dependencies(adapter, runId);
+    const lifecycleDeps = {
+      ...deps,
+      decisionProvenance: "human-elicitation" as const,
+    };
 
     const result = await handleDelegatePipeline(repo, validSpec(), deps);
 
@@ -371,7 +375,7 @@ describe.runIf(process.platform === "darwin")("end-to-end review pipeline", () =
     expect(result.result.attempt.evidence.producerPreflight)
       .toMatchObject({ status: "inconclusive" });
 
-    await expect(handleDecideCandidate(repo, runId, "accepted", deps)).resolves.toEqual({
+    await expect(handleDecideCandidate(repo, runId, "accepted", lifecycleDeps)).resolves.toEqual({
       recorded: true,
     });
     const manifest = await new ArtifactStore(runId).readManifest(runId);
@@ -381,7 +385,7 @@ describe.runIf(process.platform === "darwin")("end-to-end review pipeline", () =
       repo,
       runId,
       manifest!.candidateManifestHash!,
-      deps,
+      lifecycleDeps,
     )).resolves.toMatchObject({ integration: "applied" });
     await expect(readFile(path.join(repo, "a.txt"), "utf8")).resolves.toBe("fixed\n");
   });

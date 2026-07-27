@@ -4,11 +4,11 @@ Claude Architect is a Claude Code plugin that turns a bounded implementation req
 
 ## Runtime shape
 
-The plugin manifest is `.claude-plugin/plugin.json`; the packaged MCP entry point is `runtime/bootstrap.mjs`, which locates a suitable Node.js runtime and starts `runtime/server.mjs` over stdio. The TypeScript source is under `src/`. `src/mcp/server.ts` exposes `delegate`, `delegatePipeline`, `reviewCandidate`, `decideCandidate`, `integrateCandidate`, `doctor`, and four bounded Git read tools.
+The plugin manifest is `.claude-plugin/plugin.json`; the packaged MCP entry point is `runtime/bootstrap.mjs`, which locates a suitable Node.js runtime and starts `runtime/server.mjs` over stdio. The TypeScript source is under `src/`. `src/mcp/server.ts` exposes `validateDelegationSpec`, `delegate`, `delegatePipeline`, `reviewCandidate`, `decideCandidate`, `integrateCandidate`, `doctor`, and four bounded Git read tools.
 
 The normal MCP flow is:
 
-1. `delegate` validates a versioned spec containing an objective, context, write allowlist, forbidden scope, success criteria, Producer preferences, timeout, and explicit verification commands.
+1. `validateDelegationSpec` validates a versioned spec containing an objective, context, write allowlist, forbidden scope, success criteria, Producer preferences, timeout, and explicit verification commands, then returns the runtime's canonical `specSha256` without starting a Producer. `delegate` revalidates the same contract at dispatch and, when the caller supplies `expectedSpecSha256`, rejects a different valid spec before checkout access or Producer execution.
 2. `src/runtime/attempt-runtime.ts` checks repository preconditions, selects an eligible Producer, creates a detached Git worktree under the plugin data directory, builds a sanitized environment, and supervises the Producer.
 3. `src/git/candidate-tree.ts` inventories all changes, rejects paths outside the allowlist or inside forbidden scope, rejects unsafe symlink/submodule conditions, writes a Git tree and commit, and anchors it at `refs/claude-architect/candidates/<run-id>`.
 4. The candidate's sorted changed-path manifest is SHA-256 hashed. `src/verify/acceptance-verifier.ts` performs structural checks and runs Host-authorized verification in a separate worktree created by `src/verify/project-verifier.ts`.

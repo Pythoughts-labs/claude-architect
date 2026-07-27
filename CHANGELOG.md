@@ -27,6 +27,65 @@ All notable changes to Claude Architect are recorded here. The format follows
   `issue.input` for both the wrong-value and the absent-key case. Both
   diagnostics are byte-identical to the previous behavior.
 
+## [0.40.0] - 2026-07-27
+
+### Added
+
+- `validateDelegationSpec` gives the architect a read-only, side-effect-free
+  preflight that returns the runtime's canonical `specSha256`. A live lane
+  exposed the missing contract: the controller hashed the spec file's raw bytes
+  while the runtime hashes canonical JSON semantics, producing different
+  identities for the same valid spec and making exact-spec review/recovery fail.
+  The shared validator now also keeps direct and pipeline dispatch validation
+  behavior identical, including unknown Producer diagnostics.
+- Both dispatch tools accept an optional `expectedSpecSha256` guard. Native
+  lanes pass the digest returned by `validateDelegationSpec`; a valid but
+  different payload now fails before checkout access, locking, preflight, or
+  Producer execution. Legacy callers may omit the field.
+- Cancellation is now proven end-to-end, not just checked. Every existing
+  cancellation test injects an `AbortSignal` directly into attempt or pipeline
+  dependencies, which demonstrates the runtime honors a signal but cannot
+  demonstrate one is ever raised — the test supplies the aborted signal itself.
+  The link none of them covered is the one that failed in practice: a caller
+  gives up, and whether that becomes an aborted `extra.signal` depends on the
+  client emitting `notifications/cancelled` and the SDK wiring it through.
+  `tests/runtime/mcp-cancellation.test.ts` drives a real SDK client over an
+  in-memory transport, aborts a live `delegate` call, and asserts the signal the
+  attempt runtime received fires. `ServerDependencies` gained a `transport` seam
+  so a test can connect a client without a stdio process. Cancellation still
+  depends on the host emitting `notifications/cancelled` on task-stop; that is
+  the client's half of the protocol and remains unobserved live.
+
+### Fixed
+
+- Decision provenance is now enforced at integration, and decision retries are
+  bound to it. Integration accepts `human-elicitation` and `policy-autonomous`
+  provenance and refuses what the runtime cannot vouch for — `caller-asserted`
+  records, and records predating the field — with
+  `accepted-decision-not-confirmed`. A later confirmation no longer reports a
+  false successful write over an immutable record: retries are idempotent only
+  when the decision, provenance, and candidate binding all match, and otherwise
+  return `decision-conflict`.
+
+  The autonomous decision authority introduced in 0.39.0 is retained. A
+  concurrent change briefly removed it and required `human-elicitation` at
+  integration; that combination made an autonomous acceptance unspendable, which
+  reintroduced the prompt by another route. The authority remains as documented:
+  a candidate that is independently verified, unwarned, and readable is recorded
+  without prompting; everything else still elicits and still fails closed, and
+  `CLAUDE_ARCHITECT_DECISION_AUTHORITY=human` restores confirmation for every
+  decision.
+- The native delegation lane fails closed when its prompt omits the complete
+  Delegation Spec JSON. In a live session it received only a spec-file path,
+  despite having no filesystem tool, and invented two invalid payloads before
+  the architect recovered by inlining the spec. The courier contract now
+  forbids either dispatch call on an incomplete handoff, while the architect
+  validates and obtains the canonical digest before creating the lane.
+- Security documentation now matches the enforced boundary: which decisions
+  prompt, which are recorded by policy, and which provenance may authorize
+  integration. It still documents the real residual boundary accurately — where
+  elicitation applies the host is trusted to present it faithfully, and no
+  cryptographic human identity is established.
 ## [0.39.0] - 2026-07-27
 
 ### Changed
@@ -60,22 +119,6 @@ All notable changes to Claude Architect are recorded here. The format follows
   were amended together — the trust invariant they stated is now the configured
   authority they describe, so a later session cannot read the old text as law
   and "fix" the code back.
-
-### Added
-
-- Cancellation is now proven end-to-end, not just checked. Every existing
-  cancellation test injects an `AbortSignal` directly into attempt or pipeline
-  dependencies, which demonstrates the runtime honors a signal but cannot
-  demonstrate one is ever raised — the test supplies the aborted signal itself.
-  The link none of them covered is the one that failed in practice: a caller
-  gives up, and whether that becomes an aborted `extra.signal` depends on the
-  client emitting `notifications/cancelled` and the SDK wiring it through.
-  `tests/runtime/mcp-cancellation.test.ts` drives a real SDK client over an
-  in-memory transport, aborts a live `delegate` call, and asserts the signal the
-  attempt runtime received fires. `ServerDependencies` gained a `transport` seam
-  so a test can connect a client without a stdio process. Cancellation still
-  depends on the host emitting `notifications/cancelled` on task-stop; that is
-  the client's half of the protocol and remains unobserved live.
 
 ## [0.38.0] - 2026-07-27
 

@@ -264,6 +264,10 @@ describe("P0-A end-to-end vertical slice", () => {
     const repoRoot = await initRepo();
     const runId = "e2e-happy";
     const deps = dependencies(new FakeAdapter(), runId);
+    const lifecycleDeps = {
+      ...deps,
+      decisionProvenance: "human-elicitation" as const,
+    };
 
     const delegated = await handleDelegate(repoRoot, validSpec(), deps);
     expect(delegated).toMatchObject({
@@ -285,14 +289,19 @@ describe("P0-A end-to-end vertical slice", () => {
       candidate!.manifestHash,
       deps,
     )).resolves.toEqual({ integration: "aborted", detail: "no-accepted-decision" });
-    await expect(handleDecideCandidate(repoRoot, runId, "accepted", deps)).resolves.toEqual({
+    await expect(handleDecideCandidate(
+      repoRoot,
+      runId,
+      "accepted",
+      lifecycleDeps,
+    )).resolves.toEqual({
       recorded: true,
     });
     await expect(handleIntegrateCandidate(
       repoRoot,
       runId,
       candidate!.manifestHash,
-      deps,
+      lifecycleDeps,
     )).resolves.toEqual({ integration: "applied", detail: "candidate tree applied" });
 
     expect(await readFile(path.join(repoRoot, "a.txt"), "utf8")).toBe("integrated\n");

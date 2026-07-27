@@ -75,6 +75,26 @@ describe("P0-A plugin wiring", () => {
     }
     assert.match(skill, /validationErrors/u, "delegate skill must describe the repair loop");
     assert.match(skill, /protocolVersion/u, "delegate skill must echo its protocol marker");
+    assert.match(
+      skill,
+      /[Cc]all `validateDelegationSpec`[^.\n]*exact Delegation Spec/u,
+      "architect must obtain the runtime's canonical spec digest before lane dispatch",
+    );
+    assert.match(
+      skill,
+      /Never hash the spec file or reimplement the canonicalization algorithm/u,
+      "skill must prohibit the raw-file digest mismatch observed live",
+    );
+    assert.match(
+      skill,
+      /Call `delegate`[^.\n]*`expectedSpecSha256`[^.\n]*runtime-returned/u,
+      "direct dispatch must bind the spec to the trusted runtime digest",
+    );
+    assert.doesNotMatch(
+      skill,
+      /hash you computed/u,
+      "review correlation must retain the runtime digest rather than reintroducing caller hashing",
+    );
     for (const rosterName of ["codex-implementer", "opencode-implementer", "pi-implementer", "pythinker-implementer"]) {
       assert.ok(skill.includes(`\`${rosterName}\``), `delegate skill must retain ${rosterName} in its selection roster`);
     }
@@ -91,8 +111,44 @@ describe("P0-A plugin wiring", () => {
       "skill must state same-repository serialization",
     );
     assert.ok(skill.includes("At most one accepted candidate per clean checkout; never batch-accept multiple candidates targeting the same checkout."));
-    assert.ok(skill.includes("compute `specSha256` over the exact spec JSON"), "skill must document lane correlation");
+    assert.ok(skill.includes("runtime-returned `specSha256`"), "skill must document trusted lane correlation");
     assert.match(skill, /laneEligibility\.edit=false/u);
+    for (const inventory of [
+      "README.md",
+      "docs/ARCHITECTURE.md",
+      "docs/MARKETPLACE_REVIEW.md",
+      "docs/PLUGIN_COMPONENTS.md",
+    ]) {
+      assert.match(
+        read(inventory),
+        /validateDelegationSpec/u,
+        `${inventory} must inventory the public validation tool`,
+      );
+    }
+    const securityModel = read("docs/SECURITY_MODEL.md");
+    assert.match(
+      securityModel,
+      /MCP elicitation/u,
+      "security model must describe the enforced human-decision channel",
+    );
+    assert.doesNotMatch(
+      securityModel,
+      /“human-only” is a workflow and UI trust assumption/u,
+      "security model must not describe the removed caller-asserted decision path",
+    );
+    for (const securityDoc of ["docs/MARKETPLACE_REVIEW.md", "docs/THREAT_MODEL.md"]) {
+      const contents = read(securityDoc);
+      assert.match(
+        contents,
+        /MCP elicitation/u,
+        `${securityDoc} must describe the enforced decision gate`,
+      );
+      assert.doesNotMatch(
+        contents,
+        /(?:control of the Claude\/MCP session is the decision credential|a hijacked Claude session can accept)/u,
+        `${securityDoc} must distinguish ordinary caller control from trusted-host compromise`,
+      );
+    }
     // An absence gate whose pattern is an English phrase also matches comments,
     // so a Producer documenting why it avoided the pattern fails a check its
     // code satisfies. Observed live; the rule must stay in the authoring guide.
@@ -129,8 +185,8 @@ describe("P0-A plugin wiring", () => {
     const marketplace = JSON.parse(read(".claude-plugin/marketplace.json"));
     const readme = read("README.md");
     const changelog = read("CHANGELOG.md");
-    assert.equal(plugin.version, "0.39.0");
-    assert.equal(marketplace.plugins[0].version, "0.39.0");
+    assert.equal(plugin.version, "0.40.0");
+    assert.equal(marketplace.plugins[0].version, "0.40.0");
     // Derived from plugin.json, not written out: a literal here is a seventh
     // place to edit on every bump, and it is the one that keeps being missed.
     assert.match(readme, new RegExp(`badge/version-${plugin.version.replace(/\./gu, "\\.")}-`, "u"));
@@ -251,7 +307,20 @@ test("delegation-lane agent ships the produce-only courier contract", () => {
   // no tool to open, so it reports nothing and its controller re-dispatches.
   assert.match(lane, /responseMode: "lane"/u, "lane must request the bounded envelope");
   assert.match(lane, /never re-dispatch a delegation because a result was unreadable/u);
-  for (const field of ["laneId", "specSha256", "\"failure\"", "validationErrors", "manifestHash"]) {
+  assert.match(
+    lane,
+    /complete Delegation Spec is missing[^.]*do not call either MCP tool/u,
+    "lane must fail closed instead of inventing a spec from a file-path handoff",
+  );
+  for (const field of [
+    "laneId",
+    "specSha256",
+    "expectedSpecSha256",
+    "\"failure\"",
+    "\"error\"",
+    "validationErrors",
+    "manifestHash",
+  ]) {
     assert.ok(lane.includes(field), `delegation-lane contract must include ${field}`);
   }
   assert.match(lane, /[Nn]ever review/u);

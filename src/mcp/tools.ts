@@ -12,6 +12,7 @@ import { registry } from "../producers/producer-registry.js";
 import type { AttemptResult, CandidateArtifact } from "../protocol/attempt-result.js";
 import type { DelegationSpec } from "../protocol/delegation-spec.js";
 import { checkVersionCompat } from "../protocol/schema-loader.js";
+import { specSha256 } from "../protocol/spec-hash.js";
 import { validateSpec } from "../protocol/spec-validator.js";
 import {
   DELEGATION_SPEC_VERSION,
@@ -326,6 +327,90 @@ function schemaCompatibility(input: unknown): { ok: true } | { ok: false; diagno
   return { ok: true };
 }
 
+type SpecValidationFailure =
+  | {
+    ok: false;
+    error: "invalid-specification";
+    validationErrors: Array<{ path: string; message: string }>;
+  }
+  | { ok: false; diagnostic: string };
+
+function validateDelegationSpecInput(
+  input: unknown,
+  deps: ToolDependencies,
+): { ok: true; spec: DelegationSpec; specSha256: string } | SpecValidationFailure {
+  const protocol = checkVersionCompat(deps.skillProtocolVersion ?? PROTOCOL_VERSION);
+  if (!protocol.ok) return { ok: false, diagnostic: protocol.diagnostic! };
+  // Schemaless MCP clients (spec is z.unknown → empty JSON schema) may serialize the
+  // nested spec object as a JSON string; accept that encoding before validation.
+  if (typeof input === "string") {
+    try {
+      input = JSON.parse(input) as unknown;
+    } catch {
+      return {
+        ok: false,
+        error: "invalid-specification",
+        validationErrors: [{ path: "#", message: "string spec is not valid JSON" }],
+      };
+    }
+  }
+  const schema = schemaCompatibility(input);
+  if (!schema.ok) return schema;
+  const validation = validateSpec(input);
+  if (!validation.ok) {
+    return {
+      ok: false,
+      error: "invalid-specification",
+      validationErrors: validation.errors,
+    };
+  }
+  const producerErrors = unknownProducerErrors(validation.spec.producerPreferences);
+  if (producerErrors.length > 0) {
+    return { ok: false, error: "invalid-specification", validationErrors: producerErrors };
+  }
+  return {
+    ok: true,
+    spec: validation.spec,
+    specSha256: specSha256(validation.spec),
+  };
+}
+
+/**
+ * Validate and identify a spec without touching a checkout or starting a
+ * Producer. The digest comes from the runtime's canonical wire algorithm, so a
+ * host does not have to reimplement that contract before dispatching a lane.
+ */
+export async function handleValidateDelegationSpec(
+  input: unknown,
+  deps: ToolDependencies = {},
+): Promise<{ ok: true; specSha256: string } | SpecValidationFailure> {
+  const validation = validateDelegationSpecInput(input, deps);
+  if (!validation.ok) return validation;
+  return { ok: true, specSha256: validation.specSha256 };
+}
+
+function requireExpectedSpecIdentity(
+  actualSpecSha256: string,
+  expectedSpecSha256: string | undefined,
+): ToolErrorResult | null {
+  if (expectedSpecSha256 === undefined) return null;
+  if (!/^[0-9a-f]{64}$/u.test(expectedSpecSha256)) {
+    return {
+      ok: false,
+      error: "spec-identity-unverifiable",
+      diagnostic: "expectedSpecSha256 is not a sha-256 digest",
+    };
+  }
+  if (actualSpecSha256 !== expectedSpecSha256) {
+    return {
+      ok: false,
+      error: "spec-identity-mismatch",
+      diagnostic: "the validated Delegation Spec does not match expectedSpecSha256",
+    };
+  }
+  return null;
+}
+
 
 /**
  * The bounded envelope a delegation lane actually reports.
@@ -363,6 +448,7 @@ export async function handleDelegate(
   input: unknown,
   deps: ToolDependencies = {},
   responseMode: "full" | "lane" = "full",
+  expectedSpecSha256?: string,
 ): Promise<
   | { ok: true; result: AttemptResult | LaneEnvelope }
   | {
@@ -374,35 +460,13 @@ export async function handleDelegate(
   | { ok: false; error: "nested-delegation-denied" }
   | ToolErrorResult
 > {
-  const protocol = checkVersionCompat(deps.skillProtocolVersion ?? PROTOCOL_VERSION);
-  if (!protocol.ok) return { ok: false, diagnostic: protocol.diagnostic! };
-  // Schemaless MCP clients (spec is z.unknown → empty JSON schema) may serialize the
-  // nested spec object as a JSON string; accept that encoding before validation.
-  if (typeof input === "string") {
-    try {
-      input = JSON.parse(input) as unknown;
-    } catch {
-      return {
-        ok: false,
-        error: "invalid-specification",
-        validationErrors: [{ path: "#", message: "string spec is not valid JSON" }],
-      };
-    }
-  }
-  const schema = schemaCompatibility(input);
-  if (!schema.ok) return schema;
-  const validation = validateSpec(input);
-  if (!validation.ok) {
-    return {
-      ok: false,
-      error: "invalid-specification",
-      validationErrors: validation.errors,
-    };
-  }
-  const producerErrors = unknownProducerErrors(validation.spec.producerPreferences);
-  if (producerErrors.length > 0) {
-    return { ok: false, error: "invalid-specification", validationErrors: producerErrors };
-  }
+  const validation = validateDelegationSpecInput(input, deps);
+  if (!validation.ok) return validation;
+  const identityError = requireExpectedSpecIdentity(
+    validation.specSha256,
+    expectedSpecSha256,
+  );
+  if (identityError !== null) return identityError;
 
   try {
     const ps = services(deps);
@@ -442,6 +506,7 @@ export async function handleDelegatePipeline(
   input: unknown,
   deps: ToolDependencies = {},
   responseMode: "full" | "lane" = "full",
+  expectedSpecSha256?: string,
 ): Promise<
   | { ok: true; result: PipelineResult | LaneEnvelope }
   | {
@@ -453,35 +518,13 @@ export async function handleDelegatePipeline(
   | { ok: false; error: "nested-delegation-denied" }
   | ToolErrorResult
 > {
-  const protocol = checkVersionCompat(deps.skillProtocolVersion ?? PROTOCOL_VERSION);
-  if (!protocol.ok) return { ok: false, diagnostic: protocol.diagnostic! };
-  // Schemaless MCP clients (spec is z.unknown → empty JSON schema) may serialize the
-  // nested spec object as a JSON string; accept that encoding before validation.
-  if (typeof input === "string") {
-    try {
-      input = JSON.parse(input) as unknown;
-    } catch {
-      return {
-        ok: false,
-        error: "invalid-specification",
-        validationErrors: [{ path: "#", message: "string spec is not valid JSON" }],
-      };
-    }
-  }
-  const schema = schemaCompatibility(input);
-  if (!schema.ok) return schema;
-  const validation = validateSpec(input);
-  if (!validation.ok) {
-    return {
-      ok: false,
-      error: "invalid-specification",
-      validationErrors: validation.errors,
-    };
-  }
-  const producerErrors = unknownProducerErrors(validation.spec.producerPreferences);
-  if (producerErrors.length > 0) {
-    return { ok: false, error: "invalid-specification", validationErrors: producerErrors };
-  }
+  const validation = validateDelegationSpecInput(input, deps);
+  if (!validation.ok) return validation;
+  const identityError = requireExpectedSpecIdentity(
+    validation.specSha256,
+    expectedSpecSha256,
+  );
+  if (identityError !== null) return identityError;
 
   try {
     const ps = services(deps);
@@ -749,6 +792,17 @@ export async function handleIntegrateCandidate(
       if (decision?.decision !== "accepted") {
         return { integration: "aborted", detail: "no-accepted-decision" };
       }
+      const artifact = requireVerifiedCandidate(run);
+      // Provenance is recorded, not required to be human here. Under the
+      // autonomous decision authority a verified, unwarned candidate is accepted
+      // as `policy-autonomous`; demanding `human-elicitation` at integration
+      // would make that acceptance unspendable and reintroduce the prompt the
+      // authority exists to remove. A `caller-asserted` record is still refused:
+      // that provenance means the runtime does not know how the decision was
+      // reached, which is different from knowing it was policy.
+      if (decision.decidedBy !== "human-elicitation" && decision.decidedBy !== "policy-autonomous") {
+        return { integration: "aborted", detail: "accepted-decision-not-confirmed" };
+      }
       // An acceptance is a judgement about one specific candidate. When the
       // record names the artifact it was made about, refuse to spend it on a
       // different one. Records written before provenance existed carry no hash;
@@ -759,7 +813,7 @@ export async function handleIntegrateCandidate(
       }
       return (deps.applyCandidateTree ?? applyTree)({
         repoRoot: run.repoRoot,
-        artifact: requireVerifiedCandidate(run),
+        artifact,
         expectedArtifactHash,
         borrowedCheckoutLock: lock,
         platformServices: ps,
