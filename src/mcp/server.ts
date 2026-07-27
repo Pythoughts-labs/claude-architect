@@ -592,7 +592,13 @@ export async function createServer(
         (dependencies.decisionAuthority ?? decisionAuthority)(),
         advisory,
       );
-      if (!autonomy.eligible) {
+      // Eligibility says the runtime proved everything it can prove about the
+      // candidate; it says nothing about the verdict. The policy may only ever
+      // accept, so a rejection or revision request on an eligible candidate is a
+      // human overriding the policy — it must go through elicitation and be
+      // recorded as the person's decision, not the policy's.
+      const autonomous = autonomy.eligible && decision === "accepted";
+      if (!autonomous) {
         const confirmed = await confirmWithHuman(server, runId, decision, advisory.warnings);
         if (!confirmed.ok) return toolOutput(confirmed.error);
       }
@@ -603,7 +609,7 @@ export async function createServer(
         expectedArtifactHash,
         {
           ...dependencies,
-          decisionProvenance: autonomy.eligible ? "policy-autonomous" : "human-elicitation",
+          decisionProvenance: autonomous ? "policy-autonomous" : "human-elicitation",
         },
       ));
     },
