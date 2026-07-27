@@ -37685,18 +37685,22 @@ function changeType(status) {
 function sortChangedPaths(changedPaths) {
   return changedPaths.sort((left, right) => left.path < right.path ? -1 : left.path > right.path ? 1 : 0);
 }
+function foldPathForCollision(value) {
+  const exact = value.replaceAll("\\", "/").normalize("NFC");
+  return { exact, folded: exact.toLowerCase() };
+}
 function validateChangedPaths(changedPaths) {
   const observed = /* @__PURE__ */ new Map();
   for (const change of changedPaths) {
     if (change.path.includes("\\")) {
       throw new RuntimeError("changed path is not forward-slash normalized");
     }
-    const folded = change.path.toLowerCase();
+    const { exact, folded } = foldPathForCollision(change.path);
     const existing = observed.get(folded);
-    if (existing !== void 0 && existing !== change.path) {
+    if (existing !== void 0 && existing !== exact) {
       throw new RuntimeError("changed paths collide under case folding");
     }
-    observed.set(folded, change.path);
+    observed.set(folded, exact);
   }
 }
 function manifestHashOf(changedPaths) {
@@ -38213,6 +38217,9 @@ var WorktreeManager = class {
     };
   }
   async createAttached(branch, expectedCommitOid) {
+    if (branch === "" || branch.startsWith("-")) {
+      throw new RuntimeError("refusing to create a worktree for an option-like branch name");
+    }
     const { worktreesRoot, worktreePath } = this.managedWorktreePath();
     await mkdir3(worktreesRoot, { recursive: true });
     const runGit = this.dependencies.git ?? git;
@@ -38223,18 +38230,27 @@ var WorktreeManager = class {
     if (result.exitCode !== 0) {
       throw failure("git worktree add", result);
     }
-    const symbolicBranch = await runGit(worktreePath, ["symbolic-ref", "--quiet", "--short", "HEAD"]);
-    const head = await runGit(worktreePath, ["rev-parse", "--verify", "HEAD"]);
-    if (symbolicBranch.exitCode !== 0 || symbolicBranch.stdout.trim() !== branch || head.exitCode !== 0 || head.stdout.trim() !== expectedCommitOid) {
+    let identityMatches;
+    let probeError;
+    try {
+      const symbolicBranch = await runGit(worktreePath, ["symbolic-ref", "--quiet", "--short", "HEAD"]);
+      const head = await runGit(worktreePath, ["rev-parse", "--verify", "HEAD"]);
+      identityMatches = symbolicBranch.exitCode === 0 && symbolicBranch.stdout.trim() === branch && head.exitCode === 0 && head.stdout.trim() === expectedCommitOid;
+    } catch (error51) {
+      identityMatches = false;
+      probeError = error51;
+    }
+    if (!identityMatches) {
+      const primary = probeError ?? new RuntimeError("created worktree identity did not match");
       try {
         await this.remove(worktreePath);
       } catch (cleanupError) {
         throw new AggregateError(
-          [new RuntimeError("created worktree identity did not match"), cleanupError],
+          [primary, cleanupError],
           "created worktree identity did not match and cleanup failed"
         );
       }
-      throw new RuntimeError("created worktree identity did not match");
+      throw primary;
     }
     return {
       path: worktreePath,
@@ -38755,26 +38771,25 @@ function gitFailure2(action, result) {
 async function checkedGit2(cwd, args) {
   const result = await git(cwd, args);
   if (result.exitCode !== 0) throw gitFailure2(`git ${args[0] ?? "command"}`, result);
+  if (result.truncated?.stdout === true || result.truncated?.stderr === true) {
+    throw gitFailure2(`git ${args[0] ?? "command"}`, { ...result, stderr: "output truncated" });
+  }
   return result.stdout;
 }
 function isAllowed(pathname, writeAllowlist, forbiddenScope, opaqueDirectory = false) {
   const scopePaths = opaqueDirectory ? [pathname, `${pathname}/`] : [pathname];
   return writeAllowlist.some((pattern) => scopePaths.some((candidate) => globMatches(pattern, candidate))) && !forbiddenScope.some((pattern) => scopePaths.some((candidate) => globMatches(pattern, candidate, true)));
 }
-function normalizedFoldedPath(value) {
-  const exact = value.replaceAll("\\", "/").normalize("NFC");
-  return { exact, folded: exact.toLowerCase() };
-}
 function pathsCaseCollide(changedPaths, treePaths) {
   const changedByFold = /* @__PURE__ */ new Map();
   for (const changedPath of changedPaths) {
-    const { exact, folded } = normalizedFoldedPath(changedPath);
+    const { exact, folded } = foldPathForCollision(changedPath);
     const existing = changedByFold.get(folded);
     if (existing !== void 0 && existing !== exact) return true;
     changedByFold.set(folded, exact);
   }
   for (const treePath of treePaths) {
-    const { exact, folded } = normalizedFoldedPath(treePath);
+    const { exact, folded } = foldPathForCollision(treePath);
     const changed = changedByFold.get(folded);
     if (changed !== void 0 && changed !== exact) return true;
   }
@@ -38857,14 +38872,27 @@ async function artifactIdentityMatches(args) {
   return anchorResult.stdout.trim() === args.artifact.candidateCommitOid && treeResult.stdout.trim() === args.artifact.candidateTreeOid && commitAndParents.length === 2 && commitAndParents[0] === args.artifact.candidateCommitOid && commitAndParents[1] === args.baseCommitOid;
 }
 async function structuralVerify(args) {
+  const failures = /* @__PURE__ */ new Set();
   if (await candidateHasCaseCollision(args)) {
+    const [head, status] = await Promise.all([
+      checkedGit2(args.repoRoot, ["rev-parse", "--verify", "HEAD"]),
+      checkedGit2(args.repoRoot, [
+        "status",
+        "--porcelain=v1",
+        "--untracked-files=all",
+        "--ignore-submodules=none"
+      ])
+    ]);
     return {
       ok: false,
       failures: ["case-collision"],
-      manifestHash: args.artifact.manifestHash
+      manifestHash: null,
+      checkoutDrift: {
+        headMoved: head.trim() !== args.baseCommitOid,
+        dirty: status.length > 0
+      }
     };
   }
-  const failures = /* @__PURE__ */ new Set();
   const [manifest, baseTreeOid, currentHead, mainStatus, artifactIdentityValid] = await Promise.all([
     recomputeManifest(args),
     checkedGit2(args.repoRoot, ["rev-parse", `${args.baseCommitOid}^{tree}`]),
@@ -45942,8 +45970,11 @@ async function packageScriptInvokesVitest(cwd, scriptName) {
       scripts,
       /* @__PURE__ */ new Set([scriptName])
     );
-  } catch {
-    return false;
+  } catch (error51) {
+    if (typeof error51 === "object" && error51 !== null && "code" in error51 && error51.code === "ENOENT") {
+      return false;
+    }
+    throw error51;
   }
 }
 async function isVitestCommand(command, cwd) {
@@ -52800,90 +52831,94 @@ async function recoverAutopilotWorkflows(root, dependencies) {
   const results = [];
   const branchManager = new WorkflowBranchManager({ git: dependencies.runGit });
   for (const workflowId of await workflowIds(root)) {
-    const store = new WorkflowStore(workflowId, {
-      stateDirectory: root,
-      isProcessAlive: dependencies.isProcessAlive,
-      getProcessStartToken: dependencies.getProcessStartToken
-    });
-    const [lease, branch] = await Promise.all([
-      observeWorkflowLease(
-        store,
-        dependencies.isProcessAlive,
-        dependencies.getProcessStartToken
-      ),
-      observeWorkflowBranch(
-        root,
-        workflowId,
-        branchManager,
-        dependencies.isProcessAlive,
-        dependencies.getProcessStartToken
-      )
-    ]);
-    if (lease.presence === "present" && lease.status === "live" || branch.ownerStatus === "live") {
-      results.push({ workflowId, disposition: "live-preserve" });
-      continue;
-    }
-    const stateAbsent = await isAbsent(store.statePath);
-    if (stateAbsent === true) {
-      if (branch.presence === "present" && branch.ownerStatus === "dead" && branch.identity !== null) {
-        const cleanup = await branchManager.cleanup(branch.identity, branch.identity.baseCommitOid);
-        results.push({
-          workflowId,
-          disposition: cleanup.ok && cleanup.worktreeRemoved && cleanup.refsRemoved ? "dispose" : "human-decision-required"
-        });
-      } else {
-        results.push({ workflowId, disposition: "human-decision-required" });
-      }
-      continue;
-    }
-    if (stateAbsent !== false) {
-      results.push({ workflowId, disposition: "human-decision-required" });
-      continue;
-    }
-    let state;
-    let journal;
     try {
-      [state, journal] = await Promise.all([store.read(), store.readIntentJournal()]);
-    } catch {
-      results.push({ workflowId, disposition: "human-decision-required" });
-      continue;
-    }
-    if (TERMINAL_WORKFLOW_PHASES.has(state.phase)) continue;
-    if (lease.presence !== "present" || lease.status !== "dead" || branch.presence === "ambiguous" || branch.ownerStatus === "unverifiable") {
-      results.push({ workflowId, disposition: "human-decision-required" });
-      continue;
-    }
-    const recorded = recordedBranch(journal, state);
-    if (recorded === null) {
-      results.push({ workflowId, disposition: "human-decision-required" });
-      continue;
-    }
-    if (state.phase === "cleaning-up") {
-      const expectedHead3 = expectedWorkflowHead(state);
-      const intent = expectedHead3 === null ? null : cleanupIntent(journal, expectedHead3);
-      const directlyObserved = expectedHead3 !== null && state.finalGate?.headCommitOid === expectedHead3 && branch.presence === "absent" && await isAbsent(branchOwnershipPath(root, workflowId)) === true && await cleanupIsDirectlyObserved(recorded, dependencies.runGit);
-      if (expectedHead3 === null || intent === null || !directlyObserved) {
+      const store = new WorkflowStore(workflowId, {
+        stateDirectory: root,
+        isProcessAlive: dependencies.isProcessAlive,
+        getProcessStartToken: dependencies.getProcessStartToken
+      });
+      const [lease, branch] = await Promise.all([
+        observeWorkflowLease(
+          store,
+          dependencies.isProcessAlive,
+          dependencies.getProcessStartToken
+        ),
+        observeWorkflowBranch(
+          root,
+          workflowId,
+          branchManager,
+          dependencies.isProcessAlive,
+          dependencies.getProcessStartToken
+        )
+      ]);
+      if (lease.presence === "present" && lease.status === "live" || branch.ownerStatus === "live") {
+        results.push({ workflowId, disposition: "live-preserve" });
+        continue;
+      }
+      const stateAbsent = await isAbsent(store.statePath);
+      if (stateAbsent === true) {
+        if (branch.presence === "present" && branch.ownerStatus === "dead" && branch.identity !== null) {
+          const cleanup = await branchManager.cleanup(branch.identity, branch.identity.baseCommitOid);
+          results.push({
+            workflowId,
+            disposition: cleanup.ok && cleanup.worktreeRemoved && cleanup.refsRemoved ? "dispose" : "human-decision-required"
+          });
+        } else {
+          results.push({ workflowId, disposition: "human-decision-required" });
+        }
+        continue;
+      }
+      if (stateAbsent !== false) {
         results.push({ workflowId, disposition: "human-decision-required" });
         continue;
       }
-      await finalizeObservedWorkflow(store, state, expectedHead3);
-      results.push({ workflowId, disposition: "finalize" });
-      continue;
-    }
-    if (branch.presence !== "present" || branch.identity === null || branch.ownerStatus !== "dead" || !sameWorkflowBranch(branch.identity, recorded)) {
+      let state;
+      let journal;
+      try {
+        [state, journal] = await Promise.all([store.read(), store.readIntentJournal()]);
+      } catch {
+        results.push({ workflowId, disposition: "human-decision-required" });
+        continue;
+      }
+      if (TERMINAL_WORKFLOW_PHASES.has(state.phase)) continue;
+      if (lease.presence !== "present" || lease.status !== "dead" || branch.presence === "ambiguous" || branch.ownerStatus === "unverifiable") {
+        results.push({ workflowId, disposition: "human-decision-required" });
+        continue;
+      }
+      const recorded = recordedBranch(journal, state);
+      if (recorded === null) {
+        results.push({ workflowId, disposition: "human-decision-required" });
+        continue;
+      }
+      if (state.phase === "cleaning-up") {
+        const expectedHead3 = expectedWorkflowHead(state);
+        const intent = expectedHead3 === null ? null : cleanupIntent(journal, expectedHead3);
+        const directlyObserved = expectedHead3 !== null && state.finalGate?.headCommitOid === expectedHead3 && branch.presence === "absent" && await isAbsent(branchOwnershipPath(root, workflowId)) === true && await cleanupIsDirectlyObserved(recorded, dependencies.runGit);
+        if (expectedHead3 === null || intent === null || !directlyObserved) {
+          results.push({ workflowId, disposition: "human-decision-required" });
+          continue;
+        }
+        await finalizeObservedWorkflow(store, state, expectedHead3);
+        results.push({ workflowId, disposition: "finalize" });
+        continue;
+      }
+      if (branch.presence !== "present" || branch.identity === null || branch.ownerStatus !== "dead" || !sameWorkflowBranch(branch.identity, recorded)) {
+        results.push({ workflowId, disposition: "human-decision-required" });
+        continue;
+      }
+      const expectedHead2 = expectedWorkflowHead(state);
+      if (expectedHead2 === null || !await activeBranchIsDirectlyObserved(
+        branch.identity,
+        expectedHead2,
+        dependencies.runGit
+      )) {
+        results.push({ workflowId, disposition: "human-decision-required" });
+        continue;
+      }
+      results.push({ workflowId, disposition: "resume" });
+    } catch {
       results.push({ workflowId, disposition: "human-decision-required" });
-      continue;
     }
-    const expectedHead2 = expectedWorkflowHead(state);
-    if (expectedHead2 === null || !await activeBranchIsDirectlyObserved(
-      branch.identity,
-      expectedHead2,
-      dependencies.runGit
-    )) {
-      results.push({ workflowId, disposition: "human-decision-required" });
-      continue;
-    }
-    results.push({ workflowId, disposition: "resume" });
   }
   return results;
 }
@@ -53349,7 +53384,15 @@ function toolOutput(value) {
     structuredContent
   };
 }
+function nestedDelegationDenied() {
+  return process.env.CLAUDE_ARCHITECT_DELEGATED !== void 0;
+}
 async function createServer(dependencies = {}) {
+  if (nestedDelegationDenied()) {
+    throw new RuntimeError(
+      "Claude Architect MCP startup denied: CLAUDE_ARCHITECT_DELEGATED is present"
+    );
+  }
   await (dependencies.recoverStaleRuns ?? recoverStaleRuns)();
   try {
     await (dependencies.pruneRuns ?? pruneRuns)();
@@ -53677,7 +53720,7 @@ async function createServer(dependencies = {}) {
   return server;
 }
 async function start(dependencies = {}) {
-  if (process.env.CLAUDE_ARCHITECT_DELEGATED !== void 0) {
+  if (nestedDelegationDenied()) {
     console.error("Claude Architect MCP startup denied: CLAUDE_ARCHITECT_DELEGATED is present");
     process.exitCode = 1;
     return;

@@ -817,6 +817,10 @@ function requireMatchingSnapshotBytes(
   regenerated: ReviewSnapshot,
   persisted: ReviewSnapshot,
 ): void {
+  // Deliberately byte-strict, not hash-equal: the persisted snapshot must be
+  // the exact bytes this runtime wrote, so a key-order difference means
+  // something rewrote the archive even though the canonical hash still matches.
+  // `reviewSnapshotHash(persisted)` is called for its validation side effect.
   reviewSnapshotHash(persisted);
   if (JSON.stringify(persisted) !== JSON.stringify(regenerated)) {
     throw runtimeError(

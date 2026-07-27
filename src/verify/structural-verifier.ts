@@ -1,6 +1,7 @@
 import { git, type GitResult } from "../git/git-exec.js";
 import {
   computeChangedPathManifest,
+  foldPathForCollision,
   parseRawDiff,
   splitNul,
   type RawDiffEntry,
@@ -50,7 +51,12 @@ export interface StructuralVerifyArgs {
 export interface StructuralVerifyResult {
   ok: boolean;
   failures: StructuralFailure[];
-  manifestHash: string;
+  /**
+   * The INDEPENDENTLY recomputed manifest hash, never the candidate's own
+   * claim. `null` when colliding paths make the manifest uncomputable — a
+   * missing proof must read as missing, not as the Producer's assertion.
+   */
+  manifestHash: string | null;
   /** Recorded so a human sees the checkout moved; does not affect `ok`. */
   checkoutDrift?: CheckoutDrift;
 }
@@ -63,6 +69,12 @@ function gitFailure(action: string, result: GitResult): RuntimeError {
 async function checkedGit(cwd: string, args: string[]): Promise<string> {
   const result = await git(cwd, args);
   if (result.exitCode !== 0) throw gitFailure(`git ${args[0] ?? "command"}`, result);
+  // Truncated output is a partial answer, and every caller here treats what it
+  // gets as the complete path set — a clipped `ls-tree` would silently hide a
+  // real case collision. Proof cannot rest on a truncated read.
+  if (result.truncated?.stdout === true || result.truncated?.stderr === true) {
+    throw gitFailure(`git ${args[0] ?? "command"}`, { ...result, stderr: "output truncated" });
+  }
   return result.stdout;
 }
 
@@ -80,21 +92,16 @@ function isAllowed(
       scopePaths.some(candidate => globMatches(pattern, candidate, true)));
 }
 
-function normalizedFoldedPath(value: string): { exact: string; folded: string } {
-  const exact = value.replaceAll("\\", "/").normalize("NFC");
-  return { exact, folded: exact.toLowerCase() };
-}
-
 export function pathsCaseCollide(changedPaths: string[], treePaths: string[]): boolean {
   const changedByFold = new Map<string, string>();
   for (const changedPath of changedPaths) {
-    const { exact, folded } = normalizedFoldedPath(changedPath);
+    const { exact, folded } = foldPathForCollision(changedPath);
     const existing = changedByFold.get(folded);
     if (existing !== undefined && existing !== exact) return true;
     changedByFold.set(folded, exact);
   }
   for (const treePath of treePaths) {
-    const { exact, folded } = normalizedFoldedPath(treePath);
+    const { exact, folded } = foldPathForCollision(treePath);
     const changed = changedByFold.get(folded);
     if (changed !== undefined && changed !== exact) return true;
   }
@@ -185,14 +192,29 @@ async function artifactIdentityMatches(args: StructuralVerifyArgs): Promise<bool
 }
 
 export async function structuralVerify(args: StructuralVerifyArgs): Promise<StructuralVerifyResult> {
+  const failures = new Set<StructuralFailure>();
+  // A collision makes the manifest uncomputable (`validateChangedPaths` throws
+  // on it), so the recompute is skipped — but the old short-circuit then
+  // reported the candidate's OWN manifestHash as verification output and threw
+  // away checkoutDrift and every other failure, leaving a repair loop with one
+  // problem instead of all of them. Report the collision and keep going.
   if (await candidateHasCaseCollision(args)) {
+    const [head, status] = await Promise.all([
+      checkedGit(args.repoRoot, ["rev-parse", "--verify", "HEAD"]),
+      checkedGit(args.repoRoot, [
+        "status", "--porcelain=v1", "--untracked-files=all", "--ignore-submodules=none",
+      ]),
+    ]);
     return {
       ok: false,
       failures: ["case-collision"],
-      manifestHash: args.artifact.manifestHash,
+      manifestHash: null,
+      checkoutDrift: {
+        headMoved: head.trim() !== args.baseCommitOid,
+        dirty: status.length > 0,
+      },
     };
   }
-  const failures = new Set<StructuralFailure>();
   const [manifest, baseTreeOid, currentHead, mainStatus, artifactIdentityValid] = await Promise.all([
     recomputeManifest(args),
     checkedGit(args.repoRoot, ["rev-parse", `${args.baseCommitOid}^{tree}`]),

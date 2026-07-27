@@ -95,18 +95,33 @@ function sortChangedPaths(changedPaths: ChangedPath[]): ChangedPath[] {
   return changedPaths.sort((left, right) => left.path < right.path ? -1 : left.path > right.path ? 1 : 0);
 }
 
+/**
+ * The single definition of "these two paths are the same file on a
+ * case-insensitive or Unicode-normalizing filesystem". Folding with
+ * `toLowerCase()` alone misses NFC/NFD aliases (`É.txt` vs `e\u0301.txt`),
+ * which name one file on macOS and Windows — so every collision gate in the
+ * codebase must fold identically or one of them fails open.
+ */
+export function foldPathForCollision(value: string): { exact: string; folded: string } {
+  const exact = value.replaceAll("\\", "/").normalize("NFC");
+  return { exact, folded: exact.toLowerCase() };
+}
+
 export function validateChangedPaths(changedPaths: ChangedPath[]): void {
   const observed = new Map<string, string>();
   for (const change of changedPaths) {
     if (change.path.includes("\\")) {
       throw new RuntimeError("changed path is not forward-slash normalized");
     }
-    const folded = change.path.toLowerCase();
+    // Compare the NORMALIZED form on both sides, exactly as `pathsCaseCollide`
+    // does: NFC-equal paths are the same path (not an alias), while paths that
+    // differ once normalized but share a fold are the real collision.
+    const { exact, folded } = foldPathForCollision(change.path);
     const existing = observed.get(folded);
-    if (existing !== undefined && existing !== change.path) {
+    if (existing !== undefined && existing !== exact) {
       throw new RuntimeError("changed paths collide under case folding");
     }
-    observed.set(folded, change.path);
+    observed.set(folded, exact);
   }
 }
 

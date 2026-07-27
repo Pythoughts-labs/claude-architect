@@ -76,6 +76,12 @@ export class WorktreeManager {
     branch: string,
     expectedCommitOid: string,
   ): Promise<{ path: string; cleanup(): Promise<void> }> {
+    // This is a public method and must not depend on a particular caller having
+    // pre-validated the ref: an empty or option-like name would otherwise reach
+    // `git worktree add` as an option rather than a positional.
+    if (branch === "" || branch.startsWith("-")) {
+      throw new RuntimeError("refusing to create a worktree for an option-like branch name");
+    }
     const { worktreesRoot, worktreePath } = this.managedWorktreePath();
     await mkdir(worktreesRoot, { recursive: true });
     const runGit = this.dependencies.git ?? git;
@@ -87,21 +93,34 @@ export class WorktreeManager {
       throw failure("git worktree add", result);
     }
 
-    const symbolicBranch = await runGit(worktreePath, ["symbolic-ref", "--quiet", "--short", "HEAD"]);
-    const head = await runGit(worktreePath, ["rev-parse", "--verify", "HEAD"]);
-    if (symbolicBranch.exitCode !== 0
-      || symbolicBranch.stdout.trim() !== branch
-      || head.exitCode !== 0
-      || head.stdout.trim() !== expectedCommitOid) {
+    // The identity probes must be inside the guarded block: if either rejects
+    // outright (executable resolution, supervisor failure) rather than
+    // returning a mismatch, the worktree and its registration would survive
+    // with no owner.
+    let identityMatches: boolean;
+    let probeError: unknown;
+    try {
+      const symbolicBranch = await runGit(worktreePath, ["symbolic-ref", "--quiet", "--short", "HEAD"]);
+      const head = await runGit(worktreePath, ["rev-parse", "--verify", "HEAD"]);
+      identityMatches = symbolicBranch.exitCode === 0
+        && symbolicBranch.stdout.trim() === branch
+        && head.exitCode === 0
+        && head.stdout.trim() === expectedCommitOid;
+    } catch (error) {
+      identityMatches = false;
+      probeError = error;
+    }
+    if (!identityMatches) {
+      const primary = probeError ?? new RuntimeError("created worktree identity did not match");
       try {
         await this.remove(worktreePath);
       } catch (cleanupError) {
         throw new AggregateError(
-          [new RuntimeError("created worktree identity did not match"), cleanupError],
+          [primary, cleanupError],
           "created worktree identity did not match and cleanup failed",
         );
       }
-      throw new RuntimeError("created worktree identity did not match");
+      throw primary;
     }
 
     return {
