@@ -1,6 +1,11 @@
+import fs from "node:fs";
+import { fileURLToPath } from "node:url";
 import { describe, it, expect } from "vitest";
 import { loadSchemas, checkVersionCompat } from "../../src/protocol/schema-loader.js";
-import { PROTOCOL_VERSION } from "../../src/protocol/versions.js";
+import {
+  AUTOPILOT_SPEC_VERSION,
+  PROTOCOL_VERSION,
+} from "../../src/protocol/versions.js";
 
 const validDelegationSpec = {
   specVersion: "1",
@@ -48,9 +53,26 @@ describe("schema loader", () => {
   it("compiles delegation-spec and attempt-result validators", () => {
     const v = loadSchemas();
     expect(typeof v.delegationSpec).toBe("function");
+    expect(typeof v.autopilotSpec).toBe("function");
     expect(typeof v.attemptResult).toBe("function");
     expect(v.delegationSpec({ specVersion: "1" })).toBe(false); // missing required fields
   });
+
+  it("loads Autopilot Spec v1 from source and packaged runtime schema paths", () => {
+    const sourceLoaderUrl = new URL("../../src/protocol/schema-loader.ts", import.meta.url);
+    const packagedRuntimeUrl = new URL("../../runtime/server.mjs", import.meta.url);
+    const paths = [
+      new URL("../../runtime/schemas/autopilot-spec.v1.json", sourceLoaderUrl),
+      new URL("./schemas/autopilot-spec.v1.json", packagedRuntimeUrl),
+    ];
+
+    for (const schemaUrl of paths) {
+      const schema = JSON.parse(fs.readFileSync(fileURLToPath(schemaUrl), "utf8"));
+      expect(schema.$id).toBe(`autopilot-spec.v${AUTOPILOT_SPEC_VERSION}.json`);
+    }
+
+    expect(loadSchemas().autopilotSpec({ specVersion: AUTOPILOT_SPEC_VERSION })).toBe(false);
+  }, 5_000);
 
   it("accepts a valid, fully-populated delegation spec", () => {
     const v = loadSchemas();
@@ -203,14 +225,14 @@ describe("checkVersionCompat", () => {
   });
 
   it("reports a diagnostic for a mismatched protocol version", () => {
-    const result = checkVersionCompat("2.0.0");
+    const result = checkVersionCompat("1.3.0");
     expect(result.ok).toBe(false);
     expect(typeof result.diagnostic).toBe("string");
     expect((result.diagnostic as string).length).toBeGreaterThan(0);
   });
 
   it("rejects every non-matching protocol version", () => {
-    for (const version of ["1.0.0", "1.99.0", "2.0.0", "not-semver"]) {
+    for (const version of ["1.0.0", "1.3.0", "1.99.0", "3.0.0", "not-semver"]) {
       const result = checkVersionCompat(version);
       expect(result.ok).toBe(false);
       expect(result.diagnostic).toContain(`skill declares ${version}`);

@@ -30,6 +30,8 @@ const IN_PROGRESS_PATHS = [
 ] as const;
 const MAX_NESTED_REPOSITORY_SCAN_ENTRIES = 10_000;
 
+export type InProgressOperationResult = "clear" | "in-progress" | "scan-failed";
+
 function succeeded(result: GitResult): boolean {
   return result.exitCode === 0;
 }
@@ -43,6 +45,26 @@ async function exists(filePath: string): Promise<boolean> {
       return false;
     }
     throw error;
+  }
+}
+
+export async function checkInProgressOperation(
+  checkoutPath: string,
+  runGit: typeof git = git,
+): Promise<InProgressOperationResult> {
+  const gitDirectoryResult = await runGit(checkoutPath, [
+    "rev-parse",
+    "--path-format=absolute",
+    "--git-dir",
+  ]);
+  if (!succeeded(gitDirectoryResult)) return "scan-failed";
+  try {
+    return (await Promise.all(IN_PROGRESS_PATHS.map(relative =>
+      exists(path.join(gitDirectoryResult.stdout.trim(), relative))))).some(Boolean)
+      ? "in-progress"
+      : "clear";
+  } catch {
+    return "scan-failed";
   }
 }
 
@@ -218,14 +240,9 @@ export async function checkPreconditions(
   if (!succeeded(head)) return { ok: false, reason: "unborn-repository" };
   const baseCommitOid = head.stdout.trim();
 
-  const gitDirectoryResult = await git(canonical, ["rev-parse", "--path-format=absolute", "--git-dir"]);
-  if (!succeeded(gitDirectoryResult)) return { ok: false, reason: "git-command-failed" };
-  const gitDirectory = gitDirectoryResult.stdout.trim();
-  try {
-    if ((await Promise.all(IN_PROGRESS_PATHS.map(relative => exists(path.join(gitDirectory, relative))))).some(Boolean)) {
-      return { ok: false, reason: "in-progress-operation" };
-    }
-  } catch {
+  const inProgress = await checkInProgressOperation(canonical);
+  if (inProgress === "in-progress") return { ok: false, reason: "in-progress-operation" };
+  if (inProgress === "scan-failed") {
     return { ok: false, reason: "in-progress-operation-scan-failed" };
   }
 
