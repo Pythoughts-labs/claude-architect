@@ -375,12 +375,22 @@ describe.runIf(process.platform === "darwin")("end-to-end review pipeline", () =
     expect(result.result.attempt.evidence.producerPreflight)
       .toMatchObject({ status: "inconclusive" });
 
-    await expect(handleDecideCandidate(repo, runId, "accepted", lifecycleDeps)).resolves.toEqual({
-      recorded: true,
-    });
+    const candidateHash = result.result.attempt.candidate?.manifestHash;
+    expect(candidateHash).toBeDefined();
+    await expect(handleDecideCandidate(repo, runId, "accepted", candidateHash!, lifecycleDeps))
+      .resolves.toEqual({ recorded: true });
     const manifest = await new ArtifactStore(runId).readManifest(runId);
     expect(manifest).not.toBeNull();
     expect(manifest?.candidateManifestHash).not.toBeNull();
+    await expect(handleDecideCandidate(
+      repo,
+      runId,
+      "accepted",
+      manifest!.candidateManifestHash!,
+      deps,
+    )).resolves.toEqual({
+      recorded: true,
+    });
     await expect(handleIntegrateCandidate(
       repo,
       runId,

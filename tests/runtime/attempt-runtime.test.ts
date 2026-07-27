@@ -497,11 +497,11 @@ describe("runAttempt", () => {
 
     await runAttempt(repoRoot, validSpec(), deps);
 
-    expect(phaseDuringBaseline).toMatchObject({ phase: "verifying baseline", terminal: false });
+    expect(phaseDuringBaseline).toMatchObject({ phase: "baseline-verify" });
     // This used to assert the end state was "archiving result" — pinning the
-    // defect in place, since that reads as a run still archiving.
-    expect(await archivedJson(runId, "status.json"))
-      .toMatchObject({ phase: "finished: verified-candidate", terminal: true });
+    // defect in place, since that reads as a run still archiving. Terminality is
+    // now carried by the phase itself rather than a separate flag.
+    expect(await archivedJson(runId, "status.json")).toMatchObject({ phase: "done" });
   });
 
   it("records the spec hash so a lost lane report can still be correlated", async () => {
@@ -532,12 +532,11 @@ describe("runAttempt", () => {
 
     // status.json used to keep naming the last phase entered, so "archiving
     // result" meant both "currently archiving" and "finished long ago" — the
-    // one question the file exists to answer was unanswerable.
-    const status = await archivedJson(runId, "status.json") as {
-      phase: string; terminal: boolean;
-    };
-    expect(status.terminal).toBe(true);
-    expect(status.phase).toContain("finished");
+    // one question the file exists to answer was unanswerable. "done" and
+    // "failed" are terminal phases, so the phase alone now answers it.
+    const status = await archivedJson(runId, "status.json") as { phase: string };
+    expect(["done", "failed"]).toContain(status.phase);
+    expect(status.phase).toBe("done");
   });
 
   it("does not release a borrowed checkout lease on a classified early return", async () => {
