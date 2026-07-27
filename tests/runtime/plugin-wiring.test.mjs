@@ -85,6 +85,16 @@ describe("P0-A plugin wiring", () => {
       /Never hash the spec file or reimplement the canonicalization algorithm/u,
       "skill must prohibit the raw-file digest mismatch observed live",
     );
+    assert.match(
+      skill,
+      /Call `delegate`[^.\n]*`expectedSpecSha256`[^.\n]*runtime-returned/u,
+      "direct dispatch must bind the spec to the trusted runtime digest",
+    );
+    assert.doesNotMatch(
+      skill,
+      /hash you computed/u,
+      "review correlation must retain the runtime digest rather than reintroducing caller hashing",
+    );
     for (const rosterName of ["codex-implementer", "opencode-implementer", "pi-implementer", "pythinker-implementer"]) {
       assert.ok(skill.includes(`\`${rosterName}\``), `delegate skill must retain ${rosterName} in its selection roster`);
     }
@@ -126,6 +136,19 @@ describe("P0-A plugin wiring", () => {
       /“human-only” is a workflow and UI trust assumption/u,
       "security model must not describe the removed caller-asserted decision path",
     );
+    for (const securityDoc of ["docs/MARKETPLACE_REVIEW.md", "docs/THREAT_MODEL.md"]) {
+      const contents = read(securityDoc);
+      assert.match(
+        contents,
+        /MCP elicitation/u,
+        `${securityDoc} must describe the enforced decision gate`,
+      );
+      assert.doesNotMatch(
+        contents,
+        /(?:control of the Claude\/MCP session is the decision credential|a hijacked Claude session can accept)/u,
+        `${securityDoc} must distinguish ordinary caller control from trusted-host compromise`,
+      );
+    }
     // An absence gate whose pattern is an English phrase also matches comments,
     // so a Producer documenting why it avoided the pattern fails a check its
     // code satisfies. Observed live; the rule must stay in the authoring guide.
@@ -289,7 +312,15 @@ test("delegation-lane agent ships the produce-only courier contract", () => {
     /complete Delegation Spec is missing[^.]*do not call either MCP tool/u,
     "lane must fail closed instead of inventing a spec from a file-path handoff",
   );
-  for (const field of ["laneId", "specSha256", "\"failure\"", "validationErrors", "manifestHash"]) {
+  for (const field of [
+    "laneId",
+    "specSha256",
+    "expectedSpecSha256",
+    "\"failure\"",
+    "\"error\"",
+    "validationErrors",
+    "manifestHash",
+  ]) {
     assert.ok(lane.includes(field), `delegation-lane contract must include ${field}`);
   }
   assert.match(lane, /[Nn]ever review/u);

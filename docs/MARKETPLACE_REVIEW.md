@@ -41,7 +41,7 @@ The Host runtime can read the selected repository and Git metadata; it writes pl
 
 ## Human approval points
 
-The user chooses the Producer when none is named. After a verified candidate or pipeline evidence bundle is returned, the architect must show/review the evidence and call `decideCandidate` with `accepted`, `rejected`, or `revision-requested`. Only `accepted` enables `integrateCandidate`, and integration additionally requires the exact candidate manifest hash. The runtime does not cryptographically authenticate the human; control of the Claude/MCP session is the decision credential. Final commit, merge, push, or release remains a separate human-controlled action.
+The user chooses the Producer when none is named. After a verified candidate or pipeline evidence bundle is returned, the architect must show/review the evidence and call `decideCandidate` with `accepted`, `rejected`, or `revision-requested`. The runtime separately requires positive MCP elicitation, so an ordinary tool caller's decision argument cannot record acceptance. Only a confirmed `accepted` decision enables `integrateCandidate`, and integration additionally requires the exact candidate manifest hash. MCP elicitation is not cryptographic human authentication: a compromised or modified trusted host/client could synthesize confirmation. Final commit, merge, push, or release remains a separate human-controlled action.
 
 ## Threat-model summary and limitations
 

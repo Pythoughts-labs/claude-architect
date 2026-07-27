@@ -84,7 +84,7 @@ Dispatch a delegation through the `delegation-lane` agent to watch it as a nativ
 
 - The lane agent is a courier: its only tools are `delegate` and `delegatePipeline`. It cannot read the repository, run commands, review, decide, or integrate.
 - Lanes against independent repositories run genuinely in parallel. Lanes against the same repository are serialized by the runtime's repository lock — they surface as subagents for visibility, but execute one at a time.
-- The lane's JSON report is used only to correlate (`laneId`, `specSha256`, `runId`); all reviewable evidence comes from `reviewCandidate`, and every acceptance stays human-only. At most one accepted candidate per clean checkout.
+- The runtime-issued `specSha256` is supplied back to lane dispatch so a valid-but-different spec fails before work starts. The lane's JSON report is used only to correlate (`laneId`, `specSha256`, `runId`); all reviewable evidence comes from `reviewCandidate`, and every acceptance stays human-only. At most one accepted candidate per clean checkout.
 - Known limitation: the host injects project context (CLAUDE.md, git status) into custom subagents. The lane agent is instructed to ignore it; the enforced boundary is its tool allowlist, and the Producer itself only ever sees the spec through the trusted runtime.
 
 ## Available skills, agents, and MCP tools

@@ -292,6 +292,89 @@ describe("handleValidateDelegationSpec", () => {
   });
 });
 
+describe.each(["delegate", "delegatePipeline"])("%s spec identity", operation => {
+  it("starts work when the expected digest matches", async () => {
+    const deps = dependencies();
+    deps.runPipeline = async () => pipelineResult;
+
+    const output = operation === "delegate"
+      ? await handleDelegate(
+        "/repo",
+        validSpec,
+        deps,
+        "full",
+        "75d6bdadedf7b97cbae5bce0b3d401bfb77a6099cf158d6f8fe5b39f3964eb69",
+      )
+      : await handleDelegatePipeline(
+        "/repo",
+        validSpec,
+        deps,
+        "full",
+        "75d6bdadedf7b97cbae5bce0b3d401bfb77a6099cf158d6f8fe5b39f3964eb69",
+      );
+
+    expect(output).toMatchObject({ ok: true });
+  });
+
+  it("rejects a different valid spec before touching the checkout or starting work", async () => {
+    let checkoutReads = 0;
+    let attempts = 0;
+    let pipelines = 0;
+    const basePlatform = fakePlatform();
+    const deps = dependencies();
+    deps.ps = {
+      ...basePlatform,
+      canonicalizePath: async input => {
+        checkoutReads += 1;
+        return basePlatform.canonicalizePath(input);
+      },
+    };
+    deps.runAttempt = async () => {
+      attempts += 1;
+      return result;
+    };
+    deps.runPipeline = async () => {
+      pipelines += 1;
+      return pipelineResult;
+    };
+
+    const output = operation === "delegate"
+      ? await handleDelegate("/repo", validSpec, deps, "full", "0".repeat(64))
+      : await handleDelegatePipeline("/repo", validSpec, deps, "full", "0".repeat(64));
+
+    expect(output).toEqual({
+      ok: false,
+      error: "spec-identity-mismatch",
+      diagnostic: "the validated Delegation Spec does not match expectedSpecSha256",
+    });
+    expect({ checkoutReads, attempts, pipelines }).toEqual({
+      checkoutReads: 0,
+      attempts: 0,
+      pipelines: 0,
+    });
+  });
+
+  it("rejects a malformed expected digest before checkout access", async () => {
+    const deps = dependencies();
+    deps.ps = {
+      ...fakePlatform(),
+      canonicalizePath: async () => {
+        throw new Error("checkout must not be read");
+      },
+    };
+
+    const output = operation === "delegate"
+      ? await handleDelegate("/repo", validSpec, deps, "full", "not-a-digest")
+      : await handleDelegatePipeline("/repo", validSpec, deps, "full", "not-a-digest");
+
+    expect(output).toEqual({
+      ok: false,
+      error: "spec-identity-unverifiable",
+      diagnostic: "expectedSpecSha256 is not a sha-256 digest",
+    });
+  });
+});
+
 type LifecycleOperation = "review" | "decide" | "integrate";
 
 function invokeLifecycle(

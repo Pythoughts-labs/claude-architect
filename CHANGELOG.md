@@ -15,6 +15,10 @@ All notable changes to Claude Architect are recorded here. The format follows
   identities for the same valid spec and making exact-spec review/recovery fail.
   The shared validator now also keeps direct and pipeline dispatch validation
   behavior identical, including unknown Producer diagnostics.
+- Both dispatch tools accept an optional `expectedSpecSha256` guard. Native
+  lanes pass the digest returned by `validateDelegationSpec`; a valid but
+  different payload now fails before checkout access, locking, preflight, or
+  Producer execution. Legacy callers may omit the field.
 - Cancellation is now proven end-to-end, not just checked. Every existing
   cancellation test injects an `AbortSignal` directly into attempt or pipeline
   dependencies, which demonstrates the runtime honors a signal but cannot

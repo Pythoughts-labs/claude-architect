@@ -59,6 +59,17 @@ describe.each([
     expect(result.success).toBe(false);
     if (!result.success) expect(result.error.issues[0]?.code).toBe("unrecognized_keys");
   });
+
+  it("accepts an optional expected canonical spec digest", () => {
+    expect(schema.safeParse({
+      ...validInput,
+      expectedSpecSha256: "a".repeat(64),
+    }).success).toBe(true);
+    expect(schema.safeParse({
+      ...validInput,
+      expectedSpecSha256: 42,
+    }).success).toBe(false);
+  });
 });
 
 describe.each([

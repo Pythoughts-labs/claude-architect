@@ -141,7 +141,8 @@ describe("MCP server handshake", () => {
         arguments: {
           checkoutPath: "/unused-invalid-spec",
           protocolVersion: PROTOCOL_VERSION,
-          spec: { specVersion: "1" },
+          spec: validSpec,
+          expectedSpecSha256: "0".repeat(64),
         },
       });
       const diagnosed = await request(5, "tools/call", {
@@ -167,7 +168,11 @@ describe("MCP server handshake", () => {
         ok: true,
         specSha256: "75d6bdadedf7b97cbae5bce0b3d401bfb77a6099cf158d6f8fe5b39f3964eb69",
       });
-      expect(called.structuredContent).toMatchObject({ ok: false });
+      expect(called.structuredContent).toEqual({
+        ok: false,
+        error: "spec-identity-mismatch",
+        diagnostic: "the validated Delegation Spec does not match expectedSpecSha256",
+      });
       expect(called.content).toEqual([{
         type: "text",
         text: JSON.stringify(called.structuredContent),

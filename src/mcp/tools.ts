@@ -389,6 +389,28 @@ export async function handleValidateDelegationSpec(
   return { ok: true, specSha256: validation.specSha256 };
 }
 
+function requireExpectedSpecIdentity(
+  actualSpecSha256: string,
+  expectedSpecSha256: string | undefined,
+): ToolErrorResult | null {
+  if (expectedSpecSha256 === undefined) return null;
+  if (!/^[0-9a-f]{64}$/u.test(expectedSpecSha256)) {
+    return {
+      ok: false,
+      error: "spec-identity-unverifiable",
+      diagnostic: "expectedSpecSha256 is not a sha-256 digest",
+    };
+  }
+  if (actualSpecSha256 !== expectedSpecSha256) {
+    return {
+      ok: false,
+      error: "spec-identity-mismatch",
+      diagnostic: "the validated Delegation Spec does not match expectedSpecSha256",
+    };
+  }
+  return null;
+}
+
 
 /**
  * The bounded envelope a delegation lane actually reports.
@@ -426,6 +448,7 @@ export async function handleDelegate(
   input: unknown,
   deps: ToolDependencies = {},
   responseMode: "full" | "lane" = "full",
+  expectedSpecSha256?: string,
 ): Promise<
   | { ok: true; result: AttemptResult | LaneEnvelope }
   | {
@@ -439,6 +462,11 @@ export async function handleDelegate(
 > {
   const validation = validateDelegationSpecInput(input, deps);
   if (!validation.ok) return validation;
+  const identityError = requireExpectedSpecIdentity(
+    validation.specSha256,
+    expectedSpecSha256,
+  );
+  if (identityError !== null) return identityError;
 
   try {
     const ps = services(deps);
@@ -478,6 +506,7 @@ export async function handleDelegatePipeline(
   input: unknown,
   deps: ToolDependencies = {},
   responseMode: "full" | "lane" = "full",
+  expectedSpecSha256?: string,
 ): Promise<
   | { ok: true; result: PipelineResult | LaneEnvelope }
   | {
@@ -491,6 +520,11 @@ export async function handleDelegatePipeline(
 > {
   const validation = validateDelegationSpecInput(input, deps);
   if (!validation.ok) return validation;
+  const identityError = requireExpectedSpecIdentity(
+    validation.specSha256,
+    expectedSpecSha256,
+  );
+  if (identityError !== null) return identityError;
 
   try {
     const ps = services(deps);

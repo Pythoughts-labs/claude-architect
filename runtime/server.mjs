@@ -32351,6 +32351,24 @@ async function handleValidateDelegationSpec(input, deps = {}) {
   if (!validation.ok) return validation;
   return { ok: true, specSha256: validation.specSha256 };
 }
+function requireExpectedSpecIdentity(actualSpecSha256, expectedSpecSha256) {
+  if (expectedSpecSha256 === void 0) return null;
+  if (!/^[0-9a-f]{64}$/u.test(expectedSpecSha256)) {
+    return {
+      ok: false,
+      error: "spec-identity-unverifiable",
+      diagnostic: "expectedSpecSha256 is not a sha-256 digest"
+    };
+  }
+  if (actualSpecSha256 !== expectedSpecSha256) {
+    return {
+      ok: false,
+      error: "spec-identity-mismatch",
+      diagnostic: "the validated Delegation Spec does not match expectedSpecSha256"
+    };
+  }
+  return null;
+}
 function laneEnvelope(result) {
   return {
     runId: result.runId,
@@ -32361,9 +32379,14 @@ function laneEnvelope(result) {
     durationMs: result.durationMs
   };
 }
-async function handleDelegate(checkoutPath, input, deps = {}, responseMode = "full") {
+async function handleDelegate(checkoutPath, input, deps = {}, responseMode = "full", expectedSpecSha256) {
   const validation = validateDelegationSpecInput(input, deps);
   if (!validation.ok) return validation;
+  const identityError = requireExpectedSpecIdentity(
+    validation.specSha256,
+    expectedSpecSha256
+  );
+  if (identityError !== null) return identityError;
   try {
     const ps = services2(deps);
     const canonical = await ps.canonicalizePath(checkoutPath);
@@ -32396,9 +32419,14 @@ async function handleDelegate(checkoutPath, input, deps = {}, responseMode = "fu
     return errorResult(error2);
   }
 }
-async function handleDelegatePipeline(checkoutPath, input, deps = {}, responseMode = "full") {
+async function handleDelegatePipeline(checkoutPath, input, deps = {}, responseMode = "full", expectedSpecSha256) {
   const validation = validateDelegationSpecInput(input, deps);
   if (!validation.ok) return validation;
+  const identityError = requireExpectedSpecIdentity(
+    validation.specSha256,
+    expectedSpecSha256
+  );
+  if (identityError !== null) return identityError;
   try {
     const ps = services2(deps);
     const canonical = await ps.canonicalizePath(checkoutPath);
@@ -34410,6 +34438,12 @@ var delegateInputSchema = external_exports.object({
   spec: external_exports.unknown(),
   protocolVersion: protocolVersionInput,
   /**
+   * Optional dispatch guard obtained from `validateDelegationSpec`. Omission is
+   * backward-compatible; lane dispatch supplies it to prevent a valid-but-
+   * different spec from starting work before review can detect substitution.
+   */
+  expectedSpecSha256: external_exports.string().optional(),
+  /**
    * "lane" returns only the correlation envelope a delegation lane reports.
    * A full result can exceed the host's inline-response limit, and the host then
    * offloads it to a file a lane — which has no filesystem tools by design —
@@ -34426,6 +34460,8 @@ var delegatePipelineInputSchema = external_exports.object({
   checkoutPath: external_exports.string(),
   spec: external_exports.unknown(),
   protocolVersion: protocolVersionInput,
+  /** See `delegateInputSchema.expectedSpecSha256`. */
+  expectedSpecSha256: external_exports.string().optional(),
   /**
    * "lane" returns only the correlation envelope a delegation lane reports.
    * A full result can exceed the host's inline-response limit, and the host then
@@ -34553,7 +34589,7 @@ async function start(dependencies = {}) {
       inputSchema: delegateInputSchema,
       outputSchema: delegateOutput
     },
-    async ({ checkoutPath, spec, protocolVersion, responseMode }, extra) => {
+    async ({ checkoutPath, spec, protocolVersion, responseMode, expectedSpecSha256 }, extra) => {
       const progressToken = extra._meta?.progressToken;
       const startedAt = Date.now();
       let step = 0;
@@ -34585,7 +34621,8 @@ async function start(dependencies = {}) {
             // it a cancelled request keeps running and keeps spawning.
             abortSignal: extra.signal
           },
-          responseMode ?? "full"
+          responseMode ?? "full",
+          expectedSpecSha256
         ));
       } finally {
         if (heartbeat !== void 0) clearInterval(heartbeat);
@@ -34600,7 +34637,7 @@ async function start(dependencies = {}) {
       inputSchema: delegatePipelineInputSchema,
       outputSchema: delegatePipelineOutput
     },
-    async ({ checkoutPath, spec, protocolVersion, responseMode }, extra) => {
+    async ({ checkoutPath, spec, protocolVersion, responseMode, expectedSpecSha256 }, extra) => {
       const progressToken = extra._meta?.progressToken;
       const startedAt = Date.now();
       let step = 0;
@@ -34632,7 +34669,8 @@ async function start(dependencies = {}) {
             // it a cancelled request keeps running and keeps spawning.
             abortSignal: extra.signal
           },
-          responseMode ?? "full"
+          responseMode ?? "full",
+          expectedSpecSha256
         ));
       } finally {
         if (heartbeat !== void 0) clearInterval(heartbeat);
