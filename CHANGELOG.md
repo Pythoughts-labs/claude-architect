@@ -6,6 +6,27 @@ All notable changes to Claude Architect are recorded here. The format follows
 
 ## [Unreleased]
 
+### Security
+
+- `@hono/node-server` now resolves to 2.0.12, past the 2.0.5 that patches
+  GHSA-frvp-7c67-39w9 (path traversal in `serve-static` on Windows via an
+  encoded backslash). `npm audit` reports no vulnerabilities. The package
+  reaches this tree only as a transitive dependency of the MCP SDK, and SDK
+  1.29.0 pinned it to `^1.19.9` — a range that cannot reach the patch, which is
+  why Dependabot's own update job failed rather than proposing a bump. Upgrading
+  `@modelcontextprotocol/sdk` to 1.30.0, which declares
+  `^1.19.9 || ^2.0.5`, makes the fix reachable.
+
+### Changed
+
+- `@modelcontextprotocol/sdk` 1.29.0 → 1.30.0, and `zod` 3.25.76 → 4.4.3. The
+  SDK's new `zod: "^3.25 || ^4.0"` range removes the dual-copy `TS2589`
+  constraint that held this project on zod 3. The only affected call site is the
+  protocol-version input schema: `errorMap` became `error` returning a string,
+  and `invalid_literal` no longer exists, so the received value is read from
+  `issue.input` for both the wrong-value and the absent-key case. Both
+  diagnostics are byte-identical to the previous behavior.
+
 ## [0.39.0] - 2026-07-27
 
 ### Changed

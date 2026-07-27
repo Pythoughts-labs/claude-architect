@@ -124,20 +124,22 @@ All dependencies track latest, with one deliberate pin. Provenance for future se
   `@typescript/native-preview` line, which is no longer installed); `npx tsc --noEmit`
   is the single type gate. tsconfig pins `types: ["node"]` because the native
   compiler does not auto-discover `@types` packages the way tsc 5.x did.
-- `zod` is pinned to latest **v3**, and the reason narrowed on 2026-07-27. The
-  original constraint was real: `@modelcontextprotocol/sdk` 1.29.0 and earlier
-  declared `zod ^3`, and mixing zod 4 into that tree causes dual-copy `TS2589`
-  type blowups (per the SDK's own troubleshooting docs, verified via Context7
-  against /modelcontextprotocol/typescript-sdk). **SDK 1.30.0 declares
-  `zod: "^3.25 || ^4.0"`, so that blocker is gone.** The pin now stands only
-  until zod 4 is evaluated on its own merits; it is no longer waiting on the
-  SDK.
+- `zod` tracks latest **v4** as of 2026-07-27; the long-standing v3 pin is gone.
+  The original constraint was real: `@modelcontextprotocol/sdk` 1.29.0 and
+  earlier declared `zod ^3`, and mixing zod 4 into that tree causes dual-copy
+  `TS2589` type blowups (per the SDK's own troubleshooting docs, verified via
+  Context7 against /modelcontextprotocol/typescript-sdk). SDK 1.30.0 declares
+  `zod: "^3.25 || ^4.0"`, which removed it. Migration notes for future call
+  sites: `errorMap` is `error` and returns a string rather than an object, and
+  `invalid_literal` no longer exists — the received value arrives as
+  `issue.input` for both the wrong-value and the absent-key case, so branch on
+  that rather than on an issue code.
 - **There is no MCP SDK v2.** A previous version of this policy said zod 4 must
   wait for "the SDK v2 upgrade (v2 requires zod >= 4.2; still beta)". That was
-  wrong against the registry: `@modelcontextprotocol/sdk` has 79 published
-  versions, zero `2.x`, and a single dist-tag `latest`. Do not plan around a v2.
-  Verify a claimed version with `npm view <pkg> versions` before it becomes a
-  blocker in a plan.
+  wrong against the registry: `@modelcontextprotocol/sdk` publishes no `2.x` at
+  all, and its only dist-tag is `latest` on the 1.x line. Do not plan around a
+  v2. Verify a claimed version with `npm view <pkg> versions` before it becomes
+  a blocker in a plan.
 - `@hono/node-server` reaches this tree only through the SDK. SDK 1.29.0 pinned
   it to `^1.19.9`, which could not reach the `2.0.5` that patches
   GHSA-frvp-7c67-39w9 — which is why Dependabot's own update job failed rather
