@@ -4,7 +4,7 @@ import { createHash } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   autonomousEligibility,
   DECISION_AUTHORITY_ENV,
@@ -14,7 +14,7 @@ import { start } from "../../src/mcp/server.js";
 import type { PlatformServices } from "../../src/platform/platform-services.js";
 import type { AttemptResult, CandidateArtifact } from "../../src/protocol/attempt-result.js";
 import { ArtifactStore } from "../../src/runtime/artifact-store.js";
-import type { RunDecisionRecord } from "../../src/runtime/artifact-store.js";
+import type { CandidateDecisionV2 } from "../../src/protocol/candidate-decision.js";
 import type { RunManifest } from "../../src/runtime/run-manifest.js";
 
 describe("decisionAuthority", () => {
@@ -83,20 +83,57 @@ describe("autonomousEligibility", () => {
 });
 
 describe("policy-autonomous decisions survive the archive", () => {
+  // Isolated state root: this used to write into the real plugin data directory
+  // under a fixed run id, so the archive it created survived the run and made
+  // the next one fail on a decision conflict with its own leftovers.
+  let previousPluginData: string | undefined;
+
+  beforeEach(async () => {
+    previousPluginData = process.env.CLAUDE_PLUGIN_DATA;
+    process.env.CLAUDE_PLUGIN_DATA = await mkdtemp(join(tmpdir(), "decision-authority-"));
+  });
+
+  afterEach(() => {
+    if (previousPluginData === undefined) delete process.env.CLAUDE_PLUGIN_DATA;
+    else process.env.CLAUDE_PLUGIN_DATA = previousPluginData;
+  });
+
   it("writes and reads back a policy-autonomous decision", async () => {
     // The write validator rejects unknown provenance values, so without this
     // the new value would be unwritable and every autonomous decision would
     // fail at the point of being recorded.
     const store = new ArtifactStore("decision-authority-roundtrip");
-    const record: RunDecisionRecord = {
+    await store.writeResult({
+      resultVersion: "1",
+      runId: "decision-authority-roundtrip",
+      status: "failed",
+      failure: "producer-failure",
+      summary: "fixture",
+      producerSummary: null,
+      candidate: null,
+      requestedVerification: [],
+      executedVerification: [],
+      unresolvedIssues: [],
+      evidence: {},
+      logsRef: "logs/producer.log",
+      producerId: "codex",
+      producerVersion: "1.2.3",
+      producerModel: null,
+      durationMs: 1,
+      sessionId: null,
+    });
+    const record: CandidateDecisionV2 = {
+      decisionVersion: "2",
       decision: "accepted",
-      recordedAt: new Date().toISOString(),
-      decidedBy: "policy-autonomous",
+      authority: "policy-autonomous",
       candidateManifestHash: "a".repeat(64),
+      evidenceHash: "b".repeat(64),
+      policyVersion: "1",
+      recordedAt: new Date().toISOString(),
     };
-    await store.writeDecision(record);
-    await expect(store.readDecision("decision-authority-roundtrip"))
-      .resolves.toMatchObject({ decidedBy: "policy-autonomous" });
+    await store.writeCandidateDecisionRecord(record);
+    await expect(store.readCandidateDecision("decision-authority-roundtrip"))
+      .resolves.toMatchObject({ authority: "policy-autonomous" });
   });
 });
 
@@ -117,6 +154,10 @@ const verifiedResult = {
   failure: null,
   candidate,
   evidence: {},
+  // The review snapshot maps over this, so it must be a real array rather than
+  // absent: a fixture that omits it fails inside the snapshot builder before
+  // the authority branch under test is ever reached.
+  executedVerification: [],
   durationMs: 1,
   producerId: "fake",
 } as unknown as AttemptResult;
@@ -150,9 +191,9 @@ function fakePlatform(): PlatformServices {
 async function decideVia(
   authority: "autonomous" | "human",
   result: AttemptResult,
-): Promise<{ output: unknown; decision: RunDecisionRecord | null }> {
+): Promise<{ output: unknown; decision: CandidateDecisionV2 | null }> {
   const root = await mkdtemp(join(tmpdir(), "decide-authority-"));
-  let recorded: RunDecisionRecord | null = null;
+  let recorded: CandidateDecisionV2 | null = null;
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   try {
     await start({
@@ -169,17 +210,39 @@ async function decideVia(
           baseCommitOid: candidate.baseCommitOid,
           candidateManifestHash: candidate.manifestHash,
         } as unknown as RunManifest),
-        writeDecision: async (record: RunDecisionRecord) => { recorded = record; },
-        readDecision: async () => recorded,
+        writeCandidateDecisionRecord: async (record: CandidateDecisionV2) => {
+          recorded = record;
+        },
+        readCandidateDecision: async () => recorded,
+        writeReviewSnapshot: async () => {},
+        readReviewSnapshot: async () => null,
+        readRunStartSpecSha256: async () => null,
         readPipelineActiveMarker: async () => null,
       }) as never,
-      git: async () => ({ stdout: "", stderr: "", exitCode: 0 }),
+    // The decision path regenerates a review snapshot, which verifies the anchor
+    // and tree against the archive before anything is recorded. A git stub that
+    // answered nothing failed that check, so the authority branch under test was
+    // never reached.
+    git: async (_cwd: string, args: string[]) => {
+      if (args[0] === "rev-parse" && args.at(-1)?.endsWith("^{commit}") === true) {
+        return { stdout: `${candidate.candidateCommitOid}\n`, stderr: "", exitCode: 0 };
+      }
+      if (args[0] === "rev-parse" && args.at(-1)?.endsWith("^{tree}") === true) {
+        return { stdout: `${candidate.candidateTreeOid}\n`, stderr: "", exitCode: 0 };
+      }
+      return { stdout: "", stderr: "", exitCode: 0 };
+    },
     });
     const client = new Client({ name: "authority-test", version: "1.0.0" });
     await client.connect(clientTransport);
     const output = await client.callTool({
       name: "decideCandidate",
-      arguments: { checkoutPath: "/repo", runId: "decide-authority", decision: "accepted" },
+      arguments: {
+        checkoutPath: "/repo",
+        runId: "decide-authority",
+        decision: "accepted",
+        expectedArtifactHash: candidate.manifestHash,
+      },
     });
     await client.close();
     return { output, decision: recorded };
@@ -190,9 +253,9 @@ async function decideVia(
 
 describe("decideCandidate honors the configured authority", () => {
   it("records a clean candidate without prompting under the default authority", async () => {
-    const { decision } = await decideVia("autonomous", verifiedResult);
-    expect(decision).not.toBeNull();
-    expect(decision?.decidedBy).toBe("policy-autonomous");
+    const { decision, output } = await decideVia("autonomous", verifiedResult);
+    expect(decision, JSON.stringify(output)).not.toBeNull();
+    expect(decision?.authority).toBe("policy-autonomous");
   });
 
   it("still demands a human when the authority is human", async () => {

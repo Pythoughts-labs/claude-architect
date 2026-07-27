@@ -2,7 +2,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { ElicitRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import { createHash } from "node:crypto";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -10,8 +10,30 @@ import { start } from "../../src/mcp/server.js";
 import type { PlatformServices } from "../../src/platform/platform-services.js";
 import type { AttemptResult, CandidateArtifact } from "../../src/protocol/attempt-result.js";
 import { ArtifactStore } from "../../src/runtime/artifact-store.js";
-import type { RunDecisionRecord } from "../../src/runtime/artifact-store.js";
+import type { CandidateDecisionV2 } from "../../src/protocol/candidate-decision.js";
 import type { RunManifest } from "../../src/runtime/run-manifest.js";
+
+function minimalResult(runId: string): AttemptResult {
+  return {
+    resultVersion: "1",
+    runId,
+    status: "failed",
+    failure: "producer-failure",
+    summary: "fixture",
+    producerSummary: null,
+    candidate: null,
+    requestedVerification: [],
+    executedVerification: [],
+    unresolvedIssues: [],
+    evidence: {},
+    logsRef: "logs/producer.log",
+    producerId: "codex",
+    producerVersion: "1.2.3",
+    producerModel: null,
+    durationMs: 1,
+    sessionId: null,
+  };
+}
 
 describe("legacy decision provenance", () => {
   it("keeps policy-autonomous archives readable for backward compatibility", async () => {
@@ -22,15 +44,22 @@ describe("legacy decision provenance", () => {
     process.env.CLAUDE_PLUGIN_DATA = stateRoot;
     try {
       const store = new ArtifactStore("decision-authority-roundtrip");
-      const record: RunDecisionRecord = {
-        decision: "accepted",
-        recordedAt: new Date().toISOString(),
-        decidedBy: "policy-autonomous",
-        candidateManifestHash: "a".repeat(64),
-      };
-      await store.writeDecision(record);
-      await expect(store.readDecision("decision-authority-roundtrip"))
-        .resolves.toMatchObject({ decidedBy: "policy-autonomous" });
+      // The pre-V2 shape a shipped release wrote: provenance and a candidate
+      // binding, but no decisionVersion. It must still read back as the same
+      // authority, or a live run's own decision becomes unreadable.
+      await store.writeResult(minimalResult("decision-authority-roundtrip"));
+      await writeFile(
+        join(store.runDirectory, "decision.json"),
+        JSON.stringify({
+          decision: "accepted",
+          recordedAt: new Date().toISOString(),
+          decidedBy: "policy-autonomous",
+          candidateManifestHash: "a".repeat(64),
+        }),
+        "utf8",
+      );
+      await expect(store.readCandidateDecision("decision-authority-roundtrip"))
+        .resolves.toMatchObject({ authority: "policy-autonomous" });
     } finally {
       if (previousStateRoot === undefined) {
         delete process.env.CLAUDE_ARCHITECT_STATE_DIR;
@@ -64,6 +93,10 @@ const verifiedResult = {
   failure: null,
   candidate,
   evidence: {},
+  // The review snapshot maps over this, so it must be a real array rather than
+  // absent: a fixture that omits it fails inside the snapshot builder before
+  // the authority branch under test is ever reached.
+  executedVerification: [],
   durationMs: 1,
   producerId: "fake",
 } as unknown as AttemptResult;
@@ -95,8 +128,8 @@ function fakePlatform(): PlatformServices {
 async function decideVia(
   result: AttemptResult,
   authority: "autonomous" | "human" = "autonomous",
-): Promise<{ output: unknown; decision: RunDecisionRecord | null }> {
-  let recorded: RunDecisionRecord | null = null;
+): Promise<{ output: unknown; decision: CandidateDecisionV2 | null }> {
+  let recorded: CandidateDecisionV2 | null = null;
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   await start({
     transport: serverTransport,
@@ -112,17 +145,39 @@ async function decideVia(
         baseCommitOid: candidate.baseCommitOid,
         candidateManifestHash: candidate.manifestHash,
       } as unknown as RunManifest),
-      writeDecision: async (record: RunDecisionRecord) => { recorded = record; },
-      readDecision: async () => recorded,
+      writeCandidateDecisionRecord: async (record: CandidateDecisionV2) => {
+        recorded = record;
+      },
+      readCandidateDecision: async () => recorded,
+      writeReviewSnapshot: async () => {},
+      readReviewSnapshot: async () => null,
+      readRunStartSpecSha256: async () => null,
       readPipelineActiveMarker: async () => null,
     }) as never,
-    git: async () => ({ stdout: "", stderr: "", exitCode: 0 }),
+    // The decision path regenerates a review snapshot, which verifies the anchor
+  // and tree against the archive before anything is recorded. A git stub that
+  // answered nothing failed that check, so the authority branch under test was
+  // never reached.
+  git: async (_cwd: string, args: string[]) => {
+    if (args[0] === "rev-parse" && args.at(-1)?.endsWith("^{commit}") === true) {
+      return { stdout: `${candidate.candidateCommitOid}\n`, stderr: "", exitCode: 0 };
+    }
+    if (args[0] === "rev-parse" && args.at(-1)?.endsWith("^{tree}") === true) {
+      return { stdout: `${candidate.candidateTreeOid}\n`, stderr: "", exitCode: 0 };
+    }
+    return { stdout: "", stderr: "", exitCode: 0 };
+  },
   });
   const client = new Client({ name: "authority-test", version: "1.0.0" });
   await client.connect(clientTransport);
   const output = await client.callTool({
     name: "decideCandidate",
-    arguments: { checkoutPath: "/repo", runId: "decide-authority", decision: "accepted" },
+    arguments: {
+      checkoutPath: "/repo",
+      runId: "decide-authority",
+      decision: "accepted",
+      expectedArtifactHash: candidate.manifestHash,
+    },
   });
   await client.close();
   return { output, decision: recorded };
@@ -135,7 +190,7 @@ describe("decideCandidate authority", () => {
   it("records a clean candidate without prompting under the default authority", async () => {
     const { decision } = await decideVia(verifiedResult);
     expect(decision).not.toBeNull();
-    expect(decision?.decidedBy).toBe("policy-autonomous");
+    expect(decision?.authority).toBe("policy-autonomous");
   });
 
   it("never records a clean candidate without elicitation under human authority", async () => {
@@ -159,14 +214,18 @@ describe("decideCandidate authority", () => {
       process.env.CLAUDE_ARCHITECT_STATE_DIR = stateRoot;
       process.env.CLAUDE_PLUGIN_DATA = stateRoot;
       const persistentStore = new ArtifactStore("decide-authority");
-      const existing: RunDecisionRecord = {
-        decision: "accepted",
-        recordedAt: "2026-07-27T00:00:00.000Z",
-        ...(decidedBy === undefined ? {} : { decidedBy }),
-        candidateManifestHash: candidate.manifestHash,
-      };
       try {
-        await persistentStore.writeDecision(existing);
+        await persistentStore.writeResult(minimalResult("decide-authority"));
+        await writeFile(
+          join(persistentStore.runDirectory, "decision.json"),
+          JSON.stringify({
+            decision: "accepted",
+            recordedAt: "2026-07-27T00:00:00.000Z",
+            ...(decidedBy === undefined ? {} : { decidedBy }),
+            candidateManifestHash: candidate.manifestHash,
+          }),
+          "utf8",
+        );
         const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
         await start({
           transport: serverTransport,
@@ -182,13 +241,28 @@ describe("decideCandidate authority", () => {
               baseCommitOid: candidate.baseCommitOid,
               candidateManifestHash: candidate.manifestHash,
             } as unknown as RunManifest),
-            writeDecision: async (record: RunDecisionRecord) => {
-              await persistentStore.writeDecision(record);
+            writeCandidateDecisionRecord: async (record: CandidateDecisionV2) => {
+              await persistentStore.writeCandidateDecisionRecord(record);
             },
-            readDecision: async () => persistentStore.readDecision("decide-authority"),
+            readCandidateDecision: async () => persistentStore.readCandidateDecision("decide-authority"),
+            writeReviewSnapshot: async () => {},
+            readReviewSnapshot: async () => null,
+            readRunStartSpecSha256: async () => null,
             readPipelineActiveMarker: async () => null,
           }) as never,
-          git: async () => ({ stdout: "", stderr: "", exitCode: 0 }),
+        // The decision path regenerates a review snapshot, which verifies the anchor
+    // and tree against the archive before anything is recorded. A git stub that
+    // answered nothing failed that check, so the authority branch under test was
+    // never reached.
+    git: async (_cwd: string, args: string[]) => {
+      if (args[0] === "rev-parse" && args.at(-1)?.endsWith("^{commit}") === true) {
+        return { stdout: `${candidate.candidateCommitOid}\n`, stderr: "", exitCode: 0 };
+      }
+      if (args[0] === "rev-parse" && args.at(-1)?.endsWith("^{tree}") === true) {
+        return { stdout: `${candidate.candidateTreeOid}\n`, stderr: "", exitCode: 0 };
+      }
+      return { stdout: "", stderr: "", exitCode: 0 };
+    },
         });
         const client = new Client(
           { name: "authority-conflict-test", version: "1.0.0" },
@@ -205,12 +279,21 @@ describe("decideCandidate authority", () => {
             checkoutPath: "/repo",
             runId: "decide-authority",
             decision: "accepted",
+            expectedArtifactHash: candidate.manifestHash,
           },
         });
         await client.close();
 
         expect(JSON.stringify(output)).toContain("decision-conflict");
-        await expect(persistentStore.readDecision("decide-authority")).resolves.toEqual(existing);
+        // The archived decision must survive the refused write unchanged, with
+        // the authority its recorded provenance maps to. An absent decidedBy is
+        // "unknown": the record cannot say a person decided.
+        await expect(persistentStore.readCandidateDecision("decide-authority"))
+          .resolves.toMatchObject({
+            decision: "accepted",
+            authority: decidedBy ?? "unknown",
+            candidateManifestHash: candidate.manifestHash,
+          });
       } finally {
         if (previousStateRoot === undefined) {
           delete process.env.CLAUDE_ARCHITECT_STATE_DIR;
