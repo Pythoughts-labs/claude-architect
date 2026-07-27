@@ -1,0 +1,44 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "reportVersion",
+    "workflowId",
+    "baseCommitOid",
+    "headCommitOid",
+    "branchArtifactHash",
+    "verificationHash",
+    "reviewHashes",
+    "advisorHash",
+    "taskEvidenceHashes",
+    "eligible",
+    "reasons",
+    "status",
+    "evaluatedAt"
+  ],
+  "properties": {
+    "reportVersion": { "const": "1" },
+    "workflowId": { "type": "string", "minLength": 1 },
+    "baseCommitOid": { "type": "string", "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$" },
+    "headCommitOid": { "type": "string", "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$" },
+    "branchArtifactHash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "verificationHash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "reviewHashes": {
+      "type": "array",
+      "items": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+    },
+    "advisorHash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "taskEvidenceHashes": {
+      "type": "array",
+      "items": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+    },
+    "eligible": { "type": "boolean" },
+    "reasons": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 }
+    },
+    "status": { "enum": ["ready-to-ship", "human-decision-required"] },
+    "evaluatedAt": { "type": "string", "format": "date-time" }
+  }
+}
