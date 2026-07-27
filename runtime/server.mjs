@@ -24841,9 +24841,13 @@ async function structuralVerify(args) {
     ]),
     artifactIdentityMatches(args)
   ]);
-  if (args.artifact.baseCommitOid !== args.baseCommitOid || currentHead.trim() !== args.baseCommitOid || mainStatus.length > 0) {
-    failures.add("base-changed");
+  if (args.artifact.baseCommitOid !== args.baseCommitOid) {
+    failures.add("artifact-base-mismatch");
   }
+  const checkoutDrift = {
+    headMoved: currentHead.trim() !== args.baseCommitOid,
+    dirty: mainStatus.length > 0
+  };
   if (JSON.stringify(args.artifact.changedPaths) !== JSON.stringify(manifest.changedPaths) || args.artifact.manifestHash !== manifest.manifestHash) {
     failures.add("manifest-divergence");
   }
@@ -24867,7 +24871,8 @@ async function structuralVerify(args) {
   return {
     ok: failures.size === 0,
     failures: [...failures],
-    manifestHash: manifest.manifestHash
+    manifestHash: manifest.manifestHash,
+    checkoutDrift
   };
 }
 
@@ -30112,8 +30117,7 @@ async function parseStructuredReport(raw, validate, repair) {
 // src/pipeline/pipeline-runtime.ts
 var schemas = loadSchemas();
 var IGNORED_STRUCTURAL_FAILURES = /* @__PURE__ */ new Set([
-  "artifact-divergence",
-  "base-changed"
+  "artifact-divergence"
 ]);
 var CANDIDATE_REF_PREFIX2 = "refs/claude-architect/candidates/";
 var SLICE_REF_PREFIX = "refs/claude-architect/slices/";

@@ -114,6 +114,9 @@ describe("structuralVerify", () => {
       ok: true,
       failures: [],
       manifestHash: fixture.artifact.manifestHash,
+      // Exact, not partial: an unexpected key here is a change to what the
+      // trust boundary reports.
+      checkoutDrift: { headMoved: false, dirty: false },
     });
   });
 
@@ -341,7 +344,11 @@ describe("structuralVerify", () => {
     expect(result.failures).toContain("empty-candidate");
   });
 
-  it("rejects a candidate after the main checkout advances", async () => {
+  it("does not reject a frozen candidate because the main checkout advanced", async () => {
+    // The candidate is frozen and verified in an isolated worktree; the shared
+    // checkout's HEAD is mutable, extrinsic to it, re-checked under the
+    // repository lock at integration, and can move again in between — so
+    // failing here discarded valid work and proved nothing.
     const fixture = await frozenFixture();
     await writeFile(join(fixture.repoRoot, "a.txt"), "new base\n");
     await runGit(fixture.repoRoot, ["add", "a.txt"]);
@@ -349,16 +356,31 @@ describe("structuralVerify", () => {
 
     const result = await verify(fixture);
 
-    expect(result.ok).toBe(false);
-    expect(result.failures).toContain("base-changed");
+    expect(result.ok).toBe(true);
+    expect(result.failures).toEqual([]);
+    // Still visible to a human deciding integration.
+    expect(result.checkoutDrift).toMatchObject({ headMoved: true });
   });
 
-  it("rejects a candidate when the main checkout becomes dirty", async () => {
+  it("does not reject a frozen candidate because the main checkout is dirty", async () => {
     const fixture = await frozenFixture();
     await writeFile(join(fixture.repoRoot, "untracked.txt"), "host edit\n");
 
     const result = await verify(fixture);
 
-    expect(result.failures).toContain("base-changed");
+    expect(result.ok).toBe(true);
+    expect(result.checkoutDrift).toMatchObject({ dirty: true });
+  });
+
+  it("still rejects an artifact that does not match the base it claims", async () => {
+    // The integrity half of the old check: intrinsic to the frozen artifact.
+    const fixture = await frozenFixture();
+    const result = await verify({
+      ...fixture,
+      artifact: { ...fixture.artifact, baseCommitOid: "0".repeat(40) },
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.failures).toContain("artifact-base-mismatch");
   });
 });

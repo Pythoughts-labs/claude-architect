@@ -143,9 +143,12 @@ type StructuredRoleRunResult<T> =
   };
 
 const schemas = loadSchemas();
+// `base-changed` used to be ignored here because it fired on shared-checkout
+// drift that a slice cannot control — but that also suppressed the same code's
+// legitimate half, an artifact not matching its own base. Drift is no longer a
+// failure at all, so only the genuinely slice-specific exemption remains.
 const IGNORED_STRUCTURAL_FAILURES = new Set<StructuralFailure>([
   "artifact-divergence",
-  "base-changed",
 ]);
 const CANDIDATE_REF_PREFIX = "refs/claude-architect/candidates/";
 const SLICE_REF_PREFIX = "refs/claude-architect/slices/";

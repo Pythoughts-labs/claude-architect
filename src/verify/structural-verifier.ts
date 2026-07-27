@@ -13,7 +13,24 @@ export type StructuralFailure =
   | "out-of-scope-write"
   | "modified-symlink"
   | "empty-candidate"
-  | "base-changed";
+  /**
+   * The frozen artifact does not match the base it claims to be built from.
+   * Intrinsic to the candidate, so it is a verification failure.
+   *
+   * Renamed from `base-changed`, which also covered two properties of the
+   * *shared checkout* — that its HEAD had moved and that it was dirty. Those are
+   * mutable, extrinsic to a frozen artifact, re-checked authoritatively under
+   * the repository lock at integration, and can change again in between, so
+   * failing verification on them discarded valid candidates and proved nothing.
+   * They are reported as `checkoutDrift` evidence instead.
+   */
+  | "artifact-base-mismatch";
+
+/** Observed state of the shared checkout. Never a verification failure. */
+export interface CheckoutDrift {
+  headMoved: boolean;
+  dirty: boolean;
+}
 
 export interface StructuralVerifyArgs {
   repoRoot: string;
@@ -28,6 +45,8 @@ export interface StructuralVerifyResult {
   ok: boolean;
   failures: StructuralFailure[];
   manifestHash: string;
+  /** Recorded so a human sees the checkout moved; does not affect `ok`. */
+  checkoutDrift?: CheckoutDrift;
 }
 
 function gitFailure(action: string, result: GitResult): RuntimeError {
@@ -137,11 +156,13 @@ export async function structuralVerify(args: StructuralVerifyArgs): Promise<Stru
     artifactIdentityMatches(args),
   ]);
 
-  if (args.artifact.baseCommitOid !== args.baseCommitOid
-    || currentHead.trim() !== args.baseCommitOid
-    || mainStatus.length > 0) {
-    failures.add("base-changed");
+  if (args.artifact.baseCommitOid !== args.baseCommitOid) {
+    failures.add("artifact-base-mismatch");
   }
+  const checkoutDrift: CheckoutDrift = {
+    headMoved: currentHead.trim() !== args.baseCommitOid,
+    dirty: mainStatus.length > 0,
+  };
   if (JSON.stringify(args.artifact.changedPaths) !== JSON.stringify(manifest.changedPaths)
     || args.artifact.manifestHash !== manifest.manifestHash) {
     failures.add("manifest-divergence");
@@ -171,5 +192,6 @@ export async function structuralVerify(args: StructuralVerifyArgs): Promise<Stru
     ok: failures.size === 0,
     failures: [...failures],
     manifestHash: manifest.manifestHash,
+    checkoutDrift,
   };
 }

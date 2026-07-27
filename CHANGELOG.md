@@ -16,6 +16,18 @@ All notable changes to Claude Architect are recorded here. The format follows
   human control — it removes the supported path and pushes work to hand-applied
   changes outside the lifecycle, which is the outcome the gate exists to
   prevent.
+- Checkout drift no longer fails a frozen candidate's verification. The
+  `base-changed` structural failure covered three conditions at once: the
+  artifact not matching its own base — intrinsic, and still a failure, now named
+  `artifact-base-mismatch` — plus the shared checkout's HEAD having moved and the
+  shared checkout being dirty. The latter two are mutable state extrinsic to a
+  frozen artifact, re-checked authoritatively under the repository lock at
+  integration, and free to change again in between, so failing verification on
+  them discarded valid work while proving nothing. They are recorded as
+  `checkoutDrift` evidence instead, visible to whoever decides integration.
+  Integration still aborts unless the checkout matches the reviewed base.
+  The sliced pipeline previously suppressed `base-changed` wholesale to survive
+  this, which also suppressed the integrity half; that exemption is gone.
 - Slice repair attempts receive the evidence from every earlier attempt.
   `runSliceToCompletion` accumulated each attempt's failing verification
   commands, blocking findings, and routing reason for the report a human reads
