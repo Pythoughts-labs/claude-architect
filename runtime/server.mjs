@@ -53541,7 +53541,8 @@ async function createServer(dependencies = {}) {
         (dependencies.decisionAuthority ?? decisionAuthority)(),
         advisory
       );
-      if (!autonomy.eligible) {
+      const autonomous = autonomy.eligible && decision === "accepted";
+      if (!autonomous) {
         const confirmed = await confirmWithHuman(server, runId, decision, advisory.warnings);
         if (!confirmed.ok) return toolOutput(confirmed.error);
       }
@@ -53552,7 +53553,7 @@ async function createServer(dependencies = {}) {
         expectedArtifactHash,
         {
           ...dependencies,
-          decisionProvenance: autonomy.eligible ? "policy-autonomous" : "human-elicitation"
+          decisionProvenance: autonomous ? "policy-autonomous" : "human-elicitation"
         }
       ));
     }

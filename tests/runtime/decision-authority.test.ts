@@ -191,6 +191,7 @@ function fakePlatform(): PlatformServices {
 async function decideVia(
   authority: "autonomous" | "human",
   result: AttemptResult,
+  decision: "accepted" | "rejected" | "revision-requested" = "accepted",
 ): Promise<{ output: unknown; decision: CandidateDecisionV2 | null }> {
   const root = await mkdtemp(join(tmpdir(), "decide-authority-"));
   let recorded: CandidateDecisionV2 | null = null;
@@ -240,7 +241,7 @@ async function decideVia(
       arguments: {
         checkoutPath: "/repo",
         runId: "decide-authority",
-        decision: "accepted",
+        decision,
         expectedArtifactHash: candidate.manifestHash,
       },
     });
@@ -257,6 +258,20 @@ describe("decideCandidate honors the configured authority", () => {
     expect(decision, JSON.stringify(output)).not.toBeNull();
     expect(decision?.authority).toBe("policy-autonomous");
   });
+
+  it.each(["rejected", "revision-requested"] as const)(
+    "routes a %s verdict on an eligible candidate through a human",
+    async verdict => {
+      // Eligibility is about the candidate, not the verdict. A rejection of a
+      // candidate the runtime found clean is a person overriding the policy, so
+      // it must be elicited and recorded as theirs. Attributing it to
+      // `policy-autonomous` also tripped the accept-only guard, which made
+      // rejecting a clean candidate fail outright.
+      const { decision, output } = await decideVia("autonomous", verifiedResult, verdict);
+      expect(decision).toBeNull();
+      expect(JSON.stringify(output)).toContain("elicitation");
+    },
+  );
 
   it("still demands a human when the authority is human", async () => {
     // Same candidate, same client, only the authority differs — so this is the
