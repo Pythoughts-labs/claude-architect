@@ -1005,13 +1005,13 @@ describe("MCP tool handlers", () => {
     const store = new FakeStore(result, manifestFor(repoRoot));
     const deps = dependencies(store, getPlatformServices());
 
-    await expect(handleDecideCandidate(repoRoot, "run-tools", "accepted", deps))
+    await expect(handleDecideCandidate(repoRoot, "run-tools", "accepted", candidate.manifestHash, deps))
       .resolves.toEqual({ recorded: true });
 
-    const recorded = await store.readDecision("run-tools");
+    const recorded = await store.readCandidateDecision("run-tools");
     expect(recorded).toMatchObject({
       decision: "accepted",
-      decidedBy: "caller-asserted",
+      authority: "caller-asserted",
       candidateManifestHash: candidate.manifestHash,
     });
   });
@@ -1024,10 +1024,10 @@ describe("MCP tool handlers", () => {
       decisionProvenance: "human-elicitation" as const,
     };
 
-    await handleDecideCandidate(repoRoot, "run-tools", "accepted", deps);
+    await handleDecideCandidate(repoRoot, "run-tools", "accepted", candidate.manifestHash, deps);
 
-    expect(await store.readDecision("run-tools"))
-      .toMatchObject({ decidedBy: "human-elicitation" });
+    expect(await store.readCandidateDecision("run-tools"))
+      .toMatchObject({ authority: "human" });
   });
 
   it("refuses to spend an acceptance on a different artifact", async () => {
@@ -1037,7 +1037,7 @@ describe("MCP tool handlers", () => {
       ...dependencies(store, getPlatformServices()),
       decisionProvenance: "human-elicitation" as const,
     };
-    await handleDecideCandidate(repoRoot, "run-tools", "accepted", deps);
+    await handleDecideCandidate(repoRoot, "run-tools", "accepted", candidate.manifestHash, deps);
 
     await expect(handleIntegrateCandidate(repoRoot, "run-tools", "f".repeat(64), deps))
       .resolves.toEqual({ integration: "aborted", detail: "decision-artifact-mismatch" });
@@ -1049,15 +1049,16 @@ describe("MCP tool handlers", () => {
   // opposite: the runtime knows exactly how, and it met every objective
   // condition, so it integrates — see the case below.
   it.each([
-    undefined,
+    "unknown",
     "caller-asserted",
-  ] as const)("refuses integration on unknown acceptance provenance (%s)", async decidedBy => {
+  ] as const)("refuses integration on unknown acceptance provenance (%s)", async authority => {
     const repoRoot = await createRepository();
     const store = new FakeStore(result, manifestFor(repoRoot));
     store.decision = {
+      decisionVersion: "1",
       decision: "accepted",
+      authority,
       recordedAt: "2026-07-27T00:00:00.000Z",
-      ...(decidedBy === undefined ? {} : { decidedBy }),
       candidateManifestHash: candidate.manifestHash,
     };
     let integrationCalls = 0;
@@ -1086,9 +1087,10 @@ describe("MCP tool handlers", () => {
     const repoRoot = await createRepository();
     const store = new FakeStore(result, manifestFor(repoRoot));
     store.decision = {
+      decisionVersion: "1",
       decision: "accepted",
+      authority: "policy-autonomous",
       recordedAt: "2026-07-27T00:00:00.000Z",
-      decidedBy: "policy-autonomous",
       candidateManifestHash: candidate.manifestHash,
     };
     let integrationCalls = 0;
@@ -1298,14 +1300,10 @@ describe("MCP tool handlers", () => {
     let allowWrite!: () => void;
     const entered = new Promise<void>(resolve => { markEntered = resolve; });
     const writeAllowed = new Promise<void>(resolve => { allowWrite = resolve; });
-    store.writeHumanDecision = async record => {
+    store.writeCandidateDecisionRecord = async record => {
       markEntered();
       await writeAllowed;
-      store.decision = {
-        ...record,
-        decisionVersion: "2",
-        authority: "human",
-      };
+      store.decision = structuredClone(record);
     };
     const pending = handleDecideCandidate(
       repoRoot,
@@ -1361,7 +1359,7 @@ describe("MCP tool handlers", () => {
 
   it("records decisions idempotently and rejects a contradictory decision", async () => {
     const store = new FakeStore();
-    const deps = dependencies(store);
+    const deps = { ...dependencies(store), decisionProvenance: "human-elicitation" as const };
     const recordedAt = [
       new Date("2026-07-18T12:00:00.000Z"),
       new Date("2026-07-18T12:01:00.000Z"),
@@ -1391,8 +1389,6 @@ describe("MCP tool handlers", () => {
       evidenceHash: expectedReviewEvidenceHash,
       policyVersion: "1",
       recordedAt: "2026-07-18T12:00:00.000Z",
-      decidedBy: "caller-asserted",
-      candidateManifestHash: candidate.manifestHash,
     });
 
     await expect(handleDecideCandidate(
@@ -1509,7 +1505,7 @@ describe("MCP tool handlers", () => {
         "run-tools",
         decision,
         candidate.manifestHash,
-        dependencies(store),
+        { ...dependencies(store), decisionProvenance: "human-elicitation" as const },
       )).resolves.toEqual({ recorded: true });
       expect(store.decision).toMatchObject({
         decisionVersion: "2",

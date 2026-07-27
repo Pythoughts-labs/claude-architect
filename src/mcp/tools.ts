@@ -1025,7 +1025,11 @@ export async function handleDecideCandidate(
       // refused: the decision happened and the archive should say so, and
       // INTEGRABLE_DECISION_AUTHORITIES is what keeps it from being spent.
       const authority = decisionAuthorityFor(deps.decisionProvenance);
-      if (authority !== "human" && decision !== "accepted") {
+      // Only the policy authorities are accept-only: a policy that could reject
+      // or request revision on its own could bury work nobody reviewed. A
+      // caller-asserted decision may carry any value — a caller can reject, and
+      // refusing to record that would lose the rejection entirely.
+      if (authority === "policy-autonomous" && decision !== "accepted") {
         throw runtimeError(
           `a ${authority} authority may only accept, never ${decision}`,
           "decision-authority-refused",
