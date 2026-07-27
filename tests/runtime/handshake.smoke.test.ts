@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 import { LATEST_PROTOCOL_VERSION } from "@modelcontextprotocol/sdk/types.js";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createServer } from "../../src/mcp/server.js";
 import { PROTOCOL_VERSION } from "../../src/protocol/versions.js";
 
@@ -58,9 +58,23 @@ async function waitForExit(child: ChildProcessWithoutNullStreams, timeoutMs = 2_
   });
 }
 
+// createServer runs recovery AND pruneRuns against the ambient state root, so
+// without a stubbed prune and an isolated CLAUDE_PLUGIN_DATA these tests reach
+// into whatever archive the developer happens to have.
+let previousPluginData: string | undefined;
+
+beforeEach(async () => {
+  previousPluginData = process.env.CLAUDE_PLUGIN_DATA;
+  const stateRoot = await mkdtemp(path.join(tmpdir(), "ca-handshake-state-"));
+  temporaryPaths.push(stateRoot);
+  process.env.CLAUDE_PLUGIN_DATA = stateRoot;
+});
+
 afterEach(async () => {
+  if (previousPluginData === undefined) delete process.env.CLAUDE_PLUGIN_DATA;
+  else process.env.CLAUDE_PLUGIN_DATA = previousPluginData;
   await Promise.all(temporaryPaths.splice(0).map(entry =>
-    rm(entry, { recursive: true, force: true })));
+    rm(entry, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 })));
 });
 
 describe("MCP server handshake", () => {
@@ -72,7 +86,8 @@ describe("MCP server handshake", () => {
     process.env.CLAUDE_ARCHITECT_DELEGATED = "1";
     try {
       await expect(createServer({
-        recoverStaleRuns: async () => ({ recovered: [], skipped: [] }),
+        recoverStaleRuns: async () => ({ recovered: [], quarantined: [] }),
+        pruneRuns: async () => {},
       })).rejects.toThrow("CLAUDE_ARCHITECT_DELEGATED");
     } finally {
       if (previous === undefined) delete process.env.CLAUDE_ARCHITECT_DELEGATED;
@@ -82,7 +97,8 @@ describe("MCP server handshake", () => {
 
   it("advertises the source autopilot lifecycle schemas", async () => {
     const server = await createServer({
-      recoverStaleRuns: async () => ({ recovered: [], skipped: [] }),
+      recoverStaleRuns: async () => ({ recovered: [], quarantined: [] }),
+      pruneRuns: async () => {},
     });
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
     await server.connect(serverTransport);

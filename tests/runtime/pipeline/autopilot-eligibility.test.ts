@@ -25,28 +25,37 @@ describe("evaluateAutopilotEligibility", () => {
     });
   });
 
+  // Several rows are red for more than the reason they name -- the status and
+  // gate overrides also trip the projection-mismatch check, because the
+  // hash-bound pipelineResult still reports decision-ready. Asserting only
+  // `eligible: false` would keep these green even if the named check were
+  // removed, so each row now pins the reason it claims to exercise.
   it.each([
-    ["human status", () => ({ status: "human-decision-required" as const })],
+    ["human status", () => ({ status: "human-decision-required" as const }),
+      /status is not decision-ready/iu],
     ["gate reason", () => ({
       gate: { decisionReady: false, requiresHumanDecision: false, reasons: ["baseline drift"] },
-    })],
+    }), /baseline drift|gate/iu],
     ["advisor risk", () => {
       const advisor = {
         ...advisorReport,
         risks: [{ severity: "major" as const, claim: "race", evidence: "repro" }],
       };
       return { advisor, advisorReportHash: advisorReportHash(advisor) };
-    }],
+    }, /risk/iu],
     ["coverage gap", () => {
       const advisor = { ...advisorReport, coverageGaps: ["Windows not reviewed"] };
       return { advisor, advisorReportHash: advisorReportHash(advisor) };
-    }],
-    ["hash mismatch", () => ({ reviewManifestHash: "0".repeat(64) })],
-    ["missing source artifacts", () => ({ pipelineResult: undefined, reviewSnapshot: undefined })],
-  ])("rejects %s", (_name, override) => {
-    expect(evaluateAutopilotEligibility({ ...greenInput(), ...override() })).toMatchObject({
-      eligible: false,
-    });
+    }, /coverage/iu],
+    ["hash mismatch", () => ({ reviewManifestHash: "0".repeat(64) }), /hash|manifest/iu],
+    ["missing source artifacts", () => ({
+      pipelineResult: undefined, reviewSnapshot: undefined,
+    }), /missing|artifact/iu],
+  ])("rejects %s", (_name, override, expectedReason) => {
+    const record = evaluateAutopilotEligibility({ ...greenInput(), ...override() });
+    expect(record).toMatchObject({ eligible: false });
+    expect(record.reasons.some(reason => expectedReason.test(reason)), record.reasons.join(" | "))
+      .toBe(true);
   });
 
   it("ignores a forged caller eligibility and recomputes reasons", () => {

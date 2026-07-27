@@ -382,6 +382,11 @@ describe.runIf(process.platform === "darwin")("end-to-end review pipeline", () =
     const manifest = await new ArtifactStore(runId).readManifest(runId);
     expect(manifest).not.toBeNull();
     expect(manifest?.candidateManifestHash).not.toBeNull();
+    // decideCandidate compares the caller's hash against the ARCHIVED manifest,
+    // so this equality is load-bearing but was only asserted incidentally via
+    // `recorded: true`. Pin it, or a divergence between the frozen artifact and
+    // the archive would surface as a confusing decision failure.
+    expect(manifest!.candidateManifestHash).toBe(candidateHash);
     // Same authority as the first call: idempotence is about repeating a
     // decision, and re-recording one under a different authority is a different
     // claim about who decided, which the store refuses by design.

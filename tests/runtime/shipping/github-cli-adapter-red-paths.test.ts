@@ -724,8 +724,15 @@ describe("GitHubCliAdapter complete red-path matrix", () => {
         classification: redCase.classification,
         message: redCase.classification,
       });
-      expect(String(error)).not.toContain(SECRET);
-      expect(String(error)).not.toContain(LEAK_PATH);
+      // `String(error)` is only "name: message". A secret carried in `stack`,
+      // `cause`, or any enumerable property would pass that untouched.
+      const exposed = [
+        String(error),
+        (error as Error).stack ?? "",
+        JSON.stringify(error, Object.getOwnPropertyNames(error as object)),
+      ].join("\n");
+      expect(exposed).not.toContain(SECRET);
+      expect(exposed).not.toContain(LEAK_PATH);
       expect(scenario.calls.map(stage)).toEqual(scenario.expectedStages);
     } finally {
       await scenario.dispose?.();

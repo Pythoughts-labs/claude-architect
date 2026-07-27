@@ -359,14 +359,19 @@ describe("ArtifactStore", () => {
       pipelineResult: pipeline,
       reviewSnapshot: snapshot,
       advisorReport,
-      eligibility: { ...eligibility, eligible: false },
-    })).rejects.toThrow(/eligibility/u);
+      // Internally consistent (a false verdict WITH reasons), so it passes
+      // strict validation and must be caught by the DERIVATION check instead.
+      // A shared loose /eligibility/ matcher could not tell the two guards
+      // apart, so dropping either one would have left this green.
+      eligibility: { ...eligibility, eligible: false, reasons: ["forged verdict"] },
+    })).rejects.toThrow(/was not derived from the supplied frozen evidence/u);
     await expect(store.writePostPipelineAutopilotArtifacts({
       pipelineResult: pipeline,
       reviewSnapshot: snapshot,
       advisorReport,
+      // An unknown field must fail strict schema validation, not derivation.
       eligibility: { ...eligibility, extra: true } as unknown as typeof eligibility,
-    })).rejects.toThrow(/eligibility/u);
+    })).rejects.toThrow(/record is invalid/u);
   });
 
   it("redacts secrets in persisted pipeline artifacts", async () => {

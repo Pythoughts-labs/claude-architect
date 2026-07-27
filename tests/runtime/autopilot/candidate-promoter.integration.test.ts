@@ -229,9 +229,18 @@ describe("CandidatePromoter real repository", () => {
           : { ok: false, classification: "repository-identity-changed" };
       }),
     };
-    const observedGit = vi.fn(async (cwd: string, args: string[]): Promise<GitResult> => {
+    // Forward the full signature. This suite exists to prove exact-tree
+    // promotion against real Git, so dropping `options` would mean the env,
+    // stdin, and timeout under test are not the production ones — and a change
+    // that moved the commit message to stdin would pass here and fail in
+    // production.
+    const observedGit = vi.fn(async (
+      cwd: string,
+      args: string[],
+      options?: Parameters<typeof git>[2],
+    ): Promise<GitResult> => {
       if (args[0] === "update-ref" && args.includes("-d")) events.push("anchor-delete");
-      return git(cwd, args);
+      return git(cwd, args, options);
     });
     const promoter = new CandidatePromoter({
       git: observedGit,

@@ -1,10 +1,12 @@
-import { createHash } from "node:crypto";
+import { manifestHashOf } from "../../../src/git/changed-path-manifest.js";
 import type { DelegationSpec } from "../../../src/protocol/delegation-spec.js";
 import type { PipelineResult } from "../../../src/pipeline/pipeline-runtime.js";
 import type { AdvisorReport } from "../../../src/pipeline/report-types.js";
 import type { ReviewSnapshot } from "../../../src/runtime/review-snapshot.js";
 
-export const manifestHash = createHash("sha256").update("[]").digest("hex");
+// Derived from the runtime canonicalization rather than a hand-rolled sha256
+// of "[]", so the fixture cannot drift from the hashing it stands in for.
+export const manifestHash = manifestHashOf([]);
 
 export const advisorReport: AdvisorReport = {
   reportVersion: "1",

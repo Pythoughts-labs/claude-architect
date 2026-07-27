@@ -35,7 +35,9 @@ function delegation(objective: string) {
   };
 }
 
-export function validAutopilotSpec() {
+// Deliberately not exported: importing a fixture from a `.test.ts` module
+// would re-run this suite's describe blocks in the importing suite.
+function validAutopilotSpec() {
   return {
     specVersion: "1",
     topic: "delegation-autopilot",
