@@ -64,6 +64,22 @@ afterEach(async () => {
 });
 
 describe("MCP server handshake", () => {
+  // The denial used to live only in `start`, but `createServer` is exported and
+  // wires up the whole tool surface, autopilot included. A delegated Producer
+  // reaching this function must not get a server at all.
+  it("refuses to build the tool surface inside a delegated Producer", async () => {
+    const previous = process.env.CLAUDE_ARCHITECT_DELEGATED;
+    process.env.CLAUDE_ARCHITECT_DELEGATED = "1";
+    try {
+      await expect(createServer({
+        recoverStaleRuns: async () => ({ recovered: [], skipped: [] }),
+      })).rejects.toThrow("CLAUDE_ARCHITECT_DELEGATED");
+    } finally {
+      if (previous === undefined) delete process.env.CLAUDE_ARCHITECT_DELEGATED;
+      else process.env.CLAUDE_ARCHITECT_DELEGATED = previous;
+    }
+  });
+
   it("advertises the source autopilot lifecycle schemas", async () => {
     const server = await createServer({
       recoverStaleRuns: async () => ({ recovered: [], skipped: [] }),

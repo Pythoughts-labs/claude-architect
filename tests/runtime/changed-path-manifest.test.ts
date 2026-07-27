@@ -169,6 +169,26 @@ describe("computeChangedPathManifest", () => {
     })).toThrow("changed paths collide under case folding");
   });
 
+  // This gate folded with `toLowerCase()` alone while the structural verifier
+  // folded with NFC + lowercase, so an NFC/NFD alias -- one file on macOS and
+  // Windows -- hashed cleanly here and was only caught later, if at all.
+  it("rejects a Unicode alias that differs only by normalization and case", () => {
+    expect(() => computeChangedPathManifest({
+      rawDiff: raw([
+        { path: "\u00c9.txt", oldMode: "000000", newMode: "100644" },
+        { path: "e\u0301.txt", oldMode: "000000", newMode: "100644" },
+      ]),
+      nameStatusOutput: nameStatusZ([
+        { status: "A", path: "\u00c9.txt" },
+        { status: "A", path: "e\u0301.txt" },
+      ]),
+      treeOutput: treeZ([
+        { mode: "100644", oid: OID_1, path: "\u00c9.txt" },
+        { mode: "100644", oid: OID_2, path: "e\u0301.txt" },
+      ]),
+    })).toThrow("changed paths collide under case folding");
+  });
+
   it("does not conflate Unicode-distinct paths or an exact repeated path", () => {
     const unicode = computeChangedPathManifest({
       rawDiff: raw([

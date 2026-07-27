@@ -2496,7 +2496,13 @@ async function recoverAutopilotWorkflows(
 ): Promise<AutopilotRecoveryResult[]> {
   const results: AutopilotRecoveryResult[] = [];
   const branchManager = new WorkflowBranchManager({ git: dependencies.runGit });
+  // Isolate every workflow: the run loop below already quarantines per entry,
+  // but a throw here (branch cleanup, finalization) propagated all the way out
+  // of recoverStaleRuns and discarded the dispositions already computed for
+  // earlier workflows. Because the failure is deterministic — same dead owner,
+  // same on-disk evidence — every later startup aborted at the same workflow.
   for (const workflowId of await workflowIds(root)) {
+    try {
     const store = new WorkflowStore(workflowId, {
       stateDirectory: root,
       isProcessAlive: dependencies.isProcessAlive,
@@ -2600,6 +2606,9 @@ async function recoverAutopilotWorkflows(
       continue;
     }
     results.push({ workflowId, disposition: "resume" });
+    } catch {
+      results.push({ workflowId, disposition: "human-decision-required" });
+    }
   }
   return results;
 }

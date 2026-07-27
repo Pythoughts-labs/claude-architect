@@ -133,8 +133,16 @@ async function packageScriptInvokesVitest(cwd: string, scriptName: string): Prom
         scripts as Record<string, unknown>,
         new Set([scriptName]),
       );
-  } catch {
-    return false;
+  } catch (error) {
+    // Only "this repository has no package.json" is a legitimate negative.
+    // A parse error, a permission denial, or anything else is ambiguity, and
+    // resolving it to `false` would let a command that collected zero tests
+    // pass as a valid baseline proof.
+    if (typeof error === "object" && error !== null && "code" in error
+      && (error as NodeJS.ErrnoException).code === "ENOENT") {
+      return false;
+    }
+    throw error;
   }
 }
 

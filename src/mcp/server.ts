@@ -33,6 +33,7 @@ import {
 import { recoverStaleRuns } from "../runtime/recovery-manager.js";
 import { pruneRuns } from "../runtime/artifact-store.js";
 import { boundedRedactedDiagnostic, redact } from "../runtime/redaction.js";
+import { RuntimeError } from "../util/errors.js";
 
 const errorOutputFields = {
   ok: z.literal(false).optional(),
@@ -327,9 +328,24 @@ function toolOutput(value: object) {
   };
 }
 
+/**
+ * A delegated Producer must never be able to build this surface: nesting a
+ * delegation would let an untrusted process launch further untrusted processes.
+ * The guard lives here rather than only in `start` because `createServer` is
+ * public API and wires up the whole tool surface, autopilot included.
+ */
+export function nestedDelegationDenied(): boolean {
+  return process.env.CLAUDE_ARCHITECT_DELEGATED !== undefined;
+}
+
 export async function createServer(
   dependencies: ServerDependencies = {},
 ): Promise<McpServer> {
+  if (nestedDelegationDenied()) {
+    throw new RuntimeError(
+      "Claude Architect MCP startup denied: CLAUDE_ARCHITECT_DELEGATED is present",
+    );
+  }
   await (dependencies.recoverStaleRuns ?? recoverStaleRuns)();
 
   // Reclaim aged/oversized run archives once per boot, after recovery has
@@ -685,7 +701,9 @@ export async function createServer(
 }
 
 export async function start(dependencies: ServerDependencies = {}): Promise<void> {
-  if (process.env.CLAUDE_ARCHITECT_DELEGATED !== undefined) {
+  // createServer enforces this too; keeping it here preserves the CLI's
+  // graceful non-zero exit instead of surfacing a stack trace.
+  if (nestedDelegationDenied()) {
     console.error("Claude Architect MCP startup denied: CLAUDE_ARCHITECT_DELEGATED is present");
     process.exitCode = 1;
     return;
