@@ -1,9 +1,18 @@
 import { mkdir, mkdtemp, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { git } from "../../src/git/git-exec.js";
 import { WorktreeManager } from "../../src/git/worktree-manager.js";
+
+// git prints worktree paths in its own format, which is forward-slashed on
+// Windows; resolve them so these assertions compare paths rather than bytes.
+async function registeredWorktrees(repository: string): Promise<string[]> {
+  const listed = await git(repository, ["worktree", "list", "--porcelain"]);
+  return listed.stdout.split(/\r?\n/u)
+    .filter(line => line.startsWith("worktree "))
+    .map(line => resolve(line.slice("worktree ".length)));
+}
 
 const failedGitResult = { exitCode: 1, stdout: "", stderr: "locked" };
 const successfulGitResult = { exitCode: 0, stdout: "", stderr: "" };
@@ -96,7 +105,7 @@ describe("WorktreeManager", () => {
     await attempt.cleanup();
 
     await expect(stat(attempt.path)).rejects.toMatchObject({ code: "ENOENT" });
-    expect(await runGit(directory, ["worktree", "list", "--porcelain"])).not.toContain(attempt.path);
+    expect(await registeredWorktrees(directory)).not.toContain(resolve(attempt.path));
   });
 
   it("removes a worktree through the downstream remove method", async () => {
@@ -107,7 +116,7 @@ describe("WorktreeManager", () => {
     await manager.remove(attempt.path);
 
     await expect(stat(attempt.path)).rejects.toMatchObject({ code: "ENOENT" });
-    expect(await runGit(directory, ["worktree", "list", "--porcelain"])).not.toContain(attempt.path);
+    expect(await registeredWorktrees(directory)).not.toContain(resolve(attempt.path));
   });
 
   it("retries Windows worktree removal until a later attempt succeeds", async () => {

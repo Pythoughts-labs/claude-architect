@@ -24,6 +24,7 @@ import {
   type WorkflowOwnerRecord,
 } from "../autopilot/workflow-store.js";
 import { git, type GitResult } from "../git/git-exec.js";
+import { isWorktreeRegistrationFor } from "../git/worktree-registration.js";
 import { WorktreeManager } from "../git/worktree-manager.js";
 import { lockOwnerStatus, parseLockOwner, type LockOwnerStatus } from "../platform/lock-owner.js";
 import type { PlatformServices } from "../platform/platform-services.js";
@@ -2292,15 +2293,6 @@ async function isAbsent(filename: string): Promise<boolean | null> {
   } catch (error) {
     return isMissing(error) ? true : null;
   }
-}
-
-// `git worktree list --porcelain` reports the worktree path in git's own
-// format, which on Windows uses forward slashes while the recorded identity is
-// canonicalized by Node and uses backslashes. Resolve the reported path before
-// comparing so the registration is recognized on every platform.
-function isWorktreeRegistrationFor(field: string, worktreePath: string): boolean {
-  if (!field.startsWith("worktree ")) return false;
-  return path.resolve(field.slice("worktree ".length)) === worktreePath;
 }
 
 async function cleanupIsDirectlyObserved(

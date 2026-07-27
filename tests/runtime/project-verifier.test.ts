@@ -1,6 +1,6 @@
 import { access, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve, sep } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { freezeCandidate } from "../../src/git/candidate-tree.js";
 import { git } from "../../src/git/git-exec.js";
@@ -175,8 +175,14 @@ describe("projectVerify", () => {
       stdoutRef: "logs/verification-0-stdout.log",
       stderrRef: "logs/verification-0-stderr.log",
     });
-    expect(await runGit(fixture.repoRoot, ["worktree", "list", "--porcelain"]))
-      .not.toContain(process.env.CLAUDE_PLUGIN_DATA);
+    // Resolve the reported paths: git forward-slashes them on Windows, so a
+    // raw substring check against the state root can never fail there.
+    const registered = (await runGit(fixture.repoRoot, ["worktree", "list", "--porcelain"]))
+      .split(/\r?\n/u).filter(line => line.startsWith("worktree "))
+      .map(line => resolve(line.slice("worktree ".length)));
+    const stateRoot = resolve(process.env.CLAUDE_PLUGIN_DATA!);
+    expect(registered.filter(entry =>
+      entry === stateRoot || entry.startsWith(`${stateRoot}${sep}`))).toEqual([]);
   });
 
   it("records a skipped dependency link when the candidate changes the lockfile", async () => {

@@ -325,6 +325,34 @@ describe("autopilot startup recovery", () => {
     expect(await snapshot(fixture.store.workflowDirectory)).toEqual(afterFirst);
   });
 
+  // git prints worktree paths in its own format, which is forward-slashed on
+  // Windows while the recorded identity is Node-canonical. When recovery
+  // compared those bytes directly it never found the registration, so every
+  // healthy workflow on Windows was downgraded to human-decision-required.
+  it("resumes when git reports the worktree path in a non-normalized form", async () => {
+    const fixture = await createFixture();
+    await makeBootstrapOwnerDead(fixture);
+    await makeLeaseDead(fixture.store);
+    const dependencies = await recoveryDependencies();
+    const denormalizing: typeof git = async (cwd, args, options) => {
+      const result = await dependencies.git(cwd, args, options);
+      if (args[0] !== "worktree" || args[1] !== "list") return result;
+      return {
+        ...result,
+        stdout: result.stdout.split("\0").map(field => field.startsWith("worktree ")
+          ? `${field}${path.sep}.`
+          : field).join("\0"),
+      };
+    };
+
+    const result = await recoverStaleRuns({ ...dependencies, git: denormalizing });
+
+    expect(result.workflows).toEqual([{
+      workflowId: fixture.branch.workflowId,
+      disposition: "resume",
+    }]);
+  });
+
   it("finalizes observed cleanup and converges byte-idempotently", async () => {
     const fixture = await createFixture();
     const cleaning = await advanceToCleaningUp(fixture.store);
