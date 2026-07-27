@@ -99,6 +99,20 @@ describe("verifyBaseline", () => {
     ]);
   });
 
+  // The flag declares the command cannot pass at clean HEAD by design. A green
+  // run contradicts that declaration, so the fail-before/pass-after evidence the
+  // flag exists to supply was never produced.
+  it("rejects a command that passes at clean HEAD despite declaring it cannot", async () => {
+    const repo = await fixture();
+    const report = await verifyBaseline({
+      ...repo,
+      commands: [{ ...command(0), id: "unexpectedly-green", expectBaselineFailure: true }],
+    });
+    expect(report.commands).toEqual([
+      { id: "unexpectedly-green", exitCode: 0, ok: false },
+    ]);
+  });
+
   // `expectBaselineFailure` asserts the command runs and reports failure. A
   // command that never delivered a verdict of its own is not that, and
   // excusing it silently voided the environment-defect gate.

@@ -185,6 +185,12 @@ test("subagent-driven-delegation skill keeps the trust invariants that upstream 
     assert.ok(sdd.includes(`\`${lifecycleTool}\``), `SDD skill must drive ${lifecycleTool}`);
   }
   assert.match(sdd, /expectedArtifactHash/u, "SDD skill must integrate by artifact hash");
+  // Integration stages rather than commits, so without an explicit commit gate
+  // the next task's delegate call fails the clean-checkout precondition and the
+  // multi-task loop cannot advance past task 1.
+  assert.match(sdd, /Gate before the next task/u,
+    "SDD skill must gate the next task on a clean checkout after integration");
+  assert.match(sdd, /confirm `git status` is clean/u);
   assert.doesNotMatch(sdd, /(^|[^:])\/subagent-driven-delegation\b/mu,
     "SDD skill must use the fully qualified command");
 

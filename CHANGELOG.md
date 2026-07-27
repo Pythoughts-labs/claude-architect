@@ -18,6 +18,11 @@ All notable changes to Claude Architect are recorded here. The format follows
   Command execution now reports how the process terminated, and only a real
   completed exit can satisfy the flag. A command that fails because it could not
   start is a baseline failure again, as it always should have been.
+- fix: a command declaring `expectBaselineFailure` that *passes* at clean HEAD is
+  now a baseline failure too. The flag declares the command cannot pass by
+  design; a green run contradicts the declaration, so the fail-before/pass-after
+  evidence the flag exists to supply was never produced. Both halves of the
+  declaration — that the command runs, and that it fails — are now enforced.
 - fix: the bootstrap smoke tests no longer leak the re-executed server. All
   three signal tests learned the server's pid inside the `try` that could throw,
   so a timed-out pid read left the grandchild — which holds an interval timer —
@@ -32,7 +37,10 @@ All notable changes to Claude Architect are recorded here. The format follows
   Artifact, and independently verified before review. The skill states the four
   points where a trust invariant overrides upstream SDD: there is no implementer
   resume, the controller never closes a task, implementer self-review is not a
-  review, and the controller never fixes findings itself.
+  review, and the controller never fixes findings itself. Because integration
+  stages rather than commits, the skill also gates each task on the user
+  committing the staged tree and a confirmed clean checkout — without that gate
+  the next task's dispatch would fail delegation's clean-checkout precondition.
 
 ## [0.33.0] - 2026-07-26
 

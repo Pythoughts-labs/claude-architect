@@ -26531,13 +26531,16 @@ async function verifyBaseline(args) {
         id: executed.outcome.id,
         exitCode: executed.outcome.exitCode,
         ...outputRefs,
-        // `expectBaselineFailure` says "this command is designed to fail at
-        // clean HEAD", which is a claim about the command's *verdict*. It is
-        // not a licence to accept a command that never delivered one: an
-        // unresolvable executable, a timeout, a cancellation, or death by
-        // signal proves nothing about the baseline, and excusing those voided
-        // the environment-defect gate for every command carrying the flag.
-        ok: (!executed.failed || command.expectBaselineFailure === true && executed.terminal === "exited") && !mutation.mutated,
+        // `expectBaselineFailure` declares that this command runs at clean HEAD
+        // and reports failure. Both halves are load-bearing. A command that
+        // never delivered a verdict — unresolvable executable, timeout,
+        // cancellation, death by signal — proves nothing about the baseline,
+        // and excusing those voided the environment-defect gate for every
+        // command carrying the flag. A command that *passes* contradicts the
+        // declaration outright: the spec claims it cannot pass by design, so a
+        // green run means the command does not prove what the spec says it
+        // proves, and the fail-before/pass-after evidence is void either way.
+        ok: (command.expectBaselineFailure === true ? executed.failed && executed.terminal === "exited" : !executed.failed) && !mutation.mutated,
         ...mutation.mutated ? { mutation: { records: mutation.records, headChanged: mutation.headChanged } } : {}
       });
       throwIfAborted(args.abortSignal);

@@ -95,7 +95,9 @@ Present the review outcome and your recommendation. The user decides.
 
 On `accepted`, call `integrateCandidate` with the exact candidate `manifestHash` as `expectedArtifactHash`, and report `applied`, `conflicted`, or `aborted` truthfully. Integration stages the reviewed tree; it does not commit. One accepted candidate per clean checkout — never batch-accept against the same checkout.
 
-Then append `Task <N>: complete (run <runId>, manifest <hash7>, review clean)` — or `…, <K> parked` after a tripped breaker — and move on.
+Then append `Task <N>: complete (run <runId>, manifest <hash7>, review clean)` — or `…, <K> parked` after a tripped breaker.
+
+**Gate before the next task.** Integration leaves the checkout dirty, and delegation requires an exact clean checkout — so the loop cannot advance until the staged tree is resolved. Stop here and have the user commit (or discard) it, then confirm `git status` is clean before authoring Task N+1's spec. This is the one mandatory pause per task; it is not a progress check-in, and it exists because the next `delegate` call will otherwise fail its precondition. Record the commit in the ledger alongside the completion line so the ledger stays a usable recovery map.
 
 ## Final review
 
@@ -116,3 +118,4 @@ When the final review is clean and integrated, delete this plan's workspace; git
 | "The Producer says it ran the tests" | A self-report is never evidence. Read the runtime's verification report. |
 | "Both lanes are on the same repo but they'll run in parallel" | The repository lock serializes them. Size timeouts accordingly. |
 | "Round 6 will converge" | Past the cap the failure is structural. Adjudicate and route. |
+| "Integration staged it, I can start the next task" | A staged tree is a dirty checkout, and delegation requires a clean one. The next task's dispatch will fail until the user commits. |

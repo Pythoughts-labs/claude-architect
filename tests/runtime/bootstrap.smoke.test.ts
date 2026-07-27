@@ -94,7 +94,16 @@ async function waitForProcessGone(pid: number, timeoutMs = 10_000): Promise<void
 async function reapServer(pidFile: string, knownPid: number): Promise<void> {
   let pid = knownPid;
   if (pid <= 1) {
-    pid = Number(await readFile(pidFile, "utf8").catch(() => "0"));
+    // The common leak is a pid read that timed out because the server was slow
+    // to start. It usually does write the file a moment later, so poll briefly
+    // rather than reading once and giving up on a process that is about to
+    // exist.
+    const deadline = Date.now() + 2_000;
+    do {
+      pid = Number(await readFile(pidFile, "utf8").catch(() => "0"));
+      if (Number.isSafeInteger(pid) && pid > 1) break;
+      await new Promise(resolve => setTimeout(resolve, 25));
+    } while (Date.now() < deadline);
   }
   if (!Number.isSafeInteger(pid) || pid <= 1) return;
   try {
@@ -226,6 +235,58 @@ describe("runtime bootstrap", () => {
     expect(result.stderr).toContain("Node.js 22");
     expect(result.stderr).toContain("PATH");
   });
+
+  // Regression: every signal test assigns serverPid inside the try that can
+  // throw, so a pid read that times out used to leave the re-executed server —
+  // which holds an interval timer — running forever. One such orphan was found
+  // alive nearly six hours after its temp directory had been deleted. Reap must
+  // not depend on the step that failed.
+  it.skipIf(process.platform === "win32")(
+    "reaps the re-executed server even when the pid read times out",
+    async () => {
+      const root = await mkdtemp(path.join(tmpdir(), "ca-bootstrap-slow-pid-"));
+      temporaryPaths.push(root);
+      const preludePath = await nodeVersionPrelude(root, "20.19.0");
+      const bin = path.join(root, "bin");
+      const serverPath = path.join(root, "signal-server.mjs");
+      const pidFile = path.join(root, "server.pid");
+      await mkdir(bin);
+      await symlink(process.execPath, path.join(bin, "node"));
+      // Writes its pid only after the test below has already given up reading.
+      await writeFile(serverPath, [
+        "import { writeFileSync } from 'node:fs';",
+        "setTimeout(() => {",
+        "  writeFileSync(process.env.TEST_SERVER_PID_FILE, String(process.pid));",
+        "}, 400);",
+        "setInterval(() => {}, 1000);",
+        "",
+      ].join("\n"));
+
+      const child = spawn(process.execPath, ["--import", preludePath, bootstrapPath], {
+        env: {
+          ...process.env,
+          PATH: bin,
+          CLAUDE_ARCHITECT_SERVER_PATH: serverPath,
+          TEST_SERVER_PID_FILE: pidFile,
+        },
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+      let serverPid = 0;
+      try {
+        // Times out by construction, exactly as the leaking runs did.
+        await expect(waitForFile(pidFile, 50)).rejects.toThrow();
+      } finally {
+        if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+        await reapServer(pidFile, serverPid);
+      }
+
+      // The server did write its pid — just too late for the read above. That
+      // is precisely the run that used to leak it.
+      const leaked = Number(await readFile(pidFile, "utf8").catch(() => "0"));
+      expect(leaked).toBeGreaterThan(1);
+      await waitForProcessGone(leaked, 5_000);
+    },
+  );
 
   it.skipIf(process.platform === "win32")("forwards SIGIO to a re-executed server", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "ca-bootstrap-signal-"));
