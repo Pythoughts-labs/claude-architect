@@ -737,10 +737,13 @@ describe("ArtifactStore", () => {
     await writeFile(decisionPath, `${JSON.stringify(legacy)}\n`);
     const before = await readFile(decisionPath, "utf8");
 
+    // "unknown", not "human": the record predates provenance, so it says a
+    // decision happened and nothing about who made it. Reporting a person would
+    // invent evidence and hand it the one authority integration accepts.
     await expect(store.readCandidateDecision(runId)).resolves.toEqual({
       decisionVersion: "1",
       decision: "accepted",
-      authority: "human",
+      authority: "unknown",
       recordedAt: legacy.recordedAt,
     });
     await expect(store.writeHumanDecision({
@@ -894,31 +897,36 @@ describe("ArtifactStore", () => {
     await expect(store.readCandidateDecision(runId)).resolves.toBeNull();
   });
 
-  it("requires idempotent decision retries to match provenance and candidate binding", async () => {
+  it("requires idempotent decision retries to match authority and candidate binding", async () => {
     const runId = "run-decision-authority";
     const store = new ArtifactStore(runId);
+    await store.writeResult(sampleResult(runId));
     const original = {
+      decisionVersion: "2" as const,
       decision: "accepted" as const,
-      recordedAt: "2026-07-27T12:00:00.000Z",
-      decidedBy: "human-elicitation" as const,
+      authority: "human" as const,
       candidateManifestHash: "a".repeat(64),
+      evidenceHash: "b".repeat(64),
+      policyVersion: "1" as const,
+      recordedAt: "2026-07-27T12:00:00.000Z",
     };
-    await store.writeDecision(original);
-    await store.writeDecision({
+    await store.writeCandidateDecisionRecord(original);
+    await store.writeCandidateDecisionRecord({
       ...original,
       recordedAt: "2026-07-27T12:01:00.000Z",
     });
 
+    // Authority is part of a decision's identity: the same verdict recorded
+    // under a different authority is a different claim about who decided.
     for (const conflicting of [
-      { ...original, decidedBy: "caller-asserted" as const },
+      { ...original, authority: "policy-autonomous" as const },
       { ...original, candidateManifestHash: "b".repeat(64) },
     ]) {
-      await expect(store.writeDecision(conflicting)).rejects.toMatchObject({
-        message: expect.stringContaining("provenance or candidate binding"),
+      await expect(store.writeCandidateDecisionRecord(conflicting)).rejects.toMatchObject({
         detail: { toolError: "decision-conflict" },
       });
     }
-    await expect(store.readDecision(runId)).resolves.toEqual(original);
+    await expect(store.readCandidateDecision(runId)).resolves.toEqual(original);
   });
 
   it("atomically preserves one decision when conflicting writers race", async () => {
