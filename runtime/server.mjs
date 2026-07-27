@@ -32598,12 +32598,16 @@ async function handleIntegrateCandidate(checkoutPath, runId, expectedArtifactHas
       if (decision?.decision !== "accepted") {
         return { integration: "aborted", detail: "no-accepted-decision" };
       }
+      const artifact = requireVerifiedCandidate(run);
+      if (decision.decidedBy !== "human-elicitation") {
+        return { integration: "aborted", detail: "accepted-decision-not-human-confirmed" };
+      }
       if (decision.candidateManifestHash != null && decision.candidateManifestHash !== expectedArtifactHash) {
         return { integration: "aborted", detail: "decision-artifact-mismatch" };
       }
       return (deps.applyCandidateTree ?? applyCandidateTree)({
         repoRoot: run.repoRoot,
-        artifact: requireVerifiedCandidate(run),
+        artifact,
         expectedArtifactHash,
         borrowedCheckoutLock: lock,
         platformServices: ps

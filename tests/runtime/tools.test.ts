@@ -888,7 +888,10 @@ describe("MCP tool handlers", () => {
     const repoRoot = await createRepository();
     const linkedWorktree = await createLinkedWorktree(repoRoot);
     const store = new FakeStore(result, manifestFor(repoRoot));
-    const deps = dependencies(store, getPlatformServices());
+    const deps = {
+      ...dependencies(store, getPlatformServices()),
+      decisionProvenance: "human-elicitation" as const,
+    };
 
     for (const checkoutPath of [repoRoot, linkedWorktree]) {
       await expect(handleReviewCandidate(checkoutPath, "run-tools", deps)).resolves.toMatchObject({
@@ -945,11 +948,46 @@ describe("MCP tool handlers", () => {
   it("refuses to spend an acceptance on a different artifact", async () => {
     const repoRoot = await createRepository();
     const store = new FakeStore(result, manifestFor(repoRoot));
-    const deps = dependencies(store, getPlatformServices());
+    const deps = {
+      ...dependencies(store, getPlatformServices()),
+      decisionProvenance: "human-elicitation" as const,
+    };
     await handleDecideCandidate(repoRoot, "run-tools", "accepted", deps);
 
     await expect(handleIntegrateCandidate(repoRoot, "run-tools", "f".repeat(64), deps))
       .resolves.toEqual({ integration: "aborted", detail: "decision-artifact-mismatch" });
+  });
+
+  it.each([
+    undefined,
+    "caller-asserted",
+    "policy-autonomous",
+  ] as const)("refuses integration without human-confirmed acceptance provenance (%s)", async decidedBy => {
+    const repoRoot = await createRepository();
+    const store = new FakeStore(result, manifestFor(repoRoot));
+    store.decision = {
+      decision: "accepted",
+      recordedAt: "2026-07-27T00:00:00.000Z",
+      ...(decidedBy === undefined ? {} : { decidedBy }),
+      candidateManifestHash: candidate.manifestHash,
+    };
+    let integrationCalls = 0;
+    const deps = dependencies(store, getPlatformServices());
+    deps.applyCandidateTree = async () => {
+      integrationCalls += 1;
+      return { integration: "applied", detail: "candidate tree applied" };
+    };
+
+    await expect(handleIntegrateCandidate(
+      repoRoot,
+      "run-tools",
+      candidate.manifestHash,
+      deps,
+    )).resolves.toEqual({
+      integration: "aborted",
+      detail: "accepted-decision-not-human-confirmed",
+    });
+    expect(integrationCalls).toBe(0);
   });
 
   it("returns the manifest hash integration requires", async () => {
@@ -1011,7 +1049,11 @@ describe("MCP tool handlers", () => {
       const platformServices = getPlatformServices();
       const store = new FakeStore(result, manifestFor(repoRoot));
       if (operation === "integrate") {
-        store.decision = { decision: "accepted", recordedAt: "2026-07-19T00:00:00.000Z" };
+        store.decision = {
+          decision: "accepted",
+          recordedAt: "2026-07-19T00:00:00.000Z",
+          decidedBy: "human-elicitation",
+        };
       }
       let markAcquiring!: () => void;
       const acquisitionStarted = new Promise<void>(resolve => { markAcquiring = resolve; });
@@ -1290,7 +1332,10 @@ describe("MCP tool handlers", () => {
 
   it("persists decisions and gates integration on the latest accepted decision", async () => {
     const store = new FakeStore();
-    const deps = dependencies(store);
+    const deps = {
+      ...dependencies(store),
+      decisionProvenance: "human-elicitation" as const,
+    };
     let integrationCalls = 0;
     deps.applyCandidateTree = async args => {
       integrationCalls += 1;
@@ -1331,7 +1376,11 @@ describe("MCP tool handlers", () => {
 
   it("passes the exact lifecycle checkout lease into integration without nested ownership", async () => {
     const store = new FakeStore();
-    store.decision = { decision: "accepted", recordedAt: "2026-07-18T12:01:00.000Z" };
+    store.decision = {
+      decision: "accepted",
+      recordedAt: "2026-07-18T12:01:00.000Z",
+      decidedBy: "human-elicitation",
+    };
     let held = false;
     let acquireCalls = 0;
     let releaseCalls = 0;
@@ -1470,7 +1519,11 @@ describe("MCP tool handlers", () => {
 
   it("preserves an applied integration result when lifecycle lease release fails", async () => {
     const store = new FakeStore();
-    store.decision = { decision: "accepted", recordedAt: "2026-07-18T12:01:00.000Z" };
+    store.decision = {
+      decision: "accepted",
+      recordedAt: "2026-07-18T12:01:00.000Z",
+      decidedBy: "human-elicitation",
+    };
     let releaseCalls = 0;
     const ps = {
       ...fakePlatform(),
@@ -1582,7 +1635,11 @@ describe("MCP tool handlers", () => {
       error: "candidate-not-verified",
       diagnostic: "candidate did not complete independent verification",
     });
-    store.decision = { decision: "accepted", recordedAt: "2026-07-14T00:00:00.000Z" };
+    store.decision = {
+      decision: "accepted",
+      recordedAt: "2026-07-14T00:00:00.000Z",
+      decidedBy: "human-elicitation",
+    };
     await expect(handleIntegrateCandidate(
       "/canonical/repo",
       "run-tools",

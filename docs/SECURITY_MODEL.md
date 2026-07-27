@@ -34,7 +34,7 @@ Pipeline roles are separate one-shot Producer invocations. Reviewer prompts expl
 
 ## Human decision authentication
 
-`decideCandidate` is an MCP tool available to the controlling Claude session, but its arguments alone cannot record a decision. The runtime opens an MCP elicitation request and writes the decision only when the response both accepts the request and explicitly confirms it; a client without elicitation support, an unconfirmed response, or an elicitation failure leaves the candidate undecided. The runtime also refuses acceptance unless the result is a verified candidate.
+`decideCandidate` is an MCP tool available to the controlling Claude session, but its arguments alone cannot record a decision. The runtime opens an MCP elicitation request and writes the decision only when the response both accepts the request and explicitly confirms it; a client without elicitation support, an unconfirmed response, or an elicitation failure leaves the candidate undecided. The runtime also refuses acceptance unless the result is a verified candidate. Integration requires `human-elicitation` provenance; older provenance-less, caller-asserted, and experimental policy-autonomous acceptance records remain readable for audit but cannot authorize integration.
 
 This is an enforced channel boundary, not cryptographic human identity. The plugin does not implement a separate login, signature, or hardware confirmation, and it relies on the MCP host to present elicitation faithfully. A compromised or modified host/client could synthesize a confirmation, so control of that trusted client remains equivalent to decision authority.
 

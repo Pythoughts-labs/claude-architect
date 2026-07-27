@@ -75,8 +75,9 @@ export type RunDecisionValue = "accepted" | "rejected" | "revision-requested";
 /**
  * `policy-autonomous` is retained only so archives written by the unreleased
  * autonomous-decision experiment remain readable and auditable. The MCP
- * lifecycle no longer writes this value; every current decision requires human
- * elicitation.
+ * lifecycle no longer writes this value, and integration rejects it (as well
+ * as missing or caller-asserted provenance); every current decision requires
+ * human elicitation.
  */
 export type DecisionProvenance = "human-elicitation" | "caller-asserted" | "policy-autonomous";
 

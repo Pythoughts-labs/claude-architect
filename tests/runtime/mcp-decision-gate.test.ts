@@ -14,16 +14,28 @@ import type { RunManifest } from "../../src/runtime/run-manifest.js";
 
 describe("legacy decision provenance", () => {
   it("keeps policy-autonomous archives readable for backward compatibility", async () => {
-    const store = new ArtifactStore("decision-authority-roundtrip");
-    const record: RunDecisionRecord = {
-      decision: "accepted",
-      recordedAt: new Date().toISOString(),
-      decidedBy: "policy-autonomous",
-      candidateManifestHash: "a".repeat(64),
-    };
-    await store.writeDecision(record);
-    await expect(store.readDecision("decision-authority-roundtrip"))
-      .resolves.toMatchObject({ decidedBy: "policy-autonomous" });
+    const stateRoot = await mkdtemp(join(tmpdir(), "decision-authority-state-"));
+    const previousStateRoot = process.env.CLAUDE_ARCHITECT_STATE_DIR;
+    process.env.CLAUDE_ARCHITECT_STATE_DIR = stateRoot;
+    try {
+      const store = new ArtifactStore("decision-authority-roundtrip");
+      const record: RunDecisionRecord = {
+        decision: "accepted",
+        recordedAt: new Date().toISOString(),
+        decidedBy: "policy-autonomous",
+        candidateManifestHash: "a".repeat(64),
+      };
+      await store.writeDecision(record);
+      await expect(store.readDecision("decision-authority-roundtrip"))
+        .resolves.toMatchObject({ decidedBy: "policy-autonomous" });
+    } finally {
+      if (previousStateRoot === undefined) {
+        delete process.env.CLAUDE_ARCHITECT_STATE_DIR;
+      } else {
+        process.env.CLAUDE_ARCHITECT_STATE_DIR = previousStateRoot;
+      }
+      await rm(stateRoot, { recursive: true, force: true });
+    }
   });
 });
 
@@ -75,40 +87,35 @@ function fakePlatform(): PlatformServices {
 async function decideVia(
   result: AttemptResult,
 ): Promise<{ output: unknown; decision: RunDecisionRecord | null }> {
-  const root = await mkdtemp(join(tmpdir(), "decide-authority-"));
   let recorded: RunDecisionRecord | null = null;
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
-  try {
-    await start({
-      transport: serverTransport,
-      recoverStaleRuns: async () => ({ recovered: [], quarantined: [] }),
-      pruneRuns: async () => {},
-      ps: fakePlatform(),
-      storeFactory: () => ({
-        readResult: async () => result,
-        readManifest: async () => ({
-          runId: "decide-authority",
-          repoRoot: "/canonical/repo",
-          baseCommitOid: candidate.baseCommitOid,
-          candidateManifestHash: candidate.manifestHash,
-        } as unknown as RunManifest),
-        writeDecision: async (record: RunDecisionRecord) => { recorded = record; },
-        readDecision: async () => recorded,
-        readPipelineActiveMarker: async () => null,
-      }) as never,
-      git: async () => ({ stdout: "", stderr: "", exitCode: 0 }),
-    });
-    const client = new Client({ name: "authority-test", version: "1.0.0" });
-    await client.connect(clientTransport);
-    const output = await client.callTool({
-      name: "decideCandidate",
-      arguments: { checkoutPath: "/repo", runId: "decide-authority", decision: "accepted" },
-    });
-    await client.close();
-    return { output, decision: recorded };
-  } finally {
-    await rm(root, { recursive: true, force: true });
-  }
+  await start({
+    transport: serverTransport,
+    recoverStaleRuns: async () => ({ recovered: [], quarantined: [] }),
+    pruneRuns: async () => {},
+    ps: fakePlatform(),
+    storeFactory: () => ({
+      readResult: async () => result,
+      readManifest: async () => ({
+        runId: "decide-authority",
+        repoRoot: "/canonical/repo",
+        baseCommitOid: candidate.baseCommitOid,
+        candidateManifestHash: candidate.manifestHash,
+      } as unknown as RunManifest),
+      writeDecision: async (record: RunDecisionRecord) => { recorded = record; },
+      readDecision: async () => recorded,
+      readPipelineActiveMarker: async () => null,
+    }) as never,
+    git: async () => ({ stdout: "", stderr: "", exitCode: 0 }),
+  });
+  const client = new Client({ name: "authority-test", version: "1.0.0" });
+  await client.connect(clientTransport);
+  const output = await client.callTool({
+    name: "decideCandidate",
+    arguments: { checkoutPath: "/repo", runId: "decide-authority", decision: "accepted" },
+  });
+  await client.close();
+  return { output, decision: recorded };
 }
 
 describe("decideCandidate human authority", () => {

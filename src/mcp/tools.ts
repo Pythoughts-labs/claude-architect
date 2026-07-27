@@ -765,6 +765,10 @@ export async function handleIntegrateCandidate(
       if (decision?.decision !== "accepted") {
         return { integration: "aborted", detail: "no-accepted-decision" };
       }
+      const artifact = requireVerifiedCandidate(run);
+      if (decision.decidedBy !== "human-elicitation") {
+        return { integration: "aborted", detail: "accepted-decision-not-human-confirmed" };
+      }
       // An acceptance is a judgement about one specific candidate. When the
       // record names the artifact it was made about, refuse to spend it on a
       // different one. Records written before provenance existed carry no hash;
@@ -775,7 +779,7 @@ export async function handleIntegrateCandidate(
       }
       return (deps.applyCandidateTree ?? applyTree)({
         repoRoot: run.repoRoot,
-        artifact: requireVerifiedCandidate(run),
+        artifact,
         expectedArtifactHash,
         borrowedCheckoutLock: lock,
         platformServices: ps,
