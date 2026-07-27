@@ -14,5 +14,8 @@ scratchpad.md
 .superpowers/
 tasks/
 /CONTEXT.md
-.claude/
+.claude/*
+!.claude/settings.json
+.claude/settings.local.json
+.claude/worktrees/
 .worktrees/

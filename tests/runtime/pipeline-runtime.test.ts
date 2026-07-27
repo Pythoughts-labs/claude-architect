@@ -2035,8 +2035,12 @@ describe("runPipeline", () => {
       failure: "producer-failure",
     });
     // The definitive check: the real accept gate must admit these bytes.
-    await expect(handleDecideCandidate(repo, runId, "accepted"))
-      .resolves.toEqual({ recorded: true });
+    await expect(handleDecideCandidate(
+      repo,
+      runId,
+      "accepted",
+      archived!.candidate!.manifestHash,
+    )).resolves.toEqual({ recorded: true });
   }, 120_000);
 
   it("archives an unexpected final-verification error before clearing lifecycle authority", async () => {
@@ -3391,8 +3395,12 @@ describe("runPipeline", () => {
     expect(result.status).toBe("failed");
     expect(result.failure).toBe("producer-failure");
     expect(result.gate.requiresHumanDecision).toBe(false);
-    await expect(handleDecideCandidate(repo, "pipeline-salvage-red", "accepted"))
-      .resolves.toMatchObject({ ok: false, error: "candidate-not-verified" });
+    await expect(handleDecideCandidate(
+      repo,
+      "pipeline-salvage-red",
+      "accepted",
+      "0".repeat(64),
+    )).resolves.toMatchObject({ ok: false, error: "candidate-not-verified" });
   }, 120_000);
 
   it("salvages the candidate after invalid reviewer output and one invalid repair", async () => {

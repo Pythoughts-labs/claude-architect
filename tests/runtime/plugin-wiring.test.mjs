@@ -26,6 +26,7 @@ describe("P0-A plugin wiring", () => {
     assert.ok(
       !/\.\.\/[^"'\n]*node_modules/u.test(bundle),
       "committed bundle must not embed worktree-relative node_modules paths",
+    );
     assert.equal(bundle.includes("/Projects/active/"), false,
       "server bundle must not embed a checkout-specific dependency path");
     assert.equal(bundle.includes("/.claude/plugins/"), false,
@@ -36,7 +37,6 @@ describe("P0-A plugin wiring", () => {
         `server bundle must register ${autopilotTool}`,
       );
     }
-    );
     if (process.platform !== "win32") {
       assert.ok(fs.statSync(`${root}/scripts/build-runtime.sh`).mode & 0o111, "build wrapper must be executable");
     }
@@ -210,12 +210,12 @@ describe("P0-A plugin wiring", () => {
     assert.match(changelog, /^## \[0\.8\.0\] - 2026-07-14$/mu);
     assert.match(readme, /macOS arm64[^\n]*certified/iu);
     assert.match(readme, /Linux[^\n]*tested/iu);
-    assert.match(readme, /Windows[^\n]*not certified/iu);
+    assert.match(readme, /Windows[^\n]*unsupported/iu);
     assert.match(readme, /codex-native-sandbox/u);
     assert.match(marketplace.plugins[0].description, /macOS arm64 certified/iu);
     assert.match(
       marketplace.plugins[0].description,
-      /eligible Linux Codex editing is tested; native Windows Codex editing is not certified/iu,
+      /eligible Linux Codex editing is tested; native Windows Codex editing is unsupported/iu,
     );
     assert.match(readme, /Installed marketplace copies[^\n]*update[^\n]*reload/iu);
     assert.match(readme, /--disable multi_agent/u);

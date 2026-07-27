@@ -184,7 +184,9 @@ describe("MCP server handshake", () => {
         name: "doctor",
         arguments: {},
       });
-      const mismatched = await requestRaw(5, "tools/call", {
+      // Distinct id: the doctor call above already used 5, and two requests
+      // sharing an id race to match the same response.
+      const mismatched = await requestRaw(6, "tools/call", {
         name: "delegate",
         arguments: {
           checkoutPath: "/unused-invalid-spec",
