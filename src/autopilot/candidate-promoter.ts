@@ -1,10 +1,14 @@
 import { createHash } from "node:crypto";
 import { git, type GitResult } from "../git/git-exec.js";
-import { stageCandidateTreeUnderLock, type IntegrationResult } from "../integrate/controlled-integrator.js";
+import {
+  stageCandidateTreeUnderLock,
+  statusMatchesArtifact,
+  type IntegrationResult,
+} from "../integrate/controlled-integrator.js";
 import type { CheckoutLock, PlatformServices } from "../platform/platform-services.js";
 import { getPlatformServices } from "../platform/select-platform.js";
 import type { PipelineResult } from "../pipeline/pipeline-runtime.js";
-import type { CandidateArtifact, ChangedPath } from "../protocol/attempt-result.js";
+import type { CandidateArtifact } from "../protocol/attempt-result.js";
 import { ArtifactStore } from "../runtime/artifact-store.js";
 import { reviewSnapshotHash } from "../runtime/review-snapshot.js";
 import {
@@ -94,22 +98,6 @@ function commitMessageHash(message: string): string {
   return createHash("sha256").update(message, "utf8").digest("hex");
 }
 
-function statusMatchesArtifact(output: string, changedPaths: ChangedPath[]): boolean {
-  const records = output.split("\0");
-  if (records.at(-1) === "") records.pop();
-  if (records.length !== changedPaths.length) return false;
-  const actual = new Map<string, string>();
-  for (const record of records) {
-    if (record.length < 4 || record[1] !== " " || record[2] !== " ") return false;
-    const pathname = record.slice(3);
-    if (actual.has(pathname)) return false;
-    actual.set(pathname, record[0]!);
-  }
-  return changedPaths.every(change => actual.get(change.path) === (
-    change.changeType === "added" ? "A" : change.changeType === "deleted" ? "D" : "M"
-  ));
-}
-
 function workflowStillAuthorizes(
   workflow: AutopilotWorkflowState,
   request: PromotionRequest,
@@ -147,10 +135,42 @@ function completionCommit(value: unknown): string | null {
   return typeof commitOid === "string" && OBJECT_ID.test(commitOid) ? commitOid : null;
 }
 
+// A journal entry is durable input, not a trusted value: an unrecognized
+// classification must fail closed rather than propagate semantics no caller
+// switches on.
+const PROMOTION_CLASSIFICATIONS: ReadonlySet<string> = new Set<PromotionClassification>([
+  "invalid-request",
+  "invalid-commit-message",
+  "workflow-state-mismatch",
+  "run-evidence-missing",
+  "eligibility-missing",
+  "eligibility-red",
+  "eligibility-stale",
+  "artifact-hash-mismatch",
+  "evidence-mismatch",
+  "decision-conflict",
+  "branch-identity-changed",
+  "dirty-worktree",
+  "head-changed",
+  "apply-conflict",
+  "git-identity-missing",
+  "commit-creation-failed",
+  "commit-proof-failed",
+  "update-ref-race",
+  "post-commit-divergence",
+  "journal-failed",
+  "anchor-deletion-failed",
+  "lock-release-failed",
+  "human-decision-required",
+]);
+
 function completionFailure(value: unknown): PromotionClassification | null {
   if (value === null || typeof value !== "object" || Array.isArray(value)) return null;
   const classification = (value as { classification?: unknown }).classification;
-  return typeof classification === "string" ? classification as PromotionClassification : null;
+  if (typeof classification !== "string") return null;
+  return PROMOTION_CLASSIFICATIONS.has(classification)
+    ? classification as PromotionClassification
+    : "journal-failed";
 }
 
 export class CandidatePromoter {
@@ -179,13 +199,20 @@ export class CandidatePromoter {
     parentOid: string,
     message: string,
   ): Promise<boolean> {
-    const [tree, parent, body] = await Promise.all([
+    const [tree, parents, body] = await Promise.all([
       this.runGit(checkout, ["rev-parse", "--verify", `${commitOid}^{tree}`]),
-      this.runGit(checkout, ["rev-parse", "--verify", `${commitOid}^`]),
+      // `${commitOid}^` resolves the FIRST parent only, so a merge commit whose
+      // first parent is the expected head and whose tree and message match would
+      // otherwise be accepted as the promotion commit on the recovery paths.
+      // Pin the parent count instead of trusting the first-parent walk.
+      this.runGit(checkout, ["rev-list", "--parents", "-n", "1", commitOid]),
       this.runGit(checkout, ["log", "-1", "--format=%B", commitOid]),
     ]);
+    const lineage = succeeded(parents) ? parents.stdout.trim().split(/\s+/u) : [];
     return succeeded(tree) && tree.stdout.trim() === treeOid
-      && succeeded(parent) && parent.stdout.trim() === parentOid
+      && lineage.length === 2
+      && lineage[0] === commitOid
+      && lineage[1] === parentOid
       && succeeded(body) && body.stdout.trimEnd() === message;
   }
 
