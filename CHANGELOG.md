@@ -6,6 +6,34 @@ All notable changes to Claude Architect are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.34.0] - 2026-07-26
+
+- fix: `expectBaselineFailure` no longer excuses a command that never ran. The
+  flag asserts that a command executes at clean HEAD and reports failure — a
+  claim about the command's verdict. The gate excused every failure mode
+  instead, so an unresolvable executable, a timeout, a cancellation, or death by
+  signal all satisfied it. That silently voided the environment-defect gate for
+  any command carrying the flag: the runtime promises an unresolvable executable
+  ends the attempt before the Producer runs, and for these commands it did not.
+  Command execution now reports how the process terminated, and only a real
+  completed exit can satisfy the flag. A command that fails because it could not
+  start is a baseline failure again, as it always should have been.
+- fix: the bootstrap smoke tests no longer leak the re-executed server. All
+  three signal tests learned the server's pid inside the `try` that could throw,
+  so a timed-out pid read left the grandchild — which holds an interval timer —
+  running as an orphan. One was found alive nearly six hours after its temp
+  directory had been deleted. Cleanup now re-reads the pid file and never
+  depends on the step that failed.
+- feat: new `/claude-architect:subagent-driven-delegation` skill runs the
+  Superpowers subagent-driven-development loop — ledger, per-task brief,
+  per-task review, final whole-branch review — with the verified delegation
+  lifecycle substituted for the generic implementer subagent. Each task becomes
+  a Delegation Spec executed in an isolated worktree, frozen as a Candidate
+  Artifact, and independently verified before review. The skill states the four
+  points where a trust invariant overrides upstream SDD: there is no implementer
+  resume, the controller never closes a task, implementer self-review is not a
+  review, and the controller never fixes findings itself.
+
 ## [0.33.0] - 2026-07-26
 
 - fix: Producer git calls no longer spawn a full `xcodebuild` lookup each time.

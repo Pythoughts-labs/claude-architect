@@ -79,6 +79,31 @@ async function waitForProcessGone(pid: number, timeoutMs = 10_000): Promise<void
   throw new Error(`timed out waiting for process ${pid} to exit`);
 }
 
+/**
+ * Reap the re-executed server unconditionally.
+ *
+ * These tests learn the server's pid by reading a file the server writes, and
+ * every one of them assigns that pid inside the `try`. When the read times out
+ * or the assertion above it throws, the pid is still 0, the `finally` reaps
+ * only the bootstrap child, and the grandchild — which holds an unref'd
+ * `setInterval` — survives as an orphan for the life of the machine. One such
+ * orphan was found running nearly six hours after its temp directory had been
+ * deleted. Re-read the pid file here so cleanup never depends on the step that
+ * failed.
+ */
+async function reapServer(pidFile: string, knownPid: number): Promise<void> {
+  let pid = knownPid;
+  if (pid <= 1) {
+    pid = Number(await readFile(pidFile, "utf8").catch(() => "0"));
+  }
+  if (!Number.isSafeInteger(pid) || pid <= 1) return;
+  try {
+    if (isProcessAlive(pid)) process.kill(pid, "SIGKILL");
+  } catch (error) {
+    if (!(error instanceof Error) || !("code" in error) || error.code !== "ESRCH") throw error;
+  }
+}
+
 afterEach(async () => {
   await Promise.all(temporaryPaths.splice(0).map(entry =>
     rm(entry, { recursive: true, force: true })));
@@ -245,13 +270,7 @@ describe("runtime bootstrap", () => {
       expect(isProcessAlive(serverPid)).toBe(false);
     } finally {
       if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
-      if (serverPid > 1 && isProcessAlive(serverPid)) {
-        try {
-          process.kill(serverPid, "SIGKILL");
-        } catch (error) {
-          if (!(error instanceof Error) || !("code" in error) || error.code !== "ESRCH") throw error;
-        }
-      }
+      await reapServer(pidFile, serverPid);
     }
   });
 
@@ -298,7 +317,7 @@ describe("runtime bootstrap", () => {
         expect(isProcessAlive(serverPid)).toBe(false);
       } finally {
         if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
-        if (serverPid > 1 && isProcessAlive(serverPid)) process.kill(serverPid, "SIGKILL");
+        await reapServer(pidFile, serverPid);
       }
     },
   );
@@ -337,7 +356,7 @@ describe("runtime bootstrap", () => {
       expect(exit).toEqual({ code: null, signal: "SIGTERM" });
     } finally {
       if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
-      if (serverPid > 1 && isProcessAlive(serverPid)) process.kill(serverPid, "SIGKILL");
+      await reapServer(pidFile, serverPid);
     }
   });
 });

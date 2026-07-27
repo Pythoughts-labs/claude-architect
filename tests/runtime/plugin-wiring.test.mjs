@@ -123,9 +123,9 @@ describe("P0-A plugin wiring", () => {
     const marketplace = JSON.parse(read(".claude-plugin/marketplace.json"));
     const readme = read("README.md");
     const changelog = read("CHANGELOG.md");
-    assert.equal(plugin.version, "0.33.0");
-    assert.equal(marketplace.plugins[0].version, "0.33.0");
-    assert.match(readme, /badge\/version-0\.33\.0-/u);
+    assert.equal(plugin.version, "0.34.0");
+    assert.equal(marketplace.plugins[0].version, "0.34.0");
+    assert.match(readme, /badge\/version-0\.34\.0-/u);
     assert.doesNotMatch(
       readme,
       /`\/delegate`/u,
@@ -160,6 +160,37 @@ describe("P0-A plugin wiring", () => {
       assert.ok(releaseValidator.includes(required), `release validator must check ${required}`);
     }
   });
+});
+
+test("subagent-driven-delegation skill keeps the trust invariants that upstream SDD relaxes", () => {
+  const sdd = read("skills/subagent-driven-delegation/SKILL.md");
+  const frontmatter = /^---\r?\n([\s\S]*?)\r?\n---\r?\n/u.exec(sdd)?.[1] ?? "";
+  assert.match(frontmatter, /^name:\s*subagent-driven-delegation$/mu);
+  assert.match(frontmatter, /^description:\s*\S/mu);
+
+  const protocol = /PROTOCOL_VERSION:\s*([^\s]+)/u.exec(sdd)?.[1];
+  const runtimeProtocol = /PROTOCOL_VERSION\s*=\s*"([^"]+)"/u
+    .exec(read("src/protocol/versions.ts"))?.[1];
+  assert.equal(protocol, runtimeProtocol, "SDD skill protocol marker must match runtime");
+
+  // Upstream SDD resumes the implementer, lets the controller close a task, and
+  // treats implementer self-review as a gate. Each of those crosses a trust
+  // boundary here, so the skill must state the divergence rather than inherit it.
+  assert.match(sdd, /No implementer resume/u);
+  assert.match(sdd, /controller never marks a task complete/iu);
+  assert.match(sdd, /self-review is not a review/iu);
+  assert.match(sdd, /controller never fixes findings/iu);
+
+  for (const lifecycleTool of ["reviewCandidate", "decideCandidate", "integrateCandidate"]) {
+    assert.ok(sdd.includes(`\`${lifecycleTool}\``), `SDD skill must drive ${lifecycleTool}`);
+  }
+  assert.match(sdd, /expectedArtifactHash/u, "SDD skill must integrate by artifact hash");
+  assert.doesNotMatch(sdd, /(^|[^:])\/subagent-driven-delegation\b/mu,
+    "SDD skill must use the fully qualified command");
+
+  const delegate = read("skills/delegate/SKILL.md");
+  assert.match(delegate, /\/claude-architect:subagent-driven-delegation/u,
+    "delegate skill must point at the SDD skill for multi-task plans");
 });
 
 test("delegation-lane agent ships the produce-only courier contract", () => {

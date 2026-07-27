@@ -15,7 +15,9 @@ Always present this skill as `/claude-architect:delegate`. Never show a shorter 
 
 ## Superpowers across the trust boundary
 
-When the upstream Superpowers plugin is available to the architect, keep its host-loop skills on the architect side of the boundary: use `brainstorming` to clarify requirements before freezing the Delegation Spec, `writing-plans` to turn an agreed design into objectively checkable work or slices, `executing-plans` or `subagent-driven-development` only to coordinate the architect-owned workflow, and `verification-before-completion` before recording a decision on a candidate. Those skills do not grant a Producer permission to plan instead of editing, dispatch nested agents, review itself, accept a candidate, or integrate bytes. When the plugin is not installed, proceed without those skills rather than inventing or approximating them.
+When the upstream Superpowers plugin is available to the architect, keep its host-loop skills on the architect side of the boundary: use `brainstorming` to clarify requirements before freezing the Delegation Spec, `writing-plans` to turn an agreed design into objectively checkable work or slices, `executing-plans` or `subagent-driven-development` only to coordinate the architect-owned workflow, and `verification-before-completion` before recording a decision on a candidate.
+
+To execute a multi-task plan where every task is implemented by a verified Producer, use `/claude-architect:subagent-driven-delegation`: it runs the Superpowers subagent-driven-development loop — ledger, per-task brief, per-task review, final whole-branch review — with the delegation lifecycle below substituted for the generic implementer subagent. Those skills do not grant a Producer permission to plan instead of editing, dispatch nested agents, review itself, accept a candidate, or integrate bytes. When the plugin is not installed, proceed without those skills rather than inventing or approximating them.
 
 Edit-lane Producers receive a deliberately smaller, vendored procedure subset:
 

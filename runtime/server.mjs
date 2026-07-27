@@ -21933,7 +21933,7 @@ var StdioServerTransport = class {
 var PROTOCOL_VERSION = "1.4.0";
 var DELEGATION_SPEC_VERSION = "1";
 var ATTEMPT_RESULT_VERSION = "1";
-var RUNTIME_VERSION = "0.33.0";
+var RUNTIME_VERSION = "0.34.0";
 
 // src/platform/posix-platform-services.ts
 import { spawn, execFile } from "node:child_process";
@@ -26291,7 +26291,8 @@ async function executeCommand(args) {
     const stdout = boundText(redact(exit?.stdout ?? ""));
     const stderr = boundText(redact(exit === null ? failureText : [exit.stderr, exit.spawnError === void 0 ? "" : errorMessage(exit.spawnError)].filter(Boolean).join("\n")));
     const exitCode = exit?.exitCode ?? null;
-    const failed = exitCode === null || exit?.timedOut === true || exit?.cancelled === true || exit?.spawnError !== void 0 || !command.expectedExitCodes.includes(exitCode);
+    const terminal = exit === null || exit.spawnError !== void 0 ? "spawn-error" : exit.cancelled === true ? "cancelled" : exit.timedOut === true ? "timeout" : exit.exitCode === null ? "signal" : "exited";
+    const failed = terminal !== "exited" || exitCode === null || !command.expectedExitCodes.includes(exitCode);
     return {
       outcome: {
         id: redact(command.id),
@@ -26320,7 +26321,8 @@ async function executeCommand(args) {
         { name: stdoutName, text: stdout.text },
         { name: stderrName, text: stderr.text }
       ],
-      failed
+      failed,
+      terminal
     };
   } finally {
     registration.dispose();
@@ -26529,7 +26531,13 @@ async function verifyBaseline(args) {
         id: executed.outcome.id,
         exitCode: executed.outcome.exitCode,
         ...outputRefs,
-        ok: (!executed.failed || command.expectBaselineFailure === true) && !mutation.mutated,
+        // `expectBaselineFailure` says "this command is designed to fail at
+        // clean HEAD", which is a claim about the command's *verdict*. It is
+        // not a licence to accept a command that never delivered one: an
+        // unresolvable executable, a timeout, a cancellation, or death by
+        // signal proves nothing about the baseline, and excusing those voided
+        // the environment-defect gate for every command carrying the flag.
+        ok: (!executed.failed || command.expectBaselineFailure === true && executed.terminal === "exited") && !mutation.mutated,
         ...mutation.mutated ? { mutation: { records: mutation.records, headChanged: mutation.headChanged } } : {}
       });
       throwIfAborted(args.abortSignal);

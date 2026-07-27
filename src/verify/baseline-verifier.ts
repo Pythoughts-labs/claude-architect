@@ -105,7 +105,15 @@ export async function verifyBaseline(args: BaselineVerifyArgs): Promise<Baseline
         id: executed.outcome.id,
         exitCode: executed.outcome.exitCode,
         ...outputRefs,
-        ok: (!executed.failed || command.expectBaselineFailure === true) && !mutation.mutated,
+        // `expectBaselineFailure` says "this command is designed to fail at
+        // clean HEAD", which is a claim about the command's *verdict*. It is
+        // not a licence to accept a command that never delivered one: an
+        // unresolvable executable, a timeout, a cancellation, or death by
+        // signal proves nothing about the baseline, and excusing those voided
+        // the environment-defect gate for every command carrying the flag.
+        ok: (!executed.failed
+          || (command.expectBaselineFailure === true && executed.terminal === "exited"))
+          && !mutation.mutated,
         ...(mutation.mutated
           ? { mutation: { records: mutation.records, headChanged: mutation.headChanged } }
           : {}),

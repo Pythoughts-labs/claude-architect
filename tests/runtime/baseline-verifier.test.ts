@@ -99,6 +99,61 @@ describe("verifyBaseline", () => {
     ]);
   });
 
+  // `expectBaselineFailure` asserts the command runs and reports failure. A
+  // command that never delivered a verdict of its own is not that, and
+  // excusing it silently voided the environment-defect gate.
+  it("does not excuse an unresolvable executable as an expected baseline failure", async () => {
+    const repo = await fixture();
+    const report = await verifyBaseline({
+      ...repo,
+      commands: [{
+        ...command(1),
+        id: "missing-executable",
+        executable: "ca-definitely-not-on-path-9f3a1c",
+        expectBaselineFailure: true,
+      }],
+    });
+    expect(report.commands).toEqual([
+      { id: "missing-executable", exitCode: null, ok: false },
+    ]);
+  });
+
+  it("does not excuse a timeout as an expected baseline failure", async () => {
+    const repo = await fixture();
+    const report = await verifyBaseline({
+      ...repo,
+      commands: [{
+        ...command(1),
+        id: "hangs",
+        args: ["-e", "setTimeout(() => {}, 60_000)"],
+        timeoutMs: 250,
+        expectBaselineFailure: true,
+      }],
+    });
+    expect(report.commands).toEqual([
+      { id: "hangs", exitCode: null, ok: false },
+    ]);
+  });
+
+  it.skipIf(process.platform === "win32")(
+    "does not excuse death by signal as an expected baseline failure",
+    async () => {
+      const repo = await fixture();
+      const report = await verifyBaseline({
+        ...repo,
+        commands: [{
+          ...command(1),
+          id: "killed",
+          args: ["-e", "process.kill(process.pid, 'SIGKILL')"],
+          expectBaselineFailure: true,
+        }],
+      });
+      expect(report.commands).toEqual([
+        { id: "killed", exitCode: null, ok: false },
+      ]);
+    },
+  );
+
   it("does not run commands when already cancelled", async () => {
     const repo = await fixture();
     const marker = join(repo.repoRoot, "must-not-run.txt");

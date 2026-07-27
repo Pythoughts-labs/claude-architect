@@ -66,11 +66,25 @@ export interface ProjectVerifyResult {
   outputLogs: ProjectOutputLog[];
 }
 
+/**
+ * How the command process ended, independent of whether the exit code was
+ * acceptable. Only `exited` means the command actually ran to completion and
+ * reported a status of its own; every other value means the result carries no
+ * information about the code under test.
+ */
+export type CommandTermination =
+  | "exited"
+  | "timeout"
+  | "cancelled"
+  | "signal"
+  | "spawn-error";
+
 export interface ExecutedCommand {
   outcome: CommandOutcome;
   evidence: ProjectCommandEvidence;
   outputLogs: ProjectOutputLog[];
   failed: boolean;
+  terminal: CommandTermination;
 }
 
 function gitFailure(action: string, result: GitResult): RuntimeError {
@@ -224,10 +238,18 @@ export async function executeCommand(args: {
         .filter(Boolean)
         .join("\n")));
     const exitCode = exit?.exitCode ?? null;
-    const failed = exitCode === null
-      || exit?.timedOut === true
-      || exit?.cancelled === true
-      || exit?.spawnError !== undefined
+    // Resolution or supervision threw, so no process ever reported a status.
+    const terminal: CommandTermination = exit === null || exit.spawnError !== undefined
+      ? "spawn-error"
+      : exit.cancelled === true
+        ? "cancelled"
+        : exit.timedOut === true
+          ? "timeout"
+          : exit.exitCode === null
+            ? "signal"
+            : "exited";
+    const failed = terminal !== "exited"
+      || exitCode === null
       || !command.expectedExitCodes.includes(exitCode);
     return {
       outcome: {
@@ -258,6 +280,7 @@ export async function executeCommand(args: {
         { name: stderrName, text: stderr.text },
       ],
       failed,
+      terminal,
     };
   } finally {
     registration.dispose();
