@@ -1,5 +1,6 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
+import { ElicitRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import { createHash } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -16,7 +17,9 @@ describe("legacy decision provenance", () => {
   it("keeps policy-autonomous archives readable for backward compatibility", async () => {
     const stateRoot = await mkdtemp(join(tmpdir(), "decision-authority-state-"));
     const previousStateRoot = process.env.CLAUDE_ARCHITECT_STATE_DIR;
+    const previousPluginData = process.env.CLAUDE_PLUGIN_DATA;
     process.env.CLAUDE_ARCHITECT_STATE_DIR = stateRoot;
+    process.env.CLAUDE_PLUGIN_DATA = stateRoot;
     try {
       const store = new ArtifactStore("decision-authority-roundtrip");
       const record: RunDecisionRecord = {
@@ -33,6 +36,11 @@ describe("legacy decision provenance", () => {
         delete process.env.CLAUDE_ARCHITECT_STATE_DIR;
       } else {
         process.env.CLAUDE_ARCHITECT_STATE_DIR = previousStateRoot;
+      }
+      if (previousPluginData === undefined) {
+        delete process.env.CLAUDE_PLUGIN_DATA;
+      } else {
+        process.env.CLAUDE_PLUGIN_DATA = previousPluginData;
       }
       await rm(stateRoot, { recursive: true, force: true });
     }
@@ -124,4 +132,84 @@ describe("decideCandidate human authority", () => {
     expect(decision).toBeNull();
     expect(JSON.stringify(output)).toContain("elicitation");
   });
+
+  it.each([
+    undefined,
+    "caller-asserted",
+    "policy-autonomous",
+  ] as const)(
+    "reports a conflict when human confirmation meets an accepted %s archive",
+    async decidedBy => {
+      const stateRoot = await mkdtemp(join(tmpdir(), "decision-authority-conflict-"));
+      const previousStateRoot = process.env.CLAUDE_ARCHITECT_STATE_DIR;
+      const previousPluginData = process.env.CLAUDE_PLUGIN_DATA;
+      process.env.CLAUDE_ARCHITECT_STATE_DIR = stateRoot;
+      process.env.CLAUDE_PLUGIN_DATA = stateRoot;
+      const persistentStore = new ArtifactStore("decide-authority");
+      const existing: RunDecisionRecord = {
+        decision: "accepted",
+        recordedAt: "2026-07-27T00:00:00.000Z",
+        ...(decidedBy === undefined ? {} : { decidedBy }),
+        candidateManifestHash: candidate.manifestHash,
+      };
+      try {
+        await persistentStore.writeDecision(existing);
+        const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+        await start({
+          transport: serverTransport,
+          recoverStaleRuns: async () => ({ recovered: [], quarantined: [] }),
+          pruneRuns: async () => {},
+          ps: fakePlatform(),
+          storeFactory: () => ({
+            readResult: async () => verifiedResult,
+            readManifest: async () => ({
+              runId: "decide-authority",
+              repoRoot: "/canonical/repo",
+              baseCommitOid: candidate.baseCommitOid,
+              candidateManifestHash: candidate.manifestHash,
+            } as unknown as RunManifest),
+            writeDecision: async (record: RunDecisionRecord) => {
+              await persistentStore.writeDecision(record);
+            },
+            readDecision: async () => persistentStore.readDecision("decide-authority"),
+            readPipelineActiveMarker: async () => null,
+          }) as never,
+          git: async () => ({ stdout: "", stderr: "", exitCode: 0 }),
+        });
+        const client = new Client(
+          { name: "authority-conflict-test", version: "1.0.0" },
+          { capabilities: { elicitation: { form: {} } } },
+        );
+        client.setRequestHandler(ElicitRequestSchema, async () => ({
+          action: "accept",
+          content: { confirm: true },
+        }));
+        await client.connect(clientTransport);
+        const output = await client.callTool({
+          name: "decideCandidate",
+          arguments: {
+            checkoutPath: "/repo",
+            runId: "decide-authority",
+            decision: "accepted",
+          },
+        });
+        await client.close();
+
+        expect(JSON.stringify(output)).toContain("decision-conflict");
+        await expect(persistentStore.readDecision("decide-authority")).resolves.toEqual(existing);
+      } finally {
+        if (previousStateRoot === undefined) {
+          delete process.env.CLAUDE_ARCHITECT_STATE_DIR;
+        } else {
+          process.env.CLAUDE_ARCHITECT_STATE_DIR = previousStateRoot;
+        }
+        if (previousPluginData === undefined) {
+          delete process.env.CLAUDE_PLUGIN_DATA;
+        } else {
+          process.env.CLAUDE_PLUGIN_DATA = previousPluginData;
+        }
+        await rm(stateRoot, { recursive: true, force: true });
+      }
+    },
+  );
 });

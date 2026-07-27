@@ -164,7 +164,11 @@ class FakeStore implements ToolArtifactStore {
   }
 
   async writeDecision(decision: RunDecision): Promise<void> {
-    if (this.decision?.decision === decision.decision) return;
+    if (this.decision?.decision === decision.decision
+      && this.decision.decidedBy === decision.decidedBy
+      && this.decision.candidateManifestHash === decision.candidateManifestHash) {
+      return;
+    }
     if (this.decision !== null) {
       throw new RuntimeError(
         `candidate decision conflict: recorded ${this.decision.decision}, attempted ${decision.decision}`,

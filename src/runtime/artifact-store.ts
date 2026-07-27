@@ -895,7 +895,18 @@ export class ArtifactStore {
     } catch (error) {
       const existing = await this.readDecision(this.runId);
       if (existing === null) throw error;
-      if (existing.decision === record.decision) return;
+      if (existing.decision === record.decision
+        && existing.decidedBy === record.decidedBy
+        && existing.candidateManifestHash === record.candidateManifestHash) {
+        return;
+      }
+      if (existing.decision === record.decision) {
+        throw new RuntimeError(
+          "candidate decision conflict: recorded provenance or candidate binding "
+            + "differs from attempted decision",
+          { toolError: "decision-conflict" },
+        );
+      }
       throw new RuntimeError(
         `candidate decision conflict: recorded ${existing.decision}, attempted ${record.decision}`,
         { toolError: "decision-conflict" },

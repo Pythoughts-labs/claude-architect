@@ -42,7 +42,11 @@ All notable changes to Claude Architect are recorded here. The format follows
   `policy-autonomous` provenance remains readable so an archive written during
   the unreleased experiment does not become corrupt or unauditable, but it
   cannot authorize integration; missing and caller-asserted provenance also
-  fail closed with `accepted-decision-not-human-confirmed`.
+  fail closed with `accepted-decision-not-human-confirmed`. A later human
+  confirmation no longer reports a false successful write over one of those
+  immutable records: decision retries are idempotent only when the decision,
+  provenance, and candidate binding all match, and otherwise return
+  `decision-conflict`.
 - The native delegation lane fails closed when its prompt omits the complete
   Delegation Spec JSON. In a live session it received only a spec-file path,
   despite having no filesystem tool, and invented two invalid payloads before
