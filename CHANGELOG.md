@@ -6,6 +6,8 @@ All notable changes to Claude Architect are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.36.0] - 2026-07-27
+
 ### Breaking
 
 - `decideCandidate` now requires MCP elicitation and fails closed without it. The
