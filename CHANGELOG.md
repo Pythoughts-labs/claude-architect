@@ -6,6 +6,40 @@ All notable changes to Claude Architect are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.33.0] - 2026-07-26
+
+- fix: Producer git calls no longer spawn a full `xcodebuild` lookup each time.
+  Codex runs commands through a login shell, so `/etc/zprofile` runs
+  `path_helper`, which rebuilds `PATH` with the `/etc/paths` entries first; the
+  per-attempt temp home has no `~/.zprofile` to re-prepend Homebrew, so `git`
+  resolved to `/usr/bin/git`. That stub finds the real binary through `xcrun` and
+  caches the answer in the macOS per-user temp directory, which the Producer
+  sandbox denied — so the cache never persisted and every invocation re-ran
+  `xcodebuild -find git`, measured at 1.01s per call against 0.012s cached. On a
+  suite that shells out to git repeatedly this became hundreds of concurrent
+  `xcodebuild` processes. The edit lane now receives that one directory as a
+  writable root; the read-only lane receives no support roots at all.
+
+  Scope of the relaxation, stated plainly: the runtime passes the host `TMPDIR`
+  through unchanged and macOS normally points it at that same directory, so where
+  that holds this reopens what `sandbox_workspace_write.exclude_tmpdir_env_var`
+  closed. `exclude_slash_tmp` still applies, `/tmp` stays unwritable, and worktree
+  confinement is unchanged. No narrower directory is possible: `xcrun` resolves
+  the cache through `confstr(_CS_DARWIN_USER_TEMP_DIR)` and ignores `TMPDIR`.
+  Only the Codex lane was affected; the Seatbelt profile used by the other
+  Producers already made this directory writable.
+
+- fix: a review whose findings demand conflicting outcomes at the same location
+  no longer consumes the repair budget. No patch can satisfy both findings, so
+  the slice gate now halts immediately and names the contradiction instead of
+  spending every attempt to reach the same halt, and the final gate — which
+  ignored contradictions entirely — routes them to a human decision.
+
+- docs: `expectBaselineFailure` is all-or-nothing for the command it sits on, so
+  a command covering both an existing path and one the candidate creates forces
+  the flag on and suppresses the baseline signal for both. The delegate skill now
+  requires splitting such a command rather than blanket-marking the set.
+
 ## [0.32.0] - 2026-07-26
 
 - fix: a cancelled `delegate` or `delegatePipeline` request now actually stops
