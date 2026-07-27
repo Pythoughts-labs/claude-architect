@@ -60,7 +60,9 @@ Translate the brief into a spec per `/claude-architect:delegate` — success cri
 - **Verification commands carry the task's acceptance.** Whatever the brief calls "done" must be an executable check, because the runtime — not the Producer — decides whether it passed.
 - **Widen `writeAllowlist` to allowlist consumers** when the task changes an exported contract, or add a repository-wide verification command. A src-only gate plus focused tests compiles neither, and the breakage lands on you at integration.
 
-Set `expectBaselineFailure: true` only on a command that cannot pass at clean HEAD *by design*. It is all-or-nothing per command: split a command that mixes existing and to-be-created paths, or you disable the baseline signal for the whole command.
+Set `expectBaselineFailure: true` only on a command that cannot pass at clean HEAD *by design*. It is all-or-nothing per command: split a command that mixes existing and to-be-created paths, or you disable the baseline signal for the whole command. The gate enforces the declaration both ways — a command carrying the flag that cannot run, or that passes, fails the baseline.
+
+Watch the brief for acceptance criteria phrased as an absence ("no bare `except`", "the legacy label is gone"). The obvious gate is a text search expecting no match, and that gate matches the phrase in comments and docstrings too — so a Producer that documents *why* it avoided the pattern fails a check its code satisfies. Anchor such patterns to syntax, or assert over parsed structure.
 
 ### 3. Dispatch
 

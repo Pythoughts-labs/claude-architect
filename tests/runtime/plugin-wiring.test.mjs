@@ -93,6 +93,12 @@ describe("P0-A plugin wiring", () => {
     assert.ok(skill.includes("At most one accepted candidate per clean checkout; never batch-accept multiple candidates targeting the same checkout."));
     assert.ok(skill.includes("compute `specSha256` over the exact spec JSON"), "skill must document lane correlation");
     assert.match(skill, /laneEligibility\.edit=false/u);
+    // An absence gate whose pattern is an English phrase also matches comments,
+    // so a Producer documenting why it avoided the pattern fails a check its
+    // code satisfies. Observed live; the rule must stay in the authoring guide.
+    assert.match(skill, /A text-search gate must not be able to match prose/u);
+    assert.match(skill, /The flag is enforced in both directions/u,
+      "skill must document that expectBaselineFailure rejects both non-runs and passes");
     assert.doesNotMatch(skill, /^## Legacy migration fallback$/mu);
 
     for (const legacyFile of [

@@ -250,11 +250,15 @@ describe("runtime bootstrap", () => {
       const bin = path.join(root, "bin");
       const serverPath = path.join(root, "signal-server.mjs");
       const pidFile = path.join(root, "server.pid");
+      const startedFile = path.join(root, "server.started");
       await mkdir(bin);
       await symlink(process.execPath, path.join(bin, "node"));
-      // Writes its pid only after the test below has already given up reading.
+      // Announces itself immediately so the test can prove the server exists
+      // before simulating the failed read; writes the pid only afterwards, which
+      // is the ordering that produced the orphan.
       await writeFile(serverPath, [
         "import { writeFileSync } from 'node:fs';",
+        "writeFileSync(process.env.TEST_SERVER_STARTED_FILE, 'up');",
         "setTimeout(() => {",
         "  writeFileSync(process.env.TEST_SERVER_PID_FILE, String(process.pid));",
         "}, 400);",
@@ -268,11 +272,16 @@ describe("runtime bootstrap", () => {
           PATH: bin,
           CLAUDE_ARCHITECT_SERVER_PATH: serverPath,
           TEST_SERVER_PID_FILE: pidFile,
+          TEST_SERVER_STARTED_FILE: startedFile,
         },
         stdio: ["ignore", "pipe", "pipe"],
       });
       let serverPid = 0;
       try {
+        // Wait for the server to genuinely exist first. Killing the bootstrap
+        // before it has spawned the grandchild leaves nothing to leak, which is
+        // a vacuous pass — and on a slow runner that is exactly what happened.
+        await waitForFile(startedFile);
         // Times out by construction, exactly as the leaking runs did.
         await expect(waitForFile(pidFile, 50)).rejects.toThrow();
       } finally {
@@ -280,9 +289,10 @@ describe("runtime bootstrap", () => {
         await reapServer(pidFile, serverPid);
       }
 
-      // The server did write its pid — just too late for the read above. That
-      // is precisely the run that used to leak it.
-      const leaked = Number(await readFile(pidFile, "utf8").catch(() => "0"));
+      // The server does write its pid — just too late for the read above. Wait
+      // for it here rather than reading once, so a regression fails on the
+      // process still being alive instead of on an unwritten file.
+      const leaked = Number(await waitForFile(pidFile, 5_000));
       expect(leaked).toBeGreaterThan(1);
       await waitForProcessGone(leaked, 5_000);
     },

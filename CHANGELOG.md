@@ -23,6 +23,15 @@ All notable changes to Claude Architect are recorded here. The format follows
   design; a green run contradicts the declaration, so the fail-before/pass-after
   evidence the flag exists to supply was never produced. Both halves of the
   declaration — that the command runs, and that it fails — are now enforced.
+- docs: the spec-authoring guide now warns that a text-search verification gate
+  must not be able to match prose. An absence check such as
+  `rg "except RuntimeError"` expecting no match also matches the phrase inside a
+  comment or docstring, so a Producer that documents why it avoided the pattern
+  fails a gate its code actually satisfies — observed live, rejecting an
+  otherwise clean attempt. Both the delegate and subagent-driven-delegation
+  skills now say to anchor such patterns to syntax or assert over parsed
+  structure. The guide also documents that `expectBaselineFailure` is enforced
+  in both directions.
 - fix: the bootstrap smoke tests no longer leak the re-executed server. All
   three signal tests learned the server's pid inside the `try` that could throw,
   so a timed-out pid read left the grandchild — which holds an interval timer —
