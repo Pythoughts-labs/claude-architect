@@ -53,7 +53,6 @@ function review(severity: 'blocker' | 'major' | 'minor'): ConsolidationResult {
       confidence: 1,
       reviewers: ['correctness'],
     }],
-    contradictions: [],
   };
 }
 
@@ -78,7 +77,6 @@ function mutateNestedEvidence(evidence: {
   evidence.verification.scopeViolations.push('mutated-scope');
   evidence.perSliceReview.findings[0]!.severity = 'blocker';
   evidence.perSliceReview.findings[0]!.reviewers.push('mutator');
-  evidence.perSliceReview.contradictions.push('mutated contradiction');
 }
 
 function expectObjectiveEvidence(

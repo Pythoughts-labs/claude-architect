@@ -62,9 +62,28 @@ export interface PruneDependencies {
 
 export type RunDecisionValue = "accepted" | "rejected" | "revision-requested";
 
+/**
+ * How the runtime obtained the decision.
+ *
+ * `human-elicitation` means the runtime itself prompted a person and read their
+ * answer. `caller-asserted` means the MCP caller supplied the decision without
+ * the runtime ever confirming a human made it — which an agent can do. Recording
+ * the distinction is what makes "only a human accepts" auditable: before this
+ * field existed, a decision record was `{decision, recordedAt}` and an agent's
+ * acceptance was indistinguishable from a person's, even after the fact.
+ */
+export type DecisionProvenance = "human-elicitation" | "caller-asserted";
+
 export interface RunDecisionRecord {
   decision: RunDecisionValue;
   recordedAt: string;
+  /** Absent on records written before provenance was tracked. */
+  decidedBy?: DecisionProvenance;
+  /**
+   * The candidate manifest hash this decision binds to, so an accepted decision
+   * cannot be spent on a different artifact. Absent on older records.
+   */
+  candidateManifestHash?: string | null;
 }
 
 export interface PipelineActiveMarker {
@@ -806,7 +825,12 @@ export class ArtifactStore {
 
   async writeDecision(record: RunDecisionRecord): Promise<void> {
     if (!(["accepted", "rejected", "revision-requested"] as const).includes(record.decision)
-      || !Number.isFinite(Date.parse(record.recordedAt))) {
+      || !Number.isFinite(Date.parse(record.recordedAt))
+      || (record.decidedBy !== undefined
+        && !(["human-elicitation", "caller-asserted"] as const).includes(record.decidedBy))
+      || (record.candidateManifestHash !== undefined
+        && record.candidateManifestHash !== null
+        && !/^[0-9a-f]{64}$/u.test(record.candidateManifestHash))) {
       throw new RuntimeError("run decision is invalid");
     }
     try {

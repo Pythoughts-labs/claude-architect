@@ -1,7 +1,7 @@
 // tests/runtime/consolidator.test.ts
 import { describe, expect, it } from "vitest";
-import { consolidate } from "../../src/pipeline/consolidator.js";
-import type { RawFinding, ReviewReport } from "../../src/pipeline/report-types.js";
+import { consolidate, detectNonConvergence } from "../../src/pipeline/consolidator.js";
+import type { FindingSeverity, RawFinding, ReviewReport } from "../../src/pipeline/report-types.js";
 
 function finding(overrides: Partial<RawFinding>): RawFinding {
   return {
@@ -44,14 +44,55 @@ describe("consolidate", () => {
     expect(consolidate([a, b])).toEqual(consolidate([b, a]));
   });
 
-  it("flags contradictions: same location, different required outcomes", () => {
+  // Differently-worded outcomes at one location are usually complementary, and a
+  // nit beside a major differs textually by construction. Inferring conflict from
+  // that halted candidates that were independently green and reviewer-approved,
+  // so a single round no longer yields a halt signal at all.
+  it("does not infer a conflict from differently worded outcomes at one location", () => {
     const out = consolidate([
-      { reviewer: "correctness", report: report([finding({ claim: "bound wrong", requiredOutcome: "use < n" })]) },
-      { reviewer: "systems", report: report([finding({ claim: "bound is fine but slow", requiredOutcome: "keep <= n, memoize instead" })]) },
+      { reviewer: "correctness", report: report([finding({ claim: "missing null check", requiredOutcome: "guard the argument" })]) },
+      { reviewer: "systems", report: report([finding({ claim: "name is unclear", severity: "nit", requiredOutcome: "rename to itemCount" })]) },
     ]);
-    expect(out.findings).toHaveLength(2); // different claims → not deduped
-    expect(out.contradictions).toHaveLength(1);
-    expect(out.contradictions[0]).toContain("src/a.ts:10");
+    expect(out.findings).toHaveLength(2);
+    expect(out).not.toHaveProperty("contradictions");
+  });
+
+  describe("detectNonConvergence", () => {
+    const at = (location: string, id: string, severity: FindingSeverity = "major") => ({
+      ...finding({ severity, location }),
+      id,
+      reviewers: ["correctness"],
+    });
+
+    it("reports a blocking location that outlived a fix round", () => {
+      const reasons = detectNonConvergence([
+        { round: 1, findings: [at("src/a.ts:10", "F-001")], fixAttempted: true },
+        { round: 2, findings: [at("src/a.ts:10", "F-001")], fixAttempted: false },
+      ]);
+      expect(reasons).toHaveLength(1);
+      expect(reasons[0]).toContain("src/a.ts:10");
+    });
+
+    it("stays silent when no fix round has run yet", () => {
+      expect(detectNonConvergence([
+        { round: 1, findings: [at("src/a.ts:10", "F-001")], fixAttempted: false },
+        { round: 2, findings: [at("src/a.ts:10", "F-001")], fixAttempted: false },
+      ])).toEqual([]);
+    });
+
+    it("ignores advisory findings that repeat", () => {
+      expect(detectNonConvergence([
+        { round: 1, findings: [at("src/a.ts:10", "F-001", "nit")], fixAttempted: true },
+        { round: 2, findings: [at("src/a.ts:10", "F-001", "nit")], fixAttempted: false },
+      ])).toEqual([]);
+    });
+
+    it("stays silent for a blocking finding seen in only one round", () => {
+      expect(detectNonConvergence([
+        { round: 1, findings: [at("src/a.ts:10", "F-001")], fixAttempted: true },
+        { round: 2, findings: [at("src/b.ts:2", "F-002")], fixAttempted: false },
+      ])).toEqual([]);
+    });
   });
 
   it("never drops a blocker or major", () => {

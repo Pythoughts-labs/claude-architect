@@ -31,18 +31,26 @@ describe("evaluateGates", () => {
     expect(evaluateGates(base())).toEqual({ decisionReady: true, requiresHumanDecision: false, reasons: [] });
   });
 
-  it("routes a self-contradictory review to a human", () => {
-    // The non-sliced path consolidates contradictions and then ignored them, so
-    // an otherwise-clean round could be reported decision-ready even though no
-    // patch could satisfy both findings.
+  it("routes a non-converging review to a human", () => {
+    // A location whose blocking findings outlived a fix round will not be fixed
+    // by more rounds. This replaced a check that inferred a contradiction from
+    // differently worded outcomes, which halted green, approved candidates.
     const gate = evaluateGates(base({
-      contradictions: ["conflicting required outcomes at src/a.ts:1: F-001, F-002"],
+      nonConvergence: ["blocking findings at src/a.ts:1 survived 2 review rounds despite a fix attempt: F-001"],
     }));
     expect(gate.decisionReady).toBe(false);
     expect(gate.requiresHumanDecision).toBe(true);
     expect(gate.reasons).toEqual([
-      "review is self-contradictory: conflicting required outcomes at src/a.ts:1: F-001, F-002",
+      "review is not converging: blocking findings at src/a.ts:1 survived 2 review rounds despite a fix attempt: F-001",
     ]);
+  });
+
+  it("stays decision-ready when nothing is non-converging", () => {
+    expect(evaluateGates(base({ nonConvergence: [] }))).toEqual({
+      decisionReady: true,
+      requiresHumanDecision: false,
+      reasons: [],
+    });
   });
 
   it("keeps the gate result byte-identical when incrementOutcome is absent", () => {

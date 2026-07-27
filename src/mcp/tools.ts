@@ -19,6 +19,7 @@ import {
 } from "../protocol/versions.js";
 import {
   ArtifactStore,
+  type DecisionProvenance,
   type PipelineActiveMarker,
   type RunDecisionRecord,
   type RunDecisionValue,
@@ -69,6 +70,12 @@ export interface ToolDependencies {
   abortSignal?: AbortSignal;
   checkLiveBundle?: typeof checkLiveBundle;
   checkAllowlistSufficiency?: typeof checkAllowlistSufficiency;
+  /**
+   * How a decision reaching `decideCandidate` was obtained. The MCP server sets
+   * this to `human-elicitation` only when it prompted a person itself; anything
+   * else is recorded as caller-asserted so the trust gap stays visible.
+   */
+  decisionProvenance?: DecisionProvenance;
 }
 
 export interface ToolErrorResult {
@@ -476,6 +483,8 @@ export async function handleReviewCandidate(
   | {
     patch: string;
     changedPaths: CandidateArtifact["changedPaths"];
+    /** Exact hash `integrateCandidate` requires as `expectedArtifactHash`. */
+    manifestHash: string;
     evidence: AttemptResult["evidence"];
     executedVerification: AttemptResult["executedVerification"];
   }
@@ -519,6 +528,10 @@ export async function handleReviewCandidate(
       return boundIgnoredPathEvidence({
         patch: patch.stdout,
         changedPaths: candidate.changedPaths.map(change => ({ ...change })),
+        // `integrateCandidate` requires this exact value as `expectedArtifactHash`.
+        // Omitting it forced the architect to source the hash from a different
+        // tool's output than the one it reviewed.
+        manifestHash: candidate.manifestHash,
         evidence: structuredClone(run.result.evidence),
         executedVerification: run.result.executedVerification.map(outcome => ({
           ...outcome,
@@ -541,9 +554,15 @@ export async function handleDecideCandidate(
     return await withCurrentArchivedRun(checkoutPath, runId, deps, async run => {
       await requireInactivePipeline(run, runId);
       if (decision === "accepted") requireVerifiedCandidate(run);
+      // Bind the decision to the exact candidate it was made about, so an
+      // acceptance cannot later be spent on a different artifact, and record how
+      // the decision was obtained so an agent-supplied one is visible as such.
+      const candidateHash = run.result.candidate?.manifestHash ?? null;
       const record: RunDecision = {
         decision,
         recordedAt: (deps.now ?? (() => new Date()))().toISOString(),
+        decidedBy: deps.decisionProvenance ?? "caller-asserted",
+        candidateManifestHash: candidateHash,
       };
       await run.store.writeDecision(record);
       if (decision === "rejected" && run.result.candidate !== null) {
@@ -578,6 +597,14 @@ export async function handleIntegrateCandidate(
       const decision = await run.store.readDecision(runId);
       if (decision?.decision !== "accepted") {
         return { integration: "aborted", detail: "no-accepted-decision" };
+      }
+      // An acceptance is a judgement about one specific candidate. When the
+      // record names the artifact it was made about, refuse to spend it on a
+      // different one. Records written before provenance existed carry no hash;
+      // those fall through to the hash check inside applyCandidateTree.
+      if (decision.candidateManifestHash != null
+        && decision.candidateManifestHash !== expectedArtifactHash) {
+        return { integration: "aborted", detail: "decision-artifact-mismatch" };
       }
       return (deps.applyCandidateTree ?? applyTree)({
         repoRoot: run.repoRoot,

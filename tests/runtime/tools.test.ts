@@ -654,6 +654,58 @@ describe("MCP tool handlers", () => {
     }
   });
 
+  // Before provenance, decision.json was {decision, recordedAt}: an agent's
+  // acceptance and a human's were indistinguishable even after the fact, so the
+  // human-only invariant was not merely unenforced but unauditable.
+  it("records how a decision was obtained and which candidate it binds to", async () => {
+    const repoRoot = await createRepository();
+    const store = new FakeStore(result, manifestFor(repoRoot));
+    const deps = dependencies(store, getPlatformServices());
+
+    await expect(handleDecideCandidate(repoRoot, "run-tools", "accepted", deps))
+      .resolves.toEqual({ recorded: true });
+
+    const recorded = await store.readDecision("run-tools");
+    expect(recorded).toMatchObject({
+      decision: "accepted",
+      decidedBy: "caller-asserted",
+      candidateManifestHash: candidate.manifestHash,
+    });
+  });
+
+  it("marks a decision the runtime obtained from a human as such", async () => {
+    const repoRoot = await createRepository();
+    const store = new FakeStore(result, manifestFor(repoRoot));
+    const deps = {
+      ...dependencies(store, getPlatformServices()),
+      decisionProvenance: "human-elicitation" as const,
+    };
+
+    await handleDecideCandidate(repoRoot, "run-tools", "accepted", deps);
+
+    expect(await store.readDecision("run-tools"))
+      .toMatchObject({ decidedBy: "human-elicitation" });
+  });
+
+  it("refuses to spend an acceptance on a different artifact", async () => {
+    const repoRoot = await createRepository();
+    const store = new FakeStore(result, manifestFor(repoRoot));
+    const deps = dependencies(store, getPlatformServices());
+    await handleDecideCandidate(repoRoot, "run-tools", "accepted", deps);
+
+    await expect(handleIntegrateCandidate(repoRoot, "run-tools", "f".repeat(64), deps))
+      .resolves.toEqual({ integration: "aborted", detail: "decision-artifact-mismatch" });
+  });
+
+  it("returns the manifest hash integration requires", async () => {
+    const repoRoot = await createRepository();
+    const store = new FakeStore(result, manifestFor(repoRoot));
+    const deps = dependencies(store, getPlatformServices());
+
+    await expect(handleReviewCandidate(repoRoot, "run-tools", deps))
+      .resolves.toMatchObject({ manifestHash: candidate.manifestHash });
+  });
+
   it("rejects cross-project lifecycle authority and preserves the candidate anchor", async () => {
     const repoA = await createRepository();
     const repoB = await createRepository();
@@ -913,6 +965,8 @@ describe("MCP tool handlers", () => {
     expect(store.decision).toEqual({
       decision: "accepted",
       recordedAt: "2026-07-18T12:00:00.000Z",
+      decidedBy: "caller-asserted",
+      candidateManifestHash: candidate.manifestHash,
     });
 
     await expect(handleDecideCandidate(
@@ -928,6 +982,8 @@ describe("MCP tool handlers", () => {
     expect(store.decision).toEqual({
       decision: "accepted",
       recordedAt: "2026-07-18T12:00:00.000Z",
+      decidedBy: "caller-asserted",
+      candidateManifestHash: candidate.manifestHash,
     });
   });
 
@@ -944,6 +1000,7 @@ describe("MCP tool handlers", () => {
     expect(output).toEqual({
       patch: "exact unredacted patch\n",
       changedPaths: candidate.changedPaths,
+      manifestHash: candidate.manifestHash,
       evidence: result.evidence,
       executedVerification: result.executedVerification,
     });

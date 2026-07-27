@@ -57,19 +57,12 @@ export function routeSlice(input: SliceGateInput): SliceGateResult {
     return { route: 'advance', reasons };
   }
 
-  // Reviewers that demand different outcomes at one location leave no patch that
-  // satisfies both, so every repair round re-triggers the finding it just fixed.
-  // Halt on the spot and name the contradiction: spending the whole repair budget
-  // to arrive at the same place hides why it could never converge.
-  const contradictions = input.perSliceReview?.contradictions ?? [];
-  if (contradictions.length > 0) {
-    return {
-      route: 'halt',
-      reasons: [...reasons, `review is self-contradictory, repair cannot converge: ${
-        contradictions.join('; ')}`],
-    };
-  }
-
+  // A slice sees exactly one review round, so there is nothing here from which
+  // non-convergence could be observed: an earlier check halted whenever two
+  // findings at one location were worded differently, which stopped slices whose
+  // findings were merely complementary. Let the repair budget do its job; the
+  // round cap below is the real backstop, and cross-round non-convergence is
+  // evaluated at the final gate where the round history actually exists.
   if (input.roundsUsed < input.maxRounds) {
     return { route: 'repair', reasons };
   }

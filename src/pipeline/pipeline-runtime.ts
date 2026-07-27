@@ -39,7 +39,7 @@ import {
   structuralVerify,
   type StructuralFailure,
 } from "../verify/structural-verifier.js";
-import { consolidate, type ConsolidationResult } from "./consolidator.js";
+import { consolidate, detectNonConvergence, type ConsolidationResult } from "./consolidator.js";
 import { evaluateGates, type GateResult, type IncrementOutcome } from "./gates.js";
 import { composeSliceOntoHead } from "./slice-composer.js";
 import type {
@@ -2166,7 +2166,12 @@ async function runPipelineWithLease(
       finalRoundReviewed: (lastRound?.fix ?? null) === null,
       artifactsValid: true,
       baselineDrift: verified.baselineDrift,
-      contradictions: lastRound?.consolidated.contradictions ?? [],
+      // Computed over the whole round history, not one round's prose.
+      nonConvergence: detectNonConvergence(rounds.map(round => ({
+        round: round.round,
+        findings: round.consolidated.findings,
+        fixAttempted: round.fix !== null,
+      }))),
       ...(incrementOutcome === undefined ? {} : { incrementOutcome }),
     });
     const result: PipelineResult = {

@@ -27360,7 +27360,7 @@ var ArtifactStore = class {
     }
   }
   async writeDecision(record2) {
-    if (!["accepted", "rejected", "revision-requested"].includes(record2.decision) || !Number.isFinite(Date.parse(record2.recordedAt))) {
+    if (!["accepted", "rejected", "revision-requested"].includes(record2.decision) || !Number.isFinite(Date.parse(record2.recordedAt)) || record2.decidedBy !== void 0 && !["human-elicitation", "caller-asserted"].includes(record2.decidedBy) || record2.candidateManifestHash !== void 0 && record2.candidateManifestHash !== null && !/^[0-9a-f]{64}$/u.test(record2.candidateManifestHash)) {
       throw new RuntimeError("run decision is invalid");
     }
     try {
@@ -29014,22 +29014,33 @@ function consolidate(reports) {
     id: `F-${String(index + 1).padStart(3, "0")}`,
     reviewers: [...entry.reviewers].sort()
   }));
-  const contradictions = [];
-  const byLocation = /* @__PURE__ */ new Map();
-  for (const f of findings) {
-    const bucket = byLocation.get(f.location) ?? [];
-    bucket.push(f);
-    byLocation.set(f.location, bucket);
-  }
-  for (const [location, group] of byLocation) {
-    const outcomes = new Set(group.map((f) => normalize(f.requiredOutcome)));
-    if (group.length > 1 && outcomes.size > 1) {
-      contradictions.push(
-        `conflicting required outcomes at ${location}: ${group.map((f) => f.id).join(", ")}`
-      );
+  return { findings };
+}
+var BLOCKING = /* @__PURE__ */ new Set(["blocker", "major"]);
+function detectNonConvergence(rounds) {
+  const survived = /* @__PURE__ */ new Map();
+  for (const round of rounds) {
+    for (const finding of round.findings) {
+      if (!BLOCKING.has(finding.severity)) continue;
+      const entry = survived.get(finding.location) ?? { rounds: [], ids: /* @__PURE__ */ new Set() };
+      if (!entry.rounds.includes(round.round)) entry.rounds.push(round.round);
+      entry.ids.add(finding.id);
+      survived.set(finding.location, entry);
     }
   }
-  return { findings, contradictions };
+  const fixedRounds = new Set(rounds.filter((round) => round.fixAttempted).map((round) => round.round));
+  const reasons = [];
+  for (const [location, entry] of survived) {
+    if (entry.rounds.length < 2) continue;
+    const first = Math.min(...entry.rounds);
+    const last = Math.max(...entry.rounds);
+    const interveningFix = [...fixedRounds].some((round) => round >= first && round < last);
+    if (!interveningFix) continue;
+    reasons.push(
+      `blocking findings at ${location} survived ${entry.rounds.length} review rounds despite a fix attempt: ${[...entry.ids].sort().join(", ")}`
+    );
+  }
+  return reasons.sort();
 }
 
 // src/pipeline/gates.ts
@@ -29066,9 +29077,9 @@ function evaluateGates(input) {
     if (!v.workspaceClean) reasons.push("verify worktree dirty after checks");
     if (v.scopeViolations.length > 0) reasons.push(`out-of-scope diff: ${v.scopeViolations.join(", ")}`);
   }
-  const contradictions = input.contradictions ?? [];
-  if (contradictions.length > 0) {
-    reasons.push(`review is self-contradictory: ${contradictions.join("; ")}`);
+  const nonConvergence = input.nonConvergence ?? [];
+  if (nonConvergence.length > 0) {
+    reasons.push(`review is not converging: ${nonConvergence.join("; ")}`);
     requiresHumanDecision = true;
   }
   if (!input.artifactsValid) reasons.push("missing or invalid artifact");
@@ -29236,13 +29247,6 @@ function routeSlice(input) {
   }
   if (reasons.length === 0) {
     return { route: "advance", reasons };
-  }
-  const contradictions = input.perSliceReview?.contradictions ?? [];
-  if (contradictions.length > 0) {
-    return {
-      route: "halt",
-      reasons: [...reasons, `review is self-contradictory, repair cannot converge: ${contradictions.join("; ")}`]
-    };
   }
   if (input.roundsUsed < input.maxRounds) {
     return { route: "repair", reasons };
@@ -31540,7 +31544,12 @@ async function runPipelineWithLease(checkoutPath, spec, deps, ps, borrowedChecko
       finalRoundReviewed: (lastRound?.fix ?? null) === null,
       artifactsValid: true,
       baselineDrift: verified.baselineDrift,
-      contradictions: lastRound?.consolidated.contradictions ?? [],
+      // Computed over the whole round history, not one round's prose.
+      nonConvergence: detectNonConvergence(rounds.map((round) => ({
+        round: round.round,
+        findings: round.consolidated.findings,
+        fixAttempted: round.fix !== null
+      }))),
       ...incrementOutcome === void 0 ? {} : { incrementOutcome }
     });
     const result = {
@@ -32172,6 +32181,10 @@ async function handleReviewCandidate(checkoutPath, runId, deps = {}) {
       return boundIgnoredPathEvidence({
         patch: patch.stdout,
         changedPaths: candidate.changedPaths.map((change) => ({ ...change })),
+        // `integrateCandidate` requires this exact value as `expectedArtifactHash`.
+        // Omitting it forced the architect to source the hash from a different
+        // tool's output than the one it reviewed.
+        manifestHash: candidate.manifestHash,
         evidence: structuredClone(run.result.evidence),
         executedVerification: run.result.executedVerification.map((outcome) => ({
           ...outcome,
@@ -32188,9 +32201,12 @@ async function handleDecideCandidate(checkoutPath, runId, decision, deps = {}) {
     return await withCurrentArchivedRun(checkoutPath, runId, deps, async (run) => {
       await requireInactivePipeline(run, runId);
       if (decision === "accepted") requireVerifiedCandidate(run);
+      const candidateHash = run.result.candidate?.manifestHash ?? null;
       const record2 = {
         decision,
-        recordedAt: (deps.now ?? (() => /* @__PURE__ */ new Date()))().toISOString()
+        recordedAt: (deps.now ?? (() => /* @__PURE__ */ new Date()))().toISOString(),
+        decidedBy: deps.decisionProvenance ?? "caller-asserted",
+        candidateManifestHash: candidateHash
       };
       await run.store.writeDecision(record2);
       if (decision === "rejected" && run.result.candidate !== null) {
@@ -32219,6 +32235,9 @@ async function handleIntegrateCandidate(checkoutPath, runId, expectedArtifactHas
       const decision = await run.store.readDecision(runId);
       if (decision?.decision !== "accepted") {
         return { integration: "aborted", detail: "no-accepted-decision" };
+      }
+      if (decision.candidateManifestHash != null && decision.candidateManifestHash !== expectedArtifactHash) {
+        return { integration: "aborted", detail: "decision-artifact-mismatch" };
       }
       return (deps.applyCandidateTree ?? applyCandidateTree)({
         repoRoot: run.repoRoot,

@@ -13,8 +13,8 @@ export interface GateInput {
   artifactsValid: boolean;
   baselineDrift: boolean;
   incrementOutcome?: IncrementOutcome;
-  /** Conflicting required outcomes the consolidator found in the final review. */
-  contradictions?: string[];
+  /** Locations whose blocking findings survived a fix round (see detectNonConvergence). */
+  nonConvergence?: string[];
 }
 
 export interface GateResult {
@@ -61,12 +61,14 @@ export function evaluateGates(input: GateInput): GateResult {
     if (v.scopeViolations.length > 0) reasons.push(`out-of-scope diff: ${v.scopeViolations.join(", ")}`);
   }
 
-  // Reviewers demanding different outcomes at one location leave no patch that
-  // satisfies both. A disposition that claims otherwise cannot be trusted, so
-  // route it to a human instead of letting the round loop chase itself.
-  const contradictions = input.contradictions ?? [];
-  if (contradictions.length > 0) {
-    reasons.push(`review is self-contradictory: ${contradictions.join("; ")}`);
+  // A location whose blocking findings outlived a fix round is not converging,
+  // and more rounds will not change that. This replaces an earlier check that
+  // inferred a contradiction whenever two findings at one location were worded
+  // differently — which fired on complementary findings and on nits, halting
+  // candidates that were independently green and reviewer-approved.
+  const nonConvergence = input.nonConvergence ?? [];
+  if (nonConvergence.length > 0) {
+    reasons.push(`review is not converging: ${nonConvergence.join("; ")}`);
     requiresHumanDecision = true;
   }
 

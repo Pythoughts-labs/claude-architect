@@ -1657,8 +1657,8 @@ describe("runPipeline", () => {
     expect(reviewerArgs[2]?.pkg.testEvidence).toContain('"sliceIndex":1');
     expect(reviewerArgs[2]?.pkg.testEvidence).toContain('"sliceIndex":2');
     expect(result.slices.map(slice => slice.perSliceReview)).toEqual([
-      { findings: [], contradictions: [] },
-      { findings: [], contradictions: [] },
+      { findings: [] },
+      { findings: [] },
     ]);
     expect(result.slices.map(slice => slice.roleLogRefs)).toEqual([
       [
@@ -3475,7 +3475,7 @@ describe("runPipeline", () => {
     await expect(store.readPipelineArtifact(runId, "round-1-review-systems"))
       .resolves.toEqual(approve);
     await expect(store.readPipelineArtifact(runId, "round-1-consolidated"))
-      .resolves.toMatchObject({ findings: [], contradictions: [] });
+      .resolves.toMatchObject({ findings: [] });
     const persistedVerification = await store.readPipelineArtifact(runId, "verification");
     expect(persistedVerification.evidence).not.toHaveProperty("authorizedTestDeletions");
     expect(persistedVerification)
