@@ -177,6 +177,12 @@ class FakeStore implements ToolArtifactStore {
     return this.decision;
   }
 
+  storedSpecSha256: string | null = null;
+
+  async readRunStartSpecSha256(_runId: string): Promise<string | null> {
+    return this.storedSpecSha256;
+  }
+
   async readPipelineActiveMarker(_runId: string): Promise<PipelineActiveMarker | null> {
     return this.pipelineActiveMarker;
   }
@@ -481,6 +487,39 @@ describe("MCP tool handlers", () => {
     expect((evidence.ignoredPaths as string[]).length).toBe(50);
     expect(evidence.ignoredPathsOmitted).toBe(450);
     expect(bigResult.evidence.ignoredPaths.length).toBe(500); // archived copy untouched
+  });
+
+  it("rejects a review whose run was started from a different spec", async () => {
+    // A delegation lane reports its own runId and echoes back the specSha256 it
+    // was handed, so both are claims by the party under review. Naming a
+    // different real run returns a clean candidate for work nobody asked for.
+    const store = new FakeStore();
+    store.storedSpecSha256 = "a".repeat(64);
+    const output = await handleReviewCandidate("/repo", "run-tools", dependencies(store), "b".repeat(64));
+    expect(output).toMatchObject({ ok: false, error: "run-spec-mismatch" });
+  });
+
+  it("accepts a review whose run records the dispatched spec", async () => {
+    const store = new FakeStore();
+    store.storedSpecSha256 = "a".repeat(64);
+    const output = await handleReviewCandidate("/repo", "run-tools", dependencies(store), "a".repeat(64));
+    expect(output).toMatchObject({ manifestHash: candidate.manifestHash });
+  });
+
+  it("fails closed when correspondence was requested but nothing was recorded", async () => {
+    // Answering "verified" by omission is the one outcome that must not happen:
+    // the caller asked for proof precisely because it does not trust the claim.
+    const store = new FakeStore();
+    store.storedSpecSha256 = null;
+    const output = await handleReviewCandidate("/repo", "run-tools", dependencies(store), "a".repeat(64));
+    expect(output).toMatchObject({ ok: false, error: "run-spec-unverifiable" });
+  });
+
+  it("reviews without correspondence when the caller supplies no spec hash", async () => {
+    const store = new FakeStore();
+    store.storedSpecSha256 = null;
+    const output = await handleReviewCandidate("/repo", "run-tools", dependencies(store));
+    expect(output).toMatchObject({ manifestHash: candidate.manifestHash });
   });
 
   it("bounds ignored-path evidence on the pipeline result too", async () => {

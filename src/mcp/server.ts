@@ -127,6 +127,12 @@ export const delegatePipelineInputSchema = z.object({
 export const reviewCandidateInputSchema = z.object({
   checkoutPath: z.string(),
   runId: z.string(),
+  /**
+   * Optional proof that this run belongs to the spec the caller dispatched.
+   * A delegation lane reports its own runId, so without this the architect is
+   * trusting the reviewed party's word about which run to review.
+   */
+  expectedSpecSha256: z.string().optional(),
 }).strict();
 
 export const decideCandidateInputSchema = z.object({
@@ -355,10 +361,11 @@ export async function start(dependencies: ServerDependencies = {}): Promise<void
       inputSchema: reviewCandidateInputSchema,
       outputSchema: reviewOutput,
     },
-    async ({ checkoutPath, runId }) => toolOutput(await handleReviewCandidate(
+    async ({ checkoutPath, runId, expectedSpecSha256 }) => toolOutput(await handleReviewCandidate(
       checkoutPath,
       runId,
       dependencies,
+      expectedSpecSha256,
     )),
   );
   server.registerTool(

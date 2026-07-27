@@ -15,6 +15,7 @@ import type {
 } from "../../src/platform/platform-services.js";
 import { getPlatformServices } from "../../src/platform/select-platform.js";
 import type { DelegationSpec } from "../../src/protocol/delegation-spec.js";
+import { specSha256 } from "../../src/protocol/spec-hash.js";
 import { RUNTIME_VERSION } from "../../src/protocol/versions.js";
 import { ProducerRegistry } from "../../src/producers/producer-registry.js";
 import type {
@@ -507,9 +508,17 @@ describe("runAttempt", () => {
 
     await runAttempt(repoRoot, spec, dependencies(new FakeAdapter(), runId));
 
-    expect(await archivedJson(runId, "run-start.json")).toMatchObject({
-      specSha256: createHash("sha256").update(JSON.stringify(spec)).digest("hex"),
-    });
+    // Asserted against the shared canonical hash, not against a local
+    // JSON.stringify: mirroring the implementation would have passed for any
+    // serialization, including the insertion-order-dependent one that made the
+    // architect's digest and the runtime's disagree for the same spec.
+    const recorded = await archivedJson(runId, "run-start.json") as { specSha256: string };
+    expect(recorded).toMatchObject({ specSha256: specSha256(spec) });
+
+    // The property a caller depends on: rebuilding the same spec with its keys
+    // in another order still reproduces the recorded digest.
+    const reordered = Object.fromEntries(Object.entries(spec).reverse());
+    expect(specSha256(reordered)).toBe(recorded.specSha256);
   });
 
   it("does not release a borrowed checkout lease on a classified early return", async () => {

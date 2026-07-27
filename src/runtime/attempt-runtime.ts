@@ -22,6 +22,7 @@ import type {
 } from "../protocol/attempt-result.js";
 import { classifyFailure } from "../protocol/attempt-result.js";
 import type { DelegationSpec } from "../protocol/delegation-spec.js";
+import { specSha256 } from "../protocol/spec-hash.js";
 import { probeAll } from "../producers/capability-probe.js";
 import {
   detectEnvironmentType,
@@ -396,7 +397,7 @@ export async function runAttempt(
       pid: null,
       processToken: null,
       startedAt: new Date(startedAtMs).toISOString(),
-      specSha256: createHash("sha256").update(JSON.stringify(spec)).digest("hex"),
+      specSha256: specSha256(spec),
     };
     const runStartContext = await initializeRunStart(store, runStart);
     await deps.onRunStart?.(runStartContext);

@@ -24413,7 +24413,7 @@ function gitChangedFiles(checkoutPath, deps = {}) {
 }
 
 // src/mcp/tools.ts
-import { createHash as createHash7 } from "node:crypto";
+import { createHash as createHash8 } from "node:crypto";
 
 // src/git/repo-preconditions.ts
 import { access as access2, lstat, opendir, readlink, realpath } from "node:fs/promises";
@@ -25763,7 +25763,7 @@ function checkVersionCompat(skillProtocolVersion) {
 }
 
 // src/runtime/attempt-runtime.ts
-import { createHash as createHash6, randomUUID as randomUUID4 } from "node:crypto";
+import { randomUUID as randomUUID4 } from "node:crypto";
 import { rm as rm7 } from "node:fs/promises";
 
 // src/git/candidate-tree.ts
@@ -26097,6 +26097,20 @@ var FAILURE_PRECEDENCE = [
 function classifyFailure(s) {
   for (const reason of FAILURE_PRECEDENCE) if (s[reason]) return reason;
   return null;
+}
+
+// src/protocol/spec-hash.ts
+import { createHash as createHash5 } from "node:crypto";
+function canonicalSpecJson(value) {
+  if (Array.isArray(value)) return `[${value.map(canonicalSpecJson).join(",")}]`;
+  if (typeof value === "object" && value !== null) {
+    const entries = Object.entries(value).filter(([, entry]) => entry !== void 0).sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0);
+    return `{${entries.map(([key, entry]) => `${JSON.stringify(key)}:${canonicalSpecJson(entry)}`).join(",")}}`;
+  }
+  return JSON.stringify(value) ?? "null";
+}
+function specSha256(spec) {
+  return createHash5("sha256").update(canonicalSpecJson(spec)).digest("hex");
 }
 
 // src/producers/routing-policy.ts
@@ -26721,12 +26735,12 @@ import {
 import path10 from "node:path";
 
 // src/runtime/run-manifest.ts
-import { createHash as createHash5 } from "node:crypto";
+import { createHash as createHash6 } from "node:crypto";
 function compareText(left, right) {
   return left < right ? -1 : left > right ? 1 : 0;
 }
 function sha2562(value) {
-  return createHash5("sha256").update(value).digest("hex");
+  return createHash6("sha256").update(value).digest("hex");
 }
 function canonicalize2(value) {
   if (Array.isArray(value)) return value.map(canonicalize2);
@@ -27511,6 +27525,28 @@ var ArtifactStore = class {
         )),
         runId
       );
+    } catch (error2) {
+      if (isMissing(error2)) return null;
+      throw error2;
+    }
+  }
+  /**
+   * The spec hash recorded when this run started, or null when the run or the
+   * record is absent. Lets a caller prove a reported run id actually belongs to
+   * the spec it dispatched, rather than trusting the reporter's echo of it.
+   */
+  async readRunStartSpecSha256(runId) {
+    validateComponent(runId, "run id");
+    const validated = await this.ensureExistingRunDirectory(path10.join(this.runsRoot, runId));
+    if (validated === null) return null;
+    try {
+      const record2 = JSON.parse(await readRegularFile(
+        path10.join(validated.path, "run-start.json"),
+        validated.identity
+      ));
+      if (typeof record2 !== "object" || record2 === null) return null;
+      const value = record2.specSha256;
+      return typeof value === "string" && /^[0-9a-f]{64}$/u.test(value) ? value : null;
     } catch (error2) {
       if (isMissing(error2)) return null;
       throw error2;
@@ -28639,7 +28675,7 @@ async function runAttempt(checkoutPath, spec, deps) {
       pid: null,
       processToken: null,
       startedAt: new Date(startedAtMs).toISOString(),
-      specSha256: createHash6("sha256").update(JSON.stringify(spec)).digest("hex")
+      specSha256: specSha256(spec)
     };
     const runStartContext = await initializeRunStart(store, runStart);
     await deps.onRunStart?.(runStartContext);
@@ -32138,7 +32174,7 @@ async function loadArchivedRun(runId, deps) {
   if (result.runId !== runId || manifest.runId !== runId) {
     throw runtimeError("archived run identity does not match", "archive-inconsistent");
   }
-  if (result.candidate !== null && (manifest.baseCommitOid !== result.candidate.baseCommitOid || manifest.candidateManifestHash !== result.candidate.manifestHash || result.candidate.manifestHash !== createHash7("sha256").update(JSON.stringify(result.candidate.changedPaths)).digest("hex"))) {
+  if (result.candidate !== null && (manifest.baseCommitOid !== result.candidate.baseCommitOid || manifest.candidateManifestHash !== result.candidate.manifestHash || result.candidate.manifestHash !== createHash8("sha256").update(JSON.stringify(result.candidate.changedPaths)).digest("hex"))) {
     throw runtimeError("archived candidate does not match its run manifest", "archive-inconsistent");
   }
   const canonical = await services2(deps).canonicalizePath(manifest.repoRoot);
@@ -32355,10 +32391,30 @@ async function handleDelegatePipeline(checkoutPath, input, deps = {}) {
     return errorResult(error2);
   }
 }
-async function handleReviewCandidate(checkoutPath, runId, deps = {}) {
+async function requireSpecCorrespondence(run, runId, expectedSpecSha256) {
+  if (expectedSpecSha256 === void 0) return;
+  if (!/^[0-9a-f]{64}$/u.test(expectedSpecSha256)) {
+    throw runtimeError("expectedSpecSha256 is not a sha-256 digest", "run-spec-unverifiable");
+  }
+  const recorded = await run.store.readRunStartSpecSha256(runId);
+  if (recorded === null) {
+    throw runtimeError(
+      "this run recorded no spec hash, so it cannot be matched to the dispatched spec",
+      "run-spec-unverifiable"
+    );
+  }
+  if (recorded !== expectedSpecSha256) {
+    throw runtimeError(
+      "this run was started from a different spec than the one supplied",
+      "run-spec-mismatch"
+    );
+  }
+}
+async function handleReviewCandidate(checkoutPath, runId, deps = {}, expectedSpecSha256) {
   try {
     return await withCurrentArchivedRun(checkoutPath, runId, deps, async (run) => {
       await requireInactivePipeline(run, runId);
+      await requireSpecCorrespondence(run, runId, expectedSpecSha256);
       const candidate = requireCandidate(run);
       const git2 = deps.git ?? git;
       const anchor = await git2(run.repoRoot, [
@@ -32486,7 +32542,7 @@ async function handleIntegrateCandidate(checkoutPath, runId, expectedArtifactHas
 }
 
 // src/runtime/recovery-manager.ts
-import { createHash as createHash8, randomUUID as randomUUID5 } from "node:crypto";
+import { createHash as createHash9, randomUUID as randomUUID5 } from "node:crypto";
 import { constants as constants4 } from "node:fs";
 import {
   lstat as lstat6,
@@ -32638,7 +32694,7 @@ function parseRunStart(text, expectedRunId) {
   if (record2.runId !== expectedRunId || typeof record2.lockKey !== "string" || !/^[0-9a-f]{64}$/.test(record2.lockKey) || typeof record2.canonicalCommonDir !== "string" || !path18.isAbsolute(record2.canonicalCommonDir) || record2.pid !== null && (record2.pid === void 0 || !Number.isSafeInteger(record2.pid) || record2.pid <= 1) || record2.processToken !== void 0 && record2.processToken !== null && typeof record2.processToken !== "string" || typeof record2.startedAt !== "string" || !Number.isFinite(Date.parse(record2.startedAt))) {
     throw new RuntimeError("run-start recovery record is malformed");
   }
-  const expectedLockKey = createHash8("sha256").update(record2.canonicalCommonDir).digest("hex");
+  const expectedLockKey = createHash9("sha256").update(record2.canonicalCommonDir).digest("hex");
   if (record2.lockKey !== expectedLockKey) {
     throw new RuntimeError("run-start lock key does not match its canonical common directory");
   }
@@ -34306,7 +34362,13 @@ var delegatePipelineInputSchema = external_exports.object({
 }).strict();
 var reviewCandidateInputSchema = external_exports.object({
   checkoutPath: external_exports.string(),
-  runId: external_exports.string()
+  runId: external_exports.string(),
+  /**
+   * Optional proof that this run belongs to the spec the caller dispatched.
+   * A delegation lane reports its own runId, so without this the architect is
+   * trusting the reviewed party's word about which run to review.
+   */
+  expectedSpecSha256: external_exports.string().optional()
 }).strict();
 var decideCandidateInputSchema = external_exports.object({
   checkoutPath: external_exports.string(),
@@ -34493,10 +34555,11 @@ async function start(dependencies = {}) {
       inputSchema: reviewCandidateInputSchema,
       outputSchema: reviewOutput
     },
-    async ({ checkoutPath, runId }) => toolOutput(await handleReviewCandidate(
+    async ({ checkoutPath, runId, expectedSpecSha256 }) => toolOutput(await handleReviewCandidate(
       checkoutPath,
       runId,
-      dependencies
+      dependencies,
+      expectedSpecSha256
     ))
   );
   server.registerTool(

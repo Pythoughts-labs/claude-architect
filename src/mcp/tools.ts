@@ -48,6 +48,12 @@ export interface ToolArtifactStore {
   writeDecision(record: RunDecision): Promise<void>;
   readDecision(runId: string): Promise<RunDecision | null>;
   readPipelineActiveMarker(runId: string): Promise<PipelineActiveMarker | null>;
+  /**
+   * The spec hash recorded when the run started. Required, not optional: a store
+   * that cannot answer must say so explicitly, because a caller asking to verify
+   * a run id against a spec must never be told "verified" by omission.
+   */
+  readRunStartSpecSha256(runId: string): Promise<string | null>;
 }
 
 export interface ToolDependencies {
@@ -480,10 +486,48 @@ export async function handleDelegatePipeline(
   }
 }
 
+/**
+ * Prove a reported run id belongs to the spec the caller dispatched.
+ *
+ * A delegation lane reports its own `runId` and echoes back the `specSha256` it
+ * was handed, so both are claims by the party whose work is under review. A lane
+ * naming a nonexistent run already fails here; the dangerous case is one naming
+ * a *different real* run — an earlier green attempt — which returns a clean
+ * candidate for work nobody asked for. `specSha256` was persisted at run start
+ * for exactly this comparison, and until now nothing performed it.
+ *
+ * Fails closed: a caller that asked for verification and cannot get it is told
+ * so, never told "verified" by omission.
+ */
+async function requireSpecCorrespondence(
+  run: ArchivedRun,
+  runId: string,
+  expectedSpecSha256: string | undefined,
+): Promise<void> {
+  if (expectedSpecSha256 === undefined) return;
+  if (!/^[0-9a-f]{64}$/u.test(expectedSpecSha256)) {
+    throw runtimeError("expectedSpecSha256 is not a sha-256 digest", "run-spec-unverifiable");
+  }
+  const recorded = await run.store.readRunStartSpecSha256(runId);
+  if (recorded === null) {
+    throw runtimeError(
+      "this run recorded no spec hash, so it cannot be matched to the dispatched spec",
+      "run-spec-unverifiable",
+    );
+  }
+  if (recorded !== expectedSpecSha256) {
+    throw runtimeError(
+      "this run was started from a different spec than the one supplied",
+      "run-spec-mismatch",
+    );
+  }
+}
+
 export async function handleReviewCandidate(
   checkoutPath: string,
   runId: string,
   deps: ToolDependencies = {},
+  expectedSpecSha256?: string,
 ): Promise<
   | {
     patch: string;
@@ -498,6 +542,7 @@ export async function handleReviewCandidate(
   try {
     return await withCurrentArchivedRun(checkoutPath, runId, deps, async run => {
       await requireInactivePipeline(run, runId);
+      await requireSpecCorrespondence(run, runId, expectedSpecSha256);
       const candidate = requireCandidate(run);
       const git = deps.git ?? runGit;
       const anchor = await git(run.repoRoot, [

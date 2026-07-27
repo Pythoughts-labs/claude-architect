@@ -839,6 +839,29 @@ export class ArtifactStore {
     }
   }
 
+  /**
+   * The spec hash recorded when this run started, or null when the run or the
+   * record is absent. Lets a caller prove a reported run id actually belongs to
+   * the spec it dispatched, rather than trusting the reporter's echo of it.
+   */
+  async readRunStartSpecSha256(runId: string): Promise<string | null> {
+    validateComponent(runId, "run id");
+    const validated = await this.ensureExistingRunDirectory(path.join(this.runsRoot, runId));
+    if (validated === null) return null;
+    try {
+      const record: unknown = JSON.parse(await readRegularFile(
+        path.join(validated.path, "run-start.json"),
+        validated.identity,
+      ));
+      if (typeof record !== "object" || record === null) return null;
+      const value = (record as { specSha256?: unknown }).specSha256;
+      return typeof value === "string" && /^[0-9a-f]{64}$/u.test(value) ? value : null;
+    } catch (error) {
+      if (isMissing(error)) return null;
+      throw error;
+    }
+  }
+
   async writeDecision(record: RunDecisionRecord): Promise<void> {
     if (!(["accepted", "rejected", "revision-requested"] as const).includes(record.decision)
       || !Number.isFinite(Date.parse(record.recordedAt))

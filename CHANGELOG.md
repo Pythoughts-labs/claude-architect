@@ -20,6 +20,19 @@ All notable changes to Claude Architect are recorded here. The format follows
   it. Acceptance is still theirs to give: the gate advises, it does not veto.
 - A run whose archive cannot be read reports that as a warning at decision time
   instead of presenting an unknown candidate as an unflagged one.
+- `reviewCandidate` accepts `expectedSpecSha256` and proves the run it is asked
+  about was started from that spec. A delegation lane reports its own `runId`
+  and echoes back the spec hash it was handed, so both are claims by the party
+  under review; a lane naming a *different real* run returned a clean candidate
+  for unrequested work. `specSha256` was persisted at run start for exactly this
+  comparison and nothing performed it. Omitting the argument preserves the
+  previous behavior; supplying one that cannot be checked fails closed with
+  `run-spec-unverifiable` rather than passing by omission.
+- The spec hash is canonical. It was `sha256(JSON.stringify(spec))`, which
+  depends on key insertion order, so the architect's digest and the runtime's
+  could differ for structurally identical specs — failing the correspondence
+  check on correct runs while proving nothing about wrong ones. Keys are now
+  sorted at every depth; array order is preserved because it carries meaning.
 - `delegatePipeline` bounds its ignored-path evidence. The 50-entry cap existed
   and `delegate` applied it, but the helper reads `value.evidence` while a
   pipeline's evidence sits at `result.attempt.evidence`, so this path returned
