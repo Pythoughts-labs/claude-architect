@@ -159,8 +159,16 @@ interface TerminalContext {
   packagedVerifier: PackagedVerifierInput;
 }
 
-function reportPhase(deps: AttemptRuntimeDependencies, phase: string): void {
+async function reportPhase(
+  deps: AttemptRuntimeDependencies,
+  phase: string,
+  store?: ArtifactStore,
+): Promise<void> {
   try { deps.onPhase?.(phase); } catch { /* progress reporting must never affect the attempt */ }
+  // Awaited, not fire-and-forget: the point is that the phase is on disk before
+  // the long operation it names begins, so an interrupted run is locatable. A
+  // failed write is still advisory and never affects the attempt.
+  try { await store?.writeRunPhase(phase); } catch { /* status is advisory */ }
 }
 
 function hasEnvironmentMarker(environment: Record<string, string | undefined>): boolean {
@@ -407,7 +415,7 @@ export async function runAttempt(
   const executionMode = (spec as { executionMode: string }).executionMode;
   let baselineEvidence: Record<string, unknown> = { baseline: "skipped — read-only spec" };
   if (executionMode === "edit") {
-    reportPhase(deps, "verifying baseline");
+    await reportPhase(deps, "verifying baseline", store);
     let baseline;
     try {
       baseline = await (deps.baselineVerifier ?? verifyBaseline)({
@@ -449,7 +457,7 @@ export async function runAttempt(
     }
   }
 
-  reportPhase(deps, "probing producers");
+  await reportPhase(deps, "probing producers", store);
   const reports = await probeAll({
     ps,
     os: ps.os,
@@ -568,7 +576,7 @@ export async function runAttempt(
       }
     }
     if (spec.executionMode === "edit" && deps.producerPreflight !== false) {
-      reportPhase(deps, "probing producer environment");
+      await reportPhase(deps, "probing producer environment", store);
       const preflight = await (typeof deps.producerPreflight === "function"
         ? deps.producerPreflight
         : runProducerPreflight)({
@@ -620,7 +628,7 @@ export async function runAttempt(
       invocation.executable,
       invocation.args,
     );
-    reportPhase(deps, "producer running");
+    await reportPhase(deps, "producer running", store);
     const exit = deps.abortSignal?.aborted === true
       ? preCancelledExit()
       : await supervise(recordingServices, {
@@ -653,7 +661,7 @@ export async function runAttempt(
     }
 
     if (!hasFailureSignal(signals)) {
-      reportPhase(deps, "freezing candidate");
+      await reportPhase(deps, "freezing candidate", store);
       const frozen = await freezeCandidate({
         repoRoot: canonical.canonical,
         worktreePath: worktree.path,
@@ -675,7 +683,7 @@ export async function runAttempt(
         candidate = frozen.artifact;
         evidence = { ...evidence, ...frozen.evidence };
         try {
-          reportPhase(deps, "verifying candidate");
+          await reportPhase(deps, "verifying candidate", store);
           const verification = await deps.verifier.verify({
             repoRoot: canonical.canonical,
             worktreePath: worktree.path,
@@ -713,7 +721,7 @@ export async function runAttempt(
       }
     }
 
-    reportPhase(deps, "archiving result");
+    await reportPhase(deps, "archiving result", store);
     archivedResult = await archiveTerminal({
       store,
       spec,

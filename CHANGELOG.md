@@ -41,6 +41,13 @@ All notable changes to Claude Architect are recorded here. The format follows
   for exactly that recovery but which nothing persisted — making the documented
   "find the run whose recorded spec matches" impossible.
 
+- Runs record their current phase durably in `status.json`. Phase transitions
+  were reported only through an in-process callback, so the sole persisted trace
+  of a live run was the single "attempt lock acquired" line written at startup —
+  a pipeline ten minutes into a slice was indistinguishable from one wedged at
+  the lock. The write is awaited before the phase it names begins, so an
+  interrupted run is locatable, and a failed write stays advisory.
+
 ### Added
 
 - `baselineFailureExitCodes` on a verification command narrows which exit codes

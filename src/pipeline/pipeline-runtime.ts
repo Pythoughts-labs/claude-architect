@@ -1255,9 +1255,14 @@ async function runPipelineWithLease(
     startedAt: new Date().toISOString(),
     sliced: slices.length > 0,
   };
-  const notePhase = (phase: string): void => {
+  const notePhase = async (phase: string): Promise<void> => {
     // Best-effort progress; must never affect pipeline control flow.
     try { deps.onPhase?.(phase); } catch { /* progress reporting is advisory */ }
+    // Durable too, and awaited: a pipeline ten minutes into a slice used to be
+    // indistinguishable from one wedged at the lock, because the only persisted
+    // lifecycle line was written once at startup. `store` is initialized before
+    // any notePhase call.
+    try { await store?.writeRunPhase(phase); } catch { /* status is advisory */ }
   };
   let runStart: RunStartContext | undefined;
   let slicedMarkerEstablished = false;
@@ -1780,7 +1785,7 @@ async function runPipelineWithLease(
         finalAttempt = promoted.attempt;
         currentCandidateCommit = promoted.candidateCommit;
         authoritySafeToRelease = true;
-        notePhase("partial halt verification");
+        await notePhase("partial halt verification");
         const verified = await verifyCandidate({
           checkoutPath,
           spec,
@@ -1853,7 +1858,7 @@ async function runPipelineWithLease(
                 pipelineSlices,
               );
             }
-            notePhase(`increment ${increment}/${maxIncrements}`);
+            await notePhase(`increment ${increment}/${maxIncrements}`);
             const previousCandidateCommit = currentCandidateCommit;
             const diffText = await checkedGit(candidateWorktree.path, [
               "diff",
@@ -1989,7 +1994,7 @@ async function runPipelineWithLease(
             pipelineSlices,
           );
         }
-        notePhase(`review round ${round}/${maxRounds}`);
+        await notePhase(`review round ${round}/${maxRounds}`);
         const diffText = await checkedGit(candidateWorktree.path, [
           "diff",
           `${baselineCommit}..${currentCandidateCommit}`,
@@ -2059,7 +2064,7 @@ async function runPipelineWithLease(
           });
         }
 
-        notePhase(`round ${round}: applying fixes`);
+        await notePhase(`round ${round}: applying fixes`);
         const fixRun = await runFix({
           spec,
           pkg: { ...pkg, findings: consolidated.findings },
@@ -2143,7 +2148,7 @@ async function runPipelineWithLease(
       }
     }
 
-    notePhase("final verification");
+    await notePhase("final verification");
     const verified = await verifyCandidate({
       checkoutPath,
       spec,
@@ -2156,7 +2161,7 @@ async function runPipelineWithLease(
     });
     await store.writePipelineArtifact("verification", verified.verification);
     const lastRound = rounds.at(-1);
-    notePhase("evaluating gate");
+    await notePhase("evaluating gate");
     const gate = evaluateGates({
       findings: lastRound?.consolidated.findings ?? [],
       dispositions: lastRound?.fix?.dispositions ?? [],

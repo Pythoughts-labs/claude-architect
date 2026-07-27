@@ -27249,6 +27249,21 @@ var ArtifactStore = class {
     await this.writeArchiveFile(ref, redact(text));
     return ref;
   }
+  /**
+   * Record where the run currently is, durably.
+   *
+   * Phase transitions were reported only through an in-process callback, so the
+   * sole durable trace of a live run was "attempt lock acquired" written once at
+   * startup. A pipeline ten minutes into a slice was indistinguishable from one
+   * wedged at the lock. Replaced rather than appended so the file stays a bounded
+   * "where is this run now" answer.
+   */
+  async writeRunPhase(phase, at = /* @__PURE__ */ new Date()) {
+    await this.replaceJson("status.json", {
+      phase: redact(phase).slice(0, 200),
+      at: at.toISOString()
+    });
+  }
   async writePipelineArtifact(name, value) {
     validateComponent(name, "log name");
     await this.writeJson(
@@ -28274,9 +28289,13 @@ async function captureWorktreeSnapshot(worktreePath) {
     truncated
   };
 }
-function reportPhase(deps, phase) {
+async function reportPhase(deps, phase, store) {
   try {
     deps.onPhase?.(phase);
+  } catch {
+  }
+  try {
+    await store?.writeRunPhase(phase);
   } catch {
   }
 }
@@ -28497,7 +28516,7 @@ async function runAttempt(checkoutPath, spec, deps) {
     const executionMode = spec.executionMode;
     let baselineEvidence = { baseline: "skipped \u2014 read-only spec" };
     if (executionMode === "edit") {
-      reportPhase(deps, "verifying baseline");
+      await reportPhase(deps, "verifying baseline", store);
       let baseline;
       try {
         baseline = await (deps.baselineVerifier ?? verifyBaseline)({
@@ -28563,7 +28582,7 @@ async function runAttempt(checkoutPath, spec, deps) {
         });
       }
     }
-    reportPhase(deps, "probing producers");
+    await reportPhase(deps, "probing producers", store);
     const reports = await probeAll({
       ps,
       os: ps.os,
@@ -28677,7 +28696,7 @@ async function runAttempt(checkoutPath, spec, deps) {
       }
     }
     if (spec.executionMode === "edit" && deps.producerPreflight !== false) {
-      reportPhase(deps, "probing producer environment");
+      await reportPhase(deps, "probing producer environment", store);
       const preflight = await (typeof deps.producerPreflight === "function" ? deps.producerPreflight : runProducerPreflight)({
         adapter,
         capabilityReport: report,
@@ -28727,7 +28746,7 @@ async function runAttempt(checkoutPath, spec, deps) {
       invocation.executable,
       invocation.args
     );
-    reportPhase(deps, "producer running");
+    await reportPhase(deps, "producer running", store);
     const exit = deps.abortSignal?.aborted === true ? preCancelledExit() : await supervise(recordingServices, {
       executable: watchdog.executable,
       args: watchdog.args,
@@ -28753,7 +28772,7 @@ async function runAttempt(checkoutPath, spec, deps) {
       if (exit.exitCode !== 0) signals["producer-failure"] = true;
     }
     if (!hasFailureSignal(signals)) {
-      reportPhase(deps, "freezing candidate");
+      await reportPhase(deps, "freezing candidate", store);
       const frozen = await freezeCandidate({
         repoRoot: canonical.canonical,
         worktreePath: worktree.path,
@@ -28775,7 +28794,7 @@ async function runAttempt(checkoutPath, spec, deps) {
         candidate = frozen.artifact;
         evidence = { ...evidence, ...frozen.evidence };
         try {
-          reportPhase(deps, "verifying candidate");
+          await reportPhase(deps, "verifying candidate", store);
           const verification = await deps.verifier.verify({
             repoRoot: canonical.canonical,
             worktreePath: worktree.path,
@@ -28810,7 +28829,7 @@ async function runAttempt(checkoutPath, spec, deps) {
         };
       }
     }
-    reportPhase(deps, "archiving result");
+    await reportPhase(deps, "archiving result", store);
     archivedResult = await archiveTerminal({
       store,
       spec,
@@ -30723,9 +30742,13 @@ async function runPipelineWithLease(checkoutPath, spec, deps, ps, borrowedChecko
     startedAt: (/* @__PURE__ */ new Date()).toISOString(),
     sliced: slices.length > 0
   };
-  const notePhase = (phase) => {
+  const notePhase = async (phase) => {
     try {
       deps.onPhase?.(phase);
+    } catch {
+    }
+    try {
+      await store?.writeRunPhase(phase);
     } catch {
     }
   };
@@ -31190,7 +31213,7 @@ async function runPipelineWithLease(checkoutPath, spec, deps, ps, borrowedChecko
         finalAttempt = promoted.attempt;
         currentCandidateCommit = promoted.candidateCommit;
         authoritySafeToRelease = true;
-        notePhase("partial halt verification");
+        await notePhase("partial halt verification");
         const verified2 = await verifyCandidate({
           checkoutPath,
           spec,
@@ -31258,7 +31281,7 @@ async function runPipelineWithLease(checkoutPath, spec, deps, ps, borrowedChecko
                 pipelineSlices
               );
             }
-            notePhase(`increment ${increment}/${maxIncrements}`);
+            await notePhase(`increment ${increment}/${maxIncrements}`);
             const previousCandidateCommit = currentCandidateCommit;
             const diffText = await checkedGit4(candidateWorktree.path, [
               "diff",
@@ -31390,7 +31413,7 @@ async function runPipelineWithLease(checkoutPath, spec, deps, ps, borrowedChecko
             pipelineSlices
           );
         }
-        notePhase(`review round ${round}/${maxRounds}`);
+        await notePhase(`review round ${round}/${maxRounds}`);
         const diffText = await checkedGit4(candidateWorktree.path, [
           "diff",
           `${baselineCommit}..${currentCandidateCommit}`
@@ -31453,7 +31476,7 @@ async function runPipelineWithLease(checkoutPath, spec, deps, ps, borrowedChecko
             failure: "sandbox-violation"
           });
         }
-        notePhase(`round ${round}: applying fixes`);
+        await notePhase(`round ${round}: applying fixes`);
         const fixRun = await runFix({
           spec,
           pkg: { ...pkg, findings: consolidated.findings },
@@ -31531,7 +31554,7 @@ async function runPipelineWithLease(checkoutPath, spec, deps, ps, borrowedChecko
         });
       }
     }
-    notePhase("final verification");
+    await notePhase("final verification");
     const verified = await verifyCandidate({
       checkoutPath,
       spec,
@@ -31544,7 +31567,7 @@ async function runPipelineWithLease(checkoutPath, spec, deps, ps, borrowedChecko
     });
     await store.writePipelineArtifact("verification", verified.verification);
     const lastRound = rounds.at(-1);
-    notePhase("evaluating gate");
+    await notePhase("evaluating gate");
     const gate = evaluateGates({
       findings: lastRound?.consolidated.findings ?? [],
       dispositions: lastRound?.fix?.dispositions ?? [],

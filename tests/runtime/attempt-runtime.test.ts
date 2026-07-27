@@ -481,6 +481,25 @@ describe("runAttempt", () => {
     expect(runStartAtBaseline).toMatchObject({ runId });
   });
 
+  // The only durable lifecycle line was written once at startup, so a run ten
+  // minutes into a phase was indistinguishable from one wedged at the lock.
+  it("persists the current phase while the attempt is still running", async () => {
+    const repoRoot = await initRepo();
+    const runId = "run-durable-phase";
+    let phaseDuringBaseline: unknown = null;
+
+    const deps = dependencies(new FakeAdapter(), runId);
+    deps.baselineVerifier = async args => {
+      phaseDuringBaseline = await archivedJson(runId, "status.json");
+      return { baselineCommitOid: args.headCommitOid, commands: [], dependencyLink: "none" };
+    };
+
+    await runAttempt(repoRoot, validSpec(), deps);
+
+    expect(phaseDuringBaseline).toMatchObject({ phase: "verifying baseline" });
+    expect(await archivedJson(runId, "status.json")).toMatchObject({ phase: "archiving result" });
+  });
+
   it("records the spec hash so a lost lane report can still be correlated", async () => {
     const repoRoot = await initRepo();
     const runId = "run-start-spec-hash";

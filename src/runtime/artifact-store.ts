@@ -693,6 +693,22 @@ export class ArtifactStore {
     return ref;
   }
 
+  /**
+   * Record where the run currently is, durably.
+   *
+   * Phase transitions were reported only through an in-process callback, so the
+   * sole durable trace of a live run was "attempt lock acquired" written once at
+   * startup. A pipeline ten minutes into a slice was indistinguishable from one
+   * wedged at the lock. Replaced rather than appended so the file stays a bounded
+   * "where is this run now" answer.
+   */
+  async writeRunPhase(phase: string, at: Date = new Date()): Promise<void> {
+    await this.replaceJson("status.json", {
+      phase: redact(phase).slice(0, 200),
+      at: at.toISOString(),
+    });
+  }
+
   async writePipelineArtifact(name: string, value: unknown): Promise<void> {
     validateComponent(name, "log name");
     await this.writeJson(
