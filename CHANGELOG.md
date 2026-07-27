@@ -6,6 +6,8 @@ All notable changes to Claude Architect are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.39.0] - 2026-07-27
+
 ### Changed
 
 - **Delegation now runs to completion without asking permission, by default.**
