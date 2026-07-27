@@ -654,7 +654,7 @@ async function structuralVerifyFinalBranch(
     "merge-base", "--is-ancestor", args.baseCommitOid, args.artifact.candidateCommitOid,
   ]);
 
-  if (args.artifact.baseCommitOid !== args.baseCommitOid) failures.add("base-changed");
+  if (args.artifact.baseCommitOid !== args.baseCommitOid) failures.add("artifact-base-mismatch");
   if (sourceHead.trim() !== args.artifact.candidateCommitOid
     || materializedHead.trim() !== args.artifact.candidateCommitOid
     || candidateTree.trim() !== args.artifact.candidateTreeOid

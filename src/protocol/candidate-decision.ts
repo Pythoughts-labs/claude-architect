@@ -34,10 +34,24 @@ export interface PolicyAutonomousCandidateDecisionV2 extends CandidateDecisionV2
   authority: "policy-autonomous";
 }
 
+/**
+ * A decision the MCP caller supplied without the runtime ever confirming a
+ * person made it. It is recorded rather than refused — the decision did happen
+ * and an archive that omitted it would be lying by silence — but it is absent
+ * from {@link INTEGRABLE_DECISION_AUTHORITIES}, so it can never be spent on a
+ * checkout. Unlike the two policy authorities it may carry any decision value:
+ * a caller can reject, and refusing to record that would lose the rejection.
+ */
+export interface CallerAssertedCandidateDecisionV2 extends CandidateDecisionV2Base {
+  decision: CandidateDecisionValue;
+  authority: "caller-asserted";
+}
+
 export type CandidateDecisionV2 =
   | HumanCandidateDecisionV2
   | AutopilotCandidateDecisionV2
-  | PolicyAutonomousCandidateDecisionV2;
+  | PolicyAutonomousCandidateDecisionV2
+  | CallerAssertedCandidateDecisionV2;
 
 /**
  * Authorities whose acceptance may reach a checkout.

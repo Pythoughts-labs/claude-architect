@@ -27,7 +27,8 @@
       "enum": [
         "human",
         "policy-autonomous",
-        "autopilot-policy"
+        "autopilot-policy",
+        "caller-asserted"
       ]
     },
     "candidateManifestHash": {
