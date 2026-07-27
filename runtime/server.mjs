@@ -29473,7 +29473,7 @@ async function runSliceToCompletion(slice, index, base, deps, initialAttempt) {
   let roundsUsed = 0;
   const attempts = [];
   while (true) {
-    const sourceAttempt = roundsUsed === 0 && initialAttempt !== void 0 ? initialAttempt : await deps.runSlice(slice, index, base, roundsUsed);
+    const sourceAttempt = roundsUsed === 0 && initialAttempt !== void 0 ? initialAttempt : await deps.runSlice(slice, index, base, roundsUsed, attempts.map((e) => structuredClone(e)));
     const attempt = structuredClone(sourceAttempt);
     const perSliceReview = attempt.perSliceReview ?? null;
     const route2 = routeSlice({
@@ -29701,6 +29701,11 @@ function renderBaseRolePrompt(role, pkg) {
         commonSections(pkg),
         "## Progress notes from prior increment",
         untrustedBlock("progress-notes", pkg.progress ?? "(none)"),
+        ...pkg.priorAttempts === void 0 ? [] : [
+          "## Earlier attempts at this work failed",
+          "Each attempt below was rejected for the stated reason. Do not repeat an approach that already failed; address the reason directly.",
+          untrustedBlock("prior-attempts", pkg.priorAttempts)
+        ],
         `Claim status "complete" ONLY when every success criterion is met and the spec's verification passes locally.`,
         'Claim status "continue" with concrete nextSteps when more work remains.',
         'Claim status "blocked" with blockers when unable to proceed.',
@@ -30112,6 +30117,19 @@ var IGNORED_STRUCTURAL_FAILURES = /* @__PURE__ */ new Set([
 ]);
 var CANDIDATE_REF_PREFIX2 = "refs/claude-architect/candidates/";
 var SLICE_REF_PREFIX = "refs/claude-architect/slices/";
+function describePriorAttempts(attempts) {
+  return attempts.map((entry) => {
+    const failed = (entry.verification?.commandResults ?? []).filter((command) => !command.ok).map((command) => `${command.id} (exit ${String(command.exitCode)})`);
+    const blocking = (entry.perSliceReview?.findings ?? []).filter((finding) => finding.severity === "blocker" || finding.severity === "major").map((finding) => `${finding.severity} at ${finding.location}: ${finding.claim}`);
+    return [
+      `attempt ${entry.attempt} -> ${entry.route}`,
+      `  reasons: ${entry.reasons.join("; ") || "(none recorded)"}`,
+      ...failed.length === 0 ? [] : [`  failing verification: ${failed.join(", ")}`],
+      ...blocking.length === 0 ? [] : [`  blocking findings:
+    ${blocking.join("\n    ")}`]
+    ].join("\n");
+  }).join("\n\n");
+}
 function scopeSpecToSlice(spec, slice) {
   const scoped = structuredClone({ ...spec, ...slice });
   delete scoped.slices;
@@ -31199,7 +31217,7 @@ async function runPipelineWithLease(checkoutPath, spec, deps, ps, borrowedChecko
             perSliceReview: initialPerSliceReview,
             roleLogRefs: initialRoleLogRefs
           },
-          runSlice: async (slice, index, base, sliceAttempt) => {
+          runSlice: async (slice, index, base, sliceAttempt, priorAttempts) => {
             const namespace = `slice-${index}-attempt-${sliceAttempt}`;
             const scopedSpec = scopeSpecToSlice(spec, slice);
             return withManagedWorktree({
@@ -31227,7 +31245,10 @@ async function runPipelineWithLease(checkoutPath, spec, deps, ps, borrowedChecko
                     baselineCommit: base,
                     candidateCommit: base,
                     candidateDiff: "",
-                    testEvidence: completedSlices.length === 0 ? testEvidence(attempt) : sliceTestEvidence(completedSlices)
+                    testEvidence: completedSlices.length === 0 ? testEvidence(attempt) : sliceTestEvidence(completedSlices),
+                    // A repair that cannot see why the last attempt was rejected
+                    // reproduces it. Bounded and redacted like any prompt data.
+                    ...priorAttempts === void 0 || priorAttempts.length === 0 ? {} : { priorAttempts: describePriorAttempts(priorAttempts) }
                   },
                   worktreePath,
                   deps,

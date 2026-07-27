@@ -16,6 +16,15 @@ All notable changes to Claude Architect are recorded here. The format follows
   human control — it removes the supported path and pushes work to hand-applied
   changes outside the lifecycle, which is the outcome the gate exists to
   prevent.
+- Slice repair attempts receive the evidence from every earlier attempt.
+  `runSliceToCompletion` accumulated each attempt's failing verification
+  commands, blocking findings, and routing reason for the report a human reads
+  afterwards, and handed the next attempt only a round number — so a
+  fresh-context implementer could not see the failure it was dispatched to fix
+  and reproduced it until the round budget was gone. The summary is bounded
+  (reason, failing command ids, blocking findings) rather than replayed logs,
+  and stays out of reviewer prompts: a reviewer judging loop history instead of
+  the candidate is biased toward confirming the prior verdict.
 - A sliced pipeline records the spec hash the caller dispatched. `scopeSpecToSlice`
   merges the slice over the spec and drops `slices`, so the attempt hashed a spec
   no caller ever wrote — meaning `reviewCandidate`'s `expectedSpecSha256` check,

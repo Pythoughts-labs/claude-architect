@@ -53,6 +53,7 @@ import type { PipelineRole, RolePackage } from "./role-prompts.js";
 import {
   runSlicePhase,
   type PipelineSlice,
+  type SliceAttemptEvidence,
 } from "./slice-runner.js";
 import {
   runRole as defaultRunRole,
@@ -152,6 +153,31 @@ const SLICE_REF_PREFIX = "refs/claude-architect/slices/";
 interface TemporarySliceRef {
   ref: string;
   oid: string;
+}
+
+
+/**
+ * Bounded, human-readable summary of earlier slice attempts for the next
+ * implementer. Carries the routing reason and the failing verification command
+ * ids — enough to avoid repeating the approach — without replaying whole logs.
+ */
+function describePriorAttempts(
+  attempts: readonly SliceAttemptEvidence[],
+): string {
+  return attempts.map(entry => {
+    const failed = (entry.verification?.commandResults ?? [])
+      .filter(command => !command.ok)
+      .map(command => `${command.id} (exit ${String(command.exitCode)})`);
+    const blocking = (entry.perSliceReview?.findings ?? [])
+      .filter(finding => finding.severity === "blocker" || finding.severity === "major")
+      .map(finding => `${finding.severity} at ${finding.location}: ${finding.claim}`);
+    return [
+      `attempt ${entry.attempt} -> ${entry.route}`,
+      `  reasons: ${entry.reasons.join("; ") || "(none recorded)"}`,
+      ...(failed.length === 0 ? [] : [`  failing verification: ${failed.join(", ")}`]),
+      ...(blocking.length === 0 ? [] : [`  blocking findings:\n    ${blocking.join("\n    ")}`]),
+    ].join("\n");
+  }).join("\n\n");
 }
 
 export function scopeSpecToSlice(spec: DelegationSpec, slice: Slice): DelegationSpec {
@@ -1559,7 +1585,7 @@ async function runPipelineWithLease(
             perSliceReview: initialPerSliceReview,
             roleLogRefs: initialRoleLogRefs,
           },
-          runSlice: async (slice, index, base, sliceAttempt) => {
+          runSlice: async (slice, index, base, sliceAttempt, priorAttempts) => {
             const namespace = `slice-${index}-attempt-${sliceAttempt}`;
             const scopedSpec = scopeSpecToSlice(spec, slice);
             return withManagedWorktree({
@@ -1591,6 +1617,11 @@ async function runPipelineWithLease(
                     testEvidence: completedSlices.length === 0
                       ? testEvidence(attempt)
                       : sliceTestEvidence(completedSlices),
+                    // A repair that cannot see why the last attempt was rejected
+                    // reproduces it. Bounded and redacted like any prompt data.
+                    ...(priorAttempts === undefined || priorAttempts.length === 0
+                      ? {}
+                      : { priorAttempts: describePriorAttempts(priorAttempts) }),
                   },
                   worktreePath,
                   deps,

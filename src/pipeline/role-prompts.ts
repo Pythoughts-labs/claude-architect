@@ -15,6 +15,8 @@ export interface RolePackage {
   findings?: Finding[];
   /** Why the previous reply was rejected, when re-asking a role for output. */
   outputRepair?: string;
+  /** What earlier attempts on this slice produced and why each was rejected. */
+  priorAttempts?: string;
 }
 
 function readSchemaText(name: string): string {
@@ -181,6 +183,12 @@ function renderBaseRolePrompt(role: PipelineRole, pkg: RolePackage): string {
         commonSections(pkg),
         "## Progress notes from prior increment",
         untrustedBlock("progress-notes", pkg.progress ?? "(none)"),
+        ...(pkg.priorAttempts === undefined ? [] : [
+          "## Earlier attempts at this work failed",
+          "Each attempt below was rejected for the stated reason. Do not repeat"
+          + " an approach that already failed; address the reason directly.",
+          untrustedBlock("prior-attempts", pkg.priorAttempts),
+        ]),
         "Claim status \"complete\" ONLY when every success criterion is met and the spec's verification passes locally.",
         "Claim status \"continue\" with concrete nextSteps when more work remains.",
         "Claim status \"blocked\" with blockers when unable to proceed.",

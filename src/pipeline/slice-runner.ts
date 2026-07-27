@@ -42,6 +42,13 @@ export interface SlicePhaseDeps {
     index: number,
     base: string,
     attempt: number,
+    /**
+     * What every earlier attempt on this slice produced and why it was routed
+     * to repair. A repair used to receive only a round number, so a
+     * fresh-context implementer could not see the failure it was meant to fix
+     * and reproduced it until the budget ran out.
+     */
+    priorAttempts?: readonly SliceAttemptEvidence[],
   ) => Promise<SliceAttempt>;
   maxRounds: number;
   initialAttempt?: SliceAttempt;
@@ -90,7 +97,7 @@ async function runSliceToCompletion(
   while (true) {
     const sourceAttempt = roundsUsed === 0 && initialAttempt !== undefined
       ? initialAttempt
-      : await deps.runSlice(slice, index, base, roundsUsed);
+      : await deps.runSlice(slice, index, base, roundsUsed, attempts.map(e => structuredClone(e)));
     const attempt = structuredClone(sourceAttempt);
     const perSliceReview = attempt.perSliceReview ?? null;
     const route = routeSlice({

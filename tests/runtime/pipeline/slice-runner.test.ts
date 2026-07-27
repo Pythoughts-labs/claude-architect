@@ -110,8 +110,8 @@ describe('runSlicePhase', () => {
       expect.objectContaining({ index: 1, route: 'advance', roundsUsed: 0 }),
       expect.objectContaining({ index: 2, route: 'advance', roundsUsed: 0 }),
     ]);
-    expect(runSlice).toHaveBeenNthCalledWith(1, expect.anything(), 1, 'start', 0);
-    expect(runSlice).toHaveBeenNthCalledWith(2, expect.anything(), 2, 'slice-1-commit', 0);
+    expect(runSlice).toHaveBeenNthCalledWith(1, expect.anything(), 1, 'start', 0, []);
+    expect(runSlice).toHaveBeenNthCalledWith(2, expect.anything(), 2, 'slice-1-commit', 0, []);
   });
 
   it('consumes a green initial attempt before running slice 2 from its commit', async () => {
@@ -125,7 +125,7 @@ describe('runSlicePhase', () => {
     });
 
     expect(runSlice).toHaveBeenCalledTimes(1);
-    expect(runSlice).toHaveBeenCalledWith(slices[1], 2, 'seed-commit', 0);
+    expect(runSlice).toHaveBeenCalledWith(slices[1], 2, 'seed-commit', 0, []);
     expect(result.slices.map(({ index, candidateCommit }) => ({ index, candidateCommit }))).toEqual([
       { index: 1, candidateCommit: 'seed-commit' },
       { index: 2, candidateCommit: 'slice-2-commit' },
@@ -146,7 +146,7 @@ describe('runSlicePhase', () => {
     });
 
     expect(runSlice).toHaveBeenCalledTimes(1);
-    expect(runSlice).toHaveBeenCalledWith(seededSlice, 1, 'start', 1);
+    expect(runSlice).toHaveBeenCalledWith(seededSlice, 1, 'start', 1, expect.any(Array));
     expect(result.slices[0]?.attempts).toEqual([
       expect.objectContaining({ attempt: 0, candidateCommit: 'red-seed-commit', route: 'repair' }),
       expect.objectContaining({ attempt: 1, candidateCommit: 'repaired-commit', route: 'advance' }),
@@ -339,7 +339,7 @@ describe('runSlicePhase', () => {
       'logs/attempt-1.log',
     ]);
     expect(result.slices[0]?.reasons).not.toBe(result.slices[0]?.attempts[1]?.reasons);
-    expect(runSlice).toHaveBeenNthCalledWith(2, expect.anything(), 1, 'start', 1);
+    expect(runSlice).toHaveBeenNthCalledWith(2, expect.anything(), 1, 'start', 1, expect.any(Array));
   });
 
   it('snapshots the source attempt before onAttempt can mutate it', async () => {
@@ -523,5 +523,29 @@ describe('runSlicePhase', () => {
       route: 'halt',
       reasons: ['unrecoverable blocker'],
     }));
+  });
+});
+
+describe('repair attempts receive prior-attempt evidence', () => {
+  it('hands each repair the evidence from every earlier attempt', async () => {
+    // Repairs used to receive only a round number. A fresh-context implementer
+    // cannot see why the last attempt failed, so it reproduces the same defect
+    // until the round budget is gone — observed live as three repair attempts
+    // repeating one gate failure.
+    const seen: Array<readonly SliceAttemptEvidence[]> = [];
+    const runSlice = vi.fn(async (_slice, _index, _base, round, prior) => {
+      seen.push((prior ?? []).map(entry => structuredClone(entry)));
+      return attempt(`commit-${round}`, round === 2);
+    });
+
+    await runSlicePhase([slice('one')], 'base', { runSlice, maxRounds: 3 });
+
+    expect(seen[0]).toEqual([]);
+    expect(seen[1]).toHaveLength(1);
+    expect(seen[1]?.[0]).toMatchObject({ attempt: 0, route: 'repair' });
+    expect(seen[2]).toHaveLength(2);
+    // The failing verification must be in what the repair sees, not merely
+    // recorded in the report a human reads afterwards.
+    expect(seen[2]?.[0]?.verification?.pass).toBe(false);
   });
 });
