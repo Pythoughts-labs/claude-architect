@@ -326,12 +326,45 @@ function schemaCompatibility(input: unknown): { ok: true } | { ok: false; diagno
   return { ok: true };
 }
 
+
+/**
+ * The bounded envelope a delegation lane actually reports.
+ *
+ * A lane is a courier: its contract is correlation fields, and it is granted no
+ * filesystem tools by design. A full result can exceed the host's inline-response
+ * limit, at which point the host offloads it to a file the lane cannot open — so
+ * the lane produced no report and its controller re-dispatched, duplicating the
+ * entire attempt. Returning only what the lane reports removes the offload
+ * without widening the lane's trust surface. Full evidence stays archived and
+ * reaches the architect through `reviewCandidate`.
+ */
+export interface LaneEnvelope {
+  runId: string;
+  status: AttemptResult["status"];
+  producerId: string | null;
+  manifestHash: string | null;
+  failure: AttemptResult["failure"];
+  durationMs: number;
+}
+
+function laneEnvelope(result: AttemptResult): LaneEnvelope {
+  return {
+    runId: result.runId,
+    status: result.status,
+    producerId: result.producerId,
+    manifestHash: result.candidate?.manifestHash ?? null,
+    failure: result.failure,
+    durationMs: result.durationMs,
+  };
+}
+
 export async function handleDelegate(
   checkoutPath: string,
   input: unknown,
   deps: ToolDependencies = {},
+  responseMode: "full" | "lane" = "full",
 ): Promise<
-  | { ok: true; result: AttemptResult }
+  | { ok: true; result: AttemptResult | LaneEnvelope }
   | {
     ok: false;
     error: "invalid-specification";
@@ -391,7 +424,10 @@ export async function handleDelegate(
         validation.spec,
         attemptDependencies,
       );
-      return { ok: true, result: boundIgnoredPathEvidence(result) };
+      return {
+        ok: true,
+        result: responseMode === "lane" ? laneEnvelope(result) : boundIgnoredPathEvidence(result),
+      };
     });
   } catch (error) {
     if (error instanceof NestedDelegationError) {
@@ -405,8 +441,9 @@ export async function handleDelegatePipeline(
   checkoutPath: string,
   input: unknown,
   deps: ToolDependencies = {},
+  responseMode: "full" | "lane" = "full",
 ): Promise<
-  | { ok: true; result: PipelineResult }
+  | { ok: true; result: PipelineResult | LaneEnvelope }
   | {
     ok: false;
     error: "invalid-specification";
@@ -473,6 +510,9 @@ export async function handleDelegatePipeline(
       );
       // The bound reads `value.evidence`; a pipeline's lives one level deeper,
       // so this path returned a repository-sized ignored-path list untouched.
+      if (responseMode === "lane") {
+        return { ok: true, result: laneEnvelope(pipelineResult.attempt) };
+      }
       return {
         ok: true,
         result: { ...pipelineResult, attempt: boundIgnoredPathEvidence(pipelineResult.attempt) },

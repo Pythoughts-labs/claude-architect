@@ -522,6 +522,43 @@ describe("MCP tool handlers", () => {
     expect(output).toMatchObject({ manifestHash: candidate.manifestHash });
   });
 
+  it("returns only the correlation envelope in lane response mode", async () => {
+    // A lane has no filesystem tools by design. A full result can exceed the
+    // host's inline-response limit, and the host then offloads it to a file the
+    // lane cannot open — so the lane reported nothing and its controller
+    // re-dispatched, duplicating the entire attempt.
+    const deps = dependencies();
+    const bigResult = {
+      ...result,
+      evidence: {
+        ...result.evidence,
+        ignoredPaths: Array.from({ length: 5000 }, (_, i) => `node_modules/pkg-${i}`),
+      },
+    };
+    deps.runAttempt = async () => bigResult;
+
+    const output = await handleDelegate("/repo", validSpec, deps, "lane");
+
+    expect(output).toEqual({
+      ok: true,
+      result: {
+        runId: "run-tools",
+        status: "verified-candidate",
+        producerId: "fake",
+        manifestHash: candidate.manifestHash,
+        failure: null,
+        durationMs: 1,
+      },
+    });
+    // Exactly the lane's contract, and nothing that could grow without bound.
+    expect(JSON.stringify(output).length).toBeLessThan(1_000);
+  });
+
+  it("defaults to the full result so existing callers are unchanged", async () => {
+    const output = await handleDelegate("/repo", validSpec, dependencies());
+    expect(output).toMatchObject({ ok: true, result: { evidence: expect.any(Object) } });
+  });
+
   it("bounds ignored-path evidence on the pipeline result too", async () => {
     // The cap is applied to `value.evidence`, but a pipeline's evidence lives at
     // `result.attempt.evidence`, so this path returned it unbounded. Measured on

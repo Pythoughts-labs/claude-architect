@@ -21939,7 +21939,7 @@ var StdioServerTransport = class {
 var PROTOCOL_VERSION = "1.4.0";
 var DELEGATION_SPEC_VERSION = "1";
 var ATTEMPT_RESULT_VERSION = "1";
-var RUNTIME_VERSION = "0.37.0";
+var RUNTIME_VERSION = "0.38.0";
 
 // src/platform/posix-platform-services.ts
 import { spawn, execFile } from "node:child_process";
@@ -32312,7 +32312,17 @@ function schemaCompatibility(input) {
   }
   return { ok: true };
 }
-async function handleDelegate(checkoutPath, input, deps = {}) {
+function laneEnvelope(result) {
+  return {
+    runId: result.runId,
+    status: result.status,
+    producerId: result.producerId,
+    manifestHash: result.candidate?.manifestHash ?? null,
+    failure: result.failure,
+    durationMs: result.durationMs
+  };
+}
+async function handleDelegate(checkoutPath, input, deps = {}, responseMode = "full") {
   const protocol = checkVersionCompat(deps.skillProtocolVersion ?? PROTOCOL_VERSION);
   if (!protocol.ok) return { ok: false, diagnostic: protocol.diagnostic };
   if (typeof input === "string") {
@@ -32360,7 +32370,10 @@ async function handleDelegate(checkoutPath, input, deps = {}) {
         validation.spec,
         attemptDependencies
       );
-      return { ok: true, result: boundIgnoredPathEvidence(result) };
+      return {
+        ok: true,
+        result: responseMode === "lane" ? laneEnvelope(result) : boundIgnoredPathEvidence(result)
+      };
     });
   } catch (error2) {
     if (error2 instanceof NestedDelegationError) {
@@ -32369,7 +32382,7 @@ async function handleDelegate(checkoutPath, input, deps = {}) {
     return errorResult(error2);
   }
 }
-async function handleDelegatePipeline(checkoutPath, input, deps = {}) {
+async function handleDelegatePipeline(checkoutPath, input, deps = {}, responseMode = "full") {
   const protocol = checkVersionCompat(deps.skillProtocolVersion ?? PROTOCOL_VERSION);
   if (!protocol.ok) return { ok: false, diagnostic: protocol.diagnostic };
   if (typeof input === "string") {
@@ -32422,6 +32435,9 @@ async function handleDelegatePipeline(checkoutPath, input, deps = {}) {
         validation.spec,
         pipelineDependencies
       );
+      if (responseMode === "lane") {
+        return { ok: true, result: laneEnvelope(pipelineResult.attempt) };
+      }
       return {
         ok: true,
         result: { ...pipelineResult, attempt: boundIgnoredPathEvidence(pipelineResult.attempt) }
@@ -34396,12 +34412,28 @@ var protocolVersionInput = external_exports.literal(PROTOCOL_VERSION, {
 var delegateInputSchema = external_exports.object({
   checkoutPath: external_exports.string(),
   spec: external_exports.unknown(),
-  protocolVersion: protocolVersionInput
+  protocolVersion: protocolVersionInput,
+  /**
+   * "lane" returns only the correlation envelope a delegation lane reports.
+   * A full result can exceed the host's inline-response limit, and the host then
+   * offloads it to a file a lane — which has no filesystem tools by design —
+   * cannot open, so the lane reported nothing and its controller re-dispatched,
+   * duplicating the whole attempt. Evidence stays archived either way.
+   */
+  responseMode: external_exports.enum(["full", "lane"]).optional()
 }).strict();
 var delegatePipelineInputSchema = external_exports.object({
   checkoutPath: external_exports.string(),
   spec: external_exports.unknown(),
-  protocolVersion: protocolVersionInput
+  protocolVersion: protocolVersionInput,
+  /**
+   * "lane" returns only the correlation envelope a delegation lane reports.
+   * A full result can exceed the host's inline-response limit, and the host then
+   * offloads it to a file a lane — which has no filesystem tools by design —
+   * cannot open, so the lane reported nothing and its controller re-dispatched,
+   * duplicating the whole attempt. Evidence stays archived either way.
+   */
+  responseMode: external_exports.enum(["full", "lane"]).optional()
 }).strict();
 var reviewCandidateInputSchema = external_exports.object({
   checkoutPath: external_exports.string(),
@@ -34507,7 +34539,7 @@ async function start(dependencies = {}) {
       inputSchema: delegateInputSchema,
       outputSchema: delegateOutput
     },
-    async ({ checkoutPath, spec, protocolVersion }, extra) => {
+    async ({ checkoutPath, spec, protocolVersion, responseMode }, extra) => {
       const progressToken = extra._meta?.progressToken;
       const startedAt = Date.now();
       let step = 0;
@@ -34538,7 +34570,8 @@ async function start(dependencies = {}) {
             // The caller's cancellation must reach the Producer tree; without
             // it a cancelled request keeps running and keeps spawning.
             abortSignal: extra.signal
-          }
+          },
+          responseMode ?? "full"
         ));
       } finally {
         if (heartbeat !== void 0) clearInterval(heartbeat);
@@ -34553,7 +34586,7 @@ async function start(dependencies = {}) {
       inputSchema: delegatePipelineInputSchema,
       outputSchema: delegatePipelineOutput
     },
-    async ({ checkoutPath, spec, protocolVersion }, extra) => {
+    async ({ checkoutPath, spec, protocolVersion, responseMode }, extra) => {
       const progressToken = extra._meta?.progressToken;
       const startedAt = Date.now();
       let step = 0;
@@ -34584,7 +34617,8 @@ async function start(dependencies = {}) {
             // The caller's cancellation must reach the Producer tree; without
             // it a cancelled request keeps running and keeps spawning.
             abortSignal: extra.signal
-          }
+          },
+          responseMode ?? "full"
         ));
       } finally {
         if (heartbeat !== void 0) clearInterval(heartbeat);

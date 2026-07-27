@@ -116,12 +116,28 @@ export const delegateInputSchema = z.object({
   checkoutPath: z.string(),
   spec: z.unknown(),
   protocolVersion: protocolVersionInput,
+  /**
+   * "lane" returns only the correlation envelope a delegation lane reports.
+   * A full result can exceed the host's inline-response limit, and the host then
+   * offloads it to a file a lane — which has no filesystem tools by design —
+   * cannot open, so the lane reported nothing and its controller re-dispatched,
+   * duplicating the whole attempt. Evidence stays archived either way.
+   */
+  responseMode: z.enum(["full", "lane"]).optional(),
 }).strict();
 
 export const delegatePipelineInputSchema = z.object({
   checkoutPath: z.string(),
   spec: z.unknown(),
   protocolVersion: protocolVersionInput,
+  /**
+   * "lane" returns only the correlation envelope a delegation lane reports.
+   * A full result can exceed the host's inline-response limit, and the host then
+   * offloads it to a file a lane — which has no filesystem tools by design —
+   * cannot open, so the lane reported nothing and its controller re-dispatched,
+   * duplicating the whole attempt. Evidence stays archived either way.
+   */
+  responseMode: z.enum(["full", "lane"]).optional(),
 }).strict();
 
 export const reviewCandidateInputSchema = z.object({
@@ -276,7 +292,7 @@ export async function start(dependencies: ServerDependencies = {}): Promise<void
       inputSchema: delegateInputSchema,
       outputSchema: delegateOutput,
     },
-    async ({ checkoutPath, spec, protocolVersion }, extra) => {
+    async ({ checkoutPath, spec, protocolVersion, responseMode }, extra) => {
       const progressToken = extra._meta?.progressToken;
       const startedAt = Date.now();
       let step = 0;
@@ -309,6 +325,7 @@ export async function start(dependencies: ServerDependencies = {}): Promise<void
             // it a cancelled request keeps running and keeps spawning.
             abortSignal: extra.signal,
           },
+          responseMode ?? "full",
         ));
       } finally {
         if (heartbeat !== undefined) clearInterval(heartbeat);
@@ -323,7 +340,7 @@ export async function start(dependencies: ServerDependencies = {}): Promise<void
       inputSchema: delegatePipelineInputSchema,
       outputSchema: delegatePipelineOutput,
     },
-    async ({ checkoutPath, spec, protocolVersion }, extra) => {
+    async ({ checkoutPath, spec, protocolVersion, responseMode }, extra) => {
       const progressToken = extra._meta?.progressToken;
       const startedAt = Date.now();
       let step = 0;
@@ -356,6 +373,7 @@ export async function start(dependencies: ServerDependencies = {}): Promise<void
             // it a cancelled request keeps running and keeps spawning.
             abortSignal: extra.signal,
           },
+          responseMode ?? "full",
         ));
       } finally {
         if (heartbeat !== undefined) clearInterval(heartbeat);

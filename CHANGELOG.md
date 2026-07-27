@@ -6,6 +6,8 @@ All notable changes to Claude Architect are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.38.0] - 2026-07-27
+
 ### Fixed
 
 - Human decision elicitation waits 15 minutes instead of the MCP SDK's
