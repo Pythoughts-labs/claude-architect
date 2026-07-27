@@ -645,7 +645,9 @@ describe("WorkflowBranchManager", () => {
       expect((await git(fixture.repoRoot, [
         "show-ref", "--verify", "--quiet", created.baseRef,
       ])).exitCode).toBe(1);
-      expect((await git(fixture.repoRoot, ["worktree", "list", "--porcelain", "-z"])).stdout)
+      expect((await git(fixture.repoRoot, ["worktree", "list", "--porcelain", "-z"])).stdout
+        .split("\0").filter(field => field.startsWith("worktree "))
+        .map(field => path.resolve(field.slice("worktree ".length))))
         .not.toContain(created.worktreePath);
     } finally {
       process.env.CLAUDE_PLUGIN_DATA = priorPluginData;
@@ -895,7 +897,9 @@ describe("WorkflowBranchManager", () => {
       worktreeRemoved: true,
       refsRemoved: true,
     });
-    expect((await git(fixture.repoRoot, ["worktree", "list", "--porcelain"])).stdout)
+    expect((await git(fixture.repoRoot, ["worktree", "list", "--porcelain"])).stdout
+      .split(/\r?\n/u).filter(line => line.startsWith("worktree "))
+      .map(line => path.resolve(line.slice("worktree ".length))))
       .not.toContain(created.worktreePath);
   });
 });

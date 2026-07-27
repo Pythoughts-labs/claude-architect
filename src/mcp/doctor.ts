@@ -13,6 +13,7 @@ import {
   type WorkflowOwnerRecord,
 } from "../autopilot/workflow-store.js";
 import { git as runGit } from "../git/git-exec.js";
+import { isWorktreeRegistrationFor } from "../git/worktree-registration.js";
 import type { PlatformServices } from "../platform/platform-services.js";
 import { CLEANUP_JOURNAL_LOCK_KEY } from "../platform/posix-platform-services.js";
 import { SANDBOX_BACKENDS } from "../platform/sandbox/backends.js";
@@ -542,10 +543,8 @@ async function observedBranchMatches(
     const stateHead = expectedHead(state, registration);
     if (stateHead !== null && head.stdout.trim() !== stateHead) return false;
     const fields = worktrees.stdout.split("\0");
-    // git reports its own path format here; on Windows that is forward-slashed
-    // while the recorded registration is Node-canonical. Resolve before compare.
-    const index = fields.findIndex(field => field.startsWith("worktree ")
-      && path.resolve(field.slice("worktree ".length)) === registration.worktreePath);
+    const index = fields.findIndex(field =>
+      isWorktreeRegistrationFor(field, registration.worktreePath));
     if (index === -1) return false;
     const next = fields.findIndex((field, fieldIndex) =>
       fieldIndex > index && field.startsWith("worktree "));
