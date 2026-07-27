@@ -8,6 +8,7 @@ import {
   parseRawDiff,
 } from "../git/changed-path-manifest.js";
 import { git, type GitResult } from "../git/git-exec.js";
+import { globMatches } from "../util/glob.js";
 import { WorktreeManager } from "../git/worktree-manager.js";
 import type { PlatformServices } from "../platform/platform-services.js";
 import { getPlatformServices } from "../platform/select-platform.js";
@@ -587,33 +588,6 @@ export async function withHeadRevalidation<T>(request: HeadBoundPhaseRequest<T>)
 
 function uniqueSorted(values: string[]): string[] {
   return [...new Set(values)].sort();
-}
-
-function escapeGlobRegex(character: string): string {
-  return /[\\^$.*+?()[\]{}|]/u.test(character) ? `\\${character}` : character;
-}
-
-function globMatches(pattern: string, candidate: string, caseInsensitive = false): boolean {
-  let expression = "^";
-  for (let index = 0; index < pattern.length; index += 1) {
-    const character = pattern[index]!;
-    if (character !== "*") {
-      expression += escapeGlobRegex(character);
-      continue;
-    }
-    if (pattern[index + 1] !== "*") {
-      expression += "[^/]*";
-      continue;
-    }
-    index += 1;
-    if (pattern[index + 1] === "/") {
-      expression += "(?:.*/)?";
-      index += 1;
-    } else {
-      expression += ".*";
-    }
-  }
-  return new RegExp(`${expression}$`, caseInsensitive ? "iu" : "u").test(candidate);
 }
 
 function finalPathAllowed(

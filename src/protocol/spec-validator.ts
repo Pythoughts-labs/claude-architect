@@ -70,6 +70,41 @@ function resolveMinEditTimeoutMs(): number {
   }
   return RUNTIME_MIN_EDIT_TIMEOUT_MS;
 }
+// Scope globs are compiled into regular expressions inside the gate that proves
+// where a Producer may write. `**` becomes a `.*`/`(?:.*/)?` group, so a pattern
+// chaining many of them backtracks superlinearly against a long path. These are
+// caller-supplied, so bound them here — at the boundary, before anything
+// compiles them — rather than letting the matcher decide how much to tolerate.
+const MAX_SCOPE_PATTERN_LENGTH = 512;
+const MAX_SCOPE_PATTERN_WILDCARDS = 8;
+
+function scopePatternError(pattern: string, at: string): ValidationError | null {
+  if (pattern.length > MAX_SCOPE_PATTERN_LENGTH) {
+    return { path: at, message: `scope pattern must not exceed ${MAX_SCOPE_PATTERN_LENGTH} characters` };
+  }
+  if ((pattern.match(/\*\*/gu) ?? []).length > MAX_SCOPE_PATTERN_WILDCARDS) {
+    return { path: at, message: `scope pattern must not contain more than ${MAX_SCOPE_PATTERN_WILDCARDS} '**' segments` };
+  }
+  return null;
+}
+
+function validateScopePatterns(spec: DelegationSpec): ValidateResult | null {
+  const groups: Array<[string, string[] | undefined]> = [
+    ["/writeAllowlist", spec.writeAllowlist],
+    ["/forbiddenScope", spec.forbiddenScope],
+  ];
+  for (const [sliceIndex, slice] of (spec.slices ?? []).entries()) {
+    groups.push([`/slices/${sliceIndex}/writeAllowlist`, slice.writeAllowlist]);
+  }
+  for (const [at, patterns] of groups) {
+    for (const [index, pattern] of (patterns ?? []).entries()) {
+      const error = scopePatternError(pattern, `${at}/${index}`);
+      if (error !== null) return { ok: false, errors: [error] };
+    }
+  }
+  return null;
+}
+
 export function validateSpec(input: unknown): ValidateResult {
   const minEditTimeoutMs = resolveMinEditTimeoutMs();
   if (
@@ -105,6 +140,8 @@ export function validateSpec(input: unknown): ValidateResult {
   const schemaValid = schemas.delegationSpec(schemaInput);
   if (schemaValid) {
     const spec = input as DelegationSpec;
+    const patternError = validateScopePatterns(spec);
+    if (patternError !== null) return patternError;
     const topLevelDeletionError = validateAllowedTestDeletions(
       spec.allowedTestDeletions,
       "/allowedTestDeletions",

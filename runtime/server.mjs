@@ -34747,6 +34747,7 @@ var WorkflowStore = class {
     await assertDirectoryIdentity(this.workflowDirectory, directory);
     let ownerHandle;
     let lockIdentity;
+    let operationError;
     try {
       for (let attempt = 0; attempt < 4; attempt += 1) {
         const token = randomUUID();
@@ -34808,12 +34809,23 @@ var WorkflowStore = class {
       await assertDirectoryIdentity(this.workflowDirectory, directory);
       await this.recoverAbandonedStateFiles(directory);
       return await operation();
+    } catch (error51) {
+      operationError = error51;
+      throw error51;
     } finally {
-      await ownerHandle?.close();
-      if (lockIdentity !== void 0) {
-        await this.retireWriterLock(lockIdentity, directory);
-        await rm(lockIdentity.ownerPath, { force: true });
-        await syncDirectory(this.workflowDirectory);
+      try {
+        await ownerHandle?.close();
+        if (lockIdentity !== void 0) {
+          await this.retireWriterLock(lockIdentity, directory);
+          await rm(lockIdentity.ownerPath, { force: true });
+          await syncDirectory(this.workflowDirectory);
+        }
+      } catch (cleanupError) {
+        if (operationError === void 0) throw cleanupError;
+        throw new AggregateError(
+          [operationError, cleanupError],
+          "workflow state operation failed and lock retirement failed"
+        );
       }
     }
   }
@@ -37433,6 +37445,33 @@ function resolveMinEditTimeoutMs() {
   }
   return RUNTIME_MIN_EDIT_TIMEOUT_MS;
 }
+var MAX_SCOPE_PATTERN_LENGTH = 512;
+var MAX_SCOPE_PATTERN_WILDCARDS = 8;
+function scopePatternError(pattern, at) {
+  if (pattern.length > MAX_SCOPE_PATTERN_LENGTH) {
+    return { path: at, message: `scope pattern must not exceed ${MAX_SCOPE_PATTERN_LENGTH} characters` };
+  }
+  if ((pattern.match(/\*\*/gu) ?? []).length > MAX_SCOPE_PATTERN_WILDCARDS) {
+    return { path: at, message: `scope pattern must not contain more than ${MAX_SCOPE_PATTERN_WILDCARDS} '**' segments` };
+  }
+  return null;
+}
+function validateScopePatterns(spec) {
+  const groups = [
+    ["/writeAllowlist", spec.writeAllowlist],
+    ["/forbiddenScope", spec.forbiddenScope]
+  ];
+  for (const [sliceIndex, slice] of (spec.slices ?? []).entries()) {
+    groups.push([`/slices/${sliceIndex}/writeAllowlist`, slice.writeAllowlist]);
+  }
+  for (const [at, patterns] of groups) {
+    for (const [index, pattern] of (patterns ?? []).entries()) {
+      const error51 = scopePatternError(pattern, `${at}/${index}`);
+      if (error51 !== null) return { ok: false, errors: [error51] };
+    }
+  }
+  return null;
+}
 function validateSpec(input) {
   const minEditTimeoutMs = resolveMinEditTimeoutMs();
   if (typeof input === "object" && input !== null && "executionMode" in input && input.executionMode === "edit" && "timeoutMs" in input && typeof input.timeoutMs === "number" && input.timeoutMs < minEditTimeoutMs) {
@@ -37449,6 +37488,8 @@ function validateSpec(input) {
   const schemaValid = schemas.delegationSpec(schemaInput);
   if (schemaValid) {
     const spec = input;
+    const patternError = validateScopePatterns(spec);
+    if (patternError !== null) return patternError;
     const topLevelDeletionError = validateAllowedTestDeletions(
       spec.allowedTestDeletions,
       "/allowedTestDeletions"
@@ -38085,6 +38126,34 @@ import { constants as constants7 } from "node:fs";
 import { link as link4, lstat as lstat8, open as open8, readFile as readFile4, rm as rm8 } from "node:fs/promises";
 import path17 from "node:path";
 
+// src/util/glob.ts
+function escapeRegex2(character) {
+  return /[\\^$.*+?()[\]{}|]/.test(character) ? `\\${character}` : character;
+}
+function globMatches(pattern, candidate, caseInsensitive = false) {
+  let expression = "^";
+  for (let index = 0; index < pattern.length; index += 1) {
+    const character = pattern[index];
+    if (character === void 0) break;
+    if (character !== "*") {
+      expression += escapeRegex2(character);
+      continue;
+    }
+    if (pattern[index + 1] !== "*") {
+      expression += "[^/]*";
+      continue;
+    }
+    index += 1;
+    if (pattern[index + 1] === "/") {
+      expression += "(?:.*/)?";
+      index += 1;
+    } else {
+      expression += ".*";
+    }
+  }
+  return new RegExp(`${expression}$`, caseInsensitive ? "i" : void 0).test(candidate);
+}
+
 // src/git/worktree-manager.ts
 import { mkdir as mkdir3, realpath as realpath3, rm as rm3 } from "node:fs/promises";
 import path9 from "node:path";
@@ -38675,34 +38744,6 @@ async function projectVerify(args) {
       );
     }
   }
-}
-
-// src/util/glob.ts
-function escapeRegex2(character) {
-  return /[\\^$.*+?()[\]{}|]/.test(character) ? `\\${character}` : character;
-}
-function globMatches(pattern, candidate, caseInsensitive = false) {
-  let expression = "^";
-  for (let index = 0; index < pattern.length; index += 1) {
-    const character = pattern[index];
-    if (character === void 0) break;
-    if (character !== "*") {
-      expression += escapeRegex2(character);
-      continue;
-    }
-    if (pattern[index + 1] !== "*") {
-      expression += "[^/]*";
-      continue;
-    }
-    index += 1;
-    if (pattern[index + 1] === "/") {
-      expression += "(?:.*/)?";
-      index += 1;
-    } else {
-      expression += ".*";
-    }
-  }
-  return new RegExp(`${expression}$`, caseInsensitive ? "i" : void 0).test(candidate);
 }
 
 // src/verify/structural-verifier.ts
@@ -42118,7 +42159,7 @@ var WorkflowBranchManager = class {
       handle = await open7(ownershipPath, constants6.O_RDONLY | (constants6.O_NOFOLLOW ?? 0));
       const metadata = await handle.stat();
       const named = await lstat7(ownershipPath);
-      if (!metadata.isFile() || metadata.size > 32768 || !named.isFile() || named.isSymbolicLink() || named.dev !== metadata.dev || named.ino !== metadata.ino) return null;
+      if (!metadata.isFile() || metadata.nlink !== 1 || metadata.size > 32768 || !named.isFile() || named.isSymbolicLink() || named.dev !== metadata.dev || named.ino !== metadata.ino) return null;
       const parsed = JSON.parse(await handle.readFile("utf8"));
       return parseRegistration2(parsed, workflowId);
     } catch (error51) {
@@ -42422,6 +42463,12 @@ var WorkflowBranchManager = class {
           [operationError, releaseError],
           "workflow branch creation failed and checkout lock release failed"
         );
+      } else {
+        logger.warn("checkout lock release failed after workflow branch creation", {
+          event: "checkout-lock-release-failed",
+          workflowId: completedIdentity.workflowId,
+          reason: redact(String(releaseError))
+        });
       }
     }
     if (operationError !== void 0) throw operationError;
@@ -43063,34 +43110,9 @@ async function withHeadRevalidation(request) {
 function uniqueSorted(values) {
   return [...new Set(values)].sort();
 }
-function escapeGlobRegex(character) {
-  return /[\\^$.*+?()[\]{}|]/u.test(character) ? `\\${character}` : character;
-}
-function globMatches2(pattern, candidate, caseInsensitive = false) {
-  let expression = "^";
-  for (let index = 0; index < pattern.length; index += 1) {
-    const character = pattern[index];
-    if (character !== "*") {
-      expression += escapeGlobRegex(character);
-      continue;
-    }
-    if (pattern[index + 1] !== "*") {
-      expression += "[^/]*";
-      continue;
-    }
-    index += 1;
-    if (pattern[index + 1] === "/") {
-      expression += "(?:.*/)?";
-      index += 1;
-    } else {
-      expression += ".*";
-    }
-  }
-  return new RegExp(`${expression}$`, caseInsensitive ? "iu" : "u").test(candidate);
-}
 function finalPathAllowed(pathname, writeAllowlist, forbiddenScope, opaqueDirectory) {
   const candidates = opaqueDirectory ? [pathname, `${pathname}/`] : [pathname];
-  return writeAllowlist.some((pattern) => candidates.some((candidate) => globMatches2(pattern, candidate))) && !forbiddenScope.some((pattern) => candidates.some((candidate) => globMatches2(pattern, candidate, true)));
+  return writeAllowlist.some((pattern) => candidates.some((candidate) => globMatches(pattern, candidate))) && !forbiddenScope.some((pattern) => candidates.some((candidate) => globMatches(pattern, candidate, true)));
 }
 async function structuralVerifyFinalBranch(args, runGit = git) {
   const failures = /* @__PURE__ */ new Set();
@@ -45088,19 +45110,6 @@ function rejected(classification) {
 function commitMessageHash(message) {
   return createHash12("sha256").update(message, "utf8").digest("hex");
 }
-function statusMatchesArtifact2(output, changedPaths) {
-  const records = output.split("\0");
-  if (records.at(-1) === "") records.pop();
-  if (records.length !== changedPaths.length) return false;
-  const actual = /* @__PURE__ */ new Map();
-  for (const record2 of records) {
-    if (record2.length < 4 || record2[1] !== " " || record2[2] !== " ") return false;
-    const pathname = record2.slice(3);
-    if (actual.has(pathname)) return false;
-    actual.set(pathname, record2[0]);
-  }
-  return changedPaths.every((change) => actual.get(change.path) === (change.changeType === "added" ? "A" : change.changeType === "deleted" ? "D" : "M"));
-}
 function workflowStillAuthorizes(workflow, request, taskId, eligibilityHash, expectedWorkflowRef, expectedRepositoryIdentity) {
   const task = workflow.tasks[workflow.currentTaskIndex];
   return workflow.phase === "promoting-task" && workflow.workflowId === request.workflowId && workflow.worktreePath === request.workflowCheckoutPath && workflow.workflowRef === expectedWorkflowRef && workflow.repositoryIdentity === expectedRepositoryIdentity && task?.id === taskId && task.runId === request.runId && task.candidateManifestHash === request.expectedArtifactHash && task.eligibilityHash === eligibilityHash;
@@ -45116,10 +45125,36 @@ function completionCommit(value) {
   const commitOid = value.commitOid;
   return typeof commitOid === "string" && OBJECT_ID3.test(commitOid) ? commitOid : null;
 }
+var PROMOTION_CLASSIFICATIONS = /* @__PURE__ */ new Set([
+  "invalid-request",
+  "invalid-commit-message",
+  "workflow-state-mismatch",
+  "run-evidence-missing",
+  "eligibility-missing",
+  "eligibility-red",
+  "eligibility-stale",
+  "artifact-hash-mismatch",
+  "evidence-mismatch",
+  "decision-conflict",
+  "branch-identity-changed",
+  "dirty-worktree",
+  "head-changed",
+  "apply-conflict",
+  "git-identity-missing",
+  "commit-creation-failed",
+  "commit-proof-failed",
+  "update-ref-race",
+  "post-commit-divergence",
+  "journal-failed",
+  "anchor-deletion-failed",
+  "lock-release-failed",
+  "human-decision-required"
+]);
 function completionFailure(value) {
   if (value === null || typeof value !== "object" || Array.isArray(value)) return null;
   const classification = value.classification;
-  return typeof classification === "string" ? classification : null;
+  if (typeof classification !== "string") return null;
+  return PROMOTION_CLASSIFICATIONS.has(classification) ? classification : "journal-failed";
 }
 var CandidatePromoter = class {
   runGit;
@@ -45139,12 +45174,17 @@ var CandidatePromoter = class {
     this.now = dependencies.now ?? (() => (/* @__PURE__ */ new Date()).toISOString());
   }
   async proveCommit(checkout, commitOid, treeOid, parentOid, message) {
-    const [tree, parent, body] = await Promise.all([
+    const [tree, parents, body] = await Promise.all([
       this.runGit(checkout, ["rev-parse", "--verify", `${commitOid}^{tree}`]),
-      this.runGit(checkout, ["rev-parse", "--verify", `${commitOid}^`]),
+      // `${commitOid}^` resolves the FIRST parent only, so a merge commit whose
+      // first parent is the expected head and whose tree and message match would
+      // otherwise be accepted as the promotion commit on the recovery paths.
+      // Pin the parent count instead of trusting the first-parent walk.
+      this.runGit(checkout, ["rev-list", "--parents", "-n", "1", commitOid]),
       this.runGit(checkout, ["log", "-1", "--format=%B", commitOid])
     ]);
-    return succeeded5(tree) && tree.stdout.trim() === treeOid && succeeded5(parent) && parent.stdout.trim() === parentOid && succeeded5(body) && body.stdout.trimEnd() === message;
+    const lineage = succeeded5(parents) ? parents.stdout.trim().split(/\s+/u) : [];
+    return succeeded5(tree) && tree.stdout.trim() === treeOid && lineage.length === 2 && lineage[0] === commitOid && lineage[1] === parentOid && succeeded5(body) && body.stdout.trimEnd() === message;
   }
   async deleteAnchor(checkout, artifact) {
     const current = await this.runGit(checkout, [
@@ -45199,7 +45239,7 @@ var CandidatePromoter = class {
         "--no-renames"
       ])
     ]);
-    return succeeded5(head) && head.stdout.trim() === artifact.baseCommitOid && succeeded5(branch) && branch.stdout.trim() === identity.branchRef && succeeded5(index) && index.stdout.trim() === artifact.candidateTreeOid && succeeded5(diff) && succeeded5(status) && statusMatchesArtifact2(status.stdout, artifact.changedPaths);
+    return succeeded5(head) && head.stdout.trim() === artifact.baseCommitOid && succeeded5(branch) && branch.stdout.trim() === identity.branchRef && succeeded5(index) && index.stdout.trim() === artifact.candidateTreeOid && succeeded5(diff) && succeeded5(status) && statusMatchesArtifact(status.stdout, artifact.changedPaths);
   }
   async ensureAcceptedDecision(artifactStore, runId, artifact, eligibility, eligibilityHash) {
     try {

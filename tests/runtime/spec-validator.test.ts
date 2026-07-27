@@ -61,6 +61,25 @@ describe("validateSpec", () => {
     const { forbiddenScope, ...noScope } = base;
     expect(validateSpec(noScope).ok).toBe(false);
   });
+  // Scope globs are compiled to regular expressions inside the gate that proves
+  // where a Producer may write, so a caller-supplied pattern chaining many `**`
+  // segments backtracks superlinearly. Bounded at the boundary, before compile.
+  it("rejects a scope pattern with too many '**' segments", () => {
+    const r = validateSpec({ ...base, writeAllowlist: [`${"**/".repeat(9)}x`] });
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.errors.some(e => e.path === "/writeAllowlist/0")).toBe(true);
+  });
+
+  it("rejects an over-long scope pattern", () => {
+    const r = validateSpec({ ...base, forbiddenScope: [`${"a".repeat(513)}`] });
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.errors.some(e => e.path === "/forbiddenScope/0")).toBe(true);
+  });
+
+  it("accepts scope patterns at the bound", () => {
+    expect(validateSpec({ ...base, writeAllowlist: [`${"**/".repeat(8)}x`] }).ok).toBe(true);
+  });
+
   it("rejects empty writeAllowlist", () => {
     const r = validateSpec({ ...base, writeAllowlist: [] });
     expect(r.ok).toBe(false);

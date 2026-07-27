@@ -40,7 +40,9 @@ function aborted(detail: string): IntegrationResult {
   return { integration: "aborted", detail };
 }
 
-function statusMatchesArtifact(output: string, changedPaths: ChangedPath[]): boolean {
+// Single implementation: the promoter gates on this same predicate, and two
+// copies of a status parser that authorizes promotion would silently drift.
+export function statusMatchesArtifact(output: string, changedPaths: ChangedPath[]): boolean {
   const records = output.split("\0");
   if (records.at(-1) === "") records.pop();
   if (records.length !== changedPaths.length) return false;

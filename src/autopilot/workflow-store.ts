@@ -1239,6 +1239,7 @@ export class WorkflowStore {
     await assertDirectoryIdentity(this.workflowDirectory, directory);
     let ownerHandle: FileHandle | undefined;
     let lockIdentity: WriterLockIdentity | undefined;
+    let operationError: unknown;
     try {
       for (let attempt = 0; attempt < 4; attempt += 1) {
         const token = randomUUID();
@@ -1310,12 +1311,26 @@ export class WorkflowStore {
       await assertDirectoryIdentity(this.workflowDirectory, directory);
       await this.recoverAbandonedStateFiles(directory);
       return await operation();
+    } catch (error) {
+      operationError = error;
+      throw error;
     } finally {
-      await ownerHandle?.close();
-      if (lockIdentity !== undefined) {
-        await this.retireWriterLock(lockIdentity, directory);
-        await rm(lockIdentity.ownerPath, { force: true });
-        await syncDirectory(this.workflowDirectory);
+      // A cleanup failure must stay visible without erasing the primary
+      // outcome: callers classify on the surfaced error, so replacing a real
+      // pipeline failure with an unrelated filesystem error misreports the run.
+      try {
+        await ownerHandle?.close();
+        if (lockIdentity !== undefined) {
+          await this.retireWriterLock(lockIdentity, directory);
+          await rm(lockIdentity.ownerPath, { force: true });
+          await syncDirectory(this.workflowDirectory);
+        }
+      } catch (cleanupError) {
+        if (operationError === undefined) throw cleanupError;
+        throw new AggregateError(
+          [operationError, cleanupError],
+          "workflow state operation failed and lock retirement failed",
+        );
       }
     }
   }

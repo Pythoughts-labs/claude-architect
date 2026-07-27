@@ -54,6 +54,7 @@ function fixture(options: {
   workflowDrift?: boolean;
   repositoryIdentityDrift?: boolean;
   missingBranchIdentity?: boolean;
+  mergeCommitParents?: boolean;
 } = {}) {
   const events: string[] = [];
   const artifact = {
@@ -207,6 +208,13 @@ function fixture(options: {
     }
     if (args[0] === "rev-parse" && args[2]?.endsWith("^{tree}")) return ok(`${treeOid}\n`);
     if (args[0] === "rev-parse" && args[2]?.endsWith("^")) return ok(`${baseOid}\n`);
+    if (args[0] === "rev-list" && args[1] === "--parents") {
+      // A real single-parent commit prints "<commit> <parent>"; the merge case
+      // prints a second parent, which promotion must refuse.
+      return ok(options.mergeCommitParents
+        ? `${args.at(-1)} ${baseOid} ${treeOid}\n`
+        : `${args.at(-1)} ${baseOid}\n`);
+    }
     if (args[0] === "log") return ok(`${message}\n`);
     if (args[0] === "write-tree") return ok(`${indexTree}\n`);
     if (args[0] === "symbolic-ref") return ok(`${workflowRef}\n`);
@@ -309,6 +317,17 @@ describe("CandidatePromoter", () => {
     expect(f.events).toEqual(["journal-complete", "anchor-delete"]);
     expect(f.artifactStore.writeAutopilotDecision).toHaveBeenCalledOnce();
     expect(f.stageCandidate).toHaveBeenCalledOnce();
+  });
+
+  // `<commit>^` walks the FIRST parent only, so a merge whose first parent is
+  // the expected head, whose tree matches, and whose message matches would pass
+  // a first-parent check. Promotion must pin the parent count instead.
+  it("refuses a promotion commit that has more than one parent", async () => {
+    const f = fixture({ mergeCommitParents: true });
+
+    await expect(f.promoter.promote(f.request)).resolves.toEqual({
+      status: "rejected", classification: "commit-proof-failed",
+    });
   });
 
   it("recovers an intent whose durable append crashed before promotion began", async () => {

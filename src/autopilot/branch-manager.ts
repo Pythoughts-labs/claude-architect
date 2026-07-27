@@ -6,6 +6,8 @@ import type { CheckoutLock, PlatformServices } from "../platform/platform-servic
 import { getPlatformServices } from "../platform/select-platform.js";
 import { resolveStateDir } from "../runtime/state-dir.js";
 import { RuntimeError } from "../util/errors.js";
+import { logger } from "../util/logger.js";
+import { redact } from "../runtime/redaction.js";
 import { git, type GitResult } from "../git/git-exec.js";
 import { checkInProgressOperation } from "../git/repo-preconditions.js";
 import { WorktreeManager } from "../git/worktree-manager.js";
@@ -411,6 +413,7 @@ export class WorkflowBranchManager {
       const metadata = await handle.stat();
       const named = await lstat(ownershipPath);
       if (!metadata.isFile()
+        || metadata.nlink !== 1
         || metadata.size > 32_768
         || !named.isFile()
         || named.isSymbolicLink()
@@ -728,6 +731,15 @@ export class WorkflowBranchManager {
             [operationError, releaseError],
             "workflow branch creation failed and checkout lock release failed",
           );
+      } else {
+        // The branch was created, so the primary outcome stands — but the
+        // checkout lease may still be held, which blocks every later operation
+        // on this repository. Surface it rather than dropping it on the floor.
+        logger.warn("checkout lock release failed after workflow branch creation", {
+          event: "checkout-lock-release-failed",
+          workflowId: completedIdentity.workflowId,
+          reason: redact(String(releaseError)),
+        });
       }
     }
     if (operationError !== undefined) throw operationError;
