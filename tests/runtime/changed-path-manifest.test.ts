@@ -5,10 +5,12 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import {
   computeChangedPathManifest,
+  manifestHashOf,
   parseRawDiff,
   splitNul,
   type RawDiffEntry,
 } from "../../src/git/changed-path-manifest.js";
+import type { ChangedPath } from "../../src/protocol/attempt-result.js";
 
 // Golden hashes are pinned literals (computed independently) so any change to the
 // canonical serialization — key order, JSON encoding, or hash algorithm — fails
@@ -150,6 +152,53 @@ describe("computeChangedPathManifest", () => {
     ]);
   });
 
+  it("rejects changed paths that collide under Unicode-aware case folding", () => {
+    expect(() => computeChangedPathManifest({
+      rawDiff: raw([
+        { path: "Case.txt", oldMode: "000000", newMode: "100644" },
+        { path: "case.txt", oldMode: "000000", newMode: "100644" },
+      ]),
+      nameStatusOutput: nameStatusZ([
+        { status: "A", path: "Case.txt" },
+        { status: "A", path: "case.txt" },
+      ]),
+      treeOutput: treeZ([
+        { mode: "100644", oid: OID_1, path: "Case.txt" },
+        { mode: "100644", oid: OID_2, path: "case.txt" },
+      ]),
+    })).toThrow("changed paths collide under case folding");
+  });
+
+  it("does not conflate Unicode-distinct paths or an exact repeated path", () => {
+    const unicode = computeChangedPathManifest({
+      rawDiff: raw([
+        { path: "é.txt", oldMode: "000000", newMode: "100644" },
+        { path: "e\u0301.txt", oldMode: "000000", newMode: "100644" },
+      ]),
+      nameStatusOutput: nameStatusZ([
+        { status: "A", path: "é.txt" },
+        { status: "A", path: "e\u0301.txt" },
+      ]),
+      treeOutput: treeZ([
+        { mode: "100644", oid: OID_1, path: "é.txt" },
+        { mode: "100644", oid: OID_2, path: "e\u0301.txt" },
+      ]),
+    });
+    const repeated = computeChangedPathManifest({
+      rawDiff: raw([{ path: "same.txt", oldMode: "000000", newMode: "100644" }]),
+      nameStatusOutput: nameStatusZ([
+        { status: "A", path: "same.txt" },
+        { status: "A", path: "same.txt" },
+      ]),
+      treeOutput: treeZ([{ mode: "100644", oid: OID_1, path: "same.txt" }]),
+    });
+
+    expect(unicode.changedPaths.map(change => change.path).sort()).toEqual([
+      "e\u0301.txt", "é.txt",
+    ]);
+    expect(repeated.changedPaths).toHaveLength(2);
+  });
+
   describe("fails closed on malformed or inconsistent git output", () => {
     it("odd name-status field count", () => {
       expect(() => computeChangedPathManifest({ rawDiff: [], nameStatusOutput: zStream(["A"]), treeOutput: "" }))
@@ -176,6 +225,50 @@ describe("computeChangedPathManifest", () => {
         treeOutput: treeZ([]),
       })).toThrow("git diff-tree outputs disagree");
     });
+  });
+});
+
+describe("manifestHashOf", () => {
+  it("preserves the canonical hash after persisted entries reorder their object keys", () => {
+    const canonical: ChangedPath[] = [{
+      path: "a.txt",
+      changeType: "modified",
+      mode: "100644",
+      contentHash: OID_1,
+    }];
+    const alphabetized: ChangedPath[] = [{
+      changeType: "modified",
+      contentHash: OID_1,
+      mode: "100644",
+      path: "a.txt",
+    }];
+
+    expect(manifestHashOf(canonical)).toBe(GOLDEN1_HASH);
+    expect(manifestHashOf(alphabetized)).toBe(GOLDEN1_HASH);
+  });
+
+  it("rejects case-colliding entries reloaded from persisted bytes", () => {
+    const reloaded = JSON.parse(JSON.stringify([
+      { path: "Foo.txt", changeType: "added", mode: "100644", contentHash: OID_1 },
+      { path: "foo.txt", changeType: "added", mode: "100644", contentHash: OID_2 },
+    ])) as ChangedPath[];
+
+    expect(() => manifestHashOf(reloaded)).toThrow("changed paths collide under case folding");
+  });
+
+  it.each([
+    ["backslash alias", ["a\\b", "a/b"]],
+    ["backslash case variant", ["A\\B", "a/b"]],
+  ])("rejects a %s instead of normalizing it", (_label, paths) => {
+    const changedPaths = paths.map((changedPath, index): ChangedPath => ({
+      path: changedPath,
+      changeType: "added",
+      mode: "100644",
+      contentHash: index === 0 ? OID_1 : OID_2,
+    }));
+
+    expect(() => manifestHashOf(changedPaths))
+      .toThrow("changed path is not forward-slash normalized");
   });
 });
 

@@ -64,11 +64,33 @@ export interface AutopilotDecisionEligibilityV1 {
   policyVersion: "1";
 }
 
+/**
+ * Authorities a legacy (pre-V2) archive can carry once its provenance is read.
+ *
+ * `unknown` is the honest reading of a record written before provenance was
+ * tracked at all: the bytes say a decision happened and say nothing about who
+ * made it. It is deliberately distinct from `caller-asserted`, which records
+ * that a caller supplied the decision and the runtime never confirmed a person
+ * made it. Neither appears in {@link INTEGRABLE_DECISION_AUTHORITIES}, so both
+ * are refused at integration — but an audit can still tell "we never asked"
+ * apart from "an agent asserted it".
+ */
+export type LegacyDecisionAuthority =
+  | "human"
+  | "policy-autonomous"
+  | "caller-asserted"
+  | "unknown";
+
 export interface LegacyCandidateDecisionV1 {
   decisionVersion: "1";
   decision: CandidateDecisionValue;
-  authority: "human";
+  authority: LegacyDecisionAuthority;
   recordedAt: string;
+  /**
+   * Present on records written by 0.39.0+, which bound a decision to the exact
+   * candidate it was made about. Absent on older records.
+   */
+  candidateManifestHash?: string | null;
 }
 
 export type CandidateDecision = CandidateDecisionV2 | LegacyCandidateDecisionV1;

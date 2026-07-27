@@ -15,6 +15,15 @@ export interface ApplyCandidateTreeArgs {
   platformServices?: PlatformServices;
 }
 
+export interface StageCandidateTreeUnderLockArgs {
+  repoRoot: string;
+  artifact: CandidateArtifact;
+  expectedArtifactHash: string;
+  /** Caller-owned lease that remains held for the entire staging operation. */
+  borrowedCheckoutLock: CheckoutLock;
+  platformServices?: PlatformServices;
+}
+
 export interface IntegrationResult {
   integration: "applied" | "conflicted" | "aborted";
   detail: string;
@@ -47,13 +56,117 @@ function statusMatchesArtifact(output: string, changedPaths: ChangedPath[]): boo
   ));
 }
 
-export async function applyCandidateTree(args: ApplyCandidateTreeArgs): Promise<IntegrationResult> {
+interface LockedStagingResult {
+  result: IntegrationResult;
+  canonicalRepoRoot: string;
+}
+
+async function stageCandidateTreeWithLock(
+  args: StageCandidateTreeUnderLockArgs,
+  ownership: "borrowed" | "owned",
+): Promise<LockedStagingResult> {
   const ps = args.platformServices ?? getPlatformServices();
   const canonicalPath = await ps.canonicalizePath(args.repoRoot);
-  const { canonical } = canonicalPath;
-  const repositoryIdentity = canonicalPath.gitCommonDir ?? canonicalPath.canonical;
+  const canonical = canonicalPath.canonical;
+  const repositoryIdentity = canonicalPath.gitCommonDir ?? canonical;
+  if (args.borrowedCheckoutLock.repositoryIdentity !== repositoryIdentity) {
+    throw new RuntimeError(`${ownership} checkout lease repository identity mismatch`);
+  }
+  const complete = (result: IntegrationResult): LockedStagingResult => ({
+    result,
+    canonicalRepoRoot: canonical,
+  });
+  const preconditions = await checkPreconditions(canonical);
+  if (!preconditions.ok) return complete(aborted(`precondition-failed:${preconditions.reason}`));
+  if (preconditions.baseCommitOid !== args.artifact.baseCommitOid) {
+    return complete(aborted("base-changed"));
+  }
+  if (args.artifact.manifestHash !== args.expectedArtifactHash) {
+    return complete(aborted("artifact-hash-mismatch"));
+  }
+  if (!CANDIDATE_REF.test(args.artifact.anchorRef)
+    || !OBJECT_ID.test(args.artifact.candidateCommitOid)
+    || !OBJECT_ID.test(args.artifact.candidateTreeOid)) {
+    return complete(aborted("invalid-candidate-identity"));
+  }
+  const anchor = await git(canonical, [
+    "rev-parse",
+    "--verify",
+    "--quiet",
+    `${args.artifact.anchorRef}^{commit}`,
+  ]);
+  if (!succeeded(anchor) || anchor.stdout.trim() !== args.artifact.candidateCommitOid) {
+    return complete(aborted("candidate-anchor-mismatch"));
+  }
+  const candidateTree = await git(canonical, [
+    "rev-parse",
+    "--verify",
+    `${args.artifact.candidateCommitOid}^{tree}`,
+  ]);
+  if (!succeeded(candidateTree) || candidateTree.stdout.trim() !== args.artifact.candidateTreeOid) {
+    return complete(aborted("candidate-tree-mismatch"));
+  }
+  const identity = await structuralVerify({
+    repoRoot: canonical,
+    worktreePath: canonical,
+    baseCommitOid: args.artifact.baseCommitOid,
+    artifact: args.artifact,
+    writeAllowlist: ["**"],
+    forbiddenScope: [],
+  });
+  if (!identity.ok) {
+    return complete(aborted("artifact-identity-mismatch"));
+  }
+
+  const refreshed = await git(canonical, ["update-index", "-q", "--refresh"]);
+  if (!succeeded(refreshed)) {
+    return complete({ integration: "conflicted", detail: "index-refresh-failed" });
+  }
+  const applied = await git(canonical, [
+    "read-tree",
+    "-m",
+    "-u",
+    args.artifact.baseCommitOid,
+    args.artifact.candidateTreeOid,
+  ]);
+  if (!succeeded(applied)) {
+    return complete({ integration: "conflicted", detail: "candidate-apply-conflict" });
+  }
+
+  const stagedTree = await git(canonical, ["write-tree"]);
+  const worktreeDiff = await git(canonical, ["diff", "--quiet", "--no-ext-diff"]);
+  const head = await git(canonical, ["rev-parse", "--verify", "HEAD"]);
+  const status = await git(canonical, [
+    "status",
+    "--porcelain=v1",
+    "-z",
+    "--untracked-files=all",
+    "--ignore-submodules=none",
+    "--no-renames",
+  ]);
+  if (!succeeded(stagedTree)
+    || stagedTree.stdout.trim() !== args.artifact.candidateTreeOid
+    || !succeeded(worktreeDiff)
+    || !succeeded(head)
+    || head.stdout.trim() !== args.artifact.baseCommitOid
+    || !succeeded(status)
+    || !statusMatchesArtifact(status.stdout, args.artifact.changedPaths)) {
+    return complete({ integration: "conflicted", detail: "post-apply-divergence" });
+  }
+
+  return complete({ integration: "applied", detail: "candidate tree applied" });
+}
+
+export async function stageCandidateTreeUnderLock(
+  args: StageCandidateTreeUnderLockArgs,
+): Promise<IntegrationResult> {
+  return (await stageCandidateTreeWithLock(args, "borrowed")).result;
+}
+
+export async function applyCandidateTree(args: ApplyCandidateTreeArgs): Promise<IntegrationResult> {
+  const ps = args.platformServices ?? getPlatformServices();
   let ownedLock: CheckoutLock | null = null;
-  const lock = args.borrowedCheckoutLock ?? await ps.acquireCheckoutLock(canonical);
+  const lock = args.borrowedCheckoutLock ?? await ps.acquireCheckoutLock(args.repoRoot);
   if (args.borrowedCheckoutLock === undefined) ownedLock = lock;
   const terminal: { result: IntegrationResult | null } = { result: null };
   const finish = (result: IntegrationResult): IntegrationResult => {
@@ -61,89 +174,16 @@ export async function applyCandidateTree(args: ApplyCandidateTreeArgs): Promise<
     return result;
   };
   try {
-    if (lock.repositoryIdentity !== repositoryIdentity) {
-      const ownership = ownedLock === null ? "borrowed" : "owned";
-      throw new RuntimeError(`${ownership} checkout lease repository identity mismatch`);
-    }
-    const preconditions = await checkPreconditions(canonical);
-    if (!preconditions.ok) return finish(aborted(`precondition-failed:${preconditions.reason}`));
-    if (preconditions.baseCommitOid !== args.artifact.baseCommitOid) {
-      return finish(aborted("base-changed"));
-    }
-    if (args.artifact.manifestHash !== args.expectedArtifactHash) {
-      return finish(aborted("artifact-hash-mismatch"));
-    }
-    if (!CANDIDATE_REF.test(args.artifact.anchorRef)
-      || !OBJECT_ID.test(args.artifact.candidateCommitOid)
-      || !OBJECT_ID.test(args.artifact.candidateTreeOid)) {
-      return finish(aborted("invalid-candidate-identity"));
-    }
-    const anchor = await git(canonical, [
-      "rev-parse",
-      "--verify",
-      "--quiet",
-      `${args.artifact.anchorRef}^{commit}`,
-    ]);
-    if (!succeeded(anchor) || anchor.stdout.trim() !== args.artifact.candidateCommitOid) {
-      return finish(aborted("candidate-anchor-mismatch"));
-    }
-    const candidateTree = await git(canonical, [
-      "rev-parse",
-      "--verify",
-      `${args.artifact.candidateCommitOid}^{tree}`,
-    ]);
-    if (!succeeded(candidateTree) || candidateTree.stdout.trim() !== args.artifact.candidateTreeOid) {
-      return finish(aborted("candidate-tree-mismatch"));
-    }
-    const identity = await structuralVerify({
-      repoRoot: canonical,
-      worktreePath: canonical,
-      baseCommitOid: args.artifact.baseCommitOid,
+    const staged = await stageCandidateTreeWithLock({
+      repoRoot: args.repoRoot,
       artifact: args.artifact,
-      writeAllowlist: ["**"],
-      forbiddenScope: [],
-    });
-    if (!identity.ok) {
-      return finish(aborted("artifact-identity-mismatch"));
-    }
+      expectedArtifactHash: args.expectedArtifactHash,
+      borrowedCheckoutLock: lock,
+      platformServices: ps,
+    }, ownedLock === null ? "borrowed" : "owned");
+    if (staged.result.integration !== "applied") return finish(staged.result);
 
-    const refreshed = await git(canonical, ["update-index", "-q", "--refresh"]);
-    if (!succeeded(refreshed)) {
-      return finish({ integration: "conflicted", detail: "index-refresh-failed" });
-    }
-    const applied = await git(canonical, [
-      "read-tree",
-      "-m",
-      "-u",
-      args.artifact.baseCommitOid,
-      args.artifact.candidateTreeOid,
-    ]);
-    if (!succeeded(applied)) {
-      return finish({ integration: "conflicted", detail: "candidate-apply-conflict" });
-    }
-
-    const stagedTree = await git(canonical, ["write-tree"]);
-    const worktreeDiff = await git(canonical, ["diff", "--quiet", "--no-ext-diff"]);
-    const head = await git(canonical, ["rev-parse", "--verify", "HEAD"]);
-    const status = await git(canonical, [
-      "status",
-      "--porcelain=v1",
-      "-z",
-      "--untracked-files=all",
-      "--ignore-submodules=none",
-      "--no-renames",
-    ]);
-    if (!succeeded(stagedTree)
-      || stagedTree.stdout.trim() !== args.artifact.candidateTreeOid
-      || !succeeded(worktreeDiff)
-      || !succeeded(head)
-      || head.stdout.trim() !== args.artifact.baseCommitOid
-      || !succeeded(status)
-      || !statusMatchesArtifact(status.stdout, args.artifact.changedPaths)) {
-      return finish({ integration: "conflicted", detail: "post-apply-divergence" });
-    }
-
-    const deleted = await git(canonical, [
+    const deleted = await git(staged.canonicalRepoRoot, [
       "update-ref",
       "--no-deref",
       "-d",

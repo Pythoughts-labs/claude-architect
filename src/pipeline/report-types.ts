@@ -63,3 +63,15 @@ export interface VerificationReport {
   testsSkipped: number;
   scopeViolations: string[];
 }
+
+export interface AdvisorReport {
+  reportVersion: "1";
+  verdict: "approve" | "human-decision-required";
+  rationale: string;
+  risks: Array<{
+    severity: "blocker" | "major" | "minor" | "nit";
+    claim: string;
+    evidence: string;
+  }>;
+  coverageGaps: string[];
+}
