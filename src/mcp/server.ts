@@ -382,6 +382,9 @@ export async function createServer(
       description: "Validate a Delegation Spec and run one verified attempt.",
       inputSchema: delegateInputSchema,
       outputSchema: delegateOutput,
+      // Runs an untrusted Producer in a worktree and freezes a candidate; not a
+      // probe a client may retry freely.
+      annotations: { destructiveHint: true, idempotentHint: false, readOnlyHint: false },
     },
     async ({ checkoutPath, spec, protocolVersion, responseMode, expectedSpecSha256 }, extra) => {
       const progressToken = extra._meta?.progressToken;
@@ -431,6 +434,8 @@ export async function createServer(
       description: "Validate a Delegation Spec and run the full implement/review/fix pipeline.",
       inputSchema: delegatePipelineInputSchema,
       outputSchema: delegatePipelineOutput,
+      // Runs Producers across implement/review/fix rounds.
+      annotations: { destructiveHint: true, idempotentHint: false, readOnlyHint: false },
     },
     async ({ checkoutPath, spec, protocolVersion, responseMode, expectedSpecSha256 }, extra) => {
       const progressToken = extra._meta?.progressToken;
@@ -480,6 +485,9 @@ export async function createServer(
       description: "Validate an Autopilot Spec and run its verified workflow.",
       inputSchema: autopilotStartInputSchema,
       outputSchema: autopilotOutput,
+      // The most consequential tool on the surface: runs Producers, creates
+      // branches and worktrees, promotes commits, pushes, and opens a PR.
+      annotations: { destructiveHint: true, idempotentHint: false, readOnlyHint: false },
     },
     async ({ checkoutPath, spec, protocolVersion }, extra) => {
       const progressToken = extra._meta?.progressToken;
@@ -538,6 +546,8 @@ export async function createServer(
       description: "Resume a recoverable autopilot workflow from durable state.",
       inputSchema: autopilotWorkflowInputSchema,
       outputSchema: autopilotOutput,
+      // Continues the same shipping workflow from durable state.
+      annotations: { destructiveHint: true, idempotentHint: false, readOnlyHint: false },
     },
     async ({ checkoutPath, workflowId, protocolVersion }, extra) => {
       const progressToken = extra._meta?.progressToken;

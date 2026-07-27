@@ -19,6 +19,8 @@ import {
 } from "../autopilot/branch-manager.js";
 import type { AutopilotWorkflowState } from "../autopilot/types.js";
 import {
+  SAFE_WORKFLOW_ID,
+  TERMINAL_PHASES,
   WorkflowStore,
   type WorkflowIntentJournal,
   type WorkflowOwnerRecord,
@@ -2051,13 +2053,8 @@ async function lockIsOwnedByLiveProcess(
   return await lockOwnerStatus(owner, isProcessAlive, getProcessStartToken) !== "dead";
 }
 
-const WORKFLOW_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u;
-const TERMINAL_WORKFLOW_PHASES = new Set([
-  "ready-for-human-review",
-  "human-decision-required",
-  "failed",
-  "cancelled",
-]);
+
+
 
 type OwnerObservation =
   | { presence: "absent" }
@@ -2157,7 +2154,7 @@ function isWorkflowBranchIdentity(value: unknown): value is WorkflowBranchIdenti
   const identity = value as Partial<WorkflowBranchIdentity>;
   return identity.ownershipVersion === "1"
     && typeof identity.workflowId === "string"
-    && WORKFLOW_ID.test(identity.workflowId)
+    && SAFE_WORKFLOW_ID.test(identity.workflowId)
     && typeof identity.checkoutPath === "string"
     && typeof identity.gitCommonDir === "string"
     && typeof identity.repositoryIdentity === "string"
@@ -2404,7 +2401,7 @@ async function workflowIds(root: string): Promise<string[]> {
     ? []
     : await readdir(workflowsRoot, { withFileTypes: true });
   for (const entry of workflowEntries) {
-    if (entry.isDirectory() && !entry.isSymbolicLink() && WORKFLOW_ID.test(entry.name)) {
+    if (entry.isDirectory() && !entry.isSymbolicLink() && SAFE_WORKFLOW_ID.test(entry.name)) {
       ids.add(entry.name);
     }
   }
@@ -2429,7 +2426,7 @@ async function workflowIds(root: string): Promise<string[]> {
     if (typeof value !== "object" || value === null || Array.isArray(value)) continue;
     const workflowId = (value as { workflowId?: unknown }).workflowId;
     if (typeof workflowId === "string"
-      && WORKFLOW_ID.test(workflowId)
+      && SAFE_WORKFLOW_ID.test(workflowId)
       && entry.name === path.basename(branchOwnershipPath(root, workflowId))) {
       ids.add(workflowId);
     }
@@ -2558,7 +2555,7 @@ async function recoverAutopilotWorkflows(
       results.push({ workflowId, disposition: "human-decision-required" });
       continue;
     }
-    if (TERMINAL_WORKFLOW_PHASES.has(state.phase)) continue;
+    if (TERMINAL_PHASES.has(state.phase)) continue;
     if (lease.presence !== "present" || lease.status !== "dead"
       || branch.presence === "ambiguous"
       || branch.ownerStatus === "unverifiable") {

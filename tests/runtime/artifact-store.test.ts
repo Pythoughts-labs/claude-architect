@@ -201,6 +201,30 @@ afterEach(async () => {
 });
 
 describe("ArtifactStore", () => {
+  // A crash can leave the store's own `.{basename}.{uuid}.tmp` sibling behind.
+  // `validateComponent` rejects dot-prefixed names, so one leftover used to make
+  // every evidence walk for that run throw until it was cleaned up by hand.
+  it("walks evidence past its own crash-left temporary residue", async () => {
+    const store = new ArtifactStore("run-tmp-residue");
+    await store.writePipelineArtifact("verification", { ok: true });
+    await writeFile(
+      join(store.runDirectory, "pipeline", ".verification.json.0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0.tmp"),
+      "partial\n",
+    );
+
+    await expect(store.listEvidenceReferences()).resolves.toEqual([
+      "pipeline/verification.json",
+    ]);
+  });
+
+  it("still rejects an unexpected dot-file in the evidence tree", async () => {
+    const store = new ArtifactStore("run-dotfile");
+    await store.writePipelineArtifact("verification", { ok: true });
+    await writeFile(join(store.runDirectory, "pipeline", ".hidden"), "nope\n");
+
+    await expect(store.listEvidenceReferences()).rejects.toThrow();
+  });
+
   it("reads exact archived evidence bytes and rejects traversal or symlink escapes", async () => {
     const store = new ArtifactStore("run-final-evidence");
     await store.writePipelineArtifact("verification", { ok: true, count: 2 });

@@ -82,7 +82,7 @@ export interface WorkflowIntentJournal {
   tornTail: boolean;
 }
 
-const TERMINAL_PHASES = new Set<AutopilotPhase>([
+export const TERMINAL_PHASES = new Set<AutopilotPhase>([
   "ready-for-human-review",
   "human-decision-required",
   "failed",
@@ -362,8 +362,11 @@ async function readHandleBytes(handle: FileHandle, size: number): Promise<Buffer
   return bytes;
 }
 
+/** The single definition of a workflow id that is safe as a path component. */
+export const SAFE_WORKFLOW_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u;
+
 function assertWorkflowId(workflowId: string): void {
-  if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u.test(workflowId)) {
+  if (!SAFE_WORKFLOW_ID.test(workflowId)) {
     throw workflowError("workflow id is not a safe path component", "invalid-workflow-state");
   }
 }
