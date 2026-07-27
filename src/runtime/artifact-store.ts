@@ -73,8 +73,8 @@ export type RunDecisionValue = "accepted" | "rejected" | "revision-requested";
  * acceptance was indistinguishable from a person's, even after the fact.
  */
 /**
- * `policy-autonomous` is retained only so archives written by the unreleased
- * autonomous-decision experiment remain readable and auditable. The MCP
+ * `policy-autonomous` is retained only so archives written by the autonomous
+ * decision policy shipped in 0.39.0 remain readable and auditable. The MCP
  * lifecycle no longer writes this value, and integration rejects it (as well
  * as missing or caller-asserted provenance); every current decision requires
  * human elicitation.

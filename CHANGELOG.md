@@ -35,12 +35,13 @@ All notable changes to Claude Architect are recorded here. The format follows
 
 ### Fixed
 
-- Candidate decisions remain human-only. Independent verification proves facts
-  about frozen bytes; it does not supply acceptance authority. The public
+- Candidate decisions are human-only again after the autonomous policy shipped
+  in 0.39.0. Independent verification proves facts about frozen bytes; it does
+  not supply acceptance authority. The public
   `decideCandidate` path therefore always requires positive MCP elicitation and
   never records a clean candidate merely because it has no warnings. Legacy
-  `policy-autonomous` provenance remains readable so an archive written during
-  the unreleased experiment does not become corrupt or unauditable, but it
+  `policy-autonomous` provenance remains readable so an archive written by the
+  0.39.0 policy does not become corrupt or unauditable, but it
   cannot authorize integration; missing and caller-asserted provenance also
   fail closed with `accepted-decision-not-human-confirmed`. A later human
   confirmation no longer reports a false successful write over one of those
