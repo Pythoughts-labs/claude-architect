@@ -27569,7 +27569,7 @@ var ArtifactStore = class {
     }
   }
   async writeDecision(record2) {
-    if (!["accepted", "rejected", "revision-requested"].includes(record2.decision) || !Number.isFinite(Date.parse(record2.recordedAt)) || record2.decidedBy !== void 0 && !["human-elicitation", "caller-asserted"].includes(record2.decidedBy) || record2.candidateManifestHash !== void 0 && record2.candidateManifestHash !== null && !/^[0-9a-f]{64}$/u.test(record2.candidateManifestHash)) {
+    if (!["accepted", "rejected", "revision-requested"].includes(record2.decision) || !Number.isFinite(Date.parse(record2.recordedAt)) || record2.decidedBy !== void 0 && !["human-elicitation", "caller-asserted", "policy-autonomous"].includes(record2.decidedBy) || record2.candidateManifestHash !== void 0 && record2.candidateManifestHash !== null && !/^[0-9a-f]{64}$/u.test(record2.candidateManifestHash)) {
       throw new RuntimeError("run decision is invalid");
     }
     try {

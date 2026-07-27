@@ -31,6 +31,12 @@ All notable changes to Claude Architect are recorded here. The format follows
 
 ### Fixed
 
+- Candidate decisions remain human-only. Independent verification proves facts
+  about frozen bytes; it does not supply acceptance authority. The public
+  `decideCandidate` path therefore always requires positive MCP elicitation and
+  never records a clean candidate merely because it has no warnings. Legacy
+  `policy-autonomous` provenance remains readable so an archive written during
+  the unreleased experiment does not become corrupt or unauditable.
 - The native delegation lane fails closed when its prompt omits the complete
   Delegation Spec JSON. In a live session it received only a spec-file path,
   despite having no filesystem tool, and invented two invalid payloads before

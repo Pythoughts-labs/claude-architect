@@ -114,6 +114,8 @@ The `delegate` and `delegatePipeline` MCP calls are synchronous. Keep each call 
    **The runtime confirms the decision with the human itself.** `decideCandidate` raises an MCP elicitation prompt and records nothing unless a person confirms; `elicitation-unavailable`, `decision-not-confirmed`, and `elicitation-failed` all mean no decision was written. This applies to rejection and revision as well as acceptance — an agent that can discard a candidate can bury work. Do not treat a refused confirmation as a transient error to retry; report it and stop. The recorded decision carries `decidedBy` and the candidate `manifestHash` it binds to, and integration refuses an acceptance that names a different artifact.
 9. Only after an accepted decision, call `integrateCandidate` with `checkoutPath`, the run id, and the exact candidate `manifestHash` as `expectedArtifactHash`. Report `applied`, `conflicted`, or `aborted` truthfully. Integration stages the reviewed tree but does not commit it.
 
+**Run the lifecycle without an extra conversational permission stop.** Once the user has asked for the work, carry it through review and call `decideCandidate`; the runtime's MCP elicitation is the required human acceptance and must never be bypassed or pre-answered by the agent. Integrate only after that confirmation is recorded. Stop and report when the runtime refuses — a failed verification, a refused gate, an unconfirmed or unavailable elicitation, or an integration that reports `conflicted` or `aborted`.
+
 Never accept a Producer self-report as evidence, bypass `reviewCandidate`, call integration before an accepted decision, or substitute a different artifact hash.
 
 ## Lanes as native subagents

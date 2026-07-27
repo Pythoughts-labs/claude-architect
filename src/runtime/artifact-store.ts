@@ -72,7 +72,13 @@ export type RunDecisionValue = "accepted" | "rejected" | "revision-requested";
  * field existed, a decision record was `{decision, recordedAt}` and an agent's
  * acceptance was indistinguishable from a person's, even after the fact.
  */
-export type DecisionProvenance = "human-elicitation" | "caller-asserted";
+/**
+ * `policy-autonomous` is retained only so archives written by the unreleased
+ * autonomous-decision experiment remain readable and auditable. The MCP
+ * lifecycle no longer writes this value; every current decision requires human
+ * elicitation.
+ */
+export type DecisionProvenance = "human-elicitation" | "caller-asserted" | "policy-autonomous";
 
 export interface RunDecisionRecord {
   decision: RunDecisionValue;
@@ -875,7 +881,8 @@ export class ArtifactStore {
     if (!(["accepted", "rejected", "revision-requested"] as const).includes(record.decision)
       || !Number.isFinite(Date.parse(record.recordedAt))
       || (record.decidedBy !== undefined
-        && !(["human-elicitation", "caller-asserted"] as const).includes(record.decidedBy))
+        && !(["human-elicitation", "caller-asserted", "policy-autonomous"] as const)
+          .includes(record.decidedBy))
       || (record.candidateManifestHash !== undefined
         && record.candidateManifestHash !== null
         && !/^[0-9a-f]{64}$/u.test(record.candidateManifestHash))) {
