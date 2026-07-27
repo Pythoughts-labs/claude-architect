@@ -689,6 +689,28 @@ describe("FinalBranchReviewer cumulative artifact", () => {
     });
   });
 
+  // Only the reference COUNT was bounded. Every frozen byte is held in memory,
+  // written to one artifact file, and then serialized into three model-backed
+  // role prompts, so an unbounded total could exhaust memory and blow the
+  // Producer input budget.
+  it("fails closed when frozen task evidence exceeds the supported size", async () => {
+    const f = await fixture();
+    const oversized = new Map<string, string | null>([[
+      evidenceKey(f.evidence.runId, f.evidence.evidenceRefs[0]!),
+      "x".repeat(9 * 1024 * 1024),
+    ]]);
+    const reviewer = new FinalBranchReviewer({
+      branchManager: localBranchManager(f),
+      workflowStore: () => f.store,
+      evidenceStore: inMemoryEvidenceStore(oversized, archivedRefsForFixture(f)),
+      taskEvidenceValidator: async () => {},
+    });
+
+    await expect(freezeForFinalReview(f, reviewer)).rejects.toMatchObject({
+      classification: "missing-task-evidence",
+    });
+  });
+
   it("uses the production archive validator before trusting caller-listed evidence", async () => {
     const f = await fixture();
     const previousPluginData = process.env.CLAUDE_PLUGIN_DATA;
