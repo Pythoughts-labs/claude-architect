@@ -94,6 +94,7 @@ Dispatch a delegation through the `delegation-lane` agent to watch it as a nativ
 | Skill | `/claude-architect:delegate` | Builds a versioned spec and drives delegation, review, decision, and guarded integration. |
 | Skill | `/claude-architect:subagent-driven-delegation` | Executes a multi-task plan with the Superpowers subagent-driven-development loop, using a verified Producer as the implementer for every task. |
 | Agent | `advisor` | Current strictly read-only commitment-boundary advisor. |
+| MCP | `validateDelegationSpec` | Validates a spec without starting a Producer and returns its canonical correlation digest. |
 | MCP | `delegate` | Runs one validated, isolated, independently verified attempt. |
 | MCP | `delegatePipeline` | Runs the fresh-context implement/review/repair pipeline. |
 | MCP | `reviewCandidate` | Returns the exact frozen patch and verification evidence. |

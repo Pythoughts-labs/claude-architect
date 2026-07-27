@@ -102,15 +102,17 @@ When running multiple delegations, normalize reported blockers by phase, command
 
 The `delegate` and `delegatePipeline` MCP calls are synchronous. Keep each call in the foreground until it returns; never hand it to Monitor or background execution.
 
-1. Call `delegate` through `mcp__plugin_claude-architect_runtime__delegate` with `checkoutPath`, the candidate spec, and `protocolVersion: "1.4.0"` copied from this skill's `PROTOCOL_VERSION` marker.
-2. When it returns `ok:false` with `validationErrors`, repair only the reported spec defects and resubmit. This repair loop must not touch a Producer.
-3. When it returns a protocol/schema diagnostic, stop and tell the user to update the installed marketplace copy and reload Claude Code. Never guess across a version mismatch.
-4. When the result is `unavailable`, `failed`, or `cancelled`, report the structured classification and evidence. Do not claim a candidate exists. A report with `laneEligibility.edit=false`, or any other ineligible or unconfined Lane, fails closed with the structured diagnostic.
-5. When the result is `verified-candidate`, call `reviewCandidate` with `checkoutPath` and the run id. Read the exact unredacted patch, changed-path manifest, and verification evidence; compare them with every success criterion and repository convention.
-6. Present the review outcome. Call `decideCandidate` with `checkoutPath`, the run id, and `accepted`, `rejected`, or `revision-requested`. Rejection discards the candidate anchor; a revision requires a new spec/attempt rather than editing frozen bytes.
+1. Call `validateDelegationSpec` with the exact Delegation Spec and `protocolVersion: "1.4.0"` copied from this skill's `PROTOCOL_VERSION` marker. This read-only call starts no Producer. Keep its runtime-returned `specSha256` as the identity of the spec you dispatch. Never hash the spec file or reimplement the canonicalization algorithm; file bytes and object key order are not the runtime's canonical wire identity.
+2. When validation returns `ok:false` with `validationErrors`, repair only the reported spec defects and revalidate. This repair loop must not touch a Producer.
+3. Call `delegate` through `mcp__plugin_claude-architect_runtime__delegate` with `checkoutPath`, the validated candidate spec, and the same `protocolVersion`.
+4. When dispatch returns `ok:false` with `validationErrors`, repair only the reported spec defects, call `validateDelegationSpec` again to obtain the replacement digest, and resubmit. This can catch a spec changed after validation without touching a Producer.
+5. When either call returns a protocol/schema diagnostic, stop and tell the user to update the installed marketplace copy and reload Claude Code. Never guess across a version mismatch.
+6. When the result is `unavailable`, `failed`, or `cancelled`, report the structured classification and evidence. Do not claim a candidate exists. A report with `laneEligibility.edit=false`, or any other ineligible or unconfined Lane, fails closed with the structured diagnostic.
+7. When the result is `verified-candidate`, call `reviewCandidate` with `checkoutPath` and the run id. Read the exact unredacted patch, changed-path manifest, and verification evidence; compare them with every success criterion and repository convention.
+8. Present the review outcome. Call `decideCandidate` with `checkoutPath`, the run id, and `accepted`, `rejected`, or `revision-requested`. Rejection discards the candidate anchor; a revision requires a new spec/attempt rather than editing frozen bytes.
 
    **The runtime confirms the decision with the human itself.** `decideCandidate` raises an MCP elicitation prompt and records nothing unless a person confirms; `elicitation-unavailable`, `decision-not-confirmed`, and `elicitation-failed` all mean no decision was written. This applies to rejection and revision as well as acceptance — an agent that can discard a candidate can bury work. Do not treat a refused confirmation as a transient error to retry; report it and stop. The recorded decision carries `decidedBy` and the candidate `manifestHash` it binds to, and integration refuses an acceptance that names a different artifact.
-7. Only after an accepted decision, call `integrateCandidate` with `checkoutPath`, the run id, and the exact candidate `manifestHash` as `expectedArtifactHash`. Report `applied`, `conflicted`, or `aborted` truthfully. Integration stages the reviewed tree but does not commit it.
+9. Only after an accepted decision, call `integrateCandidate` with `checkoutPath`, the run id, and the exact candidate `manifestHash` as `expectedArtifactHash`. Report `applied`, `conflicted`, or `aborted` truthfully. Integration stages the reviewed tree but does not commit it.
 
 Never accept a Producer self-report as evidence, bypass `reviewCandidate`, call integration before an accepted decision, or substitute a different artifact hash.
 
@@ -118,7 +120,7 @@ Never accept a Producer self-report as evidence, bypass `reviewCandidate`, call 
 
 For visibility, dispatch delegation lanes through the host's `Agent` tool using the plugin's `delegation-lane` agent; the host then renders each lane as a native subagent row (spinner, stats, completion notice). This is a dispatch surface only — spec construction, `reviewCandidate`, the human decision, and `integrateCandidate` stay in this session exactly as above.
 
-Before dispatch, compute `specSha256` over the exact spec JSON and assign a short `laneId`. Each lane prompt contains only: `laneId`, `specSha256`, `checkoutPath`, `protocolVersion`, `pipeline` true/false, and the complete Delegation Spec JSON. Nothing else.
+Before dispatch, call `validateDelegationSpec` and use its runtime-returned `specSha256`; assign a short `laneId`. Each lane prompt contains only: `laneId`, that `specSha256`, `checkoutPath`, `protocolVersion`, `pipeline` true/false, and the complete Delegation Spec JSON. Nothing else.
 
 Concurrency is honest, never advertised beyond the runtime:
 

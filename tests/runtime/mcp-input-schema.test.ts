@@ -5,6 +5,7 @@ import {
   delegatePipelineInputSchema,
   integrateCandidateInputSchema,
   reviewCandidateInputSchema,
+  validateDelegationSpecInputSchema,
 } from "../../src/mcp/server.js";
 import { PROTOCOL_VERSION } from "../../src/protocol/versions.js";
 
@@ -13,6 +14,24 @@ const validInput = {
   spec: { specVersion: "1" },
   protocolVersion: PROTOCOL_VERSION,
 };
+
+describe("validateDelegationSpec MCP input", () => {
+  it("requires only the exact protocol version and spec", () => {
+    expect(validateDelegationSpecInputSchema.safeParse({
+      spec: validInput.spec,
+      protocolVersion: PROTOCOL_VERSION,
+    }).success).toBe(true);
+    expect(validateDelegationSpecInputSchema.safeParse({
+      checkoutPath: "/repo",
+      spec: validInput.spec,
+      protocolVersion: PROTOCOL_VERSION,
+    }).success).toBe(false);
+    expect(validateDelegationSpecInputSchema.safeParse({
+      spec: validInput.spec,
+      protocolVersion: "1.0.0",
+    }).success).toBe(false);
+  });
+});
 
 describe.each([
   ["delegate", delegateInputSchema],

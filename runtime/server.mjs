@@ -32312,17 +32312,7 @@ function schemaCompatibility(input) {
   }
   return { ok: true };
 }
-function laneEnvelope(result) {
-  return {
-    runId: result.runId,
-    status: result.status,
-    producerId: result.producerId,
-    manifestHash: result.candidate?.manifestHash ?? null,
-    failure: result.failure,
-    durationMs: result.durationMs
-  };
-}
-async function handleDelegate(checkoutPath, input, deps = {}, responseMode = "full") {
+function validateDelegationSpecInput(input, deps) {
   const protocol = checkVersionCompat(deps.skillProtocolVersion ?? PROTOCOL_VERSION);
   if (!protocol.ok) return { ok: false, diagnostic: protocol.diagnostic };
   if (typeof input === "string") {
@@ -32350,6 +32340,30 @@ async function handleDelegate(checkoutPath, input, deps = {}, responseMode = "fu
   if (producerErrors.length > 0) {
     return { ok: false, error: "invalid-specification", validationErrors: producerErrors };
   }
+  return {
+    ok: true,
+    spec: validation.spec,
+    specSha256: specSha256(validation.spec)
+  };
+}
+async function handleValidateDelegationSpec(input, deps = {}) {
+  const validation = validateDelegationSpecInput(input, deps);
+  if (!validation.ok) return validation;
+  return { ok: true, specSha256: validation.specSha256 };
+}
+function laneEnvelope(result) {
+  return {
+    runId: result.runId,
+    status: result.status,
+    producerId: result.producerId,
+    manifestHash: result.candidate?.manifestHash ?? null,
+    failure: result.failure,
+    durationMs: result.durationMs
+  };
+}
+async function handleDelegate(checkoutPath, input, deps = {}, responseMode = "full") {
+  const validation = validateDelegationSpecInput(input, deps);
+  if (!validation.ok) return validation;
   try {
     const ps = services2(deps);
     const canonical = await ps.canonicalizePath(checkoutPath);
@@ -32383,33 +32397,8 @@ async function handleDelegate(checkoutPath, input, deps = {}, responseMode = "fu
   }
 }
 async function handleDelegatePipeline(checkoutPath, input, deps = {}, responseMode = "full") {
-  const protocol = checkVersionCompat(deps.skillProtocolVersion ?? PROTOCOL_VERSION);
-  if (!protocol.ok) return { ok: false, diagnostic: protocol.diagnostic };
-  if (typeof input === "string") {
-    try {
-      input = JSON.parse(input);
-    } catch {
-      return {
-        ok: false,
-        error: "invalid-specification",
-        validationErrors: [{ path: "#", message: "string spec is not valid JSON" }]
-      };
-    }
-  }
-  const schema = schemaCompatibility(input);
-  if (!schema.ok) return schema;
-  const validation = validateSpec(input);
-  if (!validation.ok) {
-    return {
-      ok: false,
-      error: "invalid-specification",
-      validationErrors: validation.errors
-    };
-  }
-  const producerErrors = unknownProducerErrors(validation.spec.producerPreferences);
-  if (producerErrors.length > 0) {
-    return { ok: false, error: "invalid-specification", validationErrors: producerErrors };
-  }
+  const validation = validateDelegationSpecInput(input, deps);
+  if (!validation.ok) return validation;
   try {
     const ps = services2(deps);
     const canonical = await ps.canonicalizePath(checkoutPath);
@@ -34338,6 +34327,13 @@ var delegateOutput = external_exports.object({
   diagnostic: external_exports.string().optional(),
   error: external_exports.string().optional()
 });
+var validateDelegationSpecOutput = external_exports.object({
+  ok: external_exports.boolean(),
+  specSha256: external_exports.string().optional(),
+  validationErrors: external_exports.array(external_exports.object({ path: external_exports.string(), message: external_exports.string() })).optional(),
+  diagnostic: external_exports.string().optional(),
+  error: external_exports.string().optional()
+});
 var delegatePipelineOutput = external_exports.object({
   ok: external_exports.boolean(),
   result: external_exports.object({
@@ -34421,6 +34417,10 @@ var delegateInputSchema = external_exports.object({
    * duplicating the whole attempt. Evidence stays archived either way.
    */
   responseMode: external_exports.enum(["full", "lane"]).optional()
+}).strict();
+var validateDelegationSpecInputSchema = external_exports.object({
+  spec: external_exports.unknown(),
+  protocolVersion: protocolVersionInput
 }).strict();
 var delegatePipelineInputSchema = external_exports.object({
   checkoutPath: external_exports.string(),
@@ -34531,6 +34531,20 @@ async function start(dependencies = {}) {
     console.error(`Claude Architect run pruning skipped: ${boundedRedactedDiagnostic(error2, 2e3)}`);
   }
   const server = new McpServer({ name: "claude-architect", version: RUNTIME_VERSION });
+  server.registerTool(
+    "validateDelegationSpec",
+    {
+      title: "Validate and identify a Delegation Spec",
+      description: "Validate a spec without starting a Producer and return its canonical digest.",
+      inputSchema: validateDelegationSpecInputSchema,
+      outputSchema: validateDelegationSpecOutput,
+      annotations: { destructiveHint: false, idempotentHint: true, readOnlyHint: true }
+    },
+    async ({ spec, protocolVersion }) => toolOutput(await handleValidateDelegationSpec(
+      spec,
+      { ...dependencies, skillProtocolVersion: protocolVersion }
+    ))
+  );
   server.registerTool(
     "delegate",
     {

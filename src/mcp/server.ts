@@ -17,6 +17,7 @@ import {
   handleDelegatePipeline,
   handleIntegrateCandidate,
   handleReviewCandidate,
+  handleValidateDelegationSpec,
   readDecisionAdvisory,
   type ToolDependencies,
 } from "./tools.js";
@@ -32,6 +33,13 @@ const errorOutputFields = {
 const delegateOutput = z.object({
   ok: z.boolean(),
   result: z.record(z.string(), z.unknown()).optional(),
+  validationErrors: z.array(z.object({ path: z.string(), message: z.string() })).optional(),
+  diagnostic: z.string().optional(),
+  error: z.string().optional(),
+});
+const validateDelegationSpecOutput = z.object({
+  ok: z.boolean(),
+  specSha256: z.string().optional(),
   validationErrors: z.array(z.object({ path: z.string(), message: z.string() })).optional(),
   diagnostic: z.string().optional(),
   error: z.string().optional(),
@@ -125,6 +133,11 @@ export const delegateInputSchema = z.object({
    * duplicating the whole attempt. Evidence stays archived either way.
    */
   responseMode: z.enum(["full", "lane"]).optional(),
+}).strict();
+
+export const validateDelegationSpecInputSchema = z.object({
+  spec: z.unknown(),
+  protocolVersion: protocolVersionInput,
 }).strict();
 
 export const delegatePipelineInputSchema = z.object({
@@ -293,6 +306,20 @@ export async function start(dependencies: ServerDependencies = {}): Promise<void
   }
 
   const server = new McpServer({ name: "claude-architect", version: RUNTIME_VERSION });
+  server.registerTool(
+    "validateDelegationSpec",
+    {
+      title: "Validate and identify a Delegation Spec",
+      description: "Validate a spec without starting a Producer and return its canonical digest.",
+      inputSchema: validateDelegationSpecInputSchema,
+      outputSchema: validateDelegationSpecOutput,
+      annotations: { destructiveHint: false, idempotentHint: true, readOnlyHint: true },
+    },
+    async ({ spec, protocolVersion }) => toolOutput(await handleValidateDelegationSpec(
+      spec,
+      { ...dependencies, skillProtocolVersion: protocolVersion },
+    )),
+  );
   server.registerTool(
     "delegate",
     {

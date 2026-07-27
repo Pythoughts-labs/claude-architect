@@ -8,6 +8,13 @@ All notable changes to Claude Architect are recorded here. The format follows
 
 ### Added
 
+- `validateDelegationSpec` gives the architect a read-only, side-effect-free
+  preflight that returns the runtime's canonical `specSha256`. A live lane
+  exposed the missing contract: the controller hashed the spec file's raw bytes
+  while the runtime hashes canonical JSON semantics, producing different
+  identities for the same valid spec and making exact-spec review/recovery fail.
+  The shared validator now also keeps direct and pipeline dispatch validation
+  behavior identical, including unknown Producer diagnostics.
 - Cancellation is now proven end-to-end, not just checked. Every existing
   cancellation test injects an `AbortSignal` directly into attempt or pipeline
   dependencies, which demonstrates the runtime honors a signal but cannot
@@ -21,6 +28,20 @@ All notable changes to Claude Architect are recorded here. The format follows
   so a test can connect a client without a stdio process. Cancellation still
   depends on the host emitting `notifications/cancelled` on task-stop; that is
   the client's half of the protocol and remains unobserved live.
+
+### Fixed
+
+- The native delegation lane fails closed when its prompt omits the complete
+  Delegation Spec JSON. In a live session it received only a spec-file path,
+  despite having no filesystem tool, and invented two invalid payloads before
+  the architect recovered by inlining the spec. The courier contract now
+  forbids either dispatch call on an incomplete handoff, while the architect
+  validates and obtains the canonical digest before creating the lane.
+- Security documentation now matches the enforced human-decision boundary:
+  `decideCandidate` requires positive MCP elicitation and records nothing on an
+  unavailable, failed, or unconfirmed prompt. It still documents the real
+  residual boundary accurately: the host is trusted to present elicitation and
+  no cryptographic human identity is established.
 
 ## [0.38.0] - 2026-07-27
 

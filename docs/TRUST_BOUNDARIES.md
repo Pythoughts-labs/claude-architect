@@ -19,7 +19,7 @@ flowchart LR
 
 ## Boundary 1: human and architect session
 
-The human supplies intent and should make the final acceptance choice after Claude presents the exact candidate and evidence. Claude constructs the spec and calls MCP tools. The runtime does not cryptographically authenticate a human gesture: `decideCandidate` trusts the controlling MCP client. Consequently, control of the Claude session is equivalent to decision authority. The plugin cannot distinguish a genuine human instruction from a compromised or misbehaving host session.
+The human supplies intent and should make the final acceptance choice after Claude presents the exact candidate and evidence. Claude constructs the spec and calls MCP tools. `decideCandidate` does not trust its decision argument alone: the runtime separately requires a positive MCP elicitation response and otherwise records nothing. That channel is not cryptographic human authentication; it relies on the controlling MCP client to present elicitation faithfully. Consequently, a compromised or modified host that can synthesize the confirmation still has decision authority.
 
 ## Boundary 2: architect session and Host runtime
 

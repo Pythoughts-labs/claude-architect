@@ -12,6 +12,7 @@ import {
   handleDelegatePipeline,
   handleIntegrateCandidate,
   handleReviewCandidate,
+  handleValidateDelegationSpec,
   type RunDecision,
   type ToolArtifactStore,
   type ToolDependencies,
@@ -233,6 +234,63 @@ function dependencies(
     }),
   };
 }
+
+describe("handleValidateDelegationSpec", () => {
+  it("returns the runtime's canonical digest without starting a run", async () => {
+    let attempts = 0;
+    const deps = dependencies();
+    deps.runAttempt = async () => {
+      attempts += 1;
+      return result;
+    };
+
+    const reordered = {
+      expectedOutput: validSpec.expectedOutput,
+      producerPreferences: validSpec.producerPreferences,
+      timeoutMs: validSpec.timeoutMs,
+      executionMode: validSpec.executionMode,
+      verification: validSpec.verification,
+      successCriteria: validSpec.successCriteria,
+      forbiddenScope: validSpec.forbiddenScope,
+      writeAllowlist: validSpec.writeAllowlist,
+      context: validSpec.context,
+      objective: validSpec.objective,
+      specVersion: validSpec.specVersion,
+    };
+
+    await expect(handleValidateDelegationSpec(validSpec, deps)).resolves.toEqual({
+      ok: true,
+      specSha256: "75d6bdadedf7b97cbae5bce0b3d401bfb77a6099cf158d6f8fe5b39f3964eb69",
+    });
+    await expect(handleValidateDelegationSpec(reordered, deps)).resolves.toEqual({
+      ok: true,
+      specSha256: "75d6bdadedf7b97cbae5bce0b3d401bfb77a6099cf158d6f8fe5b39f3964eb69",
+    });
+    expect(attempts).toBe(0);
+  });
+
+  it("rejects unknown producers before any attempt starts", async () => {
+    let attempts = 0;
+    const deps = dependencies();
+    deps.runAttempt = async () => {
+      attempts += 1;
+      return result;
+    };
+
+    await expect(handleValidateDelegationSpec({
+      ...validSpec,
+      producerPreferences: ["codex-implementer"],
+    }, deps)).resolves.toEqual({
+      ok: false,
+      error: "invalid-specification",
+      validationErrors: [{
+        path: "#/producerPreferences/0",
+        message: expect.stringContaining("unknown producer id"),
+      }],
+    });
+    expect(attempts).toBe(0);
+  });
+});
 
 type LifecycleOperation = "review" | "decide" | "integrate";
 

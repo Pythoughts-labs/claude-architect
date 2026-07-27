@@ -12,7 +12,7 @@ No Producer can mark its own work accepted. `decideCandidate` records the archit
 
 - Skill: `/claude-architect:delegate` in `skills/delegate/SKILL.md`.
 - Read-only advisor: `advisor`.
-- MCP tools: `delegate`, `delegatePipeline`, `reviewCandidate`, `decideCandidate`, `integrateCandidate`, `doctor`, `gitStatus`, `gitDiff`, `gitLog`, and `gitChangedFiles`.
+- MCP tools: `validateDelegationSpec`, `delegate`, `delegatePipeline`, `reviewCandidate`, `decideCandidate`, `integrateCandidate`, `doctor`, `gitStatus`, `gitDiff`, `gitLog`, and `gitChangedFiles`.
 - Packaged runtime: `runtime/bootstrap.mjs`, `runtime/server.mjs`, schemas, and Windows watchdog/helper support.
 - Host modules: protocol validation, Producer adapters/routing, platform sandbox/process supervision, Git worktree/candidate handling, verification, pipeline gates, artifact storage/recovery, and controlled integration.
 - Plugin hooks: none declared. The repository's `.githooks/pre-push` is contributor tooling, not a marketplace-installed Claude hook.
