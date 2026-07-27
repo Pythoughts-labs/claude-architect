@@ -6,6 +6,22 @@ All notable changes to Claude Architect are recorded here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- Cancellation is now proven end-to-end, not just checked. Every existing
+  cancellation test injects an `AbortSignal` directly into attempt or pipeline
+  dependencies, which demonstrates the runtime honors a signal but cannot
+  demonstrate one is ever raised — the test supplies the aborted signal itself.
+  The link none of them covered is the one that failed in practice: a caller
+  gives up, and whether that becomes an aborted `extra.signal` depends on the
+  client emitting `notifications/cancelled` and the SDK wiring it through.
+  `tests/runtime/mcp-cancellation.test.ts` drives a real SDK client over an
+  in-memory transport, aborts a live `delegate` call, and asserts the signal the
+  attempt runtime received fires. `ServerDependencies` gained a `transport` seam
+  so a test can connect a client without a stdio process. Cancellation still
+  depends on the host emitting `notifications/cancelled` on task-stop; that is
+  the client's half of the protocol and remains unobserved live.
+
 ## [0.38.0] - 2026-07-27
 
 ### Fixed

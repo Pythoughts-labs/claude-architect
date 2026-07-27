@@ -34728,7 +34728,7 @@ async function start(dependencies = {}) {
     "Return redacted HEAD-to-worktree name-status records.",
     gitChangedFiles
   );
-  await server.connect(new StdioServerTransport());
+  await server.connect(dependencies.transport ?? new StdioServerTransport());
   console.error("claude-architect MCP server ready");
 }
 

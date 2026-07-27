@@ -1,5 +1,6 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import { z } from "zod";
 import { PROTOCOL_VERSION, RUNTIME_VERSION } from "../protocol/versions.js";
 import { doctor, type DoctorDependencies } from "./doctor.js";
@@ -166,6 +167,14 @@ export const integrateCandidateInputSchema = z.object({
 export type ServerDependencies = ToolDependencies & DoctorDependencies & GitReadDependencies & {
   recoverStaleRuns?: typeof recoverStaleRuns;
   pruneRuns?: typeof pruneRuns;
+  /**
+   * Transport seam. Cancellation only reaches the runtime if a client's abort
+   * becomes a `notifications/cancelled` that the SDK turns into an aborted
+   * `extra.signal`. Injecting a signal into the pipeline proves the checks fire;
+   * it does not prove the signal ever fires. Driving a real client over an
+   * in-memory transport does.
+   */
+  transport?: Transport;
 };
 
 /**
@@ -488,6 +497,6 @@ export async function start(dependencies: ServerDependencies = {}): Promise<void
     gitChangedFiles,
   );
 
-  await server.connect(new StdioServerTransport());
+  await server.connect(dependencies.transport ?? new StdioServerTransport());
   console.error("claude-architect MCP server ready");
 }
