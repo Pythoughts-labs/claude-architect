@@ -34052,8 +34052,9 @@ async function readHandleBytes(handle, size) {
   }
   return bytes;
 }
+var SAFE_WORKFLOW_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u;
 function assertWorkflowId(workflowId) {
-  if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u.test(workflowId)) {
+  if (!SAFE_WORKFLOW_ID.test(workflowId)) {
     throw workflowError("workflow id is not a safe path component", "invalid-workflow-state");
   }
 }
@@ -36824,8 +36825,10 @@ var AUTOPILOT_ISSUE_ORDER = [
   "autopilot-promotion-incomplete",
   "autopilot-remote-recovery-required",
   "autopilot-pr-recovery-required",
-  "autopilot-state-malformed"
+  "autopilot-state-malformed",
+  "autopilot-scan-truncated"
 ];
+var MAX_AUTOPILOT_BRANCH_PROBES = 64;
 function redactAbsoluteHomePaths(text) {
   return redact(text).replace(WINDOWS_HOME_PATH, (match) => `[path]\\${match.split("\\").at(-1) ?? ""}`).replace(POSIX_HOME_PATH, (match) => `[path]/${match.split("/").at(-1) ?? ""}`);
 }
@@ -37120,6 +37123,7 @@ async function autopilotIssues(stateDir, ps, isProcessAlive2, git2) {
   if (stateDir === void 0) return [];
   const stateRoot2 = path7.resolve(stateDir);
   const issues = /* @__PURE__ */ new Set();
+  let probes = 0;
   const registrationScan = await scanRegistrations(stateRoot2, issues);
   const workflowsRoot = path7.join(stateRoot2, "workflows");
   const workflowEntries = await safeDirectoryEntries(workflowsRoot, issues);
@@ -37190,12 +37194,25 @@ async function autopilotIssues(stateDir, ps, isProcessAlive2, git2) {
     }
     if (worktreeExists && registrationMissing) {
       issues.add("autopilot-worktree-orphaned");
-    } else if (registration !== null && (!branchMatchesState(registration, state) || !await observedBranchMatches(registration, state, git2))) {
+    } else if (registration !== null && !branchMatchesState(registration, state)) {
       issues.add("autopilot-branch-mismatch");
+    } else if (registration !== null) {
+      if (probes >= MAX_AUTOPILOT_BRANCH_PROBES) issues.add("autopilot-scan-truncated");
+      else {
+        probes += 1;
+        if (!await observedBranchMatches(registration, state, git2)) {
+          issues.add("autopilot-branch-mismatch");
+        }
+      }
     }
   }
   for (const [workflowId, registration] of registrationScan.registrations) {
     if (states.has(workflowId)) continue;
+    if (probes >= MAX_AUTOPILOT_BRANCH_PROBES) {
+      issues.add("autopilot-scan-truncated");
+      break;
+    }
+    probes += 1;
     if (!await observedBranchMatches(registration, null, git2)) {
       issues.add("autopilot-branch-mismatch");
     }
@@ -39274,6 +39291,7 @@ function isSafeComponent(value) {
   const base = value.split(".", 1)[0] ?? value;
   return SAFE_COMPONENT.test(value) && !value.endsWith(".") && !WINDOWS_RESERVED_COMPONENT.test(base);
 }
+var STORE_TEMPORARY_RESIDUE = /^\..+\.[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.tmp$/u;
 function validateComponent(value, kind) {
   if (!isSafeComponent(value) || kind === "run id" && value !== value.toLowerCase()) {
     throw new RuntimeError(`invalid ${kind}: ${JSON.stringify(value)}`);
@@ -39975,6 +39993,7 @@ var ArtifactStore = class _ArtifactStore {
       await assertDirectoryIdentity2(directory.path, directory.identity);
       const names = (await readdir3(directory.path)).sort();
       for (const name of names) {
+        if (STORE_TEMPORARY_RESIDUE.test(name)) continue;
         validateComponent(name, "log name");
         const child = path12.join(directory.path, name);
         const metadata = await lstat3(child);
@@ -52556,13 +52575,6 @@ async function lockIsOwnedByLiveProcess(locksRoot, lockKey, isProcessAlive2, get
   if (owner === null) return true;
   return await lockOwnerStatus(owner, isProcessAlive2, getProcessStartToken) !== "dead";
 }
-var WORKFLOW_ID3 = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u;
-var TERMINAL_WORKFLOW_PHASES = /* @__PURE__ */ new Set([
-  "ready-for-human-review",
-  "human-decision-required",
-  "failed",
-  "cancelled"
-]);
 function exactObjectKeys(value, expected) {
   const actual = Object.keys(value).sort();
   const sortedExpected = [...expected].sort();
@@ -52620,7 +52632,7 @@ async function observeWorkflowBranch(root, workflowId, manager, isProcessAlive2,
 function isWorkflowBranchIdentity(value) {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
   const identity = value;
-  return identity.ownershipVersion === "1" && typeof identity.workflowId === "string" && WORKFLOW_ID3.test(identity.workflowId) && typeof identity.checkoutPath === "string" && typeof identity.gitCommonDir === "string" && typeof identity.repositoryIdentity === "string" && typeof identity.worktreePath === "string" && typeof identity.worktreeGitDir === "string" && typeof identity.branch === "string" && identity.branchRef === `refs/heads/${identity.branch}` && identity.baseRef === `refs/claude-architect/autopilot/${identity.workflowId}/base` && typeof identity.baseBranch === "string" && typeof identity.baseCommitOid === "string" && OID3.test(identity.baseCommitOid) && identity.remote === "origin" && typeof identity.remoteUrl === "string" && typeof identity.ownerRepo === "string";
+  return identity.ownershipVersion === "1" && typeof identity.workflowId === "string" && SAFE_WORKFLOW_ID.test(identity.workflowId) && typeof identity.checkoutPath === "string" && typeof identity.gitCommonDir === "string" && typeof identity.repositoryIdentity === "string" && typeof identity.worktreePath === "string" && typeof identity.worktreeGitDir === "string" && typeof identity.branch === "string" && identity.branchRef === `refs/heads/${identity.branch}` && identity.baseRef === `refs/claude-architect/autopilot/${identity.workflowId}/base` && typeof identity.baseBranch === "string" && typeof identity.baseCommitOid === "string" && OID3.test(identity.baseCommitOid) && identity.remote === "origin" && typeof identity.remoteUrl === "string" && typeof identity.ownerRepo === "string";
 }
 function branchMatchesWorkflowState(branch, state) {
   return branch.workflowId === state.workflowId && branch.repositoryIdentity === state.repositoryIdentity && branch.baseCommitOid === state.baseCommitOid && branch.branchRef === state.workflowRef && branch.worktreePath === state.worktreePath && branch.branch === state.shipping.branch;
@@ -52756,7 +52768,7 @@ async function workflowIds(root) {
   const workflowsIdentity = await plainDirectoryIdentity(workflowsRoot);
   const workflowEntries = workflowsIdentity === null ? [] : await readdir4(workflowsRoot, { withFileTypes: true });
   for (const entry of workflowEntries) {
-    if (entry.isDirectory() && !entry.isSymbolicLink() && WORKFLOW_ID3.test(entry.name)) {
+    if (entry.isDirectory() && !entry.isSymbolicLink() && SAFE_WORKFLOW_ID.test(entry.name)) {
       ids.add(entry.name);
     }
   }
@@ -52777,7 +52789,7 @@ async function workflowIds(root) {
     }
     if (typeof value !== "object" || value === null || Array.isArray(value)) continue;
     const workflowId = value.workflowId;
-    if (typeof workflowId === "string" && WORKFLOW_ID3.test(workflowId) && entry.name === path25.basename(branchOwnershipPath(root, workflowId))) {
+    if (typeof workflowId === "string" && SAFE_WORKFLOW_ID.test(workflowId) && entry.name === path25.basename(branchOwnershipPath(root, workflowId))) {
       ids.add(workflowId);
     }
   }
@@ -52880,7 +52892,7 @@ async function recoverAutopilotWorkflows(root, dependencies) {
         results.push({ workflowId, disposition: "human-decision-required" });
         continue;
       }
-      if (TERMINAL_WORKFLOW_PHASES.has(state.phase)) continue;
+      if (TERMINAL_PHASES.has(state.phase)) continue;
       if (lease.presence !== "present" || lease.status !== "dead" || branch.presence === "ambiguous" || branch.ownerStatus === "unverifiable") {
         results.push({ workflowId, disposition: "human-decision-required" });
         continue;
@@ -53420,7 +53432,10 @@ async function createServer(dependencies = {}) {
       title: "Delegate an implementation subtask",
       description: "Validate a Delegation Spec and run one verified attempt.",
       inputSchema: delegateInputSchema,
-      outputSchema: delegateOutput
+      outputSchema: delegateOutput,
+      // Runs an untrusted Producer in a worktree and freezes a candidate; not a
+      // probe a client may retry freely.
+      annotations: { destructiveHint: true, idempotentHint: false, readOnlyHint: false }
     },
     async ({ checkoutPath, spec, protocolVersion, responseMode, expectedSpecSha256 }, extra) => {
       const progressToken = extra._meta?.progressToken;
@@ -53468,7 +53483,9 @@ async function createServer(dependencies = {}) {
       title: "Run the fresh-context review pipeline",
       description: "Validate a Delegation Spec and run the full implement/review/fix pipeline.",
       inputSchema: delegatePipelineInputSchema,
-      outputSchema: delegatePipelineOutput
+      outputSchema: delegatePipelineOutput,
+      // Runs Producers across implement/review/fix rounds.
+      annotations: { destructiveHint: true, idempotentHint: false, readOnlyHint: false }
     },
     async ({ checkoutPath, spec, protocolVersion, responseMode, expectedSpecSha256 }, extra) => {
       const progressToken = extra._meta?.progressToken;
@@ -53516,7 +53533,10 @@ async function createServer(dependencies = {}) {
       title: "Start an autopilot workflow",
       description: "Validate an Autopilot Spec and run its verified workflow.",
       inputSchema: autopilotStartInputSchema,
-      outputSchema: autopilotOutput
+      outputSchema: autopilotOutput,
+      // The most consequential tool on the surface: runs Producers, creates
+      // branches and worktrees, promotes commits, pushes, and opens a PR.
+      annotations: { destructiveHint: true, idempotentHint: false, readOnlyHint: false }
     },
     async ({ checkoutPath, spec, protocolVersion }, extra) => {
       const progressToken = extra._meta?.progressToken;
@@ -53573,7 +53593,9 @@ async function createServer(dependencies = {}) {
       title: "Resume an autopilot workflow",
       description: "Resume a recoverable autopilot workflow from durable state.",
       inputSchema: autopilotWorkflowInputSchema,
-      outputSchema: autopilotOutput
+      outputSchema: autopilotOutput,
+      // Continues the same shipping workflow from durable state.
+      annotations: { destructiveHint: true, idempotentHint: false, readOnlyHint: false }
     },
     async ({ checkoutPath, workflowId, protocolVersion }, extra) => {
       const progressToken = extra._meta?.progressToken;

@@ -53,7 +53,14 @@ const AUTOPILOT_ISSUE_ORDER = [
   "autopilot-remote-recovery-required",
   "autopilot-pr-recovery-required",
   "autopilot-state-malformed",
+  "autopilot-scan-truncated",
 ] as const;
+
+// `observedBranchMatches` issues six supervised git invocations plus realpath
+// calls, each with its own timeout. Left unbounded, one diagnostic call could
+// serialize several thousand spawns and become the slowest tool on the surface,
+// so cap the git-probing fan-out and say so rather than truncating silently.
+const MAX_AUTOPILOT_BRANCH_PROBES = 64;
 
 interface CheckoutLockOwner {
   pid: number;
@@ -565,6 +572,7 @@ async function autopilotIssues(
   if (stateDir === undefined) return [];
   const stateRoot = path.resolve(stateDir);
   const issues = new Set<AutopilotIssue>();
+  let probes = 0;
   const registrationScan = await scanRegistrations(stateRoot, issues);
   const workflowsRoot = path.join(stateRoot, "workflows");
   const workflowEntries = await safeDirectoryEntries(workflowsRoot, issues);
@@ -642,15 +650,26 @@ async function autopilotIssues(
     }
     if (worktreeExists && registrationMissing) {
       issues.add("autopilot-worktree-orphaned");
-    } else if (registration !== null
-      && (!branchMatchesState(registration, state)
-        || !await observedBranchMatches(registration, state, git))) {
+    } else if (registration !== null && !branchMatchesState(registration, state)) {
       issues.add("autopilot-branch-mismatch");
+    } else if (registration !== null) {
+      if (probes >= MAX_AUTOPILOT_BRANCH_PROBES) issues.add("autopilot-scan-truncated");
+      else {
+        probes += 1;
+        if (!await observedBranchMatches(registration, state, git)) {
+          issues.add("autopilot-branch-mismatch");
+        }
+      }
     }
   }
 
   for (const [workflowId, registration] of registrationScan.registrations) {
     if (states.has(workflowId)) continue;
+    if (probes >= MAX_AUTOPILOT_BRANCH_PROBES) {
+      issues.add("autopilot-scan-truncated");
+      break;
+    }
+    probes += 1;
     if (!await observedBranchMatches(registration, null, git)) {
       issues.add("autopilot-branch-mismatch");
     }

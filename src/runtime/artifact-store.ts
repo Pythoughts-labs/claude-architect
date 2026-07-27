@@ -184,6 +184,9 @@ function isSafeComponent(value: string): boolean {
     && !WINDOWS_RESERVED_COMPONENT.test(base);
 }
 
+const STORE_TEMPORARY_RESIDUE =
+  /^\..+\.[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.tmp$/u;
+
 function validateComponent(value: string, kind: "run id" | "log name"): void {
   if (!isSafeComponent(value) || (kind === "run id" && value !== value.toLowerCase())) {
     throw new RuntimeError(`invalid ${kind}: ${JSON.stringify(value)}`);
@@ -1030,6 +1033,12 @@ export class ArtifactStore {
       await assertDirectoryIdentity(directory.path, directory.identity);
       const names = (await readdir(directory.path)).sort();
       for (const name of names) {
+        // The store writes `.{basename}.{uuid}.tmp` siblings when persisting.
+        // A crash can leave one behind, and `validateComponent` rejects
+        // dot-prefixed names, so a single leftover would make every evidence
+        // walk for this run throw until someone cleaned it up by hand. Skip
+        // only the store's own residue; any other dot-file is still an error.
+        if (STORE_TEMPORARY_RESIDUE.test(name)) continue;
         validateComponent(name, "log name");
         const child = path.join(directory.path, name);
         const metadata = await lstat(child);
