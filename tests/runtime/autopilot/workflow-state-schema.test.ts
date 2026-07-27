@@ -145,6 +145,24 @@ describe("Autopilot Workflow State v1", () => {
       "failed",
       "cancelled",
     ];
+    // `AutopilotPhase[]` accepts any subset, so a 14th phase would leave this
+    // green. Pin the list to the union itself via an exhaustive mapping.
+    const everyPhase: Record<AutopilotPhase, true> = {
+      "preflighting": true,
+      "running-task": true,
+      "promoting-task": true,
+      "final-review": true,
+      "pushing": true,
+      "creating-draft-pr": true,
+      "waiting-required-checks": true,
+      "marking-ready": true,
+      "cleaning-up": true,
+      "ready-for-human-review": true,
+      "human-decision-required": true,
+      "failed": true,
+      "cancelled": true,
+    };
+    expect([...phases].sort()).toEqual(Object.keys(everyPhase).sort());
     expect(phases).toHaveLength(13);
     for (const phase of phases) {
       expect(validate({ ...validWorkflowState(), phase }), phase).toBe(true);

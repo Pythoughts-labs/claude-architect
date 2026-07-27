@@ -15,7 +15,7 @@ const temporaryDirectories: string[] = [];
 
 afterEach(async () => {
   await Promise.all(temporaryDirectories.splice(0).map(directory =>
-    rm(directory, { recursive: true, force: true })));
+    rm(directory, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 })));
 });
 
 function platform(os: "darwin" | "win32"): PlatformServices {
@@ -353,6 +353,28 @@ describe("doctor", () => {
     expect(result.issues).toContain("checkout-lock-held");
     expect(result.issues).not.toContain("checkout-lock-leaked");
     expect(await readFile(fixture.lockPath, "utf8")).toBe(JSON.stringify(owner));
+  });
+
+  // Only the over-limit side was covered: a bound that drifted to `>= 4096`
+  // would classify a legitimate lease as malformed and stay green.
+  it("accepts a checkout lock at exactly the size limit", async () => {
+    const base = JSON.stringify({ pid: 4245, processToken: "" });
+    const lock = JSON.stringify({
+      pid: 4245,
+      processToken: `d${"x".repeat(4_096 - base.length - 1)}`,
+    });
+    expect(Buffer.byteLength(lock, "utf8")).toBe(4_096);
+    const fixture = await checkoutLockFixture(lock);
+
+    // The default mock throws from getProcessStartToken, which the lock scan
+    // catches as "malformed" — that would hide the bound this test is pinning.
+    const ps = platform("darwin");
+    ps.getProcessStartToken = async () => null;
+
+    const result = await doctorWithLocks(fixture.stateDir, ps, () => true);
+
+    expect(result.issues).not.toContain("checkout-lock-malformed");
+    expect(result.issues).toContain("checkout-lock-held");
   });
 
   it("bounds checkout lock reads and reports oversized locks as malformed", async () => {

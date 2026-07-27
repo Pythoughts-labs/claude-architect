@@ -58,18 +58,16 @@ describe("schema loader", () => {
     expect(v.delegationSpec({ specVersion: "1" })).toBe(false); // missing required fields
   });
 
-  it("loads Autopilot Spec v1 from source and packaged runtime schema paths", () => {
-    const sourceLoaderUrl = new URL("../../src/protocol/schema-loader.ts", import.meta.url);
+  // Both paths this used to walk resolved to runtime/schemas/autopilot-spec.v1.json,
+  // so the "source versus packaged" comparison read one file twice and could not
+  // have caught a divergence. There is only one schema file; assert that the
+  // packaged runtime resolves it and that the loader agrees.
+  it("loads Autopilot Spec v1 from the packaged runtime schema path", () => {
     const packagedRuntimeUrl = new URL("../../runtime/server.mjs", import.meta.url);
-    const paths = [
-      new URL("../../runtime/schemas/autopilot-spec.v1.json", sourceLoaderUrl),
-      new URL("./schemas/autopilot-spec.v1.json", packagedRuntimeUrl),
-    ];
+    const schemaUrl = new URL("./schemas/autopilot-spec.v1.json", packagedRuntimeUrl);
+    const schema = JSON.parse(fs.readFileSync(fileURLToPath(schemaUrl), "utf8"));
 
-    for (const schemaUrl of paths) {
-      const schema = JSON.parse(fs.readFileSync(fileURLToPath(schemaUrl), "utf8"));
-      expect(schema.$id).toBe(`autopilot-spec.v${AUTOPILOT_SPEC_VERSION}.json`);
-    }
+    expect(schema.$id).toBe(`autopilot-spec.v${AUTOPILOT_SPEC_VERSION}.json`);
 
     expect(loadSchemas().autopilotSpec({ specVersion: AUTOPILOT_SPEC_VERSION })).toBe(false);
   }, 5_000);

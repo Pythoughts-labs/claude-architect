@@ -667,7 +667,9 @@ describe("WorkflowBranchManager", () => {
       expect((await git(fixture.repoRoot, [
         "show-ref", "--verify", "--quiet", created.baseRef,
       ])).exitCode).toBe(1);
-      expect((await git(fixture.repoRoot, ["worktree", "list", "--porcelain", "-z"])).stdout
+      const listedZ = await git(fixture.repoRoot, ["worktree", "list", "--porcelain", "-z"]);
+      expect(listedZ, listedZ.stderr).toMatchObject({ exitCode: 0 });
+      expect(listedZ.stdout
         .split("\0").filter(field => field.startsWith("worktree "))
         .map(field => path.resolve(field.slice("worktree ".length))))
         .not.toContain(created.worktreePath);
@@ -921,7 +923,9 @@ describe("WorkflowBranchManager", () => {
       worktreeRemoved: true,
       refsRemoved: true,
     });
-    expect((await git(fixture.repoRoot, ["worktree", "list", "--porcelain"])).stdout
+    const listed = await git(fixture.repoRoot, ["worktree", "list", "--porcelain"]);
+    expect(listed, listed.stderr).toMatchObject({ exitCode: 0 });
+    expect(listed.stdout
       .split(/\r?\n/u).filter(line => line.startsWith("worktree "))
       .map(line => path.resolve(line.slice("worktree ".length))))
       .not.toContain(created.worktreePath);

@@ -9,6 +9,9 @@ import { WorktreeManager } from "../../src/git/worktree-manager.js";
 // Windows; resolve them so these assertions compare paths rather than bytes.
 async function registeredWorktrees(repository: string): Promise<string[]> {
   const listed = await git(repository, ["worktree", "list", "--porcelain"]);
+  // A failed list yields empty stdout, which would make every "no longer
+  // registered" assertion below pass for the wrong reason.
+  expect(listed, listed.stderr).toMatchObject({ exitCode: 0 });
   return listed.stdout.split(/\r?\n/u)
     .filter(line => line.startsWith("worktree "))
     .map(line => resolve(line.slice("worktree ".length)));

@@ -319,6 +319,28 @@ describe("CandidatePromoter", () => {
     expect(f.stageCandidate).toHaveBeenCalledOnce();
   });
 
+  // The caller-supplied hash and head are what stop a promoter from committing
+  // bytes the decision never covered, and every other case in this file passes
+  // matching values -- so a regression that dropped either comparison would
+  // have left the whole suite green.
+  it("refuses a promotion whose expected artifact hash does not match", async () => {
+    const f = fixture();
+
+    await expect(f.promoter.promote({
+      ...f.request,
+      expectedArtifactHash: `${"0".repeat(63)}1`,
+    })).resolves.toMatchObject({ status: "rejected" });
+  });
+
+  it("refuses a promotion whose expected head does not match", async () => {
+    const f = fixture();
+
+    await expect(f.promoter.promote({
+      ...f.request,
+      expectedHead: `${"0".repeat(39)}1`,
+    })).resolves.toMatchObject({ status: "rejected" });
+  });
+
   // `<commit>^` walks the FIRST parent only, so a merge whose first parent is
   // the expected head, whose tree matches, and whose message matches would pass
   // a first-parent check. Promotion must pin the parent count instead.

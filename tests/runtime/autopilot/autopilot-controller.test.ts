@@ -341,8 +341,22 @@ class MemoryWorkflowStore implements WorkflowStorePort {
     return {} as Awaited<ReturnType<WorkflowStorePort["completeIntent"]>>;
   }
 
+  // The real store is compare-and-swap: it rejects a write whose
+  // expectedRevision no longer matches. Ignoring it here meant every
+  // state-mismatch guard in the controller was untested, and a regression that
+  // transitioned from a stale snapshot would have stayed green.
+  private assertExpectedRevision(expectedRevision: number | undefined): void {
+    if (this.state === null) throw new Error("state not created");
+    if (expectedRevision !== undefined && expectedRevision !== this.state.revision) {
+      throw Object.assign(new Error("workflow revision conflict"), {
+        classification: "workflow-revision-conflict",
+      });
+    }
+  }
+
   async transition(args: Parameters<WorkflowStorePort["transition"]>[0]) {
     if (this.state === null) throw new Error("state not created");
+    this.assertExpectedRevision(args.expectedRevision);
     this.operations.push(`persist:${args.to}`);
     const next = structuredClone(this.state);
     if (args.patch !== undefined) Object.assign(next, structuredClone(args.patch));
@@ -356,6 +370,7 @@ class MemoryWorkflowStore implements WorkflowStorePort {
 
   async update(args: Parameters<WorkflowStorePort["update"]>[0]) {
     if (this.state === null) throw new Error("state not created");
+    this.assertExpectedRevision(args.expectedRevision);
     this.operations.push("persist:update");
     const next = structuredClone(this.state);
     if (args.patch !== undefined) Object.assign(next, structuredClone(args.patch));

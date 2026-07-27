@@ -51,7 +51,13 @@ describe("run manifest protocol provenance", () => {
     expect(verifyRunManifest(manifest)).toEqual(manifest);
   });
 
-  it.each(["1.0.0", "1.3.0", "not-a-version"])(
+  it("accepts a same-major archive from a different minor", () => {
+    const manifest = withProtocolVersion("2.7.0");
+
+    expect(verifyRunManifest(manifest)).toEqual(manifest);
+  });
+
+  it.each(["1.0.0", "1.3.0", "3.0.0", "not-a-version"])(
     "rejects incompatible archived protocol %s with both versions in the diagnostic",
     archivedVersion => {
       expect(() => verifyRunManifest(withProtocolVersion(archivedVersion))).toThrow(

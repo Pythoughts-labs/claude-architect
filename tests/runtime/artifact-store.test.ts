@@ -242,7 +242,8 @@ describe("ArtifactStore", () => {
     const external = join(process.env.CLAUDE_PLUGIN_DATA!, "external-evidence.json");
     await writeFile(external, "outside\n");
     await symlink(external, join(store.runDirectory, "pipeline", "linked.json"));
-    await expect(store.readEvidence("pipeline/linked.json")).rejects.toThrow();
+    await expect(store.readEvidence("pipeline/linked.json"))
+      .rejects.toThrow(/invalid archived evidence|symbolic link|escapes/u);
     await expect(store.listEvidenceReferences()).rejects.toThrow(/symbolic links/u);
   });
 
