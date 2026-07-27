@@ -27,8 +27,15 @@ describe("P0-A plugin wiring", () => {
       !/\.\.\/[^"'\n]*node_modules/u.test(bundle),
       "committed bundle must not embed worktree-relative node_modules paths",
     );
-    assert.equal(bundle.includes("/Projects/active/"), false,
-      "server bundle must not embed a checkout-specific dependency path");
+    // A literal from one machine's tree cannot catch another contributor's
+    // build. The invariant is that NO user-specific absolute path is embedded.
+    for (const [shape, pattern] of [
+      ["POSIX home", /\/(?:Users|home)\/[^/\s"']+\//u],
+      ["Windows home", /[A-Za-z]:\\Users\\[^\\\s"']+\\/u],
+    ]) {
+      assert.equal(pattern.test(bundle), false,
+        `server bundle must not embed a ${shape} absolute path`);
+    }
     assert.equal(bundle.includes("/.claude/plugins/"), false,
       "server bundle must not embed a plugin-worktree path");
     for (const autopilotTool of ["autopilotStart", "autopilotStatus", "autopilotResume"]) {
@@ -74,6 +81,11 @@ describe("P0-A plugin wiring", () => {
     const skill = read("skills/delegate/SKILL.md");
     const skillProtocol = /^PROTOCOL_VERSION:\s*([^\s]+)$/mu.exec(skill)?.[1];
     assert.equal(runtimeProtocol, "2.0.0", "runtime must expose the current wire protocol");
+    assert.equal(
+      runtimeVersion,
+      JSON.parse(read(".claude-plugin/plugin.json")).version,
+      "RUNTIME_VERSION must match the shipped plugin version",
+    );
     assert.equal(skillProtocol, runtimeProtocol, "delegate skill protocol marker must match runtime");
     assert.doesNotMatch(skill, /(^|[^:])\/delegate\b/mu, "delegate skill must use the fully qualified command");
     for (const lifecycleTool of ["autopilotStart", "autopilotStatus", "autopilotResume"]) {
@@ -207,7 +219,11 @@ describe("P0-A plugin wiring", () => {
       /`\/delegate`/u,
       "README must use the fully qualified public command",
     );
-    assert.match(changelog, /^## \[0\.8\.0\] - 2026-07-14$/mu);
+    assert.match(
+      changelog,
+      new RegExp(`^## \\[${plugin.version.replace(/\./gu, "\\.")}\\]`, "mu"),
+      "CHANGELOG must carry a heading for the shipped version",
+    );
     assert.match(readme, /macOS arm64[^\n]*certified/iu);
     assert.match(readme, /Linux[^\n]*tested/iu);
     assert.match(readme, /Windows[^\n]*unsupported/iu);

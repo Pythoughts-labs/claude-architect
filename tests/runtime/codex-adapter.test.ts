@@ -336,6 +336,9 @@ describe("CodexAdapter", () => {
     expect(invocation.args).toContain('web_search="disabled"');
     expect(invocation.args).toContain("read-only");
     expect(invocation.args).not.toContain("workspace-write");
+    // The arg that would silently reintroduce write capability if the read-only
+    // branch regressed. `--sandbox read-only` alone does not pin its absence.
+    expect(invocation.args.some(arg => arg.includes("writable_roots"))).toBe(false);
     expect(invocation.network).toBe("denied");
     expect(invocation.stdin).toContain("no authority to accept, waive, promote, integrate, commit, push, ship");
     expect(invocation.stdin).toContain("call MCP decision tools");

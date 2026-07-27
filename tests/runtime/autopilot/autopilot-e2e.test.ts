@@ -527,6 +527,7 @@ describe("AutopilotController end-to-end", () => {
     expect(await lockFiles(stateRoot)).toEqual([]);
     // git prints its own path format, which is forward-slashed on Windows;
     // resolve to the Node-canonical form the checkout path is recorded in.
+    // `runGit` already asserts a zero exit, so empty output cannot pass silently.
     const registeredWorktrees = (await runGit(fixture.checkout, ["worktree", "list", "--porcelain"]))
       .split(/\r?\n/u).filter(line => line.startsWith("worktree "))
       .map(line => path.resolve(line.slice("worktree ".length)));

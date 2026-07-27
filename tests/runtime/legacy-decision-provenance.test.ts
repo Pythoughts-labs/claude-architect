@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -7,6 +7,8 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { AttemptResult } from "../../src/protocol/attempt-result.js";
 import { INTEGRABLE_DECISION_AUTHORITIES } from "../../src/protocol/candidate-decision.js";
 import { ArtifactStore } from "../../src/runtime/artifact-store.js";
+
+const temporaryRoots: string[] = [];
 
 function sampleResult(runId: string): AttemptResult {
   return {
@@ -37,15 +39,20 @@ beforeEach(async () => {
   previousPluginData = process.env.CLAUDE_PLUGIN_DATA;
   previousPluginRoot = process.env.CLAUDE_PLUGIN_ROOT;
   const stateRoot = await mkdtemp(join(tmpdir(), "claude-architect-legacy-decision-"));
+  temporaryRoots.push(stateRoot);
   process.env.CLAUDE_PLUGIN_DATA = stateRoot;
   process.env.CLAUDE_PLUGIN_ROOT = join(stateRoot, "plugin-cache");
 });
 
-afterEach(() => {
+afterEach(async () => {
   if (previousPluginData === undefined) delete process.env.CLAUDE_PLUGIN_DATA;
   else process.env.CLAUDE_PLUGIN_DATA = previousPluginData;
   if (previousPluginRoot === undefined) delete process.env.CLAUDE_PLUGIN_ROOT;
   else process.env.CLAUDE_PLUGIN_ROOT = previousPluginRoot;
+  // Each test fills this root with archived run data; leaving it behind
+  // accumulates state directories in tmpdir() on every run.
+  await Promise.all(temporaryRoots.splice(0).map(root =>
+    rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 })));
 });
 
 /**

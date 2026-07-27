@@ -100,8 +100,8 @@ function workflowState(): AutopilotWorkflowState {
   };
 }
 
-function redactedWorkflowState(): AutopilotWorkflowState {
-  const state = workflowState();
+/** Mirrors the controller's own redaction projection for mock returns. */
+function redactedProjectionOf(state: AutopilotWorkflowState): AutopilotWorkflowState {
   state.repositoryIdentity = "[redacted]";
   state.worktreePath = "[redacted]";
   if (state.shipping.prUrl !== null) state.shipping.prUrl = "[redacted]";
@@ -146,7 +146,7 @@ describe("autopilot MCP surface", () => {
     if (checkoutPath !== CHECKOUT) {
       throw new AutopilotControllerError("repository-identity-mismatch");
     }
-    return redactedWorkflowState();
+    return redactedProjectionOf(workflowState());
   });
   const resume = vi.fn(async () => workflowState());
 
@@ -209,7 +209,14 @@ describe("autopilot MCP surface", () => {
     expect(resume).toHaveBeenCalledWith(CHECKOUT, WORKFLOW_ID);
   });
 
-  it("returns the status redaction projection from start and resume", async () => {
+  // This suite mocks the controller, and the controller is what redacts
+  // (`redactedState`, src/autopilot/autopilot-controller.ts). Asserting
+  // "[redacted]" here only proved the mock returned what the mock was told to
+  // return. Redaction itself is proven against the real controller in
+  // autopilot-controller.test.ts ("returns redacted status using only
+  // read-only collaborators"); what this layer owns is passing the controller's
+  // projection through to the client without widening it.
+  it("passes the controller status projection through start and resume unchanged", async () => {
     const sensitive = workflowState();
     sensitive.shipping.prUrl = "https://github.com/example/repository/pull/42";
     sensitive.ciObservations.push({
@@ -223,7 +230,10 @@ describe("autopilot MCP surface", () => {
         link: "https://github.com/example/repository/actions/runs/99",
       }],
     });
-    resume.mockResolvedValueOnce(sensitive);
+    const projected = redactedProjectionOf(sensitive);
+    status.mockResolvedValueOnce(projected);
+    status.mockResolvedValueOnce(projected);
+    resume.mockResolvedValueOnce(projected);
 
     const started = await client.callTool({
       name: "autopilotStart",

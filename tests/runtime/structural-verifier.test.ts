@@ -313,6 +313,9 @@ describe("structuralVerify", () => {
     });
 
     expect(result.failures).toContain("case-collision");
+    // Asserting the finding alone would still pass if the verifier reported it
+    // alongside ok:true -- the fail-open regression this test exists to catch.
+    expect(result.ok).toBe(false);
   });
 
   it("rejects a changed path colliding with an untouched candidate-tree path", async () => {
@@ -324,6 +327,9 @@ describe("structuralVerify", () => {
     });
 
     expect(result.failures).toContain("case-collision");
+    // Asserting the finding alone would still pass if the verifier reported it
+    // alongside ok:true -- the fail-open regression this test exists to catch.
+    expect(result.ok).toBe(false);
   });
 
   it("normalizes NFC and NFD paths before exact and folded comparisons", () => {

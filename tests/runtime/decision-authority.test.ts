@@ -88,15 +88,22 @@ describe("policy-autonomous decisions survive the archive", () => {
   // under a fixed run id, so the archive it created survived the run and made
   // the next one fail on a decision conflict with its own leftovers.
   let previousPluginData: string | undefined;
+  const suiteRoots: string[] = [];
 
   beforeEach(async () => {
     previousPluginData = process.env.CLAUDE_PLUGIN_DATA;
-    process.env.CLAUDE_PLUGIN_DATA = await mkdtemp(join(tmpdir(), "decision-authority-"));
+    const root = await mkdtemp(join(tmpdir(), "decision-authority-"));
+    suiteRoots.push(root);
+    process.env.CLAUDE_PLUGIN_DATA = root;
   });
 
-  afterEach(() => {
+  afterEach(async () => {
     if (previousPluginData === undefined) delete process.env.CLAUDE_PLUGIN_DATA;
     else process.env.CLAUDE_PLUGIN_DATA = previousPluginData;
+    // `decideVia` removes its own root; these were left behind full of
+    // archived attempt results and decision records.
+    await Promise.all(suiteRoots.splice(0).map(root =>
+      rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 })));
   });
 
   it("writes and reads back a policy-autonomous decision", async () => {
