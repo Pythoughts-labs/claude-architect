@@ -397,6 +397,21 @@ test("codex skill ships the direct CLI lane without obscuring its trust boundary
     "README must not describe a worktree as production");
 });
 
+test("CI exercises the supported macOS 15, Ubuntu, and Windows runners", () => {
+  const workflow = read(".github/workflows/ci.yml");
+  assert.match(
+    workflow,
+    /os:\s*\[macos-15,\s*ubuntu-latest,\s*windows-latest\]/u,
+    "CI must test the approved three-platform runner matrix",
+  );
+  assert.doesNotMatch(workflow, /macos-14/u);
+  assert.match(workflow, /actions\/checkout@v7/u);
+  assert.match(workflow, /actions\/setup-node@v7/u);
+  assert.match(workflow, /node-version:\s*22/u);
+  assert.match(workflow, /actions\/upload-artifact@v7/u);
+  assert.match(workflow, /win32-job-kill-x64\.exe/u);
+});
+
 test("delegation-lane agent ships the produce-only courier contract", () => {
   const lane = read("agents/delegation-lane.md");
   const frontmatterMatch = /^---\r?\n([\s\S]*?)\r?\n---\r?\n/u.exec(lane);
