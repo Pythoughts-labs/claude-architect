@@ -10,7 +10,9 @@ import { getPlatformServices } from "../platform/select-platform.js";
 import type { PipelineResult } from "../pipeline/pipeline-runtime.js";
 import type { CandidateArtifact } from "../protocol/attempt-result.js";
 import { ArtifactStore } from "../runtime/artifact-store.js";
+import { redact } from "../runtime/redaction.js";
 import { reviewSnapshotHash } from "../runtime/review-snapshot.js";
+import { logger } from "../util/logger.js";
 import {
   WorkflowBranchManager,
   type WorkflowBranchIdentity,
@@ -138,31 +140,34 @@ function completionCommit(value: unknown): string | null {
 // A journal entry is durable input, not a trusted value: an unrecognized
 // classification must fail closed rather than propagate semantics no caller
 // switches on.
-const PROMOTION_CLASSIFICATIONS: ReadonlySet<string> = new Set<PromotionClassification>([
-  "invalid-request",
-  "invalid-commit-message",
-  "workflow-state-mismatch",
-  "run-evidence-missing",
-  "eligibility-missing",
-  "eligibility-red",
-  "eligibility-stale",
-  "artifact-hash-mismatch",
-  "evidence-mismatch",
-  "decision-conflict",
-  "branch-identity-changed",
-  "dirty-worktree",
-  "head-changed",
-  "apply-conflict",
-  "git-identity-missing",
-  "commit-creation-failed",
-  "commit-proof-failed",
-  "update-ref-race",
-  "post-commit-divergence",
-  "journal-failed",
-  "anchor-deletion-failed",
-  "lock-release-failed",
-  "human-decision-required",
-]);
+const PROMOTION_CLASSIFICATION_RECORD = {
+  "invalid-request": true,
+  "invalid-commit-message": true,
+  "workflow-state-mismatch": true,
+  "run-evidence-missing": true,
+  "eligibility-missing": true,
+  "eligibility-red": true,
+  "eligibility-stale": true,
+  "artifact-hash-mismatch": true,
+  "evidence-mismatch": true,
+  "decision-conflict": true,
+  "branch-identity-changed": true,
+  "dirty-worktree": true,
+  "head-changed": true,
+  "apply-conflict": true,
+  "git-identity-missing": true,
+  "commit-creation-failed": true,
+  "commit-proof-failed": true,
+  "update-ref-race": true,
+  "post-commit-divergence": true,
+  "journal-failed": true,
+  "anchor-deletion-failed": true,
+  "lock-release-failed": true,
+  "human-decision-required": true,
+} as const satisfies Record<PromotionClassification, true>;
+const PROMOTION_CLASSIFICATIONS: ReadonlySet<string> = new Set(
+  Object.keys(PROMOTION_CLASSIFICATION_RECORD),
+);
 
 function completionFailure(value: unknown): PromotionClassification | null {
   if (value === null || typeof value !== "object" || Array.isArray(value)) return null;
@@ -421,7 +426,7 @@ export class CandidatePromoter {
     } catch {
       return finishFailure("branch-identity-changed");
     }
-    let terminal: PromotionResult;
+    let terminal: PromotionResult | undefined;
     try {
       const completedOid = intent.completion === null
         ? null
@@ -622,8 +627,16 @@ export class CandidatePromoter {
     } finally {
       try {
         await lock.release();
-      } catch {
-        terminal = rejected("lock-release-failed");
+      } catch (releaseError) {
+        if (terminal?.status === "committed") {
+          logger.warn("checkout lock release failed after candidate promotion", {
+            event: "checkout-lock-release-failed",
+            workflowId: request.workflowId,
+            reason: redact(String(releaseError)),
+          });
+        } else {
+          terminal = rejected("lock-release-failed");
+        }
       }
     }
     return terminal!;

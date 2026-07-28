@@ -1,6 +1,8 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
+import type { RequestHandlerExtra } from "@modelcontextprotocol/sdk/shared/protocol.js";
+import type { ServerNotification, ServerRequest } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 import { PROTOCOL_VERSION, RUNTIME_VERSION } from "../protocol/versions.js";
 import { doctor, type DoctorDependencies } from "./doctor.js";
@@ -21,7 +23,6 @@ import {
   handleIntegrateCandidate,
   handleReviewCandidate,
   handleValidateDelegationSpec,
-  readDecisionAdvisory,
   type ToolDependencies,
 } from "./tools.js";
 import {
@@ -328,6 +329,38 @@ function toolOutput(value: object) {
   };
 }
 
+async function withProgress<T>(
+  extra: RequestHandlerExtra<ServerRequest, ServerNotification>,
+  initialPhase: string,
+  operation: (onProgress: ((message: string) => void) | undefined) => Promise<T>,
+): Promise<T> {
+  const progressToken = extra._meta?.progressToken;
+  const startedAt = Date.now();
+  let step = 0;
+  let lastPhase = initialPhase;
+  const emit = (message: string) => {
+    if (progressToken === undefined) return;
+    step += 1;
+    const elapsed = Math.round((Date.now() - startedAt) / 1000);
+    void extra.sendNotification({
+      method: "notifications/progress",
+      params: { progressToken, progress: step, message: `${message} (${elapsed}s)` },
+    }).catch(() => { /* progress is best-effort */ });
+  };
+  const onProgress = progressToken === undefined ? undefined : (message: string) => {
+    lastPhase = message;
+    emit(message);
+  };
+  const heartbeat = onProgress === undefined
+    ? undefined
+    : setInterval(() => emit(lastPhase), 8_000);
+  try {
+    return await operation(onProgress);
+  } finally {
+    if (heartbeat !== undefined) clearInterval(heartbeat);
+  }
+}
+
 /**
  * A delegated Producer must never be able to build this surface: nesting a
  * delegation would let an untrusted process launch further untrusted processes.
@@ -386,29 +419,9 @@ export async function createServer(
       // probe a client may retry freely.
       annotations: { destructiveHint: true, idempotentHint: false, readOnlyHint: false },
     },
-    async ({ checkoutPath, spec, protocolVersion, responseMode, expectedSpecSha256 }, extra) => {
-      const progressToken = extra._meta?.progressToken;
-      const startedAt = Date.now();
-      let step = 0;
-      let lastPhase = "starting attempt";
-      const emit = (message: string) => {
-        if (progressToken === undefined) return;
-        step += 1;
-        const elapsed = Math.round((Date.now() - startedAt) / 1000);
-        void extra.sendNotification({
-          method: "notifications/progress",
-          params: { progressToken, progress: step, message: `${message} (${elapsed}s)` },
-        }).catch(() => { /* progress is best-effort */ });
-      };
-      const onProgress = progressToken === undefined ? undefined : (message: string) => {
-        lastPhase = message;
-        emit(message);
-      };
-      const heartbeat = onProgress === undefined
-        ? undefined
-        : setInterval(() => emit(lastPhase), 8_000);
-      try {
-        return toolOutput(await handleDelegate(
+    async ({ checkoutPath, spec, protocolVersion, responseMode, expectedSpecSha256 }, extra) =>
+      withProgress(extra, "starting attempt", async onProgress =>
+        toolOutput(await handleDelegate(
           checkoutPath,
           spec,
           {
@@ -421,11 +434,8 @@ export async function createServer(
           },
           responseMode ?? "full",
           expectedSpecSha256,
-        ));
-      } finally {
-        if (heartbeat !== undefined) clearInterval(heartbeat);
-      }
-    },
+        ))
+      ),
   );
   server.registerTool(
     "delegatePipeline",
@@ -437,29 +447,9 @@ export async function createServer(
       // Runs Producers across implement/review/fix rounds.
       annotations: { destructiveHint: true, idempotentHint: false, readOnlyHint: false },
     },
-    async ({ checkoutPath, spec, protocolVersion, responseMode, expectedSpecSha256 }, extra) => {
-      const progressToken = extra._meta?.progressToken;
-      const startedAt = Date.now();
-      let step = 0;
-      let lastPhase = "starting attempt";
-      const emit = (message: string) => {
-        if (progressToken === undefined) return;
-        step += 1;
-        const elapsed = Math.round((Date.now() - startedAt) / 1000);
-        void extra.sendNotification({
-          method: "notifications/progress",
-          params: { progressToken, progress: step, message: `${message} (${elapsed}s)` },
-        }).catch(() => { /* progress is best-effort */ });
-      };
-      const onProgress = progressToken === undefined ? undefined : (message: string) => {
-        lastPhase = message;
-        emit(message);
-      };
-      const heartbeat = onProgress === undefined
-        ? undefined
-        : setInterval(() => emit(lastPhase), 8_000);
-      try {
-        return toolOutput(await handleDelegatePipeline(
+    async ({ checkoutPath, spec, protocolVersion, responseMode, expectedSpecSha256 }, extra) =>
+      withProgress(extra, "starting attempt", async onProgress =>
+        toolOutput(await handleDelegatePipeline(
           checkoutPath,
           spec,
           {
@@ -472,11 +462,8 @@ export async function createServer(
           },
           responseMode ?? "full",
           expectedSpecSha256,
-        ));
-      } finally {
-        if (heartbeat !== undefined) clearInterval(heartbeat);
-      }
-    },
+        ))
+      ),
   );
   server.registerTool(
     "autopilotStart",
@@ -489,38 +476,15 @@ export async function createServer(
       // branches and worktrees, promotes commits, pushes, and opens a PR.
       annotations: { destructiveHint: true, idempotentHint: false, readOnlyHint: false },
     },
-    async ({ checkoutPath, spec, protocolVersion }, extra) => {
-      const progressToken = extra._meta?.progressToken;
-      const startedAt = Date.now();
-      let step = 0;
-      let lastPhase = "starting autopilot workflow";
-      const emit = (message: string) => {
-        if (progressToken === undefined) return;
-        step += 1;
-        const elapsed = Math.round((Date.now() - startedAt) / 1000);
-        void extra.sendNotification({
-          method: "notifications/progress",
-          params: { progressToken, progress: step, message: `${message} (${elapsed}s)` },
-        }).catch(() => { /* progress is best-effort */ });
-      };
-      const onProgress = progressToken === undefined ? undefined : (message: string) => {
-        lastPhase = message;
-        emit(message);
-      };
-      const heartbeat = onProgress === undefined
-        ? undefined
-        : setInterval(() => emit(lastPhase), 8_000);
-      try {
-        return toolOutput(await handleAutopilotStart(checkoutPath, spec, {
+    async ({ checkoutPath, spec, protocolVersion }, extra) =>
+      withProgress(extra, "starting autopilot workflow", async onProgress =>
+        toolOutput(await handleAutopilotStart(checkoutPath, spec, {
           ...dependencies,
           skillProtocolVersion: protocolVersion,
           abortSignal: extra.signal,
           ...(onProgress === undefined ? {} : { onProgress }),
-        }));
-      } finally {
-        if (heartbeat !== undefined) clearInterval(heartbeat);
-      }
-    },
+        }))
+      ),
   );
   server.registerTool(
     "autopilotStatus",
@@ -549,38 +513,15 @@ export async function createServer(
       // Continues the same shipping workflow from durable state.
       annotations: { destructiveHint: true, idempotentHint: false, readOnlyHint: false },
     },
-    async ({ checkoutPath, workflowId, protocolVersion }, extra) => {
-      const progressToken = extra._meta?.progressToken;
-      const startedAt = Date.now();
-      let step = 0;
-      let lastPhase = "resuming autopilot workflow";
-      const emit = (message: string) => {
-        if (progressToken === undefined) return;
-        step += 1;
-        const elapsed = Math.round((Date.now() - startedAt) / 1000);
-        void extra.sendNotification({
-          method: "notifications/progress",
-          params: { progressToken, progress: step, message: `${message} (${elapsed}s)` },
-        }).catch(() => { /* progress is best-effort */ });
-      };
-      const onProgress = progressToken === undefined ? undefined : (message: string) => {
-        lastPhase = message;
-        emit(message);
-      };
-      const heartbeat = onProgress === undefined
-        ? undefined
-        : setInterval(() => emit(lastPhase), 8_000);
-      try {
-        return toolOutput(await handleAutopilotResume(checkoutPath, workflowId, {
+    async ({ checkoutPath, workflowId, protocolVersion }, extra) =>
+      withProgress(extra, "resuming autopilot workflow", async onProgress =>
+        toolOutput(await handleAutopilotResume(checkoutPath, workflowId, {
           ...dependencies,
           skillProtocolVersion: protocolVersion,
           abortSignal: extra.signal,
           ...(onProgress === undefined ? {} : { onProgress }),
-        }));
-      } finally {
-        if (heartbeat !== undefined) clearInterval(heartbeat);
-      }
-    },
+        }))
+      ),
   );
   server.registerTool(
     "reviewCandidate",
@@ -612,33 +553,41 @@ export async function createServer(
       // to the checkout; neither is a read-only probe a client may retry freely.
       annotations: { destructiveHint: true, idempotentHint: false, readOnlyHint: false },
     },
-    async ({ checkoutPath, runId, decision, expectedArtifactHash }) => {
-      const advisory = await readDecisionAdvisory(runId, dependencies);
-      const autonomy = autonomousEligibility(
-        (dependencies.decisionAuthority ?? decisionAuthority)(),
-        advisory,
-      );
-      // Eligibility says the runtime proved everything it can prove about the
-      // candidate; it says nothing about the verdict. The policy may only ever
-      // accept, so a rejection or revision request on an eligible candidate is a
-      // human overriding the policy — it must go through elicitation and be
-      // recorded as the person's decision, not the policy's.
-      const autonomous = autonomy.eligible && decision === "accepted";
-      if (!autonomous) {
-        const confirmed = await confirmWithHuman(server, runId, decision, advisory.warnings);
-        if (!confirmed.ok) return toolOutput(confirmed.error);
-      }
-      return toolOutput(await handleDecideCandidate(
+    async ({ checkoutPath, runId, decision, expectedArtifactHash }) => toolOutput(
+      await handleDecideCandidate(
         checkoutPath,
         runId,
         decision,
         expectedArtifactHash,
         {
           ...dependencies,
-          decisionProvenance: autonomous ? "policy-autonomous" : "human-elicitation",
+          decisionProvenanceResolver: async ({ advisory }) => {
+            const autonomy = autonomousEligibility(
+              (dependencies.decisionAuthority ?? decisionAuthority)(),
+              advisory,
+            );
+            // Eligibility says the runtime proved everything it can prove about
+            // the candidate; it says nothing about the verdict. The policy may
+            // only accept, so every other verdict is a human override.
+            if (autonomy.eligible && decision === "accepted") {
+              return "policy-autonomous";
+            }
+            const confirmed = await confirmWithHuman(
+              server,
+              runId,
+              decision,
+              advisory.warnings,
+            );
+            if (!confirmed.ok) {
+              throw new RuntimeError(confirmed.error.diagnostic, {
+                toolError: confirmed.error.error,
+              });
+            }
+            return "human-elicitation";
+          },
         },
-      ));
-    },
+      ),
+    ),
   );
   server.registerTool(
     "integrateCandidate",

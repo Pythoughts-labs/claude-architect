@@ -95,16 +95,44 @@ function sortChangedPaths(changedPaths: ChangedPath[]): ChangedPath[] {
   return changedPaths.sort((left, right) => left.path < right.path ? -1 : left.path > right.path ? 1 : 0);
 }
 
+function deriveChangedPaths(inputs: {
+  rawDiff: RawDiffEntry[];
+  nameStatusOutput: string;
+  treeOutput: string;
+}): ChangedPath[] {
+  const rawEntries = new Map(inputs.rawDiff.map(entry => [entry.path, entry]));
+  const treeEntries = parseTree(inputs.treeOutput);
+  return sortChangedPaths(parseNameStatus(inputs.nameStatusOutput).map(({ path, status }) => {
+    const treeEntry = treeEntries.get(path);
+    const rawEntry = rawEntries.get(path);
+    if (treeEntry === undefined && status !== "D") {
+      throw new RuntimeError("candidate tree is missing a changed path");
+    }
+    if (treeEntry === undefined && rawEntry === undefined) {
+      throw new RuntimeError("git diff-tree outputs disagree");
+    }
+    return {
+      path,
+      changeType: changeType(status),
+      mode: treeEntry?.mode ?? rawEntry!.oldMode,
+      contentHash: treeEntry?.oid ?? null,
+    };
+  }));
+}
+
 /**
  * The single definition of "these two paths are the same file on a
  * case-insensitive or Unicode-normalizing filesystem". Folding with
- * `toLowerCase()` alone misses NFC/NFD aliases (`É.txt` vs `e\u0301.txt`),
- * which name one file on macOS and Windows — so every collision gate in the
- * codebase must fold identically or one of them fails open.
+ * `toLowerCase()` alone misses both NFC/NFD aliases (`É.txt` vs `e\u0301.txt`)
+ * and Unicode special-case aliases such as Greek final sigma (`ς` vs `σ`).
+ * Uppercasing before lowercasing closes both gaps. It deliberately over-detects
+ * expansions such as `ß` vs `ss`; that is the fail-closed outcome for a gate
+ * shared by filesystems with different folding rules. Every collision gate in
+ * the codebase must use this definition or one of them fails open.
  */
 export function foldPathForCollision(value: string): { exact: string; folded: string } {
   const exact = value.replaceAll("\\", "/").normalize("NFC");
-  return { exact, folded: exact.toLowerCase() };
+  return { exact, folded: exact.toUpperCase().toLowerCase() };
 }
 
 export function validateChangedPaths(changedPaths: ChangedPath[]): void {
@@ -145,6 +173,29 @@ export function manifestHashOf(changedPaths: ChangedPath[]): string {
 }
 
 /**
+ * Verification must keep inspecting a colliding tree even though that tree has
+ * no valid canonical manifest hash. Strict ingestion still uses
+ * `computeChangedPathManifest`; this read-only form returns `null` only for the
+ * independently observed collision so callers can accumulate other failures.
+ */
+export function inspectChangedPathManifest(inputs: {
+  rawDiff: RawDiffEntry[];
+  nameStatusOutput: string;
+  treeOutput: string;
+}): { changedPaths: ChangedPath[]; manifestHash: string | null } {
+  const changedPaths = deriveChangedPaths(inputs);
+  try {
+    return { changedPaths, manifestHash: manifestHashOf(changedPaths) };
+  } catch (error) {
+    if (error instanceof RuntimeError
+      && error.message === "changed paths collide under case folding") {
+      return { changedPaths, manifestHash: null };
+    }
+    throw error;
+  }
+}
+
+/**
  * Cross-join name-status, raw diff, and tree entries into the canonical sorted
  * `ChangedPath[]` and its hash. Fails closed when the three git outputs disagree.
  */
@@ -153,23 +204,6 @@ export function computeChangedPathManifest(inputs: {
   nameStatusOutput: string;
   treeOutput: string;
 }): ChangedPathManifest {
-  const rawEntries = new Map(inputs.rawDiff.map(entry => [entry.path, entry]));
-  const treeEntries = parseTree(inputs.treeOutput);
-  const changedPaths = sortChangedPaths(parseNameStatus(inputs.nameStatusOutput).map(({ path, status }) => {
-    const treeEntry = treeEntries.get(path);
-    const rawEntry = rawEntries.get(path);
-    if (treeEntry === undefined && status !== "D") {
-      throw new RuntimeError("candidate tree is missing a changed path");
-    }
-    if (treeEntry === undefined && rawEntry === undefined) {
-      throw new RuntimeError("git diff-tree outputs disagree");
-    }
-    return {
-      path,
-      changeType: changeType(status),
-      mode: treeEntry?.mode ?? rawEntry!.oldMode,
-      contentHash: treeEntry?.oid ?? null,
-    };
-  }));
+  const changedPaths = deriveChangedPaths(inputs);
   return { changedPaths, manifestHash: manifestHashOf(changedPaths) };
 }

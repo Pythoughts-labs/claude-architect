@@ -95,6 +95,7 @@ function validateScopePatterns(spec: DelegationSpec): ValidateResult | null {
   ];
   for (const [sliceIndex, slice] of (spec.slices ?? []).entries()) {
     groups.push([`/slices/${sliceIndex}/writeAllowlist`, slice.writeAllowlist]);
+    groups.push([`/slices/${sliceIndex}/forbiddenScope`, slice.forbiddenScope]);
   }
   for (const [at, patterns] of groups) {
     for (const [index, pattern] of (patterns ?? []).entries()) {

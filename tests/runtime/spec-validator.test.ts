@@ -76,6 +76,27 @@ describe("validateSpec", () => {
     if (!r.ok) expect(r.errors.some(e => e.path === "/forbiddenScope/0")).toBe(true);
   });
 
+  it("rejects a slice forbiddenScope with too many '**' segments at its contract path", () => {
+    const r = validateSpec({
+      ...base,
+      slices: [{
+        objective: "implement the bounded slice",
+        context: "slice context",
+        writeAllowlist: ["src/**"],
+        forbiddenScope: [`${"**/".repeat(9)}secret`],
+        successCriteria: ["the slice passes"],
+        verification: base.verification,
+      }],
+    });
+    expect(r).toEqual({
+      ok: false,
+      errors: [{
+        path: "/slices/0/forbiddenScope/0",
+        message: "scope pattern must not contain more than 8 '**' segments",
+      }],
+    });
+  });
+
   it("accepts scope patterns at the bound", () => {
     expect(validateSpec({ ...base, writeAllowlist: [`${"**/".repeat(8)}x`] }).ok).toBe(true);
   });

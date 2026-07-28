@@ -332,9 +332,28 @@ describe("structuralVerify", () => {
     expect(result.ok).toBe(false);
   });
 
+  it("reports a case collision together with independent scope failures", async () => {
+    const fixture = await frozenFixture();
+    const artifact = await candidateWithAddedPaths(fixture, ["A.TXT"]);
+
+    const result = await verify(fixture, artifact, {
+      writeAllowlist: ["elsewhere/**"], forbiddenScope: [],
+    });
+
+    expect(result.failures).toEqual(expect.arrayContaining([
+      "case-collision",
+      "out-of-scope-write",
+    ]));
+    expect(result.checkoutDrift).toEqual({ headMoved: false, dirty: false });
+  });
+
   it("normalizes NFC and NFD paths before exact and folded comparisons", () => {
     expect(pathsCaseCollide(["É.txt", "e\u0301.txt"], [])).toBe(true);
     expect(pathsCaseCollide(["é.txt"], ["e\u0301.txt"])).toBe(false);
+  });
+
+  it("folds Greek sigma and final sigma as one filesystem path", () => {
+    expect(pathsCaseCollide(["Σ.txt", "ς.txt", "σ.txt"], [])).toBe(true);
   });
 
   it("rejects a gitlink encoded directly in the immutable candidate tree", async () => {

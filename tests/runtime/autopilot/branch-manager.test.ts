@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { mkdir, mkdtemp, readFile, realpath, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   WorkflowBranchError,
   WorkflowBranchManager,
@@ -14,6 +14,7 @@ import {
 import { git, type GitResult } from "../../../src/git/git-exec.js";
 import { getPlatformServices } from "../../../src/platform/select-platform.js";
 import { RuntimeError } from "../../../src/util/errors.js";
+import { logger } from "../../../src/util/logger.js";
 
 interface Fixture {
   repoRoot: string;
@@ -832,6 +833,7 @@ describe("WorkflowBranchManager", () => {
     });
 
     const selected = getPlatformServices();
+    const warn = vi.spyOn(logger, "warn").mockImplementation(() => {});
     const releaseFailingManager = new WorkflowBranchManager({
       remoteTransport: localTransport(fixture.bareRemote),
       platformServices: {
@@ -850,14 +852,29 @@ describe("WorkflowBranchManager", () => {
       },
     });
     await expect(releaseFailingManager.revalidate(created)).resolves.toEqual({
-      ok: false,
-      classification: "git-command-failed",
+      ok: true,
     });
     await expect(releaseFailingManager.cleanup(created)).resolves.toEqual({
       ok: true,
       worktreeRemoved: true,
       refsRemoved: true,
     });
+    expect(warn).toHaveBeenCalledWith(
+      "checkout lock release failed after workflow branch revalidation",
+      expect.objectContaining({
+        event: "checkout-lock-release-failed",
+        workflowId: created.workflowId,
+        reason: expect.stringContaining("simulated release report failure"),
+      }),
+    );
+    expect(warn).toHaveBeenCalledWith(
+      "checkout lock release failed after workflow branch cleanup",
+      expect.objectContaining({
+        event: "checkout-lock-release-failed",
+        workflowId: created.workflowId,
+        reason: expect.stringContaining("simulated release report failure"),
+      }),
+    );
   });
 
   it("returns a durable identity when lock release reports failure after create", async () => {

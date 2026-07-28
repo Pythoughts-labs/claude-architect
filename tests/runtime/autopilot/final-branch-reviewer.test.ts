@@ -18,9 +18,10 @@ import {
   type FinalBranchTaskEvidence,
 } from "../../../src/autopilot/final-branch-reviewer.js";
 import { canonicalArtifactHash } from "../../../src/autopilot/autopilot-eligibility.js";
-import type {
-  WorkflowBranchIdentity,
+import {
   WorkflowBranchManager,
+  type RemoteTransport,
+  type WorkflowBranchIdentity,
 } from "../../../src/autopilot/branch-manager.js";
 import type { AutopilotWorkflowState } from "../../../src/autopilot/types.js";
 import { WorkflowStore } from "../../../src/autopilot/workflow-store.js";
@@ -667,6 +668,125 @@ describe("FinalBranchReviewer cumulative artifact", () => {
       artifact.headCommitOid,
     );
   });
+
+  it("detects drift through the real WorkflowBranchManager contract", async () => {
+    const root = await realpath(await mkdtemp(path.join(tmpdir(), "final-branch-real-manager-")));
+    temporaryDirectories.push(root);
+    const repo = path.join(root, "repository");
+    const remote = path.join(root, "remote.git");
+    const stateDirectory = path.join(root, "state");
+    await Promise.all([mkdir(repo), mkdir(remote), mkdir(stateDirectory)]);
+    await runGit(repo, ["init", "-q", "-b", "main"]);
+    await runGit(repo, ["config", "--local", "user.name", "Final Branch Test"]);
+    await runGit(repo, ["config", "--local", "user.email", "final-branch@example.invalid"]);
+    await writeFile(path.join(repo, "contract.txt"), "base contract\n");
+    await runGit(repo, ["add", "contract.txt"]);
+    await runGit(repo, ["commit", "-q", "-m", "base"]);
+    await runGit(remote, ["init", "--bare", "-q"]);
+    await runGit(repo, ["push", remote, "refs/heads/main:refs/heads/main"]);
+    await runGit(repo, [
+      "remote", "add", "origin", "https://github.com/example/project.git",
+    ]);
+
+    const transport: RemoteTransport = {
+      fetch: (cwd, _url, sourceRef, destinationRef) => git(cwd, [
+        "fetch", "--no-tags", "--no-write-fetch-head", remote,
+        `${sourceRef}:${destinationRef}`,
+      ]),
+      listHeads: cwd => git(cwd, ["ls-remote", "--heads", remote]),
+    };
+    const previousPluginData = process.env.CLAUDE_PLUGIN_DATA;
+    const previousStateDirectory = process.env.CLAUDE_ARCHITECT_STATE_DIR;
+    process.env.CLAUDE_PLUGIN_DATA = stateDirectory;
+    process.env.CLAUDE_ARCHITECT_STATE_DIR = stateDirectory;
+    try {
+      const branchManager = new WorkflowBranchManager({ remoteTransport: transport });
+      const workflowId = "final-real-manager-workflow";
+      const branch = await branchManager.create({
+        checkoutPath: repo,
+        workflowId,
+        topic: "final-real-manager",
+        remote: "origin",
+        baseBranch: "main",
+      });
+      await writeFile(path.join(branch.worktreePath, "contract.txt"), "promoted contract\n");
+      await runGit(branch.worktreePath, ["add", "contract.txt"]);
+      await runGit(branch.worktreePath, ["commit", "-q", "-m", "task promotion"]);
+      const headOid = await runGit(branch.worktreePath, ["rev-parse", "HEAD"]);
+
+      const store = new WorkflowStore(workflowId, {
+        stateDirectory,
+        now: () => "2026-07-20T20:01:00.000Z",
+      });
+      const state = initialState({ workflowId, repo: branch.worktreePath, baseOid: branch.baseCommitOid });
+      state.repositoryIdentity = branch.repositoryIdentity;
+      state.workflowRef = branch.branchRef;
+      state.worktreePath = branch.worktreePath;
+      await store.create(state);
+      await store.transition({ expectedRevision: 0, to: "running-task" });
+      await store.transition({ expectedRevision: 1, to: "promoting-task" });
+      const finalState = await store.transition({
+        expectedRevision: 2,
+        to: "final-review",
+        update(draft) {
+          draft.currentTaskIndex = 1;
+          draft.tasks[0] = {
+            id: "task-1",
+            runId: "run-real-manager",
+            candidateManifestHash: "a".repeat(64),
+            eligibilityHash: "c".repeat(64),
+            promotionCommitOid: headOid,
+            status: "promoted",
+          };
+        },
+      });
+      const evidence: FinalBranchTaskEvidence = {
+        taskId: "task-1",
+        runId: "run-real-manager",
+        candidateManifestHash: "a".repeat(64),
+        promotionCommitOid: headOid,
+        evidenceRefs: ["pipeline/verification.json"],
+      };
+      const reviewer = new FinalBranchReviewer({
+        branchManager,
+        workflowStore: () => store,
+        evidenceStore: inMemoryEvidenceStore(
+          new Map(),
+          new Map([[evidence.runId, expectedEvidenceRefs(evidence.evidenceRefs)]]),
+        ),
+        taskEvidenceValidator: async () => {},
+      });
+      const artifact = await reviewer.freezeCumulativeArtifact({
+        workflowId,
+        expectedRevision: finalState.revision,
+        taskEvidence: [evidence],
+      });
+
+      await writeFile(path.join(branch.worktreePath, "drift.txt"), "unreviewed bytes\n");
+      await runGit(branch.worktreePath, ["add", "drift.txt"]);
+      await runGit(branch.worktreePath, ["commit", "-q", "-m", "drift"]);
+      // Assert the branch manager's OWN revalidation reports the drift. The
+      // phase-level assertion below cannot prove this: `withHeadRevalidation`
+      // independently rechecks HEAD, so it still throws "head-changed" even
+      // when branch revalidation is disabled entirely. Without this line the
+      // real-manager coverage would prove nothing that the stub did not.
+      await expect(branchManager.revalidate(branch, headOid))
+        .resolves.toMatchObject({ ok: false, classification: "head-changed" });
+      const execute = vi.fn(async () => true);
+      await expect(reviewer.runHeadBoundPhase(
+        artifact,
+        "real-manager-drift",
+        execute,
+        branch.worktreePath,
+      )).rejects.toMatchObject({ classification: "head-changed" });
+      expect(execute).not.toHaveBeenCalled();
+    } finally {
+      if (previousPluginData === undefined) delete process.env.CLAUDE_PLUGIN_DATA;
+      else process.env.CLAUDE_PLUGIN_DATA = previousPluginData;
+      if (previousStateDirectory === undefined) delete process.env.CLAUDE_ARCHITECT_STATE_DIR;
+      else process.env.CLAUDE_ARCHITECT_STATE_DIR = previousStateDirectory;
+    }
+  }, 120_000);
 
   it("detects head drift introduced during a later phase", async () => {
     const f = await fixture();

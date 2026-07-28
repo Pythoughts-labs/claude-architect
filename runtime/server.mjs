@@ -37480,6 +37480,7 @@ function validateScopePatterns(spec) {
   ];
   for (const [sliceIndex, slice] of (spec.slices ?? []).entries()) {
     groups.push([`/slices/${sliceIndex}/writeAllowlist`, slice.writeAllowlist]);
+    groups.push([`/slices/${sliceIndex}/forbiddenScope`, slice.forbiddenScope]);
   }
   for (const [at, patterns] of groups) {
     for (const [index, pattern] of (patterns ?? []).entries()) {
@@ -37702,9 +37703,29 @@ function changeType(status) {
 function sortChangedPaths(changedPaths) {
   return changedPaths.sort((left, right) => left.path < right.path ? -1 : left.path > right.path ? 1 : 0);
 }
+function deriveChangedPaths(inputs) {
+  const rawEntries = new Map(inputs.rawDiff.map((entry) => [entry.path, entry]));
+  const treeEntries = parseTree(inputs.treeOutput);
+  return sortChangedPaths(parseNameStatus(inputs.nameStatusOutput).map(({ path: path26, status }) => {
+    const treeEntry = treeEntries.get(path26);
+    const rawEntry = rawEntries.get(path26);
+    if (treeEntry === void 0 && status !== "D") {
+      throw new RuntimeError("candidate tree is missing a changed path");
+    }
+    if (treeEntry === void 0 && rawEntry === void 0) {
+      throw new RuntimeError("git diff-tree outputs disagree");
+    }
+    return {
+      path: path26,
+      changeType: changeType(status),
+      mode: treeEntry?.mode ?? rawEntry.oldMode,
+      contentHash: treeEntry?.oid ?? null
+    };
+  }));
+}
 function foldPathForCollision(value) {
   const exact = value.replaceAll("\\", "/").normalize("NFC");
-  return { exact, folded: exact.toLowerCase() };
+  return { exact, folded: exact.toUpperCase().toLowerCase() };
 }
 function validateChangedPaths(changedPaths) {
   const observed = /* @__PURE__ */ new Map();
@@ -37725,25 +37746,19 @@ function manifestHashOf(changedPaths) {
   const canonical = changedPaths.map(({ path: path26, changeType: changeType2, mode, contentHash }) => ({ path: path26, changeType: changeType2, mode, contentHash }));
   return createHash6("sha256").update(JSON.stringify(canonical)).digest("hex");
 }
+function inspectChangedPathManifest(inputs) {
+  const changedPaths = deriveChangedPaths(inputs);
+  try {
+    return { changedPaths, manifestHash: manifestHashOf(changedPaths) };
+  } catch (error51) {
+    if (error51 instanceof RuntimeError && error51.message === "changed paths collide under case folding") {
+      return { changedPaths, manifestHash: null };
+    }
+    throw error51;
+  }
+}
 function computeChangedPathManifest(inputs) {
-  const rawEntries = new Map(inputs.rawDiff.map((entry) => [entry.path, entry]));
-  const treeEntries = parseTree(inputs.treeOutput);
-  const changedPaths = sortChangedPaths(parseNameStatus(inputs.nameStatusOutput).map(({ path: path26, status }) => {
-    const treeEntry = treeEntries.get(path26);
-    const rawEntry = rawEntries.get(path26);
-    if (treeEntry === void 0 && status !== "D") {
-      throw new RuntimeError("candidate tree is missing a changed path");
-    }
-    if (treeEntry === void 0 && rawEntry === void 0) {
-      throw new RuntimeError("git diff-tree outputs disagree");
-    }
-    return {
-      path: path26,
-      changeType: changeType(status),
-      mode: treeEntry?.mode ?? rawEntry.oldMode,
-      contentHash: treeEntry?.oid ?? null
-    };
-  }));
+  const changedPaths = deriveChangedPaths(inputs);
   return { changedPaths, manifestHash: manifestHashOf(changedPaths) };
 }
 
@@ -38859,7 +38874,7 @@ async function recomputeManifest(args) {
     checkedGit2(args.worktreePath, ["ls-tree", "-r", "-z", args.artifact.candidateTreeOid])
   ]);
   const rawDiff = parseRawDiff(rawOutput);
-  const { changedPaths, manifestHash } = computeChangedPathManifest({
+  const { changedPaths, manifestHash } = inspectChangedPathManifest({
     rawDiff,
     nameStatusOutput,
     treeOutput
@@ -38890,27 +38905,14 @@ async function artifactIdentityMatches(args) {
 }
 async function structuralVerify(args) {
   const failures = /* @__PURE__ */ new Set();
-  if (await candidateHasCaseCollision(args)) {
-    const [head, status] = await Promise.all([
-      checkedGit2(args.repoRoot, ["rev-parse", "--verify", "HEAD"]),
-      checkedGit2(args.repoRoot, [
-        "status",
-        "--porcelain=v1",
-        "--untracked-files=all",
-        "--ignore-submodules=none"
-      ])
-    ]);
-    return {
-      ok: false,
-      failures: ["case-collision"],
-      manifestHash: null,
-      checkoutDrift: {
-        headMoved: head.trim() !== args.baseCommitOid,
-        dirty: status.length > 0
-      }
-    };
-  }
-  const [manifest, baseTreeOid, currentHead, mainStatus, artifactIdentityValid] = await Promise.all([
+  const [
+    manifest,
+    baseTreeOid,
+    currentHead,
+    mainStatus,
+    artifactIdentityValid,
+    caseCollision
+  ] = await Promise.all([
     recomputeManifest(args),
     checkedGit2(args.repoRoot, ["rev-parse", `${args.baseCommitOid}^{tree}`]),
     checkedGit2(args.repoRoot, ["rev-parse", "--verify", "HEAD"]),
@@ -38920,8 +38922,10 @@ async function structuralVerify(args) {
       "--untracked-files=all",
       "--ignore-submodules=none"
     ]),
-    artifactIdentityMatches(args)
+    artifactIdentityMatches(args),
+    candidateHasCaseCollision(args)
   ]);
+  if (caseCollision) failures.add("case-collision");
   if (args.artifact.baseCommitOid !== args.baseCommitOid) {
     failures.add("artifact-base-mismatch");
   }
@@ -38929,7 +38933,7 @@ async function structuralVerify(args) {
     headMoved: currentHead.trim() !== args.baseCommitOid,
     dirty: mainStatus.length > 0
   };
-  if (JSON.stringify(args.artifact.changedPaths) !== JSON.stringify(manifest.changedPaths) || args.artifact.manifestHash !== manifest.manifestHash) {
+  if (manifest.manifestHash === null || JSON.stringify(args.artifact.changedPaths) !== JSON.stringify(manifest.changedPaths) || args.artifact.manifestHash !== manifest.manifestHash) {
     failures.add("manifest-divergence");
   }
   if (!artifactIdentityValid) {
@@ -42660,8 +42664,12 @@ var WorkflowBranchManager = class {
     } finally {
       try {
         await lock.release();
-      } catch {
-        return { ok: false, classification: "git-command-failed" };
+      } catch (releaseError) {
+        logger.warn("checkout lock release failed after workflow branch revalidation", {
+          event: "checkout-lock-release-failed",
+          workflowId: identity.workflowId,
+          reason: redact(String(releaseError))
+        });
       }
     }
   }
@@ -42855,7 +42863,12 @@ var WorkflowBranchManager = class {
     }
     try {
       await lock.release();
-    } catch {
+    } catch (releaseError) {
+      logger.warn("checkout lock release failed after workflow branch cleanup", {
+        event: "checkout-lock-release-failed",
+        workflowId: identity.workflowId,
+        reason: redact(String(releaseError))
+      });
     }
     return result;
   }
@@ -45191,31 +45204,34 @@ function completionCommit(value) {
   const commitOid = value.commitOid;
   return typeof commitOid === "string" && OBJECT_ID3.test(commitOid) ? commitOid : null;
 }
-var PROMOTION_CLASSIFICATIONS = /* @__PURE__ */ new Set([
-  "invalid-request",
-  "invalid-commit-message",
-  "workflow-state-mismatch",
-  "run-evidence-missing",
-  "eligibility-missing",
-  "eligibility-red",
-  "eligibility-stale",
-  "artifact-hash-mismatch",
-  "evidence-mismatch",
-  "decision-conflict",
-  "branch-identity-changed",
-  "dirty-worktree",
-  "head-changed",
-  "apply-conflict",
-  "git-identity-missing",
-  "commit-creation-failed",
-  "commit-proof-failed",
-  "update-ref-race",
-  "post-commit-divergence",
-  "journal-failed",
-  "anchor-deletion-failed",
-  "lock-release-failed",
-  "human-decision-required"
-]);
+var PROMOTION_CLASSIFICATION_RECORD = {
+  "invalid-request": true,
+  "invalid-commit-message": true,
+  "workflow-state-mismatch": true,
+  "run-evidence-missing": true,
+  "eligibility-missing": true,
+  "eligibility-red": true,
+  "eligibility-stale": true,
+  "artifact-hash-mismatch": true,
+  "evidence-mismatch": true,
+  "decision-conflict": true,
+  "branch-identity-changed": true,
+  "dirty-worktree": true,
+  "head-changed": true,
+  "apply-conflict": true,
+  "git-identity-missing": true,
+  "commit-creation-failed": true,
+  "commit-proof-failed": true,
+  "update-ref-race": true,
+  "post-commit-divergence": true,
+  "journal-failed": true,
+  "anchor-deletion-failed": true,
+  "lock-release-failed": true,
+  "human-decision-required": true
+};
+var PROMOTION_CLASSIFICATIONS = new Set(
+  Object.keys(PROMOTION_CLASSIFICATION_RECORD)
+);
 function completionFailure(value) {
   if (value === null || typeof value !== "object" || Array.isArray(value)) return null;
   const classification = value.classification;
@@ -45682,8 +45698,16 @@ var CandidatePromoter = class {
     } finally {
       try {
         await lock.release();
-      } catch {
-        terminal = rejected("lock-release-failed");
+      } catch (releaseError) {
+        if (terminal?.status === "committed") {
+          logger.warn("checkout lock release failed after candidate promotion", {
+            event: "checkout-lock-release-failed",
+            workflowId: request.workflowId,
+            reason: redact(String(releaseError))
+          });
+        } else {
+          terminal = rejected("lock-release-failed");
+        }
       }
     }
     return terminal;
@@ -46879,7 +46903,7 @@ async function runAttempt(checkoutPath, spec, deps) {
       });
       baselineEvidence = { ...baselineEvidence, producerPreflight: preflight };
       if (preflight.status === "environment-defect") {
-        return await archiveTerminal({
+        return await archiveWithStatus({
           store,
           spec,
           runId,
@@ -48004,6 +48028,9 @@ async function candidateArtifact(args) {
     baseCommitOid: args.baselineCommit,
     artifact
   });
+  if (canonical.manifestHash === null) {
+    throw new RuntimeError("final candidate paths collide under case folding");
+  }
   return {
     ...artifact,
     changedPaths: canonical.changedPaths,
@@ -50958,17 +50985,7 @@ async function handleReviewCandidate(checkoutPath, runId, deps = {}, expectedSpe
     return errorResult(error51);
   }
 }
-async function readDecisionAdvisory(runId, deps = {}) {
-  let run;
-  try {
-    run = await loadArchivedRun(runId, deps);
-  } catch (error51) {
-    return {
-      warnings: [`the pipeline gate outcome for this run could not be read: ${redact(error51 instanceof Error ? error51.message : String(error51))}`],
-      verifiedClean: false,
-      unreadable: true
-    };
-  }
+function decisionAdvisoryForRun(run) {
   const refused = run.result.evidence.pipelineGateRefused;
   const incomplete = run.result.evidence.pipelineReviewIncomplete;
   const warnings = [];
@@ -50990,6 +51007,11 @@ async function handleDecideCandidate(checkoutPath, runId, decision, expectedArti
   try {
     return await withCurrentArchivedRun(checkoutPath, runId, deps, async (run) => {
       await requireInactivePipeline(run, runId);
+      const decisionProvenance = deps.decisionProvenanceResolver === void 0 ? deps.decisionProvenance : await deps.decisionProvenanceResolver({
+        runId,
+        decision,
+        advisory: decisionAdvisoryForRun(run)
+      });
       const candidate = decision === "accepted" ? requireVerifiedCandidate(run) : requireCandidate(run);
       if (expectedArtifactHash !== run.manifest.candidateManifestHash) {
         throw runtimeError(
@@ -50997,7 +51019,7 @@ async function handleDecideCandidate(checkoutPath, runId, decision, expectedArti
           "artifact-hash-mismatch"
         );
       }
-      const authority = decisionAuthorityFor(deps.decisionProvenance);
+      const authority = decisionAuthorityFor(decisionProvenance);
       if (authority === "policy-autonomous" && decision !== "accepted") {
         throw runtimeError(
           `a ${authority} authority may only accept, never ${decision}`,
@@ -53419,6 +53441,32 @@ function toolOutput(value) {
     structuredContent
   };
 }
+async function withProgress(extra, initialPhase, operation) {
+  const progressToken = extra._meta?.progressToken;
+  const startedAt = Date.now();
+  let step = 0;
+  let lastPhase = initialPhase;
+  const emit2 = (message) => {
+    if (progressToken === void 0) return;
+    step += 1;
+    const elapsed = Math.round((Date.now() - startedAt) / 1e3);
+    void extra.sendNotification({
+      method: "notifications/progress",
+      params: { progressToken, progress: step, message: `${message} (${elapsed}s)` }
+    }).catch(() => {
+    });
+  };
+  const onProgress = progressToken === void 0 ? void 0 : (message) => {
+    lastPhase = message;
+    emit2(message);
+  };
+  const heartbeat = onProgress === void 0 ? void 0 : setInterval(() => emit2(lastPhase), 8e3);
+  try {
+    return await operation(onProgress);
+  } finally {
+    if (heartbeat !== void 0) clearInterval(heartbeat);
+  }
+}
 function nestedDelegationDenied() {
   return process.env.CLAUDE_ARCHITECT_DELEGATED !== void 0;
 }
@@ -53460,45 +53508,24 @@ async function createServer(dependencies = {}) {
       // probe a client may retry freely.
       annotations: { destructiveHint: true, idempotentHint: false, readOnlyHint: false }
     },
-    async ({ checkoutPath, spec, protocolVersion, responseMode, expectedSpecSha256 }, extra) => {
-      const progressToken = extra._meta?.progressToken;
-      const startedAt = Date.now();
-      let step = 0;
-      let lastPhase = "starting attempt";
-      const emit2 = (message) => {
-        if (progressToken === void 0) return;
-        step += 1;
-        const elapsed = Math.round((Date.now() - startedAt) / 1e3);
-        void extra.sendNotification({
-          method: "notifications/progress",
-          params: { progressToken, progress: step, message: `${message} (${elapsed}s)` }
-        }).catch(() => {
-        });
-      };
-      const onProgress = progressToken === void 0 ? void 0 : (message) => {
-        lastPhase = message;
-        emit2(message);
-      };
-      const heartbeat = onProgress === void 0 ? void 0 : setInterval(() => emit2(lastPhase), 8e3);
-      try {
-        return toolOutput(await handleDelegate(
-          checkoutPath,
-          spec,
-          {
-            ...dependencies,
-            skillProtocolVersion: protocolVersion,
-            ...onProgress === void 0 ? {} : { onProgress },
-            // The caller's cancellation must reach the Producer tree; without
-            // it a cancelled request keeps running and keeps spawning.
-            abortSignal: extra.signal
-          },
-          responseMode ?? "full",
-          expectedSpecSha256
-        ));
-      } finally {
-        if (heartbeat !== void 0) clearInterval(heartbeat);
-      }
-    }
+    async ({ checkoutPath, spec, protocolVersion, responseMode, expectedSpecSha256 }, extra) => withProgress(
+      extra,
+      "starting attempt",
+      async (onProgress) => toolOutput(await handleDelegate(
+        checkoutPath,
+        spec,
+        {
+          ...dependencies,
+          skillProtocolVersion: protocolVersion,
+          ...onProgress === void 0 ? {} : { onProgress },
+          // The caller's cancellation must reach the Producer tree; without
+          // it a cancelled request keeps running and keeps spawning.
+          abortSignal: extra.signal
+        },
+        responseMode ?? "full",
+        expectedSpecSha256
+      ))
+    )
   );
   server.registerTool(
     "delegatePipeline",
@@ -53510,45 +53537,24 @@ async function createServer(dependencies = {}) {
       // Runs Producers across implement/review/fix rounds.
       annotations: { destructiveHint: true, idempotentHint: false, readOnlyHint: false }
     },
-    async ({ checkoutPath, spec, protocolVersion, responseMode, expectedSpecSha256 }, extra) => {
-      const progressToken = extra._meta?.progressToken;
-      const startedAt = Date.now();
-      let step = 0;
-      let lastPhase = "starting attempt";
-      const emit2 = (message) => {
-        if (progressToken === void 0) return;
-        step += 1;
-        const elapsed = Math.round((Date.now() - startedAt) / 1e3);
-        void extra.sendNotification({
-          method: "notifications/progress",
-          params: { progressToken, progress: step, message: `${message} (${elapsed}s)` }
-        }).catch(() => {
-        });
-      };
-      const onProgress = progressToken === void 0 ? void 0 : (message) => {
-        lastPhase = message;
-        emit2(message);
-      };
-      const heartbeat = onProgress === void 0 ? void 0 : setInterval(() => emit2(lastPhase), 8e3);
-      try {
-        return toolOutput(await handleDelegatePipeline(
-          checkoutPath,
-          spec,
-          {
-            ...dependencies,
-            skillProtocolVersion: protocolVersion,
-            ...onProgress === void 0 ? {} : { onProgress },
-            // The caller's cancellation must reach the Producer tree; without
-            // it a cancelled request keeps running and keeps spawning.
-            abortSignal: extra.signal
-          },
-          responseMode ?? "full",
-          expectedSpecSha256
-        ));
-      } finally {
-        if (heartbeat !== void 0) clearInterval(heartbeat);
-      }
-    }
+    async ({ checkoutPath, spec, protocolVersion, responseMode, expectedSpecSha256 }, extra) => withProgress(
+      extra,
+      "starting attempt",
+      async (onProgress) => toolOutput(await handleDelegatePipeline(
+        checkoutPath,
+        spec,
+        {
+          ...dependencies,
+          skillProtocolVersion: protocolVersion,
+          ...onProgress === void 0 ? {} : { onProgress },
+          // The caller's cancellation must reach the Producer tree; without
+          // it a cancelled request keeps running and keeps spawning.
+          abortSignal: extra.signal
+        },
+        responseMode ?? "full",
+        expectedSpecSha256
+      ))
+    )
   );
   server.registerTool(
     "autopilotStart",
@@ -53561,37 +53567,16 @@ async function createServer(dependencies = {}) {
       // branches and worktrees, promotes commits, pushes, and opens a PR.
       annotations: { destructiveHint: true, idempotentHint: false, readOnlyHint: false }
     },
-    async ({ checkoutPath, spec, protocolVersion }, extra) => {
-      const progressToken = extra._meta?.progressToken;
-      const startedAt = Date.now();
-      let step = 0;
-      let lastPhase = "starting autopilot workflow";
-      const emit2 = (message) => {
-        if (progressToken === void 0) return;
-        step += 1;
-        const elapsed = Math.round((Date.now() - startedAt) / 1e3);
-        void extra.sendNotification({
-          method: "notifications/progress",
-          params: { progressToken, progress: step, message: `${message} (${elapsed}s)` }
-        }).catch(() => {
-        });
-      };
-      const onProgress = progressToken === void 0 ? void 0 : (message) => {
-        lastPhase = message;
-        emit2(message);
-      };
-      const heartbeat = onProgress === void 0 ? void 0 : setInterval(() => emit2(lastPhase), 8e3);
-      try {
-        return toolOutput(await handleAutopilotStart(checkoutPath, spec, {
-          ...dependencies,
-          skillProtocolVersion: protocolVersion,
-          abortSignal: extra.signal,
-          ...onProgress === void 0 ? {} : { onProgress }
-        }));
-      } finally {
-        if (heartbeat !== void 0) clearInterval(heartbeat);
-      }
-    }
+    async ({ checkoutPath, spec, protocolVersion }, extra) => withProgress(
+      extra,
+      "starting autopilot workflow",
+      async (onProgress) => toolOutput(await handleAutopilotStart(checkoutPath, spec, {
+        ...dependencies,
+        skillProtocolVersion: protocolVersion,
+        abortSignal: extra.signal,
+        ...onProgress === void 0 ? {} : { onProgress }
+      }))
+    )
   );
   server.registerTool(
     "autopilotStatus",
@@ -53620,37 +53605,16 @@ async function createServer(dependencies = {}) {
       // Continues the same shipping workflow from durable state.
       annotations: { destructiveHint: true, idempotentHint: false, readOnlyHint: false }
     },
-    async ({ checkoutPath, workflowId, protocolVersion }, extra) => {
-      const progressToken = extra._meta?.progressToken;
-      const startedAt = Date.now();
-      let step = 0;
-      let lastPhase = "resuming autopilot workflow";
-      const emit2 = (message) => {
-        if (progressToken === void 0) return;
-        step += 1;
-        const elapsed = Math.round((Date.now() - startedAt) / 1e3);
-        void extra.sendNotification({
-          method: "notifications/progress",
-          params: { progressToken, progress: step, message: `${message} (${elapsed}s)` }
-        }).catch(() => {
-        });
-      };
-      const onProgress = progressToken === void 0 ? void 0 : (message) => {
-        lastPhase = message;
-        emit2(message);
-      };
-      const heartbeat = onProgress === void 0 ? void 0 : setInterval(() => emit2(lastPhase), 8e3);
-      try {
-        return toolOutput(await handleAutopilotResume(checkoutPath, workflowId, {
-          ...dependencies,
-          skillProtocolVersion: protocolVersion,
-          abortSignal: extra.signal,
-          ...onProgress === void 0 ? {} : { onProgress }
-        }));
-      } finally {
-        if (heartbeat !== void 0) clearInterval(heartbeat);
-      }
-    }
+    async ({ checkoutPath, workflowId, protocolVersion }, extra) => withProgress(
+      extra,
+      "resuming autopilot workflow",
+      async (onProgress) => toolOutput(await handleAutopilotResume(checkoutPath, workflowId, {
+        ...dependencies,
+        skillProtocolVersion: protocolVersion,
+        abortSignal: extra.signal,
+        ...onProgress === void 0 ? {} : { onProgress }
+      }))
+    )
   );
   server.registerTool(
     "reviewCandidate",
@@ -53678,28 +53642,38 @@ async function createServer(dependencies = {}) {
       // to the checkout; neither is a read-only probe a client may retry freely.
       annotations: { destructiveHint: true, idempotentHint: false, readOnlyHint: false }
     },
-    async ({ checkoutPath, runId, decision, expectedArtifactHash }) => {
-      const advisory = await readDecisionAdvisory(runId, dependencies);
-      const autonomy = autonomousEligibility(
-        (dependencies.decisionAuthority ?? decisionAuthority)(),
-        advisory
-      );
-      const autonomous = autonomy.eligible && decision === "accepted";
-      if (!autonomous) {
-        const confirmed = await confirmWithHuman(server, runId, decision, advisory.warnings);
-        if (!confirmed.ok) return toolOutput(confirmed.error);
-      }
-      return toolOutput(await handleDecideCandidate(
+    async ({ checkoutPath, runId, decision, expectedArtifactHash }) => toolOutput(
+      await handleDecideCandidate(
         checkoutPath,
         runId,
         decision,
         expectedArtifactHash,
         {
           ...dependencies,
-          decisionProvenance: autonomous ? "policy-autonomous" : "human-elicitation"
+          decisionProvenanceResolver: async ({ advisory }) => {
+            const autonomy = autonomousEligibility(
+              (dependencies.decisionAuthority ?? decisionAuthority)(),
+              advisory
+            );
+            if (autonomy.eligible && decision === "accepted") {
+              return "policy-autonomous";
+            }
+            const confirmed = await confirmWithHuman(
+              server,
+              runId,
+              decision,
+              advisory.warnings
+            );
+            if (!confirmed.ok) {
+              throw new RuntimeError(confirmed.error.diagnostic, {
+                toolError: confirmed.error.error
+              });
+            }
+            return "human-elicitation";
+          }
         }
-      ));
-    }
+      )
+    )
   );
   server.registerTool(
     "integrateCandidate",
