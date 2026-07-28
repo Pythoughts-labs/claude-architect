@@ -129,6 +129,11 @@ interface DirectoryIdentity {
   canonicalPath: string;
 }
 
+interface PreciseFileIdentity {
+  dev: bigint;
+  ino: bigint;
+}
+
 interface WriterLockRecord {
   lockVersion: "1";
   pid: number;
@@ -1856,7 +1861,7 @@ export class WorkflowStore {
     let handle: FileHandle | undefined;
     let temporaryExists = false;
     let publicationExists = false;
-    let temporaryIdentity: { dev: number; ino: number } | undefined;
+    let temporaryIdentity: PreciseFileIdentity | undefined;
     try {
       handle = await open(
         temporaryPath,
@@ -1866,11 +1871,11 @@ export class WorkflowStore {
       temporaryExists = true;
       await handle.writeFile(bytes);
       await handle.sync();
-      const metadata = await handle.stat();
-      const named = await lstat(temporaryPath);
+      const metadata = await handle.stat({ bigint: true });
+      const named = await lstat(temporaryPath, { bigint: true });
       if (!metadata.isFile()
-        || metadata.nlink !== 1
-        || metadata.size !== bytes.byteLength
+        || metadata.nlink !== 1n
+        || metadata.size !== BigInt(bytes.byteLength)
         || !named.isFile()
         || named.isSymbolicLink()
         || named.dev !== metadata.dev
@@ -1920,19 +1925,19 @@ export class WorkflowStore {
     temporaryPath: string,
     publicationPath: string,
     expectedBytes: Buffer,
-    expectedIdentity: { dev: number; ino: number },
+    expectedIdentity: PreciseFileIdentity,
   ): Promise<void> {
     let linked = false;
     try {
       await link(temporaryPath, publicationPath);
       linked = true;
-      const publication = await lstat(publicationPath);
+      const publication = await lstat(publicationPath, { bigint: true });
       if (!publication.isFile()
         || publication.isSymbolicLink()
-        || publication.nlink !== 2
+        || publication.nlink !== 2n
         || publication.dev !== expectedIdentity.dev
         || publication.ino !== expectedIdentity.ino
-        || publication.size !== expectedBytes.byteLength) {
+        || publication.size !== BigInt(expectedBytes.byteLength)) {
         throw workflowError("workflow state publication source changed", "unsafe-workflow-state");
       }
     } catch (error) {
@@ -1945,18 +1950,18 @@ export class WorkflowStore {
     temporaryPath: string,
     publicationPath: string,
     expectedBytes: Buffer,
-    expectedIdentity: { dev: number; ino: number },
+    expectedIdentity: PreciseFileIdentity,
   ): Promise<void> {
     const handle = await open(publicationPath, constants.O_RDONLY | NO_FOLLOW);
     try {
-      const metadata = await handle.stat();
+      const metadata = await handle.stat({ bigint: true });
       const [publication, temporary] = await Promise.all([
-        lstat(publicationPath),
-        lstat(temporaryPath),
+        lstat(publicationPath, { bigint: true }),
+        lstat(temporaryPath, { bigint: true }),
       ]);
       if (!metadata.isFile()
-        || metadata.nlink !== 2
-        || metadata.size !== expectedBytes.byteLength
+        || metadata.nlink !== 2n
+        || metadata.size !== BigInt(expectedBytes.byteLength)
         || metadata.dev !== expectedIdentity.dev
         || metadata.ino !== expectedIdentity.ino
         || !publication.isFile()
@@ -1969,13 +1974,13 @@ export class WorkflowStore {
         || temporary.ino !== expectedIdentity.ino) {
         throw workflowError("workflow state publication changed before commit", "unsafe-workflow-state");
       }
-      const published = await readHandleBytes(handle, metadata.size);
-      const settled = await handle.stat();
+      const published = await readHandleBytes(handle, Number(metadata.size));
+      const settled = await handle.stat({ bigint: true });
       if (!published.equals(expectedBytes)
         || settled.nlink !== metadata.nlink
         || settled.size !== metadata.size
-        || settled.mtimeMs !== metadata.mtimeMs
-        || settled.ctimeMs !== metadata.ctimeMs) {
+        || settled.mtimeNs !== metadata.mtimeNs
+        || settled.ctimeNs !== metadata.ctimeNs) {
         throw workflowError("workflow state publication changed before commit", "unsafe-workflow-state");
       }
     } finally {
@@ -1985,31 +1990,31 @@ export class WorkflowStore {
 
   private async assertPublishedState(
     expectedBytes: Buffer,
-    expectedIdentity: { dev: number; ino: number },
+    expectedIdentity: PreciseFileIdentity,
   ): Promise<void> {
     const handle = await open(this.statePath, constants.O_RDONLY | NO_FOLLOW);
     try {
-      const metadata = await handle.stat();
-      const named = await lstat(this.statePath);
+      const metadata = await handle.stat({ bigint: true });
+      const named = await lstat(this.statePath, { bigint: true });
       if (!metadata.isFile()
-        || metadata.nlink !== 1
-        || metadata.size !== expectedBytes.byteLength
+        || metadata.nlink !== 1n
+        || metadata.size !== BigInt(expectedBytes.byteLength)
         || metadata.dev !== expectedIdentity.dev
         || metadata.ino !== expectedIdentity.ino
         || !named.isFile()
         || named.isSymbolicLink()
-        || named.nlink !== 1
+        || named.nlink !== 1n
         || named.dev !== metadata.dev
         || named.ino !== metadata.ino
         || named.size !== metadata.size) {
         throw workflowError("published workflow state identity changed", "unsafe-workflow-state");
       }
-      const published = await readHandleBytes(handle, metadata.size);
-      const settled = await handle.stat();
+      const published = await readHandleBytes(handle, Number(metadata.size));
+      const settled = await handle.stat({ bigint: true });
       if (!published.equals(expectedBytes)
         || settled.size !== metadata.size
-        || settled.mtimeMs !== metadata.mtimeMs
-        || settled.ctimeMs !== metadata.ctimeMs) {
+        || settled.mtimeNs !== metadata.mtimeNs
+        || settled.ctimeNs !== metadata.ctimeNs) {
         throw workflowError("published workflow state bytes changed", "unsafe-workflow-state");
       }
     } finally {

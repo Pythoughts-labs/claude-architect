@@ -474,8 +474,10 @@ describe("WorkflowStore", () => {
         temporaryPath: string,
         publicationPath: string,
         expectedBytes: Buffer,
-        expectedIdentity: { dev: number; ino: number },
+        expectedIdentity: { dev: bigint; ino: bigint },
       ): Promise<void> {
+        expect(typeof expectedIdentity.dev).toBe("bigint");
+        expect(typeof expectedIdentity.ino).toBe("bigint");
         if (!this.substitute) {
           return await super.stageStatePublication(
             temporaryPath,
@@ -518,7 +520,7 @@ describe("WorkflowStore", () => {
         temporaryPath: string,
         publicationPath: string,
         expectedBytes: Buffer,
-        expectedIdentity: { dev: number; ino: number },
+        expectedIdentity: { dev: bigint; ino: bigint },
       ): Promise<void> {
         await super.stageStatePublication(
           temporaryPath,

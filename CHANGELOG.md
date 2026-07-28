@@ -6,6 +6,13 @@ All notable changes to Claude Architect are recorded here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- Atomic workflow-state publication now compares bigint file identities and
+  nanosecond timestamps. Windows 64-bit file IDs can lose precision as
+  JavaScript numbers, which intermittently let a substituted temporary state
+  file compare equal to the original during the fail-closed publication gate.
+
 ## [0.42.0] - 2026-07-28
 
 ### Added
