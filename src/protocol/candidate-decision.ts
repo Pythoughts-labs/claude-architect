@@ -19,9 +19,10 @@ export interface AutopilotCandidateDecisionV2 extends CandidateDecisionV2Base {
 }
 
 /**
- * The autonomous decision authority shipped in 0.39.0/0.40.0: a candidate that
- * is independently verified, carries no advisory warnings, and has a readable
- * archive is accepted without prompting.
+ * The autonomous decision authority shipped in 0.39.0/0.40.0. Its current
+ * eligibility requires an independently verified pipeline candidate carrying
+ * durable gate clearance bound to its archived commit, no human requirement or
+ * advisory warnings, and a readable archive.
  *
  * It is a distinct authority rather than a flavour of `human`, because the
  * difference is exactly what an audit asks about — "which candidates went in

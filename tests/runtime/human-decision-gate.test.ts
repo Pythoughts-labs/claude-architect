@@ -26,9 +26,8 @@ function fakeServer(options: {
 }
 
 describe("human decision gate", () => {
-  // "Only a human can accept a candidate" was documented but structurally
-  // unenforced: decideCandidate recorded whatever its caller passed, and an
-  // agent is a caller.
+  // When policy acceptance is unavailable, the caller's verdict is not evidence
+  // that a person chose it; elicitation is the enforced human channel.
   it("passes when a human confirms through elicitation", async () => {
     const { server, elicited } = fakeServer({});
     await expect(confirmWithHuman(server, "run-1", "accepted")).resolves.toEqual({ ok: true });
@@ -95,8 +94,8 @@ describe("human decision gate", () => {
 describe("elicitation timeout", () => {
   // The MCP SDK's DEFAULT_REQUEST_TIMEOUT_MSEC is 60_000. Passing no options
   // gave a person 60 seconds to read a candidate review and decide, so both
-  // acceptance attempts in a live session failed at exactly 60s. Making
-  // decisions human-only is worthless if the human cannot answer in time.
+  // acceptance attempts in a live session failed at exactly 60s. A required
+  // human decision is worthless if the human cannot answer in time.
   it("gives a person a human-scale window, not the SDK's 60-second default", async () => {
     const elicitInput = vi.fn(async () => ({ action: "accept", content: { confirm: true } }));
     const server = {

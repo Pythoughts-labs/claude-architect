@@ -2803,6 +2803,46 @@ describe("runPipeline", () => {
     )).resolves.toBe(fenced(approve));
   }, 120_000);
 
+  it("reports the candidate identity when gate clearance cannot be archived", async () => {
+    const repo = await initRepo();
+    const runId = "pipeline-clearance-archive-missing";
+    const store = new ArtifactStore(runId);
+    const baseRoleRunner = roundReviews(
+      [{ correctness: approve, systems: approve }],
+      async () => { throw new Error("fixer must not run"); },
+    );
+    const roleRunner = async (args: RoleRunArgs): Promise<RoleRunResult> => {
+      const result = await baseRoleRunner(args);
+      if (args.role === "reviewer-systems") {
+        await rm(path.join(store.runDirectory, "manifest.json"));
+      }
+      return result;
+    };
+
+    let thrown: unknown;
+    try {
+      await runPipeline(
+        repo,
+        validSpec(),
+        dependencies({
+          runId,
+          roleRunner,
+        }),
+      );
+    } catch (error) {
+      thrown = error;
+    }
+
+    expect(thrown).toMatchObject({
+      name: "RuntimeError",
+      message: "pipeline gate cleared the candidate and the clearance could not be archived",
+      detail: {
+        candidateCommitOid: expect.stringMatching(/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/u),
+        requiresHumanDecision: false,
+      },
+    });
+  }, 120_000);
+
   it("fixes a blocker and returns decision-ready after a clean re-review", async () => {
     const repo = await initRepo();
     let privateObjectsDir = "";

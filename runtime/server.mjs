@@ -48690,9 +48690,9 @@ async function runPipelineWithLease(checkoutPath, spec, deps, ps, borrowedChecko
       } catch {
         return await fallback();
       }
-      const manifestForArchive = await store.readManifest(attempt.runId);
+      const manifestForArchive2 = await store.readManifest(attempt.runId);
       if (!verified2.verification.pass) {
-        if (manifestForArchive === null) return await fallback();
+        if (manifestForArchive2 === null) return await fallback();
         const demoted = {
           ...salvagedAttempt,
           status: "failed",
@@ -48708,7 +48708,7 @@ async function runPipelineWithLease(checkoutPath, spec, deps, ps, borrowedChecko
             pipelineFailure: { failure: args.failure, reason: args.reason }
           }
         };
-        await store.promoteTerminalArtifacts({ result: demoted, manifest: manifestForArchive });
+        await store.promoteTerminalArtifacts({ result: demoted, manifest: manifestForArchive2 });
         if (slices.length > 0) authoritySafeToRelease = true;
         finalAttempt = demoted;
         await store.writePipelineArtifact("verification", verified2.verification);
@@ -48724,7 +48724,7 @@ async function runPipelineWithLease(checkoutPath, spec, deps, ps, borrowedChecko
         await store.writePipelineArtifact("pipeline-result", failed);
         return failed;
       }
-      if (manifestForArchive === null) return await fallback();
+      if (manifestForArchive2 === null) return await fallback();
       salvagedAttempt = {
         ...salvagedAttempt,
         evidence: {
@@ -48734,7 +48734,7 @@ async function runPipelineWithLease(checkoutPath, spec, deps, ps, borrowedChecko
       };
       await store.promoteTerminalArtifacts({
         result: salvagedAttempt,
-        manifest: manifestForArchive
+        manifest: manifestForArchive2
       });
       finalAttempt = salvagedAttempt;
       await store.writePipelineArtifact("verification", verified2.verification);
@@ -49441,14 +49441,23 @@ async function runPipelineWithLease(checkoutPath, spec, deps, ps, borrowedChecko
       }))),
       ...incrementOutcome === void 0 ? {} : { incrementOutcome }
     });
-    if (!gate.decisionReady) {
-      const manifestForArchive = await store.readManifest(attempt.runId);
-      if (manifestForArchive === null) {
+    const manifestForArchive = await store.readManifest(attempt.runId);
+    if (manifestForArchive === null) {
+      if (!gate.decisionReady) {
         throw new RuntimeError(
           "pipeline gate refused the candidate and the refusal could not be archived",
           { reasons: gate.reasons }
         );
       }
+      throw new RuntimeError(
+        "pipeline gate cleared the candidate and the clearance could not be archived",
+        {
+          candidateCommitOid: currentCandidateCommit,
+          requiresHumanDecision: gate.requiresHumanDecision
+        }
+      );
+    }
+    if (!gate.decisionReady) {
       finalAttempt = {
         ...finalAttempt,
         evidence: {
@@ -49459,17 +49468,7 @@ async function runPipelineWithLease(checkoutPath, spec, deps, ps, borrowedChecko
           }
         }
       };
-      await store.promoteTerminalArtifacts({
-        result: finalAttempt,
-        manifest: manifestForArchive
-      });
     } else {
-      const manifestForArchive = await store.readManifest(attempt.runId);
-      if (manifestForArchive === null) {
-        throw new RuntimeError(
-          "pipeline gate cleared the candidate and the clearance could not be archived"
-        );
-      }
       finalAttempt = {
         ...finalAttempt,
         evidence: {
@@ -49480,11 +49479,11 @@ async function runPipelineWithLease(checkoutPath, spec, deps, ps, borrowedChecko
           }
         }
       };
-      await store.promoteTerminalArtifacts({
-        result: finalAttempt,
-        manifest: manifestForArchive
-      });
     }
+    await store.promoteTerminalArtifacts({
+      result: finalAttempt,
+      manifest: manifestForArchive
+    });
     const result = {
       runId: attempt.runId,
       status: gate.decisionReady ? "decision-ready" : "human-decision-required",
@@ -53425,7 +53424,7 @@ async function confirmWithHuman(server, runId, decision, warnings = []) {
       error: {
         ok: false,
         error: "elicitation-unavailable",
-        diagnostic: "this client does not support MCP elicitation, so the runtime cannot confirm a human made this decision; candidate decisions are human-only and fail closed"
+        diagnostic: "this client does not support MCP elicitation, so the runtime cannot confirm a human made this decision; this decision requires confirmation and fails closed"
       }
     };
   }
@@ -53673,7 +53672,7 @@ async function createServer(dependencies = {}) {
     "decideCandidate",
     {
       title: "Record a candidate decision",
-      description: `Record acceptance, rejection, or a revision request for a candidate. An independently verified candidate with no advisory warnings is recorded without prompting; anything else requires human confirmation through MCP elicitation and fails closed without it. Set ${DECISION_AUTHORITY_ENV}=human to require confirmation for every decision.`,
+      description: `Record acceptance, rejection, or a revision request for a candidate. Only an independently verified pipeline candidate with durable, commit-bound gate clearance and no advisory warnings is accepted without prompting; anything else requires human confirmation through MCP elicitation and fails closed without it. Set ${DECISION_AUTHORITY_ENV}=human to require confirmation for every decision.`,
       inputSchema: decideCandidateInputSchema,
       outputSchema: decisionOutput,
       // Rejection deletes the candidate anchor and acceptance authorizes writes

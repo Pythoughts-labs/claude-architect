@@ -4,7 +4,7 @@ This inventory describes the shipped surfaces relevant to marketplace review. Th
 
 ## Skill
 
-`skills/delegate/SKILL.md` defines `/claude-architect:delegate`. It instructs Claude to build a versioned Delegation Spec, choose a Producer explicitly, call the MCP lifecycle, review exact frozen bytes, record a human decision, and integrate only an accepted candidate whose manifest hash matches. It recommends `delegatePipeline` for non-trivial changes. If the requested Producer is not eligible, the workflow reports it unavailable instead of substituting another Producer or bypassing confinement. The skill itself is orchestration text; it does not directly receive Bash or file-edit tools.
+`skills/delegate/SKILL.md` defines `/claude-architect:delegate`. It instructs Claude to build a versioned Delegation Spec, choose a Producer explicitly, call the MCP lifecycle, review exact frozen bytes, invoke the configured decision gate, and integrate only an accepted candidate whose provenance is integrable and whose manifest hash matches. It recommends `delegatePipeline` for non-trivial changes. If the requested Producer is not eligible, the workflow reports it unavailable instead of substituting another Producer or bypassing confinement. The skill itself is orchestration text; it does not directly receive Bash or file-edit tools.
 
 ## Agents
 
@@ -24,7 +24,7 @@ Agent frontmatter restrictions constrain Claude Code's advisor wrapper. Implemen
 | `delegate` | Validate one spec, optionally bind it to `expectedSpecSha256` before checkout access, run one isolated Producer attempt, freeze and independently verify a candidate. |
 | `delegatePipeline` | Optionally bind the spec to `expectedSpecSha256`, then run implementation plus fresh-context correctness/systems review, fix rounds, gates, and clean-room verification. It never accepts or integrates automatically. |
 | `reviewCandidate` | Read-only regeneration of the exact anchored patch, changed-path manifest, and evidence. |
-| `decideCandidate` | Record accepted/rejected/revision-requested. Acceptance requires a verified candidate; rejection removes its candidate anchor. |
+| `decideCandidate` | Record accepted/rejected/revision-requested with provenance. Under the shipped default, only an independently verified pipeline candidate with commit-bound gate clearance and no warnings may be accepted without elicitation; all other decisions require a human. |
 | `integrateCandidate` | Apply an accepted tree only after exact manifest-hash and identity revalidation. Stages changes; does not commit. |
 | `doctor` | Read runtime, Git, Producer capability, sandbox, and platform diagnostics. |
 | `gitStatus`, `gitDiff`, `gitLog`, `gitChangedFiles` | Bounded, redacted Git reads with external diff/textconv behavior disabled where applicable. They do not mutate the repository. |
@@ -49,4 +49,4 @@ The plugin contains no marketplace/runtime hook declaration under a `hooks/` dir
 
 ## Tool restriction summary
 
-Implementation Producers may edit only in an isolated worktree and are checked against allowlist/forbidden scope. Pipeline reviewers and verifier are configured read-only with all writes forbidden. The fixer alone receives bounded edit authority. The Host runs only spec-authorized verification commands. Acceptance and integration remain separate MCP calls controlled by the architect/human workflow.
+Implementation Producers may edit only in an isolated worktree and are checked against allowlist/forbidden scope. Pipeline reviewers and verifier are configured read-only with all writes forbidden. The fixer alone receives bounded edit authority. The Host runs only spec-authorized verification commands. Acceptance and integration remain separate MCP calls controlled by the architect and configured runtime authority, with human elicitation wherever policy requires it.

@@ -1,6 +1,6 @@
 ---
 name: subagent-driven-delegation
-description: Execute an implementation plan with the Superpowers subagent-driven-development loop while every task is implemented by a verified Claude Architect Producer — isolated worktree, frozen Candidate Artifact, independent verification, fresh-context review, human-only acceptance. Use when executing a multi-task plan through delegation rather than editing directly.
+description: Execute an implementation plan with the Superpowers subagent-driven-development loop while every task is implemented by a verified Claude Architect Producer — isolated worktree, frozen Candidate Artifact, independent verification, fresh-context review, runtime-gated acceptance. Use when executing a multi-task plan through delegation rather than editing directly.
 ---
 
 # Subagent-Driven Delegation
@@ -24,7 +24,7 @@ Upstream SDD's task reviewer reads a diff and the implementer's report; it trust
 | Implement | Subagent edits the branch | Producer edits an isolated worktree it cannot escape |
 | Test evidence | Implementer's report | Runtime re-runs verification on frozen bytes |
 | Task review | Reviews a diff | Reviews the exact anchored candidate, never the implementer's context |
-| Complete | Controller marks done | Only a human accepts, then integration is hash-matched |
+| Complete | Controller marks done | The configured runtime authority records acceptance, then integration is hash-matched |
 
 The Producer's self-report is never evidence. It is a correlation aid and a summary; every reviewable fact comes from runtime evidence.
 
@@ -33,7 +33,7 @@ The Producer's self-report is never evidence. It is a correlation aid and a summ
 Follow upstream SDD except on these four points, where a trust invariant governs. Do not "restore" the upstream behavior.
 
 1. **No implementer resume.** Upstream says fix rounds 1–3 resume the original implementer with its context intact. Claude Architect forbids it: every attempt starts with fresh context in a fresh worktree. Every fix round is therefore a **new attempt** carrying the findings in a revised spec. The report file, not conversational memory, is the continuity.
-2. **The controller never marks a task complete.** Upstream lets the controller close a task after a clean review. Here a task closes only after `decideCandidate` records a human `accepted` and `integrateCandidate` reports `applied`.
+2. **The controller never marks a task complete directly.** Upstream lets the controller close a task after a clean review. Here a task closes only after `decideCandidate` records `accepted` under the configured authority and `integrateCandidate` reports `applied`.
 3. **Implementer self-review is not a review.** Upstream's implementer self-reviews before handing off. A Producer may summarize, but the gate is runtime verification plus `reviewCandidate`. Never let a self-report shorten the review.
 4. **The controller never fixes findings.** Upstream already says this to protect controller context; here it is also a trust rule. The architect authors specs and reviews bytes. It does not edit Producer output into shape.
 
@@ -47,10 +47,10 @@ Each upstream skill keeps its meaning; delegation supplies the enforcement.
 | `dispatching-parallel-agents` | A repository is shared state. Lanes on **disjoint** repositories are genuinely independent and dispatch concurrently; lanes on the **same** repository serialize on the repository lock and must never be presented as parallel. |
 | `test-driven-development` | `expectBaselineFailure` is the fail-before/pass-after proof, and the runtime enforces it: the command must run at clean HEAD and must fail. A Producer's claim to have written a failing test first is not evidence. |
 | `systematic-debugging` | A failed verification is evidence to read, not a reason to re-dispatch. Start from `unresolvedIssues`, then the per-command `stdoutRef`/`stderrRef`, then the frozen patch. Re-running an unchanged spec is the delegation form of guessing. |
-| `verification-before-completion` | Independent verification runs on frozen bytes before any reviewer sees them, and `reviewCandidate` gates the human decision. Neither is skippable because the Producer says the work is done. |
+| `verification-before-completion` | Independent verification runs on frozen bytes before any reviewer sees them, and `reviewCandidate` gates the Candidate Decision. Neither is skippable because the Producer says the work is done. |
 | `requesting-code-review` | `reviewCandidate` is the per-task review; the final whole-branch review covers the cumulative attempts. The reviewer never shares the implementer's context, so the independence upstream asks for is structural rather than conventional. |
 
-Two upstream assumptions do not survive the trust boundary, and the table above is where they break: an implementer cannot be resumed (fresh context per attempt), and a controller cannot close a task (only a human accepts).
+Two upstream assumptions do not survive the trust boundary, and the table above is where they break: an implementer cannot be resumed (fresh context per attempt), and a controller cannot self-certify completion (acceptance is a durable runtime decision with recorded provenance).
 
 ## Setup
 
@@ -108,9 +108,9 @@ Five rounds maximum per task. Each round is one new attempt plus one scoped re-r
 
 ### 6. Close the task
 
-Present the review outcome and your recommendation. The user decides.
+Present the review outcome and your recommendation, then call `decideCandidate`. Under the shipped `autonomous` authority, only an independently verified `delegatePipeline` candidate with durable, commit-bound gate clearance and no warnings may be accepted as `policy-autonomous`; every other case requires the human through MCP elicitation.
 
-On `accepted`, call `integrateCandidate` with the exact candidate `manifestHash` as `expectedArtifactHash`, and report `applied`, `conflicted`, or `aborted` truthfully. Integration stages the reviewed tree; it does not commit. One accepted candidate per clean checkout — never batch-accept against the same checkout.
+Only when `decideCandidate` records `accepted` with integrable provenance, call `integrateCandidate` with the exact candidate `manifestHash` as `expectedArtifactHash`, and report `applied`, `conflicted`, or `aborted` truthfully. Integration stages the reviewed tree; it does not commit. One accepted candidate per clean checkout — never batch-accept against the same checkout.
 
 Then append `Task <N>: complete (run <runId>, manifest <hash7>, review clean)` — or `…, <K> parked` after a tripped breaker.
 
@@ -130,7 +130,7 @@ When the final review is clean and integrated, delete this plan's workspace; git
 | --- | --- |
 | "Verification passed, skip the review" | Verification proves the checks ran, not that the spec was met. Both verdicts are required. |
 | "I'll just resume the Producer with the findings" | There is no resume. Fresh context per attempt is a trust invariant; author a revised spec. |
-| "The candidate is obviously fine, I'll accept it" | Only a human accepts. You recommend. |
+| "The candidate is obviously fine, I'll accept it" | A recommendation is not acceptance. Call `decideCandidate`; only the configured runtime authority records the durable decision. |
 | "It's a one-line finding, I'll patch it myself" | Controller edits skip review and cross the trust boundary. Revise the spec. |
 | "The Producer says it ran the tests" | A self-report is never evidence. Read the runtime's verification report. |
 | "Both lanes are on the same repo but they'll run in parallel" | The repository lock serializes them. Size timeouts accordingly. |

@@ -236,24 +236,24 @@ export type ServerDependencies = ToolDependencies & DoctorDependencies & GitRead
 };
 
 /**
- * Obtain the decision from a person, not from whatever called the tool.
+ * Obtain a decision from a person when the configured authority requires one.
  *
- * "Only a human can accept a candidate" was documented but structurally
- * unenforced: `decideCandidate` recorded whatever its caller passed, and an
- * agent is a caller. Elicitation is the only channel where the runtime itself
- * reaches a person, so acceptance now depends on one.
+ * A tool caller is not evidence that a human chose the verdict. Elicitation is
+ * the only channel where the runtime itself reaches a person, so every
+ * non-policy decision depends on it.
  *
- * This fails closed. A client that does not advertise elicitation cannot record
- * a decision at all — degrading to "trust the caller" would restore exactly the
- * hole this closes, and silently. `rejected` and `revision-requested` are gated
- * too: an agent that can freely discard a candidate can bury work it dislikes.
+ * This fails closed. When this path is required, a client that does not
+ * advertise elicitation cannot record the decision — degrading to "trust the
+ * caller" would restore exactly the hole this closes, and silently. `rejected`
+ * and `revision-requested` are gated too: an agent that can freely discard a
+ * candidate can bury work it dislikes.
  */
 /**
  * How long a person gets to answer. The SDK's default request timeout is 60
  * seconds, which is a machine-scale figure applied to a human-scale act: read
  * the candidate patch, weigh the verification evidence, decide. Both acceptance
- * attempts in a live session failed at exactly 60s, so making decisions
- * human-only had made them unrecordable instead.
+ * attempts in a live session failed at exactly 60s, so required human decisions
+ * had become unrecordable instead.
  */
 const HUMAN_DECISION_TIMEOUT_MS = 15 * 60_000;
 
@@ -271,7 +271,7 @@ export async function confirmWithHuman(
         ok: false,
         error: "elicitation-unavailable",
         diagnostic: "this client does not support MCP elicitation, so the runtime cannot confirm a "
-          + "human made this decision; candidate decisions are human-only and fail closed",
+          + "human made this decision; this decision requires confirmation and fails closed",
       },
     };
   }
@@ -543,9 +543,10 @@ export async function createServer(
     {
       title: "Record a candidate decision",
       description: "Record acceptance, rejection, or a revision request for a candidate. "
-        + "An independently verified candidate with no advisory warnings is recorded "
-        + "without prompting; anything else requires human confirmation through MCP "
-        + "elicitation and fails closed without it. Set "
+        + "Only an independently verified pipeline candidate with durable, commit-bound "
+        + "gate clearance and no advisory warnings is accepted without prompting; "
+        + "anything else requires human confirmation through MCP elicitation and fails "
+        + "closed without it. Set "
         + `${DECISION_AUTHORITY_ENV}=human to require confirmation for every decision.`,
       inputSchema: decideCandidateInputSchema,
       outputSchema: decisionOutput,
