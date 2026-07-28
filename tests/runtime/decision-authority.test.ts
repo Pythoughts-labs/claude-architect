@@ -10,6 +10,7 @@ import {
   DECISION_AUTHORITY_ENV,
   decisionAuthority,
 } from "../../src/mcp/decision-authority.js";
+import { readDecisionAdvisory } from "../../src/mcp/tools.js";
 import { start } from "../../src/mcp/server.js";
 import type { PlatformServices } from "../../src/platform/platform-services.js";
 import type { AttemptResult, CandidateArtifact } from "../../src/protocol/attempt-result.js";
@@ -42,14 +43,15 @@ describe("decisionAuthority", () => {
 });
 
 describe("autonomousEligibility", () => {
-  const clean = { warnings: [], verifiedClean: true, unreadable: false };
+  const gateCleared = { warnings: [], verifiedClean: true, unreadable: false };
 
-  it("accepts only a verified, unwarned, readable candidate", () => {
-    expect(autonomousEligibility("autonomous", clean)).toEqual({ eligible: true, reasons: [] });
+  it("accepts only an evidence-bound, gate-cleared, unwarned, readable candidate", () => {
+    expect(autonomousEligibility("autonomous", gateCleared))
+      .toEqual({ eligible: true, reasons: [] });
   });
 
   it("refuses when the authority is human", () => {
-    expect(autonomousEligibility("human", clean).eligible).toBe(false);
+    expect(autonomousEligibility("human", gateCleared).eligible).toBe(false);
   });
 
   it("refuses an unreadable archive rather than falling through to a prompt", () => {
@@ -170,6 +172,16 @@ const verifiedResult = {
   producerId: "fake",
 } as unknown as AttemptResult;
 
+const gateClearedResult = {
+  ...verifiedResult,
+  evidence: {
+    pipelineGateCleared: {
+      candidateCommitOid: candidate.candidateCommitOid,
+      requiresHumanDecision: false,
+    },
+  },
+} as AttemptResult;
+
 function fakePlatform(): PlatformServices {
   return {
     os: "darwin",
@@ -184,6 +196,21 @@ function fakePlatform(): PlatformServices {
       release: async () => {},
     }),
   } as unknown as PlatformServices;
+}
+
+async function advisoryFor(result: AttemptResult) {
+  return readDecisionAdvisory("decide-authority", {
+    ps: fakePlatform(),
+    storeFactory: () => ({
+      readResult: async () => result,
+      readManifest: async () => ({
+        runId: "decide-authority",
+        repoRoot: "/canonical/repo",
+        baseCommitOid: candidate.baseCommitOid,
+        candidateManifestHash: candidate.manifestHash,
+      } as unknown as RunManifest),
+    }) as never,
+  });
 }
 
 /**
@@ -262,8 +289,75 @@ async function decideVia(
 }
 
 describe("decideCandidate honors the configured authority", () => {
-  it("records a clean candidate without prompting under the default authority", async () => {
+  it("requires positive pipeline-gate evidence for autonomous acceptance", async () => {
+    const advisory = await advisoryFor(verifiedResult);
+
+    expect(advisory).toMatchObject({
+      warnings: [expect.stringContaining("pipeline gate clearance record is missing")],
+      verifiedClean: false,
+      unreadable: false,
+    });
+    expect(autonomousEligibility("autonomous", advisory).eligible).toBe(false);
+
     const { decision, output } = await decideVia("autonomous", verifiedResult);
+    expect(decision).toBeNull();
+    expect(JSON.stringify(output)).toContain("elicitation");
+  });
+
+  it("does not double-report a missing clearance record when the gate refused", async () => {
+    const advisory = await advisoryFor({
+      ...verifiedResult,
+      evidence: {
+        pipelineGateRefused: { reasons: ["unresolved blocker F-001: blocked"] },
+      },
+    });
+
+    expect(advisory).toEqual({
+      warnings: [
+        "the pipeline gate did NOT clear this candidate: unresolved blocker F-001: blocked",
+      ],
+      verifiedClean: false,
+      unreadable: false,
+    });
+  });
+
+  it.each([
+    ["malformed", {}, "pipeline gate clearance record is malformed"],
+    [
+      "human-required",
+      {
+        candidateCommitOid: candidate.candidateCommitOid,
+        requiresHumanDecision: true,
+      },
+      "pipeline gate clearance record requires a human decision",
+    ],
+    [
+      "commit-mismatched",
+      {
+        candidateCommitOid: "4".repeat(40),
+        requiresHumanDecision: false,
+      },
+      "pipeline gate clearance record does not match the archived candidate commit",
+    ],
+  ] as const)(
+    "fails closed when pipeline-gate evidence is %s",
+    async (_case, pipelineGateCleared, expectedWarning) => {
+      const advisory = await advisoryFor({
+        ...verifiedResult,
+        evidence: { pipelineGateCleared },
+      });
+
+      expect(advisory).toMatchObject({
+        warnings: [expect.stringContaining(expectedWarning)],
+        verifiedClean: false,
+        unreadable: false,
+      });
+      expect(autonomousEligibility("autonomous", advisory).eligible).toBe(false);
+    },
+  );
+
+  it("records a gate-cleared candidate without prompting under the default authority", async () => {
+    const { decision, output } = await decideVia("autonomous", gateClearedResult);
     expect(decision, JSON.stringify(output)).not.toBeNull();
     expect(decision?.authority).toBe("policy-autonomous");
   });
@@ -276,7 +370,7 @@ describe("decideCandidate honors the configured authority", () => {
       // it must be elicited and recorded as theirs. Attributing it to
       // `policy-autonomous` also tripped the accept-only guard, which made
       // rejecting a clean candidate fail outright.
-      const { decision, output } = await decideVia("autonomous", verifiedResult, verdict);
+      const { decision, output } = await decideVia("autonomous", gateClearedResult, verdict);
       expect(decision).toBeNull();
       expect(JSON.stringify(output)).toContain("elicitation");
     },
@@ -285,7 +379,7 @@ describe("decideCandidate honors the configured authority", () => {
   it("still demands a human when the authority is human", async () => {
     // Same candidate, same client, only the authority differs — so this is the
     // mutation that proves the branch above is the reason no prompt happened.
-    const { decision, output } = await decideVia("human", verifiedResult);
+    const { decision, output } = await decideVia("human", gateClearedResult);
     expect(decision).toBeNull();
     expect(JSON.stringify(output)).toContain("elicitation");
   });

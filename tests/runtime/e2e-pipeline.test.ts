@@ -350,7 +350,7 @@ afterEach(async () => {
 });
 
 describe.runIf(process.platform === "darwin")("end-to-end review pipeline", () => {
-  it("full lifecycle: delegatePipeline -> decide -> integrate", async () => {
+  it("full lifecycle: a gate-cleared pipeline remains autonomously eligible", async () => {
     const repo = await initRepo();
     const runId = "e2e-pipeline-full-lifecycle";
     const adapter = new FakeAdapter("fixed");
@@ -374,6 +374,19 @@ describe.runIf(process.platform === "darwin")("end-to-end review pipeline", () =
     expect(adapter.calls).toEqual({ implement: 2, correctness: 2, systems: 2, fixer: 1 });
     expect(result.result.attempt.evidence.producerPreflight)
       .toMatchObject({ status: "inconclusive" });
+    expect(result.result.attempt.evidence.pipelineGateCleared).toEqual({
+      candidateCommitOid: result.result.finalCandidateCommit,
+      requiresHumanDecision: false,
+    });
+
+    const advisory = await readDecisionAdvisory(runId, deps);
+    expect(advisory).toEqual({
+      warnings: [],
+      verifiedClean: true,
+      unreadable: false,
+    });
+    expect(autonomousEligibility("autonomous", advisory))
+      .toEqual({ eligible: true, reasons: [] });
 
     const candidateHash = result.result.attempt.candidate?.manifestHash;
     expect(candidateHash).toBeDefined();

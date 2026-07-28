@@ -49463,6 +49463,27 @@ async function runPipelineWithLease(checkoutPath, spec, deps, ps, borrowedChecko
         result: finalAttempt,
         manifest: manifestForArchive
       });
+    } else {
+      const manifestForArchive = await store.readManifest(attempt.runId);
+      if (manifestForArchive === null) {
+        throw new RuntimeError(
+          "pipeline gate cleared the candidate and the clearance could not be archived"
+        );
+      }
+      finalAttempt = {
+        ...finalAttempt,
+        evidence: {
+          ...finalAttempt.evidence,
+          pipelineGateCleared: {
+            candidateCommitOid: currentCandidateCommit,
+            requiresHumanDecision: gate.requiresHumanDecision
+          }
+        }
+      };
+      await store.promoteTerminalArtifacts({
+        result: finalAttempt,
+        manifest: manifestForArchive
+      });
     }
     const result = {
       runId: attempt.runId,
@@ -50988,6 +51009,7 @@ async function handleReviewCandidate(checkoutPath, runId, deps = {}, expectedSpe
 function decisionAdvisoryForRun(run) {
   const refused = run.result.evidence.pipelineGateRefused;
   const incomplete = run.result.evidence.pipelineReviewIncomplete;
+  const cleared = run.result.evidence.pipelineGateCleared;
   const warnings = [];
   if (isRecord7(refused) && Array.isArray(refused.reasons)) {
     warnings.push(
@@ -50997,9 +51019,25 @@ function decisionAdvisoryForRun(run) {
   if (isRecord7(incomplete) && typeof incomplete.reason === "string") {
     warnings.push(`the pipeline could not complete its own review: ${incomplete.reason}`);
   }
+  let gateCleared = false;
+  if (cleared === void 0) {
+    if (warnings.length === 0) {
+      warnings.push("the pipeline gate clearance record is missing");
+    }
+  } else if (!isRecord7(cleared) || typeof cleared.candidateCommitOid !== "string" || typeof cleared.requiresHumanDecision !== "boolean") {
+    warnings.push("the pipeline gate clearance record is malformed");
+  } else if (cleared.requiresHumanDecision === true) {
+    warnings.push("the pipeline gate clearance record requires a human decision");
+  } else if (cleared.candidateCommitOid !== run.result.candidate?.candidateCommitOid) {
+    warnings.push(
+      "the pipeline gate clearance record does not match the archived candidate commit"
+    );
+  } else {
+    gateCleared = true;
+  }
   return {
     warnings,
-    verifiedClean: run.result.status === "verified-candidate" && run.result.failure === null,
+    verifiedClean: run.result.status === "verified-candidate" && run.result.failure === null && gateCleared,
     unreadable: false
   };
 }
