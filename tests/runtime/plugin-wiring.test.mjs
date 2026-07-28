@@ -348,14 +348,41 @@ test("codex skill ships the direct CLI lane without obscuring its trust boundary
     "codex skill must retain the current default model and effort");
   assert.match(skill, /Always use --skip-git-repo-check\./u,
     "codex skill must require the repository-check override");
+  assert.doesNotMatch(skill, /--full-auto/u,
+    "codex skill must use explicit sandbox modes instead of deprecated full-auto");
+  assert.doesNotMatch(skill, /2>\/dev\/null/u,
+    "codex skill must preserve stderr diagnostics");
+  for (const command of [
+    "codex exec --skip-git-repo-check --sandbox read-only \"prompt\"",
+    "codex exec --skip-git-repo-check --sandbox workspace-write \"prompt\"",
+    "codex exec --skip-git-repo-check --sandbox danger-full-access \"prompt\"",
+    "codex exec --skip-git-repo-check -C <DIR> --sandbox read-only \"prompt\"",
+    "codex exec --skip-git-repo-check resume --last \"prompt\"",
+  ]) {
+    assert.ok(skill.includes(`\`${command}\``), `codex skill must ship ${command}`);
+  }
   assert.match(skill, /<\/dev\/null/u,
     "codex skill must document closing stdin for harness invocation");
+  assert.match(skill, /POSIX[^]*<\/dev\/null/u,
+    "codex skill must document POSIX stdin closure");
+  assert.match(skill, /PowerShell[^]*\$null \| codex exec/u,
+    "codex skill must document PowerShell stdin closure");
+  assert.match(skill, /cmd\.exe[^]*<NUL/u,
+    "codex skill must document cmd.exe stdin closure");
+  assert.match(skill, /stdio:\s*\["ignore",\s*"pipe",\s*"pipe"\]/u,
+    "codex skill must document portable process stdin closure");
   assert.match(skill, /direct, unverified lane/u,
     "codex skill must identify itself as unverified");
   assert.match(skill, /\/claude-architect:delegate[^.\n]*verified lane/u,
     "codex skill must point users to verified delegation");
+  assert.match(skill, /Only `\/claude-architect:delegate`[^.]*independently verified/u,
+    "codex skill must reserve independent verification for the delegation lane");
+  assert.match(skill, /direct skill must never call itself verified/u,
+    "codex skill must reject verified-lane claims");
   assert.doesNotMatch(skill, /claude-architect-protocol|PROTOCOL_VERSION/u,
     "direct Codex execution must not claim delegation protocol membership");
+  assert.doesNotMatch(skill, /isolated production/u,
+    "codex skill must use the worktree terminology");
 
   const readme = read("README.md");
   assert.match(readme, /\/claude-architect:codex/u,
@@ -364,6 +391,10 @@ test("codex skill ships the direct CLI lane without obscuring its trust boundary
     "README must never advertise a bare Codex command");
   assert.match(readme, /direct, unverified Codex CLI lane/u,
     "README must distinguish direct Codex execution from verified delegation");
+  assert.match(readme, /isolated worktree/u,
+    "README must name the verified lane's isolation boundary");
+  assert.doesNotMatch(readme, /isolated production/u,
+    "README must not describe a worktree as production");
 });
 
 test("delegation-lane agent ships the produce-only courier contract", () => {

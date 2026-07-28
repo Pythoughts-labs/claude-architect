@@ -77,7 +77,7 @@ The direct, unverified Codex CLI lane runs `codex exec` against your current che
 /claude-architect:codex Review this checkout with gpt-5.6-sol at high reasoning.
 ```
 
-Use it for direct Codex assistance when those controls are not required. Use `/claude-architect:delegate` when changes need the verified lane and its isolated production, frozen evidence, independent verification, and guarded integration.
+Use it for direct Codex assistance when those controls are not required. Use `/claude-architect:delegate` when changes need the verified lane and its isolated worktree, frozen evidence, independent verification, and guarded integration.
 
 ### Superpowers skill boundary
 
