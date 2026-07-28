@@ -2355,6 +2355,27 @@ async function runPipelineWithLease(
         result: finalAttempt,
         manifest: manifestForArchive,
       });
+    } else {
+      const manifestForArchive = await store.readManifest(attempt.runId);
+      if (manifestForArchive === null) {
+        throw new RuntimeError(
+          "pipeline gate cleared the candidate and the clearance could not be archived",
+        );
+      }
+      finalAttempt = {
+        ...finalAttempt,
+        evidence: {
+          ...finalAttempt.evidence,
+          pipelineGateCleared: {
+            candidateCommitOid: currentCandidateCommit,
+            requiresHumanDecision: gate.requiresHumanDecision,
+          },
+        },
+      };
+      await store.promoteTerminalArtifacts({
+        result: finalAttempt,
+        manifest: manifestForArchive,
+      });
     }
     const result: PipelineResult = {
       runId: attempt.runId,

@@ -3,19 +3,20 @@
  *
  * `autonomous` (the shipped default) lets the runtime record a decision without
  * asking a person, but only for a candidate that met every objective condition:
- * independently verified, no failure, no advisory warnings, archive readable.
+ * independently verified, no failure, a durable pipeline-gate clearance bound
+ * to the archived candidate commit, no advisory warnings, archive readable.
  * Anything short of that still requires a human through elicitation.
  *
  * `human` restores an unconditional elicitation prompt for every decision.
  *
  * Why the default is autonomous: a delegation that stops to ask permission in
  * the middle is not autonomous delegation, and the prompt was landing on the
- * happy path — the case where the runtime had already proven everything it
- * knows how to prove. Human control did not disappear; it moved to the points
- * where it is load-bearing. Integration still refuses a moved HEAD, a dirty
- * tree, or a hash that does not match the reviewed artifact, and a candidate
- * that failed verification or whose gate refused it can still only be accepted
- * by a person.
+ * happy path — the case where the pipeline had independently reviewed and
+ * verified the exact candidate bytes and cleared its gate. Human control did
+ * not disappear; it moved to the points where it is load-bearing. Integration
+ * still refuses a moved HEAD, a dirty tree, or a hash that does not match the
+ * reviewed artifact, and a plain delegation or a candidate whose gate refused
+ * it can still only be accepted by a person.
  *
  * The provenance of every decision is recorded either way, so "went in without
  * a person" stays auditable rather than becoming invisible.

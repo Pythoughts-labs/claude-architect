@@ -6,6 +6,13 @@ All notable changes to Claude Architect are recorded here. The format follows
 
 ## [Unreleased]
 
+### Security
+
+- Autonomous acceptance now requires a durable pipeline-gate clearance record
+  bound to the archived candidate commit. Plain delegation and missing,
+  malformed, human-required, or commit-mismatched evidence fail closed to human
+  elicitation.
+
 ## [0.43.0] - 2026-07-28
 
 ### Fixed

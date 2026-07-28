@@ -981,11 +981,12 @@ export interface DecisionAdvisory {
   /** Human-readable cautions to show whoever confirms the decision. */
   warnings: string[];
   /**
-   * The run is an independently verified candidate carrying no failure. This is
-   * a positive condition, deliberately not "warnings.length === 0": a plain
-   * `delegate` run has neither pipeline-gate evidence nor review evidence, so it
-   * produces zero warnings whether or not it verified. Autonomy must turn on
-   * what the run proved, never on the absence of a pipeline's paperwork.
+   * The run is an independently verified candidate carrying no failure and a
+   * durable pipeline-gate clearance bound to its archived candidate commit.
+   * This is deliberately not "warnings.length === 0": a plain `delegate` run
+   * has neither pipeline-gate evidence nor review evidence. Autonomy must turn
+   * on positive evidence for these exact bytes, never on status or the absence
+   * of a pipeline's paperwork.
    */
   verifiedClean: boolean;
   /**
@@ -999,6 +1000,7 @@ export interface DecisionAdvisory {
 function decisionAdvisoryForRun(run: ArchivedRun): DecisionAdvisory {
   const refused = run.result.evidence.pipelineGateRefused;
   const incomplete = run.result.evidence.pipelineReviewIncomplete;
+  const cleared = run.result.evidence.pipelineGateCleared;
   const warnings: string[] = [];
   if (isRecord(refused) && Array.isArray(refused.reasons)) {
     warnings.push(
@@ -1009,9 +1011,29 @@ function decisionAdvisoryForRun(run: ArchivedRun): DecisionAdvisory {
   if (isRecord(incomplete) && typeof incomplete.reason === "string") {
     warnings.push(`the pipeline could not complete its own review: ${incomplete.reason}`);
   }
+  let gateCleared = false;
+  if (cleared === undefined) {
+    if (warnings.length === 0) {
+      warnings.push("the pipeline gate clearance record is missing");
+    }
+  } else if (!isRecord(cleared)
+    || typeof cleared.candidateCommitOid !== "string"
+    || typeof cleared.requiresHumanDecision !== "boolean") {
+    warnings.push("the pipeline gate clearance record is malformed");
+  } else if (cleared.requiresHumanDecision === true) {
+    warnings.push("the pipeline gate clearance record requires a human decision");
+  } else if (cleared.candidateCommitOid !== run.result.candidate?.candidateCommitOid) {
+    warnings.push(
+      "the pipeline gate clearance record does not match the archived candidate commit",
+    );
+  } else {
+    gateCleared = true;
+  }
   return {
     warnings,
-    verifiedClean: run.result.status === "verified-candidate" && run.result.failure === null,
+    verifiedClean: run.result.status === "verified-candidate"
+      && run.result.failure === null
+      && gateCleared,
     unreadable: false,
   };
 }

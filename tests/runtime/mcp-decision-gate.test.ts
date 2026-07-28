@@ -93,7 +93,12 @@ const verifiedResult = {
   status: "verified-candidate",
   failure: null,
   candidate,
-  evidence: {},
+  evidence: {
+    pipelineGateCleared: {
+      candidateCommitOid: candidate.candidateCommitOid,
+      requiresHumanDecision: false,
+    },
+  },
   // The review snapshot maps over this, so it must be a real array rather than
   // absent: a fixture that omits it fails inside the snapshot builder before
   // the authority branch under test is ever reached.
@@ -206,6 +211,19 @@ describe("decideCandidate authority", () => {
     expect(decision).toMatchObject({
       candidateManifestHash: candidate.manifestHash,
       evidenceHash: expect.stringMatching(/^[0-9a-f]{64}$/u),
+    });
+  });
+
+  it("does not autonomously accept a plain delegate result without pipeline clearance", async () => {
+    // Same client, authority, and candidate bytes as above; only the missing gate record makes this fail closed, so a status-only regression would record here.
+    const { decision, output } = await decideVia({
+      ...verifiedResult,
+      evidence: {},
+    });
+    expect(decision).toBeNull();
+    expect(output.structuredContent).toMatchObject({
+      ok: false,
+      error: "elicitation-unavailable",
     });
   });
 
