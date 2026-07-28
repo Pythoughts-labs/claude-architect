@@ -221,9 +221,11 @@ describe("decideCandidate authority", () => {
       evidence: {},
     });
     expect(decision).toBeNull();
-    expect(output.structuredContent).toMatchObject({
-      ok: false,
-      error: "elicitation-unavailable",
+    expect(output).toMatchObject({
+      structuredContent: {
+        ok: false,
+        error: "elicitation-unavailable",
+      },
     });
   });
 

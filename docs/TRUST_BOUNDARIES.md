@@ -4,7 +4,7 @@ Claude Architect separates planning and acceptance from untrusted implementation
 
 ```mermaid
 flowchart LR
-  H[Human operator] -->|requirements, Producer choice, acceptance instruction| C[Claude architect session]
+  H[Human operator] -->|requirements, Producer choice, authority policy| C[Claude architect session]
   C -->|versioned Delegation Spec over MCP stdio| R[Host runtime]
   R -->|bounded prompt + sanitized env| P[Untrusted Producer sandbox/worktree]
   P -->|edits + untrusted output| R
@@ -19,7 +19,7 @@ flowchart LR
 
 ## Boundary 1: human and architect session
 
-The human supplies intent and should make the final acceptance choice after Claude presents the exact candidate and evidence. Claude constructs the spec and calls MCP tools. `decideCandidate` does not trust its decision argument alone: the runtime separately requires a positive MCP elicitation response and otherwise records nothing. That channel is not cryptographic human authentication; it relies on the controlling MCP client to present elicitation faithfully. Consequently, a compromised or modified host that can synthesize the confirmation still has decision authority.
+The human supplies intent, chooses a Producer when none is named, and may require confirmation for every decision by setting `CLAUDE_ARCHITECT_DECISION_AUTHORITY=human`. Under the shipped `autonomous` authority, `decideCandidate` may record only `accepted`, and only for an independently verified `delegatePipeline` candidate whose durable clearance names the archived candidate commit, does not require a human, and carries no advisory warnings. Plain `delegate`, refusal, incomplete review, invalid or mismatched clearance, non-accept verdicts, and every decision under `human` require a positive MCP elicitation response and otherwise record nothing. That channel is not cryptographic human authentication; it relies on the controlling MCP client to present elicitation faithfully. Consequently, a compromised or modified host that can synthesize the confirmation still has decision authority.
 
 ## Boundary 2: architect session and Host runtime
 
@@ -45,7 +45,7 @@ Fresh context limits direct conversational influence from the implementer. It do
 
 The candidate exists as Git tree/commit objects anchored by a namespaced ref and described by changed-path/content records. The candidate manifest hash binds that normalized manifest; the run manifest separately binds execution provenance and its candidate association. `reviewCandidate` regenerates the exact patch from these objects.
 
-Integration crosses the final commitment boundary. It is allowed only after an `accepted` record and only when the caller supplies the exact manifest hash. The runtime rechecks repository base, candidate anchor, commit/tree, structural identity, clean preconditions, and post-apply state under locks. Integration stages files but does not commit, merge, push, or deploy. The human/architect must inspect the resulting checkout and choose any later Git or release action.
+Integration crosses the final commitment boundary. It is allowed only after an `accepted` record with integrable `human-elicitation` or `policy-autonomous` provenance and only when the caller supplies the exact manifest hash. The runtime rechecks repository base, candidate anchor, commit/tree, structural identity, clean preconditions, and post-apply state under locks. Integration stages files but does not commit, merge, push, or deploy. The human/architect must inspect the resulting checkout and choose any later Git or release action.
 
 ## Boundary 6: local machine and model providers
 

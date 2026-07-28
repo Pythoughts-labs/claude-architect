@@ -1,12 +1,12 @@
 # Marketplace Review Summary
 
-Claude Architect is maintained by Mohamed Elkholy (`elkaix`) and published from `Pythoughts-labs/claude-architect` under the MIT license. It is a Claude Code plugin for delegating bounded implementation tasks to external coding CLIs while keeping review, acceptance, and integration under the Claude architect and human operator.
+Claude Architect is maintained by Mohamed Elkholy (`elkaix`) and published from `Pythoughts-labs/claude-architect` under the MIT license. It is a Claude Code plugin for delegating bounded implementation tasks to external coding CLIs while keeping review, acceptance, and integration under the trusted Host runtime, Claude architect, and human operator.
 
 ## What the plugin does
 
 The plugin validates a versioned Delegation Spec, selects an eligible Producer, creates an isolated detached Git worktree, supervises the Producer, rejects changes outside an explicit write allowlist or inside forbidden scope, freezes the result as an anchored Git candidate, computes a SHA-256 candidate manifest hash, independently reruns authorized verification in a separate worktree, and returns evidence for review. Non-trivial work can use fresh-context correctness/systems reviewers, a bounded fixer, and a read-only clean-room verifier.
 
-No Producer can mark its own work accepted. `decideCandidate` records the architect/human decision; `integrateCandidate` requires an accepted record and exact manifest hash, revalidates the candidate and base, and stages the candidate tree. It does not commit, merge, push, publish, or deploy.
+No Producer can mark its own work accepted. `decideCandidate` records a provenance-bearing decision under the configured authority; `integrateCandidate` requires an accepted record with integrable provenance and the exact manifest hash, revalidates the candidate and base, and stages the candidate tree. It does not commit, merge, push, publish, or deploy.
 
 ## Component inventory
 
@@ -39,15 +39,15 @@ The architect must specify repository-relative write allowlists and forbidden sc
 
 The Host runtime can read the selected repository and Git metadata; it writes plugin state, temporary worktrees, candidate refs, and—after acceptance—the target checkout/index. It does not automatically commit. Readable source or secrets may be transmitted by a configured cloud CLI, so users should minimize context and avoid delegating secret-bearing repositories.
 
-## Human approval points
+## Decision and human approval points
 
-The user chooses the Producer when none is named. After a verified candidate or pipeline evidence bundle is returned, the architect must show/review the evidence and call `decideCandidate` with `accepted`, `rejected`, or `revision-requested`. The runtime separately requires positive MCP elicitation, so an ordinary tool caller's decision argument cannot record acceptance. Only a confirmed `accepted` decision enables `integrateCandidate`, and integration additionally requires the exact candidate manifest hash. MCP elicitation is not cryptographic human authentication: a compromised or modified trusted host/client could synthesize confirmation. Final commit, merge, push, or release remains a separate human-controlled action.
+The user chooses the Producer when none is named. After a verified candidate or pipeline evidence bundle is returned, the architect must show/review the evidence and call `decideCandidate` with `accepted`, `rejected`, or `revision-requested`. Under the shipped `autonomous` authority, the runtime records `accepted` without prompting only for an independently verified `delegatePipeline` candidate carrying durable gate clearance bound to the archived candidate commit, with no failure, human requirement, or advisory warning. Plain `delegate`, gate-refused, review-incomplete, malformed or mismatched evidence, non-accept verdicts, and every decision under `human` require positive MCP elicitation and fail closed without it. Only a recorded `accepted` decision with integrable provenance enables `integrateCandidate`, and integration additionally requires the exact candidate manifest hash. MCP elicitation is not cryptographic human authentication: a compromised or modified trusted host/client could synthesize confirmation. Final commit, merge, push, or release remains a separate human-controlled action.
 
 ## Threat-model summary and limitations
 
 Primary threats are malicious Producer output, prompt injection in repository/diff content, a compromised Producer CLI, scope escape, forged test claims, candidate substitution, state races, credential leakage, and unauthorized acceptance. Mitigations include versioned validation, OS sandboxing where eligible, detached worktrees, environment minimization, timeouts/process-tree cleanup, post-run allowlist checks, Git object anchoring, manifest hashes, separate Host verification, read-only fresh reviewers, bounded/redacted archives, crash recovery with process start tokens, and hash-gated integration.
 
-Known limitations are material: only macOS arm64 Codex is certified; Linux is tested and native Windows Codex editing is unsupported; other Producer/platform combinations depend on reported capability and eligibility; prompt injection and subtle malicious code can pass review/tests; provider retention is outside plugin control; redaction is best effort; same-user or host compromise is out of scope; and the human decision is not cryptographically authenticated.
+Known limitations are material: only macOS arm64 Codex is certified; Linux is tested and native Windows Codex editing is unsupported; other Producer/platform combinations depend on reported capability and eligibility; prompt injection and subtle malicious code can pass review/tests; provider retention is outside plugin control; redaction is best effort; same-user or host compromise is out of scope; policy acceptance is not proof of safety; and elicited decisions are not cryptographically authenticated.
 
 ## Installation
 

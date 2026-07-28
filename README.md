@@ -20,7 +20,7 @@ In practice that means three guarantees the plugin enforces in host code, not in
 
 - **Isolation** — every Producer runs in a detached worktree with a sanitized environment, an explicit write allowlist, and OS sandboxing where certified. Out-of-scope changes are rejected at freeze time.
 - **Evidence over claims** — a Producer saying "tests pass" is never accepted; the runtime reruns your authorized verification commands in a clean worktree and records the real output.
-- **Separated authority** — implementers cannot approve their own work. Review, decision, and hash-gated integration are separate steps, and integration stages the reviewed tree without committing it. A verified candidate is accepted without prompting by default; anything less still requires a human ([decision authority](#decision-authority)).
+- **Separated authority** — implementers cannot approve their own work. Review, decision, and hash-gated integration are separate steps, and integration stages the reviewed tree without committing it. By default, only a reviewed pipeline candidate carrying durable, commit-bound gate clearance is accepted without prompting; anything less still requires a human ([decision authority](#decision-authority)).
 
 ## Status
 
@@ -30,7 +30,7 @@ The runtime and cross-platform lifecycle are evolving. Producer availability dep
 
 ## Why it exists
 
-Delegating code generation is easy; establishing which exact bytes were produced, whether they stayed in scope, and whether anyone independent verified them is harder. Claude Architect keeps Claude focused on specification and judgment while treating external coding agents as untrusted Producers. It records a reproducible run, freezes a content-addressed candidate, verifies authorized checks in a clean materialization, and makes the human decision explicit.
+Delegating code generation is easy; establishing which exact bytes were produced, whether they stayed in scope, and whether anyone independent verified them is harder. Claude Architect keeps Claude focused on specification and judgment while treating external coding agents as untrusted Producers. It records a reproducible run, freezes a content-addressed candidate, verifies authorized checks in a clean materialization, and makes every decision's provenance explicit.
 
 ## Core workflow
 
@@ -40,7 +40,7 @@ flowchart LR
     B --> C[Frozen candidate]
     C --> D[Independent verification]
     D --> E[Adversarial review]
-    E --> F{Human decision}
+    E --> F{Configured decision authority}
     F -->|accept| G[Guarded integration]
     F -->|reject or revise| H[Discard or fresh attempt]
 ```
@@ -87,7 +87,7 @@ Claude Architect can use host-side Superpowers skills such as brainstorming, wri
 - `systematic-debugging` for unexpected test, build, or behavior failures;
 - `verification-before-completion` before a Producer claims success.
 
-This filtered subset is vendored from [obra/superpowers](https://github.com/obra/superpowers) version 6.2.0 under the MIT license so it remains available inside an isolated attempt. Skills that assume nested delegation, self-review, branch acceptance, or an interactive human remain unavailable to Producers; the architect and human retain those authorities.
+This filtered subset is vendored from [obra/superpowers](https://github.com/obra/superpowers) version 6.2.0 under the MIT license so it remains available inside an isolated attempt. Skills that assume nested delegation, self-review, branch acceptance, or an interactive human remain unavailable to Producers; the architect, the runtime's configured decision authority, and the human where required retain those authorities.
 
 ### Lanes as native subagents
 
@@ -100,7 +100,7 @@ Dispatch a delegation through the `delegation-lane` agent to watch it as a nativ
 
 ## Decision authority
 
-By default a delegation runs to completion without prompting: an independently verified candidate carrying no advisory warnings is accepted and recorded as `policy-autonomous`. Anything short of that — unverified, gate-refused, review-incomplete, or an unreadable archive — still requires a human through MCP elicitation and fails closed without it. Set `CLAUDE_ARCHITECT_DECISION_AUTHORITY=human` to require confirmation for every decision; an unrecognized value fails closed to `human` with a warning.
+By default, `decideCandidate` records `accepted` without prompting only for an independently verified `delegatePipeline` candidate carrying a durable `pipelineGateCleared` record that names the archived candidate commit, does not require a human, and produces no advisory warnings from a readable archive. A plain `delegate` result has no pipeline clearance and therefore requires a human, as do gate-refused, review-incomplete, malformed, commit-mismatched, human-required, unverified, or unreadable cases and every non-accept verdict. Set `CLAUDE_ARCHITECT_DECISION_AUTHORITY=human` to require confirmation for every decision; an unrecognized value fails closed to `human` with a warning.
 
 What this does not relax: independent verification still decides what may be accepted at all, integration refuses any acceptance whose provenance is unknown, and it still aborts on a moved `HEAD`, a dirty tree, or a hash that does not match the reviewed artifact. Every decision records its provenance, so auditing which candidates went in without a person never requires inferring it.
 
@@ -125,7 +125,7 @@ What this does not relax: independent verification still decides what may be acc
 
 Claude Architect separates authority across roles and artifacts. Producers receive bounded write scope in isolated worktrees. Candidate bytes are frozen and identified by hashes before independent verification. Reviewers operate in fresh context, and read-only roles lack mutation tools. The runtime rejects nested delegation, scope escapes, changed bases, mismatched anchors or trees, and unaccepted candidates. Integration stages reviewed bytes; it does not commit them.
 
-The central rule is deliberately simple: **all agent output is an untrusted candidate; implementers cannot approve their own work; and nothing unverified is accepted without a human.** Verification reduces risk but does not establish that a change is safe for your particular deployment.
+The central rule is deliberately simple: **all agent output is an untrusted candidate; implementers cannot approve their own work; and only an independently verified pipeline candidate with commit-bound gate clearance can be accepted without a human.** Verification reduces risk but does not establish that a change is safe for your particular deployment.
 
 ## Permissions and external commands
 
