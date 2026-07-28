@@ -31812,7 +31812,7 @@ var StdioServerTransport = class {
 var PROTOCOL_VERSION = "2.0.0";
 var DELEGATION_SPEC_VERSION = "1";
 var ATTEMPT_RESULT_VERSION = "1";
-var RUNTIME_VERSION = "0.42.0";
+var RUNTIME_VERSION = "0.43.0";
 
 // src/mcp/doctor.ts
 import { createHash as createHash5 } from "node:crypto";

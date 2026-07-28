@@ -6,6 +6,8 @@ All notable changes to Claude Architect are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.43.0] - 2026-07-28
+
 ### Fixed
 
 - Atomic workflow-state publication now compares bigint file identities and
@@ -1130,7 +1132,8 @@ Initial public release.
 - Native OpenCode assets under `.opencode/` and `opencode.json`, so the same lanes and skill work outside Claude Code.
 - SVG banner and shields badges for the README.
 
-[Unreleased]: https://github.com/Pythoughts-labs/claude-architect/compare/v0.42.0...HEAD
+[Unreleased]: https://github.com/Pythoughts-labs/claude-architect/compare/v0.43.0...HEAD
+[0.43.0]: https://github.com/Pythoughts-labs/claude-architect/compare/v0.42.0...v0.43.0
 [0.42.0]: https://github.com/Pythoughts-labs/claude-architect/compare/v0.41.0...v0.42.0
 [0.16.0]: https://github.com/Pythoughts-labs/claude-architect/compare/v0.15.0...v0.16.0
 [0.15.0]: https://github.com/Pythoughts-labs/claude-architect/compare/v0.14.0...v0.15.0
