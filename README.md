@@ -4,6 +4,7 @@
 
 <p align="center">
   <a href="#quick-start"><img alt="delegate skill" src="https://img.shields.io/badge/skill-delegate-e6edf3?style=flat-square&labelColor=0b0e14"></a>
+  <a href="#direct-codex-cli"><img alt="codex skill" src="https://img.shields.io/badge/skill-codex-e6edf3?style=flat-square&labelColor=0b0e14"></a>
 </p>
 
 <p align="center">
@@ -68,6 +69,16 @@ Open Claude Code in a Git repository and name the Producer you want:
 
 If no Producer is named, the skill asks you to choose Codex, OpenCode, Pi, or Pythinker. Pi, OpenCode, and Pythinker are harnesses that accept optional model and thinking/variant overrides; model selection within a harness lane is optional and otherwise defers to that CLI's configured default. For non-trivial work it uses the fresh-context review pipeline. Read the exact patch, findings, and verification output before deciding whether to accept.
 
+### Direct Codex CLI
+
+The direct, unverified Codex CLI lane runs `codex exec` against your current checkout without an isolated worktree, frozen Candidate Artifact, or independent verification:
+
+```text
+/claude-architect:codex Review this checkout with gpt-5.6-sol at high reasoning.
+```
+
+Use it for direct Codex assistance when those controls are not required. Use `/claude-architect:delegate` when changes need the verified lane and its isolated production, frozen evidence, independent verification, and guarded integration.
+
 ### Superpowers skill boundary
 
 Claude Architect can use host-side Superpowers skills such as brainstorming, writing plans, and executing plans to shape and coordinate a delegation. Producers do not inherit that host skill set. Each edit attempt is offered only the three task-scoped procedures compatible with the trust model:
@@ -98,6 +109,7 @@ What this does not relax: independent verification still decides what may be acc
 | Kind | Name | Purpose |
 |---|---|---|
 | Skill | `/claude-architect:delegate` | Builds a versioned spec and drives delegation, review, decision, and guarded integration. |
+| Skill | `/claude-architect:codex` | Runs Codex CLI directly against the current checkout without the verified delegation lifecycle. |
 | Skill | `/claude-architect:subagent-driven-delegation` | Executes a multi-task plan with the Superpowers subagent-driven-development loop, using a verified Producer as the implementer for every task. |
 | Agent | `advisor` | Current strictly read-only commitment-boundary advisor. |
 | MCP | `validateDelegationSpec` | Validates a spec without starting a Producer and returns its canonical correlation digest. |

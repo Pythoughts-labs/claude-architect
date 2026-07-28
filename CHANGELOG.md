@@ -6,6 +6,16 @@ All notable changes to Claude Architect are recorded here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- `/claude-architect:codex`, a direct, unverified Codex CLI lane for running
+  `codex exec` against the user's checkout. The skill preserves the current
+  model and reasoning roster, sandbox and timeout guidance, follow-up flow,
+  critical-evaluation rules, and error handling from the authoritative
+  `skill-codex` design, while pointing users to
+  `/claude-architect:delegate` when they need isolated production, a frozen
+  Candidate Artifact, independent verification, and controlled integration.
+
 ## [0.41.0] - 2026-07-27
 
 ### Security

@@ -329,6 +329,43 @@ test("subagent-driven-delegation skill keeps the trust invariants that upstream 
     "delegate skill must point at the SDD skill for multi-task plans");
 });
 
+test("codex skill ships the direct CLI lane without obscuring its trust boundary", () => {
+  const skillPath = `${root}/skills/codex/SKILL.md`;
+  assert.equal(fs.existsSync(skillPath), true, "codex skill must ship");
+  const skill = read("skills/codex/SKILL.md");
+  const frontmatter = /^---\r?\n([\s\S]*?)\r?\n---\r?\n/u.exec(skill)?.[1] ?? "";
+  const keys = [...frontmatter.matchAll(/^([A-Za-z][A-Za-z0-9]*):/gmu)]
+    .map(match => match[1]);
+  assert.deepEqual(keys, ["name", "description"],
+    "codex skill frontmatter must contain only name and description");
+  assert.match(frontmatter, /^name:\s*codex$/mu);
+
+  assert.match(skill, /\/claude-architect:codex/u,
+    "codex skill must use its plugin-qualified command");
+  assert.doesNotMatch(skill, /(^|[^:])\/codex\b/mu,
+    "codex skill must never present a bare command");
+  assert.match(skill, /default to `gpt-5\.6-sol` at `high`/u,
+    "codex skill must retain the current default model and effort");
+  assert.match(skill, /Always use --skip-git-repo-check\./u,
+    "codex skill must require the repository-check override");
+  assert.match(skill, /<\/dev\/null/u,
+    "codex skill must document closing stdin for harness invocation");
+  assert.match(skill, /direct, unverified lane/u,
+    "codex skill must identify itself as unverified");
+  assert.match(skill, /\/claude-architect:delegate[^.\n]*verified lane/u,
+    "codex skill must point users to verified delegation");
+  assert.doesNotMatch(skill, /claude-architect-protocol|PROTOCOL_VERSION/u,
+    "direct Codex execution must not claim delegation protocol membership");
+
+  const readme = read("README.md");
+  assert.match(readme, /\/claude-architect:codex/u,
+    "README must advertise the plugin-qualified Codex skill");
+  assert.doesNotMatch(readme, /(^|[^:])\/codex\b/mu,
+    "README must never advertise a bare Codex command");
+  assert.match(readme, /direct, unverified Codex CLI lane/u,
+    "README must distinguish direct Codex execution from verified delegation");
+});
+
 test("delegation-lane agent ships the produce-only courier contract", () => {
   const lane = read("agents/delegation-lane.md");
   const frontmatterMatch = /^---\r?\n([\s\S]*?)\r?\n---\r?\n/u.exec(lane);
