@@ -7,6 +7,45 @@ import type { ReviewSnapshot } from "../../../src/runtime/review-snapshot.js";
 // Derived from the runtime canonicalization rather than a hand-rolled sha256
 // of "[]", so the fixture cannot drift from the hashing it stands in for.
 export const manifestHash = manifestHashOf([]);
+const DEAD_BOOTSTRAP_PID = 900_001;
+const DEAD_LEASE_PID = 900_002;
+const DEAD_PROCESS_TOKEN = "dead-autopilot-owner-token";
+
+export function autopilotOwnershipPath(workflowId: string, stateDirectory: string): string {
+  return path.join(
+    stateDirectory,
+    "autopilot-branches",
+    `${createHash("sha256").update(workflowId).digest("hex")}.json`,
+  );
+}
+
+export async function makeBootstrapOwnerDead(
+  subject: Pick<WorkflowBranchIdentity, "workflowId">
+    | { branch: Pick<WorkflowBranchIdentity, "workflowId"> },
+  stateDirectory = process.env.CLAUDE_PLUGIN_DATA,
+): Promise<void> {
+  if (stateDirectory === undefined) throw new Error("CLAUDE_PLUGIN_DATA is required");
+  const branch = "branch" in subject ? subject.branch : subject;
+  const filename = autopilotOwnershipPath(branch.workflowId, stateDirectory);
+  const registration = JSON.parse(await readFile(filename, "utf8")) as {
+    bootstrapOwner: { pid: number; processToken: string | null; createdAt: string };
+  };
+  registration.bootstrapOwner.pid = DEAD_BOOTSTRAP_PID;
+  registration.bootstrapOwner.processToken = DEAD_PROCESS_TOKEN;
+  await writeFile(filename, `${JSON.stringify(registration)}\n`);
+}
+
+export async function makeLeaseDead(store: Pick<
+  WorkflowStore,
+  "ownerPath" | "workflowId"
+>): Promise<void> {
+  await writeFile(store.ownerPath, `${JSON.stringify({
+    workflowId: store.workflowId,
+    pid: DEAD_LEASE_PID,
+    processToken: DEAD_PROCESS_TOKEN,
+    acquiredAt: "2026-07-21T17:00:00.000Z",
+  })}\n`);
+}
 
 export const advisorReport: AdvisorReport = {
   reportVersion: "1",
@@ -134,3 +173,8 @@ export function pipelineResult(runId = "run-advisor"): PipelineResult {
     failure: null,
   };
 }
+import { createHash } from "node:crypto";
+import { readFile, writeFile } from "node:fs/promises";
+import path from "node:path";
+import type { WorkflowBranchIdentity } from "../../../src/autopilot/branch-manager.js";
+import type { WorkflowStore } from "../../../src/autopilot/workflow-store.js";

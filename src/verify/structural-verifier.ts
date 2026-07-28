@@ -1,7 +1,7 @@
 import { git, type GitResult } from "../git/git-exec.js";
 import {
-  computeChangedPathManifest,
   foldPathForCollision,
+  inspectChangedPathManifest,
   parseRawDiff,
   splitNul,
   type RawDiffEntry,
@@ -129,7 +129,7 @@ export async function recomputeManifest(args: Pick<
   "worktreePath" | "baseCommitOid" | "artifact"
 >): Promise<{
   changedPaths: ChangedPath[];
-  manifestHash: string;
+  manifestHash: string | null;
   rawDiff: RawDiffEntry[];
 }> {
   const [rawOutput, nameStatusOutput, treeOutput] = await Promise.all([
@@ -156,7 +156,7 @@ export async function recomputeManifest(args: Pick<
     checkedGit(args.worktreePath, ["ls-tree", "-r", "-z", args.artifact.candidateTreeOid]),
   ]);
   const rawDiff = parseRawDiff(rawOutput);
-  const { changedPaths, manifestHash } = computeChangedPathManifest({
+  const { changedPaths, manifestHash } = inspectChangedPathManifest({
     rawDiff,
     nameStatusOutput,
     treeOutput,
@@ -193,29 +193,14 @@ async function artifactIdentityMatches(args: StructuralVerifyArgs): Promise<bool
 
 export async function structuralVerify(args: StructuralVerifyArgs): Promise<StructuralVerifyResult> {
   const failures = new Set<StructuralFailure>();
-  // A collision makes the manifest uncomputable (`validateChangedPaths` throws
-  // on it), so the recompute is skipped — but the old short-circuit then
-  // reported the candidate's OWN manifestHash as verification output and threw
-  // away checkoutDrift and every other failure, leaving a repair loop with one
-  // problem instead of all of them. Report the collision and keep going.
-  if (await candidateHasCaseCollision(args)) {
-    const [head, status] = await Promise.all([
-      checkedGit(args.repoRoot, ["rev-parse", "--verify", "HEAD"]),
-      checkedGit(args.repoRoot, [
-        "status", "--porcelain=v1", "--untracked-files=all", "--ignore-submodules=none",
-      ]),
-    ]);
-    return {
-      ok: false,
-      failures: ["case-collision"],
-      manifestHash: null,
-      checkoutDrift: {
-        headMoved: head.trim() !== args.baseCommitOid,
-        dirty: status.length > 0,
-      },
-    };
-  }
-  const [manifest, baseTreeOid, currentHead, mainStatus, artifactIdentityValid] = await Promise.all([
+  const [
+    manifest,
+    baseTreeOid,
+    currentHead,
+    mainStatus,
+    artifactIdentityValid,
+    caseCollision,
+  ] = await Promise.all([
     recomputeManifest(args),
     checkedGit(args.repoRoot, ["rev-parse", `${args.baseCommitOid}^{tree}`]),
     checkedGit(args.repoRoot, ["rev-parse", "--verify", "HEAD"]),
@@ -226,8 +211,10 @@ export async function structuralVerify(args: StructuralVerifyArgs): Promise<Stru
       "--ignore-submodules=none",
     ]),
     artifactIdentityMatches(args),
+    candidateHasCaseCollision(args),
   ]);
 
+  if (caseCollision) failures.add("case-collision");
   if (args.artifact.baseCommitOid !== args.baseCommitOid) {
     failures.add("artifact-base-mismatch");
   }
@@ -235,7 +222,8 @@ export async function structuralVerify(args: StructuralVerifyArgs): Promise<Stru
     headMoved: currentHead.trim() !== args.baseCommitOid,
     dirty: mainStatus.length > 0,
   };
-  if (JSON.stringify(args.artifact.changedPaths) !== JSON.stringify(manifest.changedPaths)
+  if (manifest.manifestHash === null
+    || JSON.stringify(args.artifact.changedPaths) !== JSON.stringify(manifest.changedPaths)
     || args.artifact.manifestHash !== manifest.manifestHash) {
     failures.add("manifest-divergence");
   }

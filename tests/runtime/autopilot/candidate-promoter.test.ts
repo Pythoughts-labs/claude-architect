@@ -15,6 +15,7 @@ import type { WorkflowStore } from "../../../src/autopilot/workflow-store.js";
 import type { ArtifactStore } from "../../../src/runtime/artifact-store.js";
 import type { PlatformServices } from "../../../src/platform/platform-services.js";
 import type { GitResult } from "../../../src/git/git-exec.js";
+import { logger } from "../../../src/util/logger.js";
 
 const baseOid = "a".repeat(40);
 const candidateOid = "b".repeat(40);
@@ -350,6 +351,10 @@ describe("CandidatePromoter", () => {
     await expect(f.promoter.promote(f.request)).resolves.toEqual({
       status: "rejected", classification: "commit-proof-failed",
     });
+    expect(f.runGit.mock.calls.filter(([, args]) =>
+      args[0] === "update-ref" && !args.includes("-d"))).toHaveLength(0);
+    expect(f.runGit.mock.calls.filter(([, args]) =>
+      args[0] === "update-ref" && args.includes("-d"))).toHaveLength(0);
   });
 
   it("recovers an intent whose durable append crashed before promotion began", async () => {
@@ -439,9 +444,10 @@ describe("CandidatePromoter", () => {
 
   it("recovers after anchor cleanup when the checkout lock release crashes", async () => {
     const f = fixture({ lockReleaseFailsOnce: true });
+    const warn = vi.spyOn(logger, "warn").mockImplementation(() => {});
 
     await expect(f.promoter.promote(f.request)).resolves.toEqual({
-      status: "rejected", classification: "lock-release-failed",
+      status: "committed", commitOid,
     });
     await expect(f.promoter.promote(f.request)).resolves.toEqual({
       status: "committed", commitOid,
@@ -450,6 +456,14 @@ describe("CandidatePromoter", () => {
     expect(f.workflowStore.completeIntent).toHaveBeenCalledOnce();
     expect(f.runGit.mock.calls.filter(([, args]) => args[0] === "commit-tree")).toHaveLength(1);
     expect(f.events).toEqual(["journal-complete", "anchor-delete"]);
+    expect(warn).toHaveBeenCalledWith(
+      "checkout lock release failed after candidate promotion",
+      expect.objectContaining({
+        event: "checkout-lock-release-failed",
+        workflowId,
+        reason: expect.stringContaining("crashed after anchor deletion"),
+      }),
+    );
   });
 
   it("fails closed when a journaled commit no longer proves the workflow branch", async () => {

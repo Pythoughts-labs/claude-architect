@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import {
   computeChangedPathManifest,
+  foldPathForCollision,
   manifestHashOf,
   parseRawDiff,
   splitNul,
@@ -187,6 +188,18 @@ describe("computeChangedPathManifest", () => {
         { mode: "100644", oid: OID_2, path: "e\u0301.txt" },
       ]),
     })).toThrow("changed paths collide under case folding");
+  });
+
+  it("rejects Greek sigma variants that APFS resolves as one path", () => {
+    const folds = ["Σ.txt", "ς.txt", "σ.txt"].map(
+      candidatePath => foldPathForCollision(candidatePath).folded,
+    );
+    expect(new Set(folds)).toEqual(new Set(["σ.txt"]));
+    expect(() => manifestHashOf([
+      { path: "Σ.txt", changeType: "added", mode: "100644", contentHash: OID_1 },
+      { path: "ς.txt", changeType: "added", mode: "100644", contentHash: OID_2 },
+      { path: "σ.txt", changeType: "added", mode: "100644", contentHash: OID_3 },
+    ])).toThrow("changed paths collide under case folding");
   });
 
   it("does not conflate Unicode-distinct paths or an exact repeated path", () => {

@@ -102,7 +102,7 @@ const verifiedResult = {
   producerId: "fake",
 } as unknown as AttemptResult;
 
-function fakePlatform(): PlatformServices {
+function fakePlatform(onAcquireLock?: () => void): PlatformServices {
   return {
     os: "darwin",
     canonicalizePath: async (input: string) => ({
@@ -110,11 +110,14 @@ function fakePlatform(): PlatformServices {
       canonical: "/canonical/repo",
       gitCommonDir: "/canonical/repo/.git",
     }),
-    acquireCheckoutLock: async (checkout: string) => ({
-      key: checkout,
-      repositoryIdentity: "/canonical/repo/.git",
-      release: async () => {},
-    }),
+    acquireCheckoutLock: async (checkout: string) => {
+      onAcquireLock?.();
+      return {
+        key: checkout,
+        repositoryIdentity: "/canonical/repo/.git",
+        release: async () => {},
+      };
+    },
   } as unknown as PlatformServices;
 }
 
@@ -129,6 +132,10 @@ function fakePlatform(): PlatformServices {
 async function decideVia(
   result: AttemptResult,
   authority: "autonomous" | "human" = "autonomous",
+  options: {
+    onAcquireLock?: () => void;
+    currentResult?: () => AttemptResult;
+  } = {},
 ): Promise<{ output: unknown; decision: CandidateDecisionV2 | null }> {
   let recorded: CandidateDecisionV2 | null = null;
   let persistedSnapshot: ReviewSnapshot | null = null;
@@ -137,10 +144,10 @@ async function decideVia(
     transport: serverTransport,
     recoverStaleRuns: async () => ({ recovered: [], quarantined: [] }),
     pruneRuns: async () => {},
-    ps: fakePlatform(),
+    ps: fakePlatform(options.onAcquireLock),
     decisionAuthority: () => authority,
     storeFactory: () => ({
-      readResult: async () => result,
+      readResult: async () => options.currentResult?.() ?? result,
       readManifest: async () => ({
         runId: "decide-authority",
         repoRoot: "/canonical/repo",
@@ -208,6 +215,24 @@ describe("decideCandidate authority", () => {
     const { decision, output } = await decideVia(verifiedResult, "human");
     expect(decision).toBeNull();
     expect(JSON.stringify(output)).toContain("elicitation");
+  });
+
+  it("cannot record policy-autonomous from an advisory that changed before locking", async () => {
+    let current = verifiedResult;
+    const warned = {
+      ...verifiedResult,
+      evidence: {
+        pipelineGateRefused: { reasons: ["the locked gate now requires a human"] },
+      },
+    } as AttemptResult;
+    const { decision, output } = await decideVia(verifiedResult, "autonomous", {
+      onAcquireLock: () => { current = warned; },
+      currentResult: () => current,
+    });
+
+    expect(decision).toBeNull();
+    expect(JSON.stringify(output)).toContain("elicitation");
+    expect(JSON.stringify(output)).not.toContain("policy-autonomous");
   });
 
   it.each([

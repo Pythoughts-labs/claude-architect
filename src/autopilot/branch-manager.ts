@@ -899,8 +899,12 @@ export class WorkflowBranchManager {
     } finally {
       try {
         await lock.release();
-      } catch {
-        return { ok: false, classification: "git-command-failed" };
+      } catch (releaseError) {
+        logger.warn("checkout lock release failed after workflow branch revalidation", {
+          event: "checkout-lock-release-failed",
+          workflowId: identity.workflowId,
+          reason: redact(String(releaseError)),
+        });
       }
     }
   }
@@ -1111,8 +1115,13 @@ export class WorkflowBranchManager {
     }
     try {
       await lock.release();
-    } catch {
+    } catch (releaseError) {
       // Cleanup reports the observed cleanup state; lock-release reporting cannot change it.
+      logger.warn("checkout lock release failed after workflow branch cleanup", {
+        event: "checkout-lock-release-failed",
+        workflowId: identity.workflowId,
+        reason: redact(String(releaseError)),
+      });
     }
     return result;
   }

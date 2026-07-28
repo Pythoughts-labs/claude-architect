@@ -1,4 +1,3 @@
-import { createHash } from "node:crypto";
 import {
   lstat,
   mkdir,
@@ -22,6 +21,11 @@ import { WorkflowStore } from "../../../src/autopilot/workflow-store.js";
 import { git } from "../../../src/git/git-exec.js";
 import { getPlatformServices } from "../../../src/platform/select-platform.js";
 import { recoverStaleRuns } from "../../../src/runtime/recovery-manager.js";
+import {
+  autopilotOwnershipPath,
+  makeBootstrapOwnerDead,
+  makeLeaseDead,
+} from "../pipeline/autopilot-fixtures.js";
 
 interface Fixture {
   root: string;
@@ -177,33 +181,6 @@ async function createFixture(options: { createState?: boolean } = {}): Promise<F
     });
   }
   return { root, repository, remote, branchManager, branch, store };
-}
-
-function ownershipPath(workflowId: string): string {
-  return path.join(
-    process.env.CLAUDE_PLUGIN_DATA!,
-    "autopilot-branches",
-    `${createHash("sha256").update(workflowId).digest("hex")}.json`,
-  );
-}
-
-async function makeBootstrapOwnerDead(fixture: Fixture): Promise<void> {
-  const filename = ownershipPath(fixture.branch.workflowId);
-  const registration = JSON.parse(await readFile(filename, "utf8")) as {
-    bootstrapOwner: { pid: number; processToken: string | null; createdAt: string };
-  };
-  registration.bootstrapOwner.pid = 900_001;
-  registration.bootstrapOwner.processToken = "dead-bootstrap-token";
-  await writeFile(filename, `${JSON.stringify(registration)}\n`);
-}
-
-async function makeLeaseDead(store: WorkflowStore): Promise<void> {
-  await writeFile(store.ownerPath, `${JSON.stringify({
-    workflowId: store.workflowId,
-    pid: 900_002,
-    processToken: "dead-lease-token",
-    acquiredAt: "2026-07-21T17:00:00.000Z",
-  })}\n`);
 }
 
 async function advanceToCleaningUp(store: WorkflowStore): Promise<AutopilotWorkflowState> {
@@ -401,7 +378,10 @@ describe("autopilot startup recovery", () => {
       disposition: "dispose",
     }]);
     await expect(lstat(fixture.branch.worktreePath)).rejects.toMatchObject({ code: "ENOENT" });
-    await expect(lstat(ownershipPath(fixture.branch.workflowId)))
+    await expect(lstat(autopilotOwnershipPath(
+      fixture.branch.workflowId,
+      process.env.CLAUDE_PLUGIN_DATA!,
+    )))
       .rejects.toMatchObject({ code: "ENOENT" });
     expect(second.workflows).toBeUndefined();
     expect(await snapshot(process.env.CLAUDE_PLUGIN_DATA!)).toEqual(afterFirst);

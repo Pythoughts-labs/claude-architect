@@ -123,6 +123,17 @@ export interface ToolDependencies {
    * gap stays visible.
    */
   decisionProvenance?: DecisionProvenance;
+  /**
+   * Resolve provenance from the advisory loaded under the same repository and
+   * checkout lock that guards the decision write. The MCP server owns human
+   * elicitation; keeping this callback inside the locked lifecycle prevents a
+   * stale unlocked advisory from authorizing autonomous acceptance.
+   */
+  decisionProvenanceResolver?: (args: {
+    runId: string;
+    decision: RunDecisionValue;
+    advisory: DecisionAdvisory;
+  }) => Promise<DecisionProvenance>;
   /** Injectable controller seam for hermetic MCP protocol tests. */
   autopilotControllerFactory?: (context: {
     onProgress?: (message: string) => void;
@@ -985,20 +996,7 @@ export interface DecisionAdvisory {
   unreadable: boolean;
 }
 
-export async function readDecisionAdvisory(
-  runId: string,
-  deps: ToolDependencies = {},
-): Promise<DecisionAdvisory> {
-  let run: ArchivedRun;
-  try { run = await loadArchivedRun(runId, deps); }
-  catch (error) {
-    return {
-      warnings: [`the pipeline gate outcome for this run could not be read: ${
-        redact(error instanceof Error ? error.message : String(error))}`],
-      verifiedClean: false,
-      unreadable: true,
-    };
-  }
+function decisionAdvisoryForRun(run: ArchivedRun): DecisionAdvisory {
   const refused = run.result.evidence.pipelineGateRefused;
   const incomplete = run.result.evidence.pipelineReviewIncomplete;
   const warnings: string[] = [];
@@ -1018,6 +1016,23 @@ export async function readDecisionAdvisory(
   };
 }
 
+export async function readDecisionAdvisory(
+  runId: string,
+  deps: ToolDependencies = {},
+): Promise<DecisionAdvisory> {
+  let run: ArchivedRun;
+  try { run = await loadArchivedRun(runId, deps); }
+  catch (error) {
+    return {
+      warnings: [`the pipeline gate outcome for this run could not be read: ${
+        redact(error instanceof Error ? error.message : String(error))}`],
+      verifiedClean: false,
+      unreadable: true,
+    };
+  }
+  return decisionAdvisoryForRun(run);
+}
+
 export async function handleDecideCandidate(
   checkoutPath: string,
   runId: string,
@@ -1028,6 +1043,13 @@ export async function handleDecideCandidate(
   try {
     return await withCurrentArchivedRun(checkoutPath, runId, deps, async run => {
       await requireInactivePipeline(run, runId);
+      const decisionProvenance = deps.decisionProvenanceResolver === undefined
+        ? deps.decisionProvenance
+        : await deps.decisionProvenanceResolver({
+          runId,
+          decision,
+          advisory: decisionAdvisoryForRun(run),
+        });
       const candidate = decision === "accepted"
         ? requireVerifiedCandidate(run)
         : requireCandidate(run);
@@ -1041,7 +1063,7 @@ export async function handleDecideCandidate(
       // supplied by the caller. `caller-asserted` is still recorded rather than
       // refused: the decision happened and the archive should say so, and
       // INTEGRABLE_DECISION_AUTHORITIES is what keeps it from being spent.
-      const authority = decisionAuthorityFor(deps.decisionProvenance);
+      const authority = decisionAuthorityFor(decisionProvenance);
       // Only the policy authorities are accept-only: a policy that could reject
       // or request revision on its own could bury work nobody reviewed. A
       // caller-asserted decision may carry any value — a caller can reject, and

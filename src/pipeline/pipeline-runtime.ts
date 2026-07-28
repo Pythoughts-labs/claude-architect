@@ -676,6 +676,9 @@ async function candidateArtifact(args: {
     baseCommitOid: args.baselineCommit,
     artifact,
   });
+  if (canonical.manifestHash === null) {
+    throw new RuntimeError("final candidate paths collide under case folding");
+  }
   return {
     ...artifact,
     changedPaths: canonical.changedPaths,

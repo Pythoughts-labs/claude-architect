@@ -1210,6 +1210,10 @@ describe("runAttempt", () => {
     )).resolves.toContain("No producer process was started");
     // Finding 7: an environment failure nobody can diagnose is its own problem.
     expect(result.evidence.producerPreflight).toMatchObject({ missing: ["node"] });
+    await expect(archivedJson("run-preflight-red", "status.json")).resolves.toMatchObject({
+      phase: "failed",
+      detail: result.summary,
+    });
   });
 
   it("proceeds when the probe is inconclusive rather than inventing a failure", async () => {

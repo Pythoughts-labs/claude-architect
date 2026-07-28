@@ -661,7 +661,7 @@ export async function runAttempt(
       });
       baselineEvidence = { ...baselineEvidence, producerPreflight: preflight };
       if (preflight.status === "environment-defect") {
-        return await archiveTerminal({
+        return await archiveWithStatus({
           store,
           spec,
           runId,

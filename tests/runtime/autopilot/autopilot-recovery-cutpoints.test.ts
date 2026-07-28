@@ -26,6 +26,10 @@ import {
   recoverStaleRuns,
   type AutopilotRecoveryDisposition,
 } from "../../../src/runtime/recovery-manager.js";
+import {
+  makeBootstrapOwnerDead,
+  makeLeaseDead,
+} from "../pipeline/autopilot-fixtures.js";
 
 interface Fixture {
   branchManager: WorkflowBranchManager;
@@ -206,33 +210,6 @@ async function createFixture(): Promise<Fixture> {
     getProcessStartToken: async pid => pid === process.pid ? CURRENT_PROCESS_TOKEN : null,
   });
   return { branchManager, branch, store };
-}
-
-function ownershipPath(workflowId: string): string {
-  return path.join(
-    process.env.CLAUDE_PLUGIN_DATA!,
-    "autopilot-branches",
-    `${createHash("sha256").update(workflowId).digest("hex")}.json`,
-  );
-}
-
-async function makeBootstrapOwnerDead(fixture: Fixture): Promise<void> {
-  const filename = ownershipPath(fixture.branch.workflowId);
-  const registration = JSON.parse(await readFile(filename, "utf8")) as {
-    bootstrapOwner: { pid: number; processToken: string | null; createdAt: string };
-  };
-  registration.bootstrapOwner.pid = process.pid;
-  registration.bootstrapOwner.processToken = STALE_PROCESS_TOKEN;
-  await writeFile(filename, `${JSON.stringify(registration)}\n`);
-}
-
-async function makeLeaseDead(store: WorkflowStore): Promise<void> {
-  await writeFile(store.ownerPath, `${JSON.stringify({
-    workflowId: store.workflowId,
-    pid: process.pid,
-    processToken: STALE_PROCESS_TOKEN,
-    acquiredAt: "2026-07-21T18:01:00.000Z",
-  })}\n`);
 }
 
 async function createState(fixture: Fixture): Promise<AutopilotWorkflowState> {

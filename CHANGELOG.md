@@ -37,7 +37,7 @@ All notable changes to Claude Architect are recorded here. The format follows
 
 ### Changed
 
-- **Protocol 1.4.0 → 2.0.0.** `decideCandidate` now requires
+- **Protocol 1.4.0 → 2.0.0, Runtime 0.40.0 → 0.41.0.** `decideCandidate` now requires
   `expectedArtifactHash`, and `reviewCandidate` returns a `ReviewSnapshot`.
 - Candidate decisions are versioned records carrying the authority that made
   them: `human`, `policy-autonomous`, `autopilot-policy`, or `caller-asserted`.
