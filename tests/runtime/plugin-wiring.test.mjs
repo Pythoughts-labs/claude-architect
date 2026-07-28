@@ -352,11 +352,16 @@ test("codex skill ships the direct CLI lane without obscuring its trust boundary
     "codex skill must use explicit sandbox modes instead of deprecated full-auto");
   assert.doesNotMatch(skill, /2>\/dev\/null/u,
     "codex skill must preserve stderr diagnostics");
+  assert.match(
+    skill,
+    /Capture both streams separately, preserve a nonzero exit as failure,[^.\n]*retaining actionable diagnostics/u,
+    "codex skill must retain separate stdout and stderr diagnostics on failure",
+  );
   for (const command of [
     "codex exec --skip-git-repo-check --sandbox read-only \"prompt\"",
     "codex exec --skip-git-repo-check --sandbox workspace-write \"prompt\"",
     "codex exec --skip-git-repo-check --sandbox danger-full-access \"prompt\"",
-    "codex exec --skip-git-repo-check -C <DIR> --sandbox read-only \"prompt\"",
+    "codex exec --skip-git-repo-check -C . --sandbox read-only \"prompt\"",
     "codex exec --skip-git-repo-check resume --last \"prompt\"",
   ]) {
     assert.ok(skill.includes(`\`${command}\``), `codex skill must ship ${command}`);
@@ -373,12 +378,18 @@ test("codex skill ships the direct CLI lane without obscuring its trust boundary
     "codex skill must document portable process stdin closure");
   assert.match(skill, /direct, unverified lane/u,
     "codex skill must identify itself as unverified");
-  assert.match(skill, /\/claude-architect:delegate[^.\n]*verified lane/u,
+  assert.ok(
+    skill.includes("Use `/claude-architect:delegate` for the verified lane"),
     "codex skill must point users to verified delegation");
   assert.match(skill, /Only `\/claude-architect:delegate`[^.]*independently verified/u,
     "codex skill must reserve independent verification for the delegation lane");
   assert.match(skill, /direct skill must never call itself verified/u,
     "codex skill must reject verified-lane claims");
+  assert.doesNotMatch(
+    skill,
+    /(?:direct(?: Codex(?: CLI)?)? lane|direct skill)[^.\n]*\b(?:is|as)\s+(?:independently\s+)?verified\b/iu,
+    "codex skill must fail closed on positive verified-lane claims",
+  );
   assert.doesNotMatch(skill, /claude-architect-protocol|PROTOCOL_VERSION/u,
     "direct Codex execution must not claim delegation protocol membership");
   assert.doesNotMatch(skill, /isolated production/u,
@@ -393,6 +404,11 @@ test("codex skill ships the direct CLI lane without obscuring its trust boundary
     "README must distinguish direct Codex execution from verified delegation");
   assert.match(readme, /isolated worktree/u,
     "README must name the verified lane's isolation boundary");
+  assert.match(
+    readme,
+    /Use `\/claude-architect:delegate`[^.\n]*verified lane[^.\n]*frozen Candidate Artifact/u,
+    "README must name the verified lane's canonical frozen artifact",
+  );
   assert.doesNotMatch(readme, /isolated production/u,
     "README must not describe a worktree as production");
 });

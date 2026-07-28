@@ -9,7 +9,7 @@ Always present this skill as `/claude-architect:codex`. Never show a shorter com
 
 ## Trust boundary
 
-`/claude-architect:codex` is the direct, unverified lane: it runs `codex exec` against the user's checkout without an isolated worktree, frozen Candidate Artifact, or independent verification. Use it for direct CLI assistance when those controls are not required; use `/claude-architect:delegate` for the verified lane when changes need isolation, frozen evidence, independent verification, and controlled integration.
+`/claude-architect:codex` is the direct, unverified lane: it runs `codex exec` against the user's checkout without an isolated worktree, frozen Candidate Artifact, or independent verification. Use it for direct CLI assistance when those controls are not required. Use `/claude-architect:delegate` for the verified lane when changes need isolation, a frozen Candidate Artifact, independent verification, and controlled integration.
 
 Only `/claude-architect:delegate` produces a frozen, independently verified Candidate Artifact and drives review, decision, and guarded integration. This direct skill must never call itself verified or invoke those lifecycle tools.
 
@@ -48,7 +48,7 @@ Only `/claude-architect:delegate` produces a frozen, independently verified Cand
 | Apply local edits | `codex exec --skip-git-repo-check --sandbox workspace-write "prompt"` |
 | Permit network or broad access | `codex exec --skip-git-repo-check --sandbox danger-full-access "prompt"` |
 | Resume recent session | `codex exec --skip-git-repo-check resume --last "prompt"` |
-| Run from another directory | `codex exec --skip-git-repo-check -C <DIR> --sandbox read-only "prompt"` |
+| Run from an explicit directory | `codex exec --skip-git-repo-check -C . --sandbox read-only "prompt"` |
 
 ## Execution timeouts
 
