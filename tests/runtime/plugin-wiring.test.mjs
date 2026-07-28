@@ -390,6 +390,11 @@ test("codex skill ships the direct CLI lane without obscuring its trust boundary
     /(?:direct(?: Codex(?: CLI)?)? lane|direct skill)[^.\n]*\b(?:is|as)\s+(?:independently\s+)?verified\b/iu,
     "codex skill must fail closed on positive verified-lane claims",
   );
+  assert.match(
+    skill,
+    /Before you use high-impact flags[^.\n]*AskUserQuestion[^.\n]*unless it was already given/u,
+    "codex skill must require permission before high-impact flags",
+  );
   assert.doesNotMatch(skill, /claude-architect-protocol|PROTOCOL_VERSION/u,
     "direct Codex execution must not claim delegation protocol membership");
   assert.doesNotMatch(skill, /isolated production/u,
