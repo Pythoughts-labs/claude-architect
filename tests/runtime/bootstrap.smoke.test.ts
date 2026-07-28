@@ -305,16 +305,22 @@ describe("runtime bootstrap", () => {
     const bin = path.join(root, "bin");
     const serverPath = path.join(root, "signal-server.mjs");
     const pidFile = path.join(root, "server.pid");
+    const readyFile = path.join(root, "signal.ready");
+    const armFile = path.join(root, "signal.arm");
     const signalFile = path.join(root, "signal.txt");
     await mkdir(bin);
     await symlink(process.execPath, path.join(bin, "node"));
     await writeFile(serverPath, [
-      "import { writeFileSync } from 'node:fs';",
-      "writeFileSync(process.env.TEST_SERVER_PID_FILE, String(process.pid));",
+      "import { existsSync, writeFileSync } from 'node:fs';",
       "process.on('SIGIO', () => {",
+      "  if (!existsSync(process.env.TEST_SIGNAL_ARM_FILE)) {",
+      "    writeFileSync(process.env.TEST_SIGNAL_READY_FILE, 'ready');",
+      "    return;",
+      "  }",
       "  writeFileSync(process.env.TEST_SIGNAL_FILE, 'SIGIO');",
       "  process.exit(47);",
       "});",
+      "writeFileSync(process.env.TEST_SERVER_PID_FILE, String(process.pid));",
       "setInterval(() => {}, 1000);",
       "",
     ].join("\n"));
@@ -325,6 +331,8 @@ describe("runtime bootstrap", () => {
         PATH: bin,
         CLAUDE_ARCHITECT_SERVER_PATH: serverPath,
         TEST_SERVER_PID_FILE: pidFile,
+        TEST_SIGNAL_READY_FILE: readyFile,
+        TEST_SIGNAL_ARM_FILE: armFile,
         TEST_SIGNAL_FILE: signalFile,
       },
       stdio: ["ignore", "pipe", "pipe"],
@@ -332,6 +340,16 @@ describe("runtime bootstrap", () => {
     let serverPid = 0;
     try {
       serverPid = Number(await waitForFile(pidFile));
+      const readiness = waitForFile(readyFile);
+      const readinessProbe = setInterval(() => {
+        if (child.exitCode === null && child.signalCode === null) child.kill("SIGIO");
+      }, 20);
+      try {
+        await readiness;
+      } finally {
+        clearInterval(readinessProbe);
+      }
+      await writeFile(armFile, "armed");
       child.kill("SIGIO");
       const exit = await waitForExit(child);
       await waitForProcessGone(serverPid);
