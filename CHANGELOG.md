@@ -6,6 +6,8 @@ All notable changes to Claude Architect are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.44.0] - 2026-08-03
+
 ### Security
 
 - Autonomous acceptance now requires a durable pipeline-gate clearance record
@@ -63,6 +65,18 @@ All notable changes to Claude Architect are recorded here. The format follows
   of recursively deleting the checkout and potentially stranding its Git
   registration. When probing, cancellation, or bounded probe-file reading also
   fails, the ordered aggregate retains that primary outcome before cleanup.
+- Startup recovery now preserves a non-terminal run whose recorded owner
+  process is verified alive even when its checkout lock entry has vanished,
+  classifying owners through the shared lock-owner status rule instead of
+  terminating them.
+- MCP startup's mutation-recovery gate only resolves the caller's repository
+  when a preserved sweep issue could belong to it, so ambiguity recorded for an
+  unrelated repository no longer blocks another repository's mutating tools.
+- Checkout locks now require the repository's Git common directory on every
+  platform instead of falling back to the canonical checkout path.
+- Workflow branch-registration reads no longer swallow filesystem errors:
+  an absent record still reads as unregistered, while permission and I/O
+  failures propagate as failures instead of masquerading as absent ownership.
 
 ## [0.43.0] - 2026-07-28
 
