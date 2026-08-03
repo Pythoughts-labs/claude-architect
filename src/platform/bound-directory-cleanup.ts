@@ -77,25 +77,31 @@ const removeBoundEntry = async (entry, expected, directory) => {
     if (!helper) process.exit(58);
     const { CLAUDE_ARCHITECT_WINDOWS_FILESYSTEM_HELPER: _helper, ...helperEnvironment } =
       process.env;
+    // Resolve through the live cwd HANDLE, not the cwd string: realpath(".")
+    // uses GetFinalPathNameByHandle, so the absolute path stays correct even
+    // if an ancestor of this quarantine was renamed after the spawn. Resolving
+    // against the stale cwd string produced persistent ERROR_PATH_NOT_FOUND.
     // Helper exit 3 (open failed) and 5 (delete disposition refused) include
     // transient sharing violations from antivirus scans of freshly written
     // files; the helper revalidates the bound identity on every attempt, so
     // retrying is safe. Anything else is a real refusal and fails immediately.
     for (let attempt = 1; ; attempt += 1) {
+      const here = await realpath(".");
       try {
         execFileSync(helper, [
           "remove",
-          path.resolve(entry),
+          path.join(here, entry),
           expected.dev.toString(),
           expected.ino.toString(),
           expected.birthtimeNs.toString(),
           directory ? "true" : "false",
         ], {
-          cwd: path.dirname(path.resolve(entry)),
+          cwd: here,
           env: helperEnvironment,
           maxBuffer: 16_384,
           timeout: 30_000,
           windowsHide: true,
+          stdio: ["ignore", "pipe", "pipe"],
         });
         return;
       } catch (error) {
@@ -116,6 +122,7 @@ const removeBoundEntry = async (entry, expected, directory) => {
           + " kind=" + (directory ? "directory" : "file")
           + " ext=" + (extension === null ? "none" : extension[1])
           + " attempts=" + String(attempt)
+          + " cwdMoved=" + String(here !== process.cwd())
           + (helperStderr.length === 0 ? "" : " helper[" + helperStderr + "]") + "\n");
         process.exit(57);
       }
