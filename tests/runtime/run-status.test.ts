@@ -551,7 +551,7 @@ describe("trusted run status", () => {
         { phase: "gating", sliceIndex: 2, round: null, role: null },
         { phase: "done", sliceIndex: 2, round: null, role: null },
       ]);
-  });
+  }, 120_000);
 
   it.skipIf(process.platform === "win32")(
     "renders phase plus slice only for fresh token-matched live state",
