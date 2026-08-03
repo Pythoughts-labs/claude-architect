@@ -14,12 +14,12 @@ const helpers = [
   },
   {
     path: "native/bin/win32-filesystem-x64.exe",
-    sha256: "885fef33c51d87ba5dff3cb9f8bdd6c175166417c4a5c789fef3131c02ad06a4",
+    sha256: "6562c2ab80c102a98c971f034396d4ee3360f4415ff589a8daceffa39a3d722e",
     machine: 0x8664,
   },
   {
     path: "native/bin/win32-filesystem-arm64.exe",
-    sha256: "bd16b22da97bc31ca69515bb2222c7b8220e2c2b8353b1c6f1ced6850c9ec280",
+    sha256: "19ac23c91fe1be69f27aa1c7c676831ea7832650aaa1fad8a7bc52cf50e1d3d9",
     machine: 0xaa64,
   },
 ];

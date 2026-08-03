@@ -99,15 +99,24 @@ const removeBoundEntry = async (entry, expected, directory) => {
         });
         return;
       } catch (error) {
+        // ~10s budget: CI antivirus scan queues under process-spawn storms hold
+        // freshly written files well past the 2s a shorter budget covered.
         const transient = error.status === 3 || error.status === 5;
-        if (transient && attempt < 20) {
-          await new Promise(resolve => setTimeout(resolve, 100));
+        if (transient && attempt < 50) {
+          await new Promise(resolve => setTimeout(resolve, 200));
           continue;
         }
+        // The helper's stderr carries code-only clauses (open-error=<GetLastError>
+        // and friends); the extension is a bounded token, never a path segment.
+        const helperStderr = String(error.stderr ?? "")
+          .replace(/[^\x20-\x7e]+/g, " ").trim().slice(0, 120);
+        const extension = /\.([A-Za-z0-9]{1,10})$/.exec(path.basename(entry));
         process.stderr.write("clause=helper-remove status=" + String(error.status)
           + " signal=" + String(error.signal) + " code=" + String(error.code)
           + " kind=" + (directory ? "directory" : "file")
-          + " attempts=" + String(attempt) + "\n");
+          + " ext=" + (extension === null ? "none" : extension[1])
+          + " attempts=" + String(attempt)
+          + (helperStderr.length === 0 ? "" : " helper[" + helperStderr + "]") + "\n");
         process.exit(57);
       }
     }
@@ -295,8 +304,8 @@ async function removeWindowsBoundEmptyDirectory(
       && !result.truncated.stderr) {
       return;
     }
-    if ((result.exitCode === 3 || result.exitCode === 5) && attempt < 20) {
-      await new Promise(resolve => setTimeout(resolve, 100));
+    if ((result.exitCode === 3 || result.exitCode === 5) && attempt < 50) {
+      await new Promise(resolve => setTimeout(resolve, 200));
       continue;
     }
     throw new RuntimeError(

@@ -64,8 +64,8 @@ async function assertWindowsDirectoryAcl(
       && !result.truncated.stderr) {
       return;
     }
-    if (result.exitCode === 3 && attempt < 20) {
-      await new Promise(resolve => setTimeout(resolve, 100));
+    if (result.exitCode === 3 && attempt < 50) {
+      await new Promise(resolve => setTimeout(resolve, 200));
       continue;
     }
     throw new RuntimeError(

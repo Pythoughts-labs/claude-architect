@@ -153,6 +153,11 @@ cleanup:
     return ok;
 }
 
+/* Codes only, never paths: stderr feeds bounded redacted diagnostics. */
+static void report_last_error(const wchar_t *clause) {
+    fwprintf(stderr, L"%ls=%lu\n", clause, GetLastError());
+}
+
 static int validate_command(int argc, wchar_t **argv) {
     uint64_t dev, ino, birth;
     HANDLE handle;
@@ -160,7 +165,7 @@ static int validate_command(int argc, wchar_t **argv) {
     if (argc != 6 || !parse_u64(argv[3], &dev) || !parse_u64(argv[4], &ino)
         || !parse_u64(argv[5], &birth)) return 2;
     handle = open_directory(argv[2], READ_CONTROL | FILE_READ_ATTRIBUTES);
-    if (handle == INVALID_HANDLE_VALUE) return 3;
+    if (handle == INVALID_HANDLE_VALUE) { report_last_error(L"open-error"); return 3; }
     ok = validate_identity(handle, dev, ino, birth, 1)
         && validate_directory_acl(handle, wcscmp(argv[1], L"validate-private-directory") == 0);
     CloseHandle(handle);
@@ -174,7 +179,7 @@ static int sync_command(int argc, wchar_t **argv) {
     if (argc != 6 || !parse_u64(argv[3], &dev) || !parse_u64(argv[4], &ino)
         || !parse_u64(argv[5], &birth)) return 2;
     handle = open_directory(argv[2], GENERIC_WRITE | FILE_READ_ATTRIBUTES);
-    if (handle == INVALID_HANDLE_VALUE) return 3;
+    if (handle == INVALID_HANDLE_VALUE) { report_last_error(L"open-error"); return 3; }
     ok = validate_identity(handle, dev, ino, birth, 1) && FlushFileBuffers(handle);
     CloseHandle(handle);
     return ok ? 0 : 4;
@@ -194,9 +199,10 @@ static int remove_command(int argc, wchar_t **argv) {
     else if (wcscmp(argv[6], L"false") == 0) expected_directory = 0;
     else return 2;
     handle = open_directory(argv[2], DELETE | FILE_READ_ATTRIBUTES);
-    if (handle == INVALID_HANDLE_VALUE) return 3;
+    if (handle == INVALID_HANDLE_VALUE) { report_last_error(L"open-error"); return 3; }
     if (!validate_identity(handle, dev, ino, birth, expected_directory)) {
         CloseHandle(handle);
+        fwprintf(stderr, L"identity-mismatch\n");
         return 4;
     }
     disposition.Flags = FILE_DISPOSITION_FLAG_DELETE
@@ -208,12 +214,14 @@ static int remove_command(int argc, wchar_t **argv) {
         &disposition,
         sizeof(disposition));
     if (!ok) {
+        report_last_error(L"dispose-posix-error");
         fallback.DeleteFile = TRUE;
         ok = SetFileInformationByHandle(
             handle,
             FileDispositionInfo,
             &fallback,
             sizeof(fallback));
+        if (!ok) report_last_error(L"dispose-fallback-error");
     }
     if (ok) {
         ok = GetFileInformationByHandleEx(
@@ -223,6 +231,7 @@ static int remove_command(int argc, wchar_t **argv) {
             sizeof(settled))
             && !!settled.Directory == !!expected_directory
             && settled.DeletePending;
+        if (!ok) fwprintf(stderr, L"delete-not-latched\n");
     }
     CloseHandle(handle);
     return ok ? 0 : 5;

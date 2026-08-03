@@ -50,8 +50,8 @@ zig cc -target aarch64-windows-gnu -O2 -s -municode -Wl,/Brepro \
 Current SHA-256 values:
 
 ```text
-885fef33c51d87ba5dff3cb9f8bdd6c175166417c4a5c789fef3131c02ad06a4  win32-filesystem-x64.exe
-bd16b22da97bc31ca69515bb2222c7b8220e2c2b8353b1c6f1ced6850c9ec280  win32-filesystem-arm64.exe
+6562c2ab80c102a98c971f034396d4ee3360f4415ff589a8daceffa39a3d722e  win32-filesystem-x64.exe
+19ac23c91fe1be69f27aa1c7c676831ea7832650aaa1fad8a7bc52cf50e1d3d9  win32-filesystem-arm64.exe
 ```
 
 Rebuilds must update these hashes and pass the real Windows adversarial tests.

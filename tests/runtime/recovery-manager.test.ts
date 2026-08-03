@@ -1212,6 +1212,9 @@ describe("recoverStaleRuns", () => {
         async getProcessStartToken() { return null; },
         async terminateProcessTreeByPid() {},
       },
+      // The recorded pid is fabricated; without injection the default liveness
+      // probe asks the real OS, and a colliding live pid preserves the run.
+      isProcessAlive: () => false,
     })).resolves.toEqual({ recovered: [], quarantined: [runId] });
     await expectQuarantinedRun(runId, runDirectory);
   });
@@ -1243,6 +1246,9 @@ describe("recoverStaleRuns", () => {
         async getProcessStartToken() { return null; },
         async terminateProcessTreeByPid(pid) { terminated.push(pid); },
       },
+      // Same fabricated-pid hazard as above: pid 5252 was live on a CI runner
+      // once, which correctly preserved the "live" run and failed the test.
+      isProcessAlive: () => false,
     })).resolves.toEqual({ recovered: [], quarantined: [runId] });
     expect(terminated).toEqual([]);
     await expectQuarantinedRun(runId, runDirectory, [secret, commonDir]);
