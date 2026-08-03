@@ -45,7 +45,7 @@ async function assertWindowsDirectoryAcl(
       executable: helper,
       args: [
         command,
-        directory,
+        path.toNamespacedPath(directory),
         expectedIdentity.dev.toString(),
         expectedIdentity.ino.toString(),
         expectedIdentity.birthtimeNs.toString(),
@@ -245,7 +245,7 @@ async function syncWindowsDirectoryMetadata(
     executable: helper,
     args: [
       "sync-directory",
-      directory,
+      path.toNamespacedPath(directory),
       expectedIdentity.dev.toString(),
       expectedIdentity.ino.toString(),
       expectedIdentity.birthtimeNs.toString(),

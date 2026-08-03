@@ -32460,7 +32460,7 @@ async function assertWindowsDirectoryAcl(command, directory, expectedIdentity, p
       executable: helper,
       args: [
         command,
-        directory,
+        path3.toNamespacedPath(directory),
         expectedIdentity.dev.toString(),
         expectedIdentity.ino.toString(),
         expectedIdentity.birthtimeNs.toString()
@@ -32601,7 +32601,7 @@ async function syncWindowsDirectoryMetadata(directory, expectedIdentity, platfor
     executable: helper,
     args: [
       "sync-directory",
-      directory,
+      path3.toNamespacedPath(directory),
       expectedIdentity.dev.toString(),
       expectedIdentity.ino.toString(),
       expectedIdentity.birthtimeNs.toString()
@@ -38741,18 +38741,21 @@ const removeBoundEntry = async (entry, expected, directory) => {
       process.env;
     // Resolve through the live cwd HANDLE, not the cwd string: realpath(".")
     // uses GetFinalPathNameByHandle, so the absolute path stays correct even
-    // if an ancestor of this quarantine was renamed after the spawn. Resolving
-    // against the stale cwd string produced persistent ERROR_PATH_NOT_FOUND.
+    // if an ancestor of this quarantine was renamed after the spawn. The path
+    // is then \\?\-namespaced: Node creates deep worktree paths past MAX_PATH
+    // through its own extended-length handling, and CreateFileW without the
+    // prefix rejects those very paths with ERROR_PATH_NOT_FOUND (3).
     // Helper exit 3 (open failed) and 5 (delete disposition refused) include
     // transient sharing violations from antivirus scans of freshly written
     // files; the helper revalidates the bound identity on every attempt, so
     // retrying is safe. Anything else is a real refusal and fails immediately.
     for (let attempt = 1; ; attempt += 1) {
       const here = await realpath(".");
+      const target = path.join(here, entry);
       try {
         execFileSync(helper, [
           "remove",
-          path.join(here, entry),
+          path.toNamespacedPath(target),
           expected.dev.toString(),
           expected.ino.toString(),
           expected.birthtimeNs.toString(),
@@ -38784,6 +38787,7 @@ const removeBoundEntry = async (entry, expected, directory) => {
           + " kind=" + (directory ? "directory" : "file")
           + " ext=" + (extension === null ? "none" : extension[1])
           + " attempts=" + String(attempt)
+          + " len=" + String(target.length)
           + " cwdMoved=" + String(here !== process.cwd())
           + (helperStderr.length === 0 ? "" : " helper[" + helperStderr + "]") + "\n");
         process.exit(57);
@@ -38919,7 +38923,7 @@ async function removeWindowsBoundEmptyDirectory(directory, expectedIdentity, pla
       executable: helper,
       args: [
         "remove",
-        directory,
+        path12.toNamespacedPath(directory),
         expectedIdentity.dev.toString(),
         expectedIdentity.ino.toString(),
         expectedIdentity.birthtimeNs.toString(),
