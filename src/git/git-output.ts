@@ -1,6 +1,6 @@
 import { RuntimeError } from "../util/errors.js";
 
-/** Decode one Git path record while preserving every character except its LF delimiter. */
+/** Decode Git path records while preserving every character except their NUL delimiters. */
 export function gitNulRecords(stdout: string, description: string): string[] {
   if (stdout.length === 0) return [];
   if (!stdout.endsWith("\0")) {

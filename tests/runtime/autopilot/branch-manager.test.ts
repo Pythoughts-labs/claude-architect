@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import {
+  chmod,
   mkdir,
   mkdtemp,
   readFile,
@@ -256,6 +257,28 @@ describe("WorkflowBranchManager", () => {
     });
     await fixture.manager.cleanup(created);
   });
+
+  it.skipIf(process.platform === "win32")(
+    "propagates errors reading an unreadable branch registration",
+    async () => {
+      const fixture = (await initFixture())!;
+      const created = await fixture.manager.create(fixture.request);
+      const ownershipName = createHash("sha256")
+        .update(fixture.request.workflowId).digest("hex");
+      const ownershipPath = path.join(
+        process.env.CLAUDE_PLUGIN_DATA!,
+        "autopilot-branches",
+        `${ownershipName}.json`,
+      );
+      await chmod(ownershipPath, 0o000);
+      try {
+        await expect(fixture.manager.load(fixture.request.workflowId)).rejects.toBeDefined();
+      } finally {
+        await chmod(ownershipPath, 0o600);
+        await fixture.manager.cleanup(created);
+      }
+    },
+  );
 
   it("removes the bootstrap owner with successful cleanup", async () => {
     const fixture = (await initFixture())!;

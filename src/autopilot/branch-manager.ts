@@ -572,8 +572,10 @@ export class WorkflowBranchManager {
   private async readRegistration(workflowId: string): Promise<WorkflowBranchRegistration | null> {
     try {
       return await readRegistrationFile(this.ownershipPath(workflowId), workflowId);
-    } catch {
-      return null;
+    } catch (error) {
+      if (typeof error === "object" && error !== null && "code" in error
+        && ["ENOENT", "ENOTDIR"].includes(String(error.code))) return null;
+      throw error;
     }
   }
 
