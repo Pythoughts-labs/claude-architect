@@ -39,7 +39,10 @@ All notable changes to Claude Architect are recorded here. The format follows
   denial; the bound-cleanup child now names its failing clause with redacted
   code-only diagnostics; and the checkout-lock wait deadline is calibrated for
   Windows process-spawn latency so designed serialization no longer reports
-  spurious `checkout-locked` contention.
+  spurious `checkout-locked` contention. Every path handed to the native
+  filesystem helper is now `\\?\`-namespaced, so identity-bound removal and
+  validation work on worktree paths past `MAX_PATH` instead of failing with
+  `ERROR_PATH_NOT_FOUND`.
 - Startup recovery now sweeps proven orphaned registered worktrees regardless
   of their names while preserving unproven directories and worktrees claimed by
   live, ambiguous, or independently owned runs and workflows. Removal uses
