@@ -16,7 +16,11 @@ import type {
 } from "./platform-services.js";
 
 const LOCK_RETRY_MS = 30;
-const LOCK_TIMEOUT_MS = 2500;
+// Windows process spawns and identity-bound removals are an order of magnitude
+// slower than POSIX, so a live contender legitimately holds the checkout lock
+// far longer there. 2.5s on Windows CI turned designed serialization (parallel
+// cleanups, concurrent branch creation) into spurious checkout-locked failures.
+const LOCK_TIMEOUT_MS = nodeProcess.platform === "win32" ? 15_000 : 2500;
 // The owner probe shells out to `ps` on darwin. Bound it: a diagnostic must
 // never turn a lock timeout that was about to return into an indefinite hang.
 const OWNER_PROBE_TIMEOUT_MS = 1000;

@@ -1200,7 +1200,7 @@ describe("worktree lease coverage", () => {
         const method = line.match(/\.create(Attached)?\s*\(/u)?.[1] === "Attached"
           ? "createAttached"
           : "create";
-        calls.push(`${path.relative(repositoryRoot, filename)}#${method}`);
+        calls.push(`${path.relative(repositoryRoot, filename).replaceAll(path.sep, "/")}#${method}`);
       }
     }
     calls.sort();

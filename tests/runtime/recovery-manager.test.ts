@@ -37,6 +37,11 @@ vi.mock("@modelcontextprotocol/sdk/server/stdio.js", () => ({
   StdioServerTransport: class {},
 }));
 
+// The interrupted-prune tests below perform real bound-directory cleanup, which
+// routes through the host OS backend (lsof/df on darwin, /proc on linux, the
+// native helper on win32) — so their platform mock must name the real host.
+const hostOs = process.platform as "darwin" | "linux" | "win32";
+
 const temporaryPaths: string[] = [];
 let previousPluginData: string | undefined;
 let previousDelegated: string | undefined;
@@ -1930,7 +1935,7 @@ describe("recoverStaleRuns", () => {
 
     await recoverStaleRuns({
       platformServices: {
-        os: "darwin",
+        os: hostOs,
         async getProcessStartToken() { return null; },
         async terminateProcessTreeByPid() {},
       },
@@ -1983,7 +1988,7 @@ describe("recoverStaleRuns", () => {
 
     await expect(recoverStaleRuns({
       platformServices: {
-        os: "darwin",
+        os: hostOs,
         async getProcessStartToken() { return null; },
         async terminateProcessTreeByPid() {},
       },
@@ -2003,7 +2008,7 @@ describe("recoverStaleRuns", () => {
     // rejecting the journal as malformed.
     await expect(recoverStaleRuns({
       platformServices: {
-        os: "darwin",
+        os: hostOs,
         async getProcessStartToken() { return null; },
         async terminateProcessTreeByPid() {},
       },
@@ -2145,7 +2150,7 @@ describe("recoverStaleRuns", () => {
 
     await recoverStaleRuns({
       platformServices: {
-        os: "darwin",
+        os: hostOs,
         async getProcessStartToken() { return null; },
         async terminateProcessTreeByPid() {},
       },

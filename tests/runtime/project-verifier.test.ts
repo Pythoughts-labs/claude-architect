@@ -425,21 +425,29 @@ describe("projectVerify", () => {
 
   it("fails a timed-out command even when the process exits zero", async () => {
     const fixture = await frozenFixture();
-    const ps = Object.create(getPlatformServices()) as PlatformServices;
-    ps.spawnSupervised = async (): Promise<SupervisedProcess> => ({
-      pid: 4242,
-      stdout: {} as NodeJS.ReadableStream,
-      stderr: {} as NodeJS.ReadableStream,
-      done: Promise.resolve({
-        exitCode: 0,
-        signal: null,
-        timedOut: true,
-        cancelled: false,
-        stdout: "",
-        stderr: "",
-        truncated: { stdout: false, stderr: false },
-      }),
-    });
+    const selected = getPlatformServices();
+    const ps = Object.create(selected) as PlatformServices;
+    // Fake only the verify command: on Windows the ACL-validation helper also
+    // routes through spawnSupervised and must run for real.
+    ps.spawnSupervised = async (request): Promise<SupervisedProcess> => {
+      if (request.executable.resolvedFrom === "plugin-native-filesystem-helper") {
+        return selected.spawnSupervised(request);
+      }
+      return {
+        pid: 4242,
+        stdout: {} as NodeJS.ReadableStream,
+        stderr: {} as NodeJS.ReadableStream,
+        done: Promise.resolve({
+          exitCode: 0,
+          signal: null,
+          timedOut: true,
+          cancelled: false,
+          stdout: "",
+          stderr: "",
+          truncated: { stdout: false, stderr: false },
+        }),
+      };
+    };
 
     const result = await projectVerify({
       repoRoot: fixture.repoRoot,

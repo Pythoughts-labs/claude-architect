@@ -32,6 +32,14 @@ All notable changes to Claude Architect are recorded here. The format follows
 
 ### Fixed
 
+- Windows removal and validation reliability: identity-revalidating filesystem
+  helper calls (directory open, ACL validation, delete disposition) retry
+  bounded transient sharing violations — such as antivirus scans of freshly
+  written files — instead of failing an entire cleanup transaction on the first
+  denial; the bound-cleanup child now names its failing clause with redacted
+  code-only diagnostics; and the checkout-lock wait deadline is calibrated for
+  Windows process-spawn latency so designed serialization no longer reports
+  spurious `checkout-locked` contention.
 - Startup recovery now sweeps proven orphaned registered worktrees regardless
   of their names while preserving unproven directories and worktrees claimed by
   live, ambiguous, or independently owned runs and workflows. Removal uses

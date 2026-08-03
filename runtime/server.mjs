@@ -31961,7 +31961,7 @@ async function lockOwnerStatus(owner, isProcessAlive2, getProcessStartToken) {
 
 // src/platform/posix-platform-services.ts
 var LOCK_RETRY_MS = 30;
-var LOCK_TIMEOUT_MS = 2500;
+var LOCK_TIMEOUT_MS = nodeProcess2.platform === "win32" ? 15e3 : 2500;
 var OWNER_PROBE_TIMEOUT_MS = 1e3;
 var SAFE_RUN_ID = /^[a-z0-9][a-z0-9._-]{0,127}$/;
 var CLEANUP_JOURNAL_LOCK_KEY = createHash("sha256").update("claude-architect:cleanup-journal:v1").digest("hex");
@@ -32455,21 +32455,28 @@ function windowsHelperFailure(result) {
 }
 async function assertWindowsDirectoryAcl(command, directory, expectedIdentity, platformServices) {
   const helper = await resolveWindowsFilesystemHelper();
-  const result = await supervise(platformServices, {
-    executable: helper,
-    args: [
-      command,
-      directory,
-      expectedIdentity.dev.toString(),
-      expectedIdentity.ino.toString(),
-      expectedIdentity.birthtimeNs.toString()
-    ],
-    cwd: path3.dirname(directory),
-    env: windowsEssentialEnvironment(),
-    timeoutMs: WINDOWS_DIRECTORY_SYNC_TIMEOUT_MS,
-    maxOutputBytes: 16384
-  }, { graceMs: 1e3 });
-  if (result.spawnError !== void 0 || result.exitCode !== 0 || result.signal !== null || result.timedOut || result.cancelled || result.truncated.stdout || result.truncated.stderr) {
+  for (let attempt = 1; ; attempt += 1) {
+    const result = await supervise(platformServices, {
+      executable: helper,
+      args: [
+        command,
+        directory,
+        expectedIdentity.dev.toString(),
+        expectedIdentity.ino.toString(),
+        expectedIdentity.birthtimeNs.toString()
+      ],
+      cwd: path3.dirname(directory),
+      env: windowsEssentialEnvironment(),
+      timeoutMs: WINDOWS_DIRECTORY_SYNC_TIMEOUT_MS,
+      maxOutputBytes: 16384
+    }, { graceMs: 1e3 });
+    if (result.spawnError === void 0 && result.exitCode === 0 && result.signal === null && !result.timedOut && !result.cancelled && !result.truncated.stdout && !result.truncated.stderr) {
+      return;
+    }
+    if (result.exitCode === 3 && attempt < 20) {
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      continue;
+    }
     throw new RuntimeError(
       `Windows directory ACL validation failed: ${command}${windowsHelperFailure(result)}`
     );
@@ -38732,21 +38739,40 @@ const removeBoundEntry = async (entry, expected, directory) => {
     if (!helper) process.exit(58);
     const { CLAUDE_ARCHITECT_WINDOWS_FILESYSTEM_HELPER: _helper, ...helperEnvironment } =
       process.env;
-    execFileSync(helper, [
-      "remove",
-      path.resolve(entry),
-      expected.dev.toString(),
-      expected.ino.toString(),
-      expected.birthtimeNs.toString(),
-      directory ? "true" : "false",
-    ], {
-      cwd: path.dirname(path.resolve(entry)),
-      env: helperEnvironment,
-      maxBuffer: 16_384,
-      timeout: 30_000,
-      windowsHide: true,
-    });
-    return;
+    // Helper exit 3 (open failed) and 5 (delete disposition refused) include
+    // transient sharing violations from antivirus scans of freshly written
+    // files; the helper revalidates the bound identity on every attempt, so
+    // retrying is safe. Anything else is a real refusal and fails immediately.
+    for (let attempt = 1; ; attempt += 1) {
+      try {
+        execFileSync(helper, [
+          "remove",
+          path.resolve(entry),
+          expected.dev.toString(),
+          expected.ino.toString(),
+          expected.birthtimeNs.toString(),
+          directory ? "true" : "false",
+        ], {
+          cwd: path.dirname(path.resolve(entry)),
+          env: helperEnvironment,
+          maxBuffer: 16_384,
+          timeout: 30_000,
+          windowsHide: true,
+        });
+        return;
+      } catch (error) {
+        const transient = error.status === 3 || error.status === 5;
+        if (transient && attempt < 20) {
+          await new Promise(resolve => setTimeout(resolve, 100));
+          continue;
+        }
+        process.stderr.write("clause=helper-remove status=" + String(error.status)
+          + " signal=" + String(error.signal) + " code=" + String(error.code)
+          + " kind=" + (directory ? "directory" : "file")
+          + " attempts=" + String(attempt) + "\n");
+        process.exit(57);
+      }
+    }
   }
   if (expected.isSymbolicLink()) {
     await removeBoundUnopenedEntry(entry, expected);
@@ -38819,7 +38845,13 @@ const emptyBoundDirectory = async expected => {
     isSymbolicLink: () => false,
   };
   await emptyBoundDirectory(expected);
-})().catch(() => process.exit(49));
+})().catch(error => {
+  // Codes only, never paths: this lands in bounded redacted diagnostics.
+  process.stderr.write("clause=uncaught code=" + String(error && error.code)
+    + " errno=" + String(error && error.errno)
+    + " name=" + String(error && error.name) + "\n");
+  process.exit(49);
+});
 `;
 function sameBoundIdentity(metadata, expected) {
   return metadata.dev === expected.dev && metadata.ino === expected.ino && metadata.birthtimeNs > 0n && metadata.birthtimeNs === expected.birthtimeNs;
@@ -38866,23 +38898,32 @@ async function darwinHandlePath(directory, handle, platformServices) {
 }
 async function removeWindowsBoundEmptyDirectory(directory, expectedIdentity, platformServices) {
   const helper = await resolveWindowsFilesystemHelper();
-  const result = await supervise(platformServices, {
-    executable: helper,
-    args: [
-      "remove",
-      directory,
-      expectedIdentity.dev.toString(),
-      expectedIdentity.ino.toString(),
-      expectedIdentity.birthtimeNs.toString(),
-      "true"
-    ],
-    cwd: path12.dirname(directory),
-    env: windowsEssentialEnvironment(),
-    timeoutMs: 3e4,
-    maxOutputBytes: 16384
-  }, { graceMs: 1e3 });
-  if (result.spawnError !== void 0 || result.exitCode !== 0 || result.signal !== null || result.timedOut || result.cancelled || result.truncated.stdout || result.truncated.stderr) {
-    throw new RuntimeError("validated Windows directory could not be removed");
+  for (let attempt = 1; ; attempt += 1) {
+    const result = await supervise(platformServices, {
+      executable: helper,
+      args: [
+        "remove",
+        directory,
+        expectedIdentity.dev.toString(),
+        expectedIdentity.ino.toString(),
+        expectedIdentity.birthtimeNs.toString(),
+        "true"
+      ],
+      cwd: path12.dirname(directory),
+      env: windowsEssentialEnvironment(),
+      timeoutMs: 3e4,
+      maxOutputBytes: 16384
+    }, { graceMs: 1e3 });
+    if (result.spawnError === void 0 && result.exitCode === 0 && result.signal === null && !result.timedOut && !result.cancelled && !result.truncated.stdout && !result.truncated.stderr) {
+      return;
+    }
+    if ((result.exitCode === 3 || result.exitCode === 5) && attempt < 20) {
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      continue;
+    }
+    throw new RuntimeError(
+      `validated Windows directory could not be removed (exitCode=${result.exitCode})`
+    );
   }
 }
 async function verifyBoundDirectoryCleanupSupport(platformServices) {
@@ -38996,7 +39037,11 @@ async function emptyBoundDirectory(directory, expectedIdentity, platformServices
     maxOutputBytes: 16384
   }, { graceMs: 1e3 });
   if (result.spawnError !== void 0 || result.exitCode !== 0 || result.timedOut || result.cancelled || result.truncated.stdout || result.truncated.stderr) {
-    throw new RuntimeError("quarantined directory contents could not be removed");
+    const condition = result.spawnError !== void 0 ? "spawnError" : result.timedOut ? "timedOut=true" : result.cancelled ? "cancelled=true" : `exitCode=${result.exitCode}${result.signal === null ? "" : ` signal=${result.signal}`}`;
+    const stderr = result.stderr.slice(0, 512).trim();
+    throw new RuntimeError(
+      `quarantined directory contents could not be removed (${condition})${stderr.length === 0 ? "" : `: ${stderr}`}`
+    );
   }
 }
 

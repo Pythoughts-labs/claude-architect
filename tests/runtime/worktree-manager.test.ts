@@ -477,12 +477,14 @@ describe("WorktreeManager", () => {
     const manager = new WorktreeManager(directory, runId);
     const attempt = await manager.create(base);
     const transactionId = "00000000-0000-4000-8000-000000000099";
-    const commonDir = await runGit(directory, [
+    // realpath the Git-reported paths: on Windows rev-parse emits forward-slash
+    // paths, which the manifest validator rejects as non-normalized.
+    const commonDir = await realpath(await runGit(directory, [
       "rev-parse", "--path-format=absolute", "--git-common-dir",
-    ]);
-    const registrationPath = await runGit(attempt.path, [
+    ]));
+    const registrationPath = await realpath(await runGit(attempt.path, [
       "rev-parse", "--path-format=absolute", "--git-dir",
-    ]);
+    ]));
     const registrationRoot = join(commonDir, "worktrees");
     const quarantineRoot = join(commonDir, "claude-architect-quarantine");
     const quarantinePath = join(
@@ -686,21 +688,30 @@ describe("WorktreeManager", () => {
 
   it("retains both quarantines when supervised physical emptying fails", async () => {
     const { directory, base } = await initRepo();
-    const processSupervisor = Object.create(getPlatformServices()) as PlatformServices;
-    processSupervisor.spawnSupervised = async () => ({
-      pid: 42_424,
-      done: Promise.resolve({
-        exitCode: 43,
-        signal: null,
-        timedOut: false,
-        cancelled: false,
-        stdout: "",
-        stderr: "",
-        truncated: { stdout: false, stderr: false },
-      }),
-      stdout: Readable.from([]),
-      stderr: Readable.from([]),
-    });
+    const selected = getPlatformServices();
+    const processSupervisor = Object.create(selected) as PlatformServices;
+    // Intercept only the bound-cleanup "node -e" spawn: on Windows, ACL
+    // validation and helper removal also route through spawnSupervised and
+    // must run for real, or worktree creation itself fails.
+    processSupervisor.spawnSupervised = async request => {
+      if (request.executable.command !== process.execPath || request.args[0] !== "-e") {
+        return selected.spawnSupervised(request);
+      }
+      return {
+        pid: 42_424,
+        done: Promise.resolve({
+          exitCode: 43,
+          signal: null,
+          timedOut: false,
+          cancelled: false,
+          stdout: "",
+          stderr: "",
+          truncated: { stdout: false, stderr: false },
+        }),
+        stdout: Readable.from([]),
+        stderr: Readable.from([]),
+      };
+    };
     const physicalRoot = join(process.env.CLAUDE_PLUGIN_DATA!, "worktrees");
     const manager = new WorktreeManager(directory, "run-emptying-failure", undefined, {
       processSupervisor,
@@ -735,8 +746,14 @@ describe("WorktreeManager", () => {
   it("never rolls back registration after physical emptying has started", async () => {
     const { directory, base } = await initRepo();
     let physicalPath = "";
-    const processSupervisor = Object.create(getPlatformServices()) as PlatformServices;
+    const selected = getPlatformServices();
+    const processSupervisor = Object.create(selected) as PlatformServices;
+    // Intercept only the bound-cleanup "node -e" spawn (see note above): the
+    // Windows ACL-validation spawn must not be renamed out from under itself.
     processSupervisor.spawnSupervised = async request => {
+      if (request.executable.command !== process.execPath || request.args[0] !== "-e") {
+        return selected.spawnSupervised(request);
+      }
       await rename(request.cwd, physicalPath);
       await rm(join(physicalPath, "damage-me.txt"), { force: false });
       return {
@@ -882,7 +899,9 @@ describe("WorktreeManager", () => {
     const selected = getPlatformServices();
     const processSupervisor = Object.create(selected) as PlatformServices;
     processSupervisor.spawnSupervised = async request => {
-      if (request.executable.command === "/usr/sbin/lsof") {
+      if (request.executable.command !== process.execPath || request.args[0] !== "-e") {
+        // lsof probes, Windows ACL validation, and identity-bound helper
+        // removal all run for real; only the bound-cleanup spawn is faked.
         return await selected.spawnSupervised(request);
       }
       helperCalls += 1;

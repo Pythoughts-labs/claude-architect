@@ -122,7 +122,6 @@ describe("native Windows filesystem helper", () => {
       try {
         await waitForReady(lockHolder);
         await expect(invokeRemove(helper.command, lockedFile, identity, false)).rejects.toBeDefined();
-        await expect(readFile(lockedFile, "utf8")).resolves.toBe("locked\n");
       } finally {
         const closed = new Promise<void>(resolve => lockHolder.once("close", () => resolve()));
         lockHolder.kill();
@@ -133,6 +132,12 @@ describe("native Windows filesystem helper", () => {
             10_000,
           )),
         ]);
+      }
+      try {
+        // The holder opened with FileShare None, so the preservation read must
+        // wait for release — reading while held fails with EBUSY by design.
+        await expect(readFile(lockedFile, "utf8")).resolves.toBe("locked\n");
+      } finally {
         await rm(directory, { recursive: true, force: true });
       }
     },

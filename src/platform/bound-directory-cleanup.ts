@@ -77,21 +77,40 @@ const removeBoundEntry = async (entry, expected, directory) => {
     if (!helper) process.exit(58);
     const { CLAUDE_ARCHITECT_WINDOWS_FILESYSTEM_HELPER: _helper, ...helperEnvironment } =
       process.env;
-    execFileSync(helper, [
-      "remove",
-      path.resolve(entry),
-      expected.dev.toString(),
-      expected.ino.toString(),
-      expected.birthtimeNs.toString(),
-      directory ? "true" : "false",
-    ], {
-      cwd: path.dirname(path.resolve(entry)),
-      env: helperEnvironment,
-      maxBuffer: 16_384,
-      timeout: 30_000,
-      windowsHide: true,
-    });
-    return;
+    // Helper exit 3 (open failed) and 5 (delete disposition refused) include
+    // transient sharing violations from antivirus scans of freshly written
+    // files; the helper revalidates the bound identity on every attempt, so
+    // retrying is safe. Anything else is a real refusal and fails immediately.
+    for (let attempt = 1; ; attempt += 1) {
+      try {
+        execFileSync(helper, [
+          "remove",
+          path.resolve(entry),
+          expected.dev.toString(),
+          expected.ino.toString(),
+          expected.birthtimeNs.toString(),
+          directory ? "true" : "false",
+        ], {
+          cwd: path.dirname(path.resolve(entry)),
+          env: helperEnvironment,
+          maxBuffer: 16_384,
+          timeout: 30_000,
+          windowsHide: true,
+        });
+        return;
+      } catch (error) {
+        const transient = error.status === 3 || error.status === 5;
+        if (transient && attempt < 20) {
+          await new Promise(resolve => setTimeout(resolve, 100));
+          continue;
+        }
+        process.stderr.write("clause=helper-remove status=" + String(error.status)
+          + " signal=" + String(error.signal) + " code=" + String(error.code)
+          + " kind=" + (directory ? "directory" : "file")
+          + " attempts=" + String(attempt) + "\n");
+        process.exit(57);
+      }
+    }
   }
   if (expected.isSymbolicLink()) {
     await removeBoundUnopenedEntry(entry, expected);
@@ -164,7 +183,13 @@ const emptyBoundDirectory = async expected => {
     isSymbolicLink: () => false,
   };
   await emptyBoundDirectory(expected);
-})().catch(() => process.exit(49));
+})().catch(error => {
+  // Codes only, never paths: this lands in bounded redacted diagnostics.
+  process.stderr.write("clause=uncaught code=" + String(error && error.code)
+    + " errno=" + String(error && error.errno)
+    + " name=" + String(error && error.name) + "\n");
+  process.exit(49);
+});
 `;
 
 export interface BoundDirectoryIdentity {
@@ -242,29 +267,41 @@ async function removeWindowsBoundEmptyDirectory(
   platformServices: PlatformServices,
 ): Promise<void> {
   const helper = await resolveWindowsFilesystemHelper();
-  const result = await supervise(platformServices, {
-    executable: helper,
-    args: [
-      "remove",
-      directory,
-      expectedIdentity.dev.toString(),
-      expectedIdentity.ino.toString(),
-      expectedIdentity.birthtimeNs.toString(),
-      "true",
-    ],
-    cwd: path.dirname(directory),
-    env: windowsEssentialEnvironment(),
-    timeoutMs: 30_000,
-    maxOutputBytes: 16_384,
-  }, { graceMs: 1_000 });
-  if (result.spawnError !== undefined
-    || result.exitCode !== 0
-    || result.signal !== null
-    || result.timedOut
-    || result.cancelled
-    || result.truncated.stdout
-    || result.truncated.stderr) {
-    throw new RuntimeError("validated Windows directory could not be removed");
+  // Exit 3 (open failed) and 5 (delete disposition refused) include transient
+  // sharing violations from antivirus scans; the helper revalidates the bound
+  // identity on every attempt, so a bounded retry is safe.
+  for (let attempt = 1; ; attempt += 1) {
+    const result = await supervise(platformServices, {
+      executable: helper,
+      args: [
+        "remove",
+        directory,
+        expectedIdentity.dev.toString(),
+        expectedIdentity.ino.toString(),
+        expectedIdentity.birthtimeNs.toString(),
+        "true",
+      ],
+      cwd: path.dirname(directory),
+      env: windowsEssentialEnvironment(),
+      timeoutMs: 30_000,
+      maxOutputBytes: 16_384,
+    }, { graceMs: 1_000 });
+    if (result.spawnError === undefined
+      && result.exitCode === 0
+      && result.signal === null
+      && !result.timedOut
+      && !result.cancelled
+      && !result.truncated.stdout
+      && !result.truncated.stderr) {
+      return;
+    }
+    if ((result.exitCode === 3 || result.exitCode === 5) && attempt < 20) {
+      await new Promise(resolve => setTimeout(resolve, 100));
+      continue;
+    }
+    throw new RuntimeError(
+      `validated Windows directory could not be removed (exitCode=${result.exitCode})`,
+    );
   }
 }
 
@@ -413,6 +450,18 @@ export async function emptyBoundDirectory(
     || result.cancelled
     || result.truncated.stdout
     || result.truncated.stderr) {
-    throw new RuntimeError("quarantined directory contents could not be removed");
+    // The script writes only clause codes to stderr, never paths, so the
+    // condition summary is safe for bounded redacted diagnostics.
+    const condition = result.spawnError !== undefined
+      ? "spawnError"
+      : result.timedOut
+        ? "timedOut=true"
+        : result.cancelled
+          ? "cancelled=true"
+          : `exitCode=${result.exitCode}${result.signal === null ? "" : ` signal=${result.signal}`}`;
+    const stderr = result.stderr.slice(0, 512).trim();
+    throw new RuntimeError(
+      `quarantined directory contents could not be removed (${condition})${stderr.length === 0 ? "" : `: ${stderr}`}`,
+    );
   }
 }

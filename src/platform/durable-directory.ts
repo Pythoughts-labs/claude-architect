@@ -36,27 +36,38 @@ async function assertWindowsDirectoryAcl(
   platformServices: PlatformServices,
 ): Promise<void> {
   const helper = await resolveWindowsFilesystemHelper();
-  const result = await supervise(platformServices, {
-    executable: helper,
-    args: [
-      command,
-      directory,
-      expectedIdentity.dev.toString(),
-      expectedIdentity.ino.toString(),
-      expectedIdentity.birthtimeNs.toString(),
-    ],
-    cwd: path.dirname(directory),
-    env: windowsEssentialEnvironment(),
-    timeoutMs: WINDOWS_DIRECTORY_SYNC_TIMEOUT_MS,
-    maxOutputBytes: 16_384,
-  }, { graceMs: 1_000 });
-  if (result.spawnError !== undefined
-    || result.exitCode !== 0
-    || result.signal !== null
-    || result.timedOut
-    || result.cancelled
-    || result.truncated.stdout
-    || result.truncated.stderr) {
+  // Helper exit 3 means CreateFileW could not open the directory, which
+  // includes transient sharing violations from antivirus scans of freshly
+  // created directories. Validation is read-only and re-runs completely, so a
+  // bounded retry is safe; any other failure is a real refusal.
+  for (let attempt = 1; ; attempt += 1) {
+    const result = await supervise(platformServices, {
+      executable: helper,
+      args: [
+        command,
+        directory,
+        expectedIdentity.dev.toString(),
+        expectedIdentity.ino.toString(),
+        expectedIdentity.birthtimeNs.toString(),
+      ],
+      cwd: path.dirname(directory),
+      env: windowsEssentialEnvironment(),
+      timeoutMs: WINDOWS_DIRECTORY_SYNC_TIMEOUT_MS,
+      maxOutputBytes: 16_384,
+    }, { graceMs: 1_000 });
+    if (result.spawnError === undefined
+      && result.exitCode === 0
+      && result.signal === null
+      && !result.timedOut
+      && !result.cancelled
+      && !result.truncated.stdout
+      && !result.truncated.stderr) {
+      return;
+    }
+    if (result.exitCode === 3 && attempt < 20) {
+      await new Promise(resolve => setTimeout(resolve, 100));
+      continue;
+    }
     throw new RuntimeError(
       `Windows directory ACL validation failed: ${command}${windowsHelperFailure(result)}`,
     );
