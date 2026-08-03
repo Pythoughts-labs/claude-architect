@@ -1,4 +1,10 @@
-The P0-B Windows process-tree helper will live in this directory.
-It will provide the native support needed to manage Windows descendant processes reliably.
-No shipped P0-A feature depends on this helper.
-P0-A remains fully functional without any native component from this directory.
+# Native Windows helpers
+
+Claude Architect ships native helpers instead of depending on PowerShell for
+trusted Windows runtime operations.
+
+- `win32-job-kill-{arch}.exe` owns process-token lookup and process-tree termination.
+- `win32-filesystem-{arch}.exe` validates private-directory ACLs, flushes directory
+  metadata, and deletes a bigint-identity-matched file or directory by handle.
+
+Sources and reproducible build commands are documented in `build-win32.md`.

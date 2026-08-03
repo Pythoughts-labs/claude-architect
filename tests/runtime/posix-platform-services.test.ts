@@ -138,6 +138,18 @@ describe("PosixPlatformServices", () => {
     await expect(fs.access(lockPath)).rejects.toThrow();
   });
 
+  it("refuses a checkout lock when the Git common directory is ambiguous", async () => {
+    const directPs = Object.assign(new PosixPlatformServices(), {
+      async canonicalizePath(input: string) {
+        return { input, canonical: repoPath, gitCommonDir: null };
+      },
+    });
+
+    await expect(directPs.acquireCheckoutLock(repoPath)).rejects.toThrow(
+      "checkout Git common directory could not be resolved",
+    );
+  });
+
   it("returns the canonical repository identity used to derive its lock key", async () => {
     const repositoryIdentity = path.join(tempRoot, `common-${randomUUID()}`);
     const directPs = Object.assign(new PosixPlatformServices(), {

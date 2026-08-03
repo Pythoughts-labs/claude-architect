@@ -1,10 +1,14 @@
 import { createHash } from "node:crypto";
+import { execFile } from "node:child_process";
 import { promises as fs } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import nodeProcess from "node:process";
+import { promisify } from "node:util";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { getPlatformServices } from "../../src/platform/select-platform.js";
+
+const execFileAsync = promisify(execFile);
 
 /**
  * A repository lock that times out used to report only "checkout is locked:
@@ -26,7 +30,7 @@ describe("repository lock contention diagnostics", () => {
       `${createHash("sha256").update(repositoryIdentity).digest("hex")}.lock`,
     );
 
-  /** The identity acquireCheckoutLock keys on: the git common dir, else the path. */
+  /** The identity acquireCheckoutLock requires: the Git common directory. */
   const identityFor = async (target: string): Promise<string> => {
     const ps = getPlatformServices();
     const canonical = await ps.canonicalizePath(target);
@@ -44,6 +48,7 @@ describe("repository lock contention diagnostics", () => {
     stateDir = await fs.mkdtemp(path.join(tmpdir(), "lock-contention-"));
     nodeProcess.env.CLAUDE_ARCHITECT_STATE_DIR = stateDir;
     checkout = await fs.mkdtemp(path.join(tmpdir(), "lock-checkout-"));
+    await execFileAsync("git", ["init", "-q"], { cwd: checkout });
   });
 
   afterEach(async () => {

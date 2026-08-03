@@ -10,6 +10,7 @@ import { getPlatformServices } from "../platform/select-platform.js";
 import type { PipelineResult } from "../pipeline/pipeline-runtime.js";
 import type { CandidateArtifact } from "../protocol/attempt-result.js";
 import { ArtifactStore } from "../runtime/artifact-store.js";
+import { guardWorktreeMutations } from "../runtime/worktree-mutation-gate.js";
 import { redact } from "../runtime/redaction.js";
 import { reviewSnapshotHash } from "../runtime/review-snapshot.js";
 import { logger } from "../util/logger.js";
@@ -189,7 +190,9 @@ export class CandidatePromoter {
 
   constructor(dependencies: CandidatePromoterDependencies = {}) {
     this.runGit = dependencies.git ?? git;
-    this.platformServices = dependencies.platformServices ?? getPlatformServices();
+    this.platformServices = guardWorktreeMutations(
+      dependencies.platformServices ?? getPlatformServices(),
+    );
     this.branchManager = dependencies.branchManager ?? new WorkflowBranchManager();
     this.workflowStore = dependencies.workflowStore ?? (workflowId => new WorkflowStore(workflowId));
     this.artifactStore = dependencies.artifactStore ?? (runId => new ArtifactStore(runId));

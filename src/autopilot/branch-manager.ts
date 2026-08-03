@@ -5,12 +5,23 @@ import path from "node:path";
 import type { CheckoutLock, PlatformServices } from "../platform/platform-services.js";
 import { getPlatformServices } from "../platform/select-platform.js";
 import { resolveStateDir } from "../runtime/state-dir.js";
+import { guardWorktreeMutations } from "../runtime/worktree-mutation-gate.js";
+import { syncDirectoryMetadata } from "../platform/durable-directory.js";
 import { RuntimeError } from "../util/errors.js";
 import { logger } from "../util/logger.js";
-import { redact } from "../runtime/redaction.js";
+import { readStableRegularFile } from "../util/stable-file.js";
+import { boundedRedactedDiagnostic, redact } from "../runtime/redaction.js";
 import { git, type GitResult } from "../git/git-exec.js";
+import { gitNulRecords, gitPathOutput } from "../git/git-output.js";
 import { checkInProgressOperation } from "../git/repo-preconditions.js";
-import { WorktreeManager } from "../git/worktree-manager.js";
+import { canonicalizeWorktreePath } from "../git/worktree-registration.js";
+import {
+  managedWorktreeDirectoryIdentity,
+  removeStaleWorktreeRegistration,
+  WorktreeManager,
+  type ManagedWorktreeDirectoryIdentity,
+  type WorktreeManagerDependencies,
+} from "../runtime/worktree-manager.js";
 
 const TOPIC = /^[a-z0-9](?:[a-z0-9-]{1,46}[a-z0-9])$/;
 const WORKFLOW_ID = /^[a-z0-9][a-z0-9-]{7,127}$/;
@@ -36,6 +47,7 @@ export interface WorkflowBranchManagerDependencies {
   removeOwnership?: (ownershipPath: string) => Promise<void>;
   platformServices?: Pick<PlatformServices, "acquireCheckoutLock" | "canonicalizePath" | "os">
     & Partial<Pick<PlatformServices, "getProcessStartToken">>;
+  worktreeManagerDependencies?: WorktreeManagerDependencies;
 }
 
 export interface CreateWorkflowBranchRequest {
@@ -308,10 +320,13 @@ interface WorktreeRegistration {
   branch?: string;
 }
 
-function parseWorktreeRegistrations(output: string): WorktreeRegistration[] | null {
+async function parseWorktreeRegistrations(
+  output: string,
+  allowMissing = false,
+): Promise<WorktreeRegistration[] | null> {
   const registrations: WorktreeRegistration[] = [];
   let registration: Partial<WorktreeRegistration> = {};
-  for (const field of output.split("\0")) {
+  for (const field of gitNulRecords(output, "Autopilot Git worktree list")) {
     if (field === "") {
       if (Object.keys(registration).length === 0) continue;
       if (registration.worktree === undefined) return null;
@@ -326,11 +341,22 @@ function parseWorktreeRegistrations(output: string): WorktreeRegistration[] | nu
     else if (key === "HEAD") registration.head = value;
     else if (key === "branch") registration.branch = value;
   }
-  return Object.keys(registration).length === 0 ? registrations : null;
+  if (Object.keys(registration).length !== 0) return null;
+  for (const parsed of registrations) {
+    parsed.worktree = await canonicalizeWorktreePath(parsed.worktree, allowMissing);
+  }
+  return registrations;
 }
 
 function sameOwnership(left: WorkflowBranchIdentity, right: WorkflowBranchIdentity): boolean {
   return JSON.stringify(left) === JSON.stringify(right);
+}
+
+function hasExactKeys(value: object, expected: readonly string[]): boolean {
+  const keys = Object.keys(value).sort();
+  const sortedExpected = [...expected].sort();
+  return keys.length === sortedExpected.length
+    && keys.every((key, index) => key === sortedExpected[index]);
 }
 
 function isBootstrapOwnerRecord(
@@ -339,7 +365,8 @@ function isBootstrapOwnerRecord(
 ): value is WorkflowBranchBootstrapOwnerRecord {
   if (typeof value !== "object" || value === null) return false;
   const record = value as Partial<WorkflowBranchBootstrapOwnerRecord>;
-  return record.workflowId === workflowId
+  return hasExactKeys(value, ["workflowId", "pid", "processToken", "createdAt"])
+    && record.workflowId === workflowId
     && Number.isSafeInteger(record.pid)
     && record.pid! > 0
     && (record.processToken === null
@@ -356,16 +383,43 @@ function parseRegistration(
 ): WorkflowBranchRegistration | null {
   if (typeof value !== "object" || value === null) return null;
   const parsed = value as Partial<WorkflowBranchRegistration>;
-  if (parsed.ownershipVersion !== OWNERSHIP_VERSION
+  if (!hasExactKeys(value, [
+    "ownershipVersion",
+    "workflowId",
+    "checkoutPath",
+    "gitCommonDir",
+    "repositoryIdentity",
+    "worktreePath",
+    "worktreeGitDir",
+    "branch",
+    "branchRef",
+    "baseRef",
+    "baseBranch",
+    "baseCommitOid",
+    "remote",
+    "remoteUrl",
+    "ownerRepo",
+    "bootstrapOwner",
+  ])
+    || parsed.ownershipVersion !== OWNERSHIP_VERSION
     || parsed.workflowId !== workflowId
     || typeof parsed.checkoutPath !== "string"
+    || !path.isAbsolute(parsed.checkoutPath)
+    || path.resolve(parsed.checkoutPath) !== parsed.checkoutPath
     || typeof parsed.gitCommonDir !== "string"
+    || !path.isAbsolute(parsed.gitCommonDir)
+    || path.resolve(parsed.gitCommonDir) !== parsed.gitCommonDir
     || typeof parsed.repositoryIdentity !== "string"
+    || parsed.repositoryIdentity !== parsed.gitCommonDir
     || typeof parsed.worktreePath !== "string"
+    || !path.isAbsolute(parsed.worktreePath)
+    || path.resolve(parsed.worktreePath) !== parsed.worktreePath
     || typeof parsed.worktreeGitDir !== "string"
+    || !path.isAbsolute(parsed.worktreeGitDir)
+    || path.resolve(parsed.worktreeGitDir) !== parsed.worktreeGitDir
     || typeof parsed.branch !== "string"
     || parsed.branchRef !== `refs/heads/${parsed.branch}`
-    || typeof parsed.baseRef !== "string"
+    || parsed.baseRef !== `refs/claude-architect/autopilot/${workflowId}/base`
     || typeof parsed.baseBranch !== "string"
     || !isOid(parsed.baseCommitOid ?? "")
     || parsed.remote !== "origin"
@@ -375,8 +429,113 @@ function parseRegistration(
   return parsed as WorkflowBranchRegistration;
 }
 
+async function readRegistrationFile(
+  ownershipPath: string,
+  expectedWorkflowId?: string,
+): Promise<WorkflowBranchRegistration | null> {
+  const contents = await readStableRegularFile(ownershipPath, 32_768n);
+  if (contents === null) return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(contents.toString("utf8")) as unknown;
+  } catch (error) {
+    if (error instanceof SyntaxError) return null;
+    throw error;
+  }
+  const workflowId = expectedWorkflowId
+    ?? (typeof parsed === "object" && parsed !== null
+      && typeof (parsed as { workflowId?: unknown }).workflowId === "string"
+      ? (parsed as { workflowId: string }).workflowId
+      : null);
+  return workflowId === null || !WORKFLOW_ID.test(workflowId)
+    ? null
+    : parseRegistration(parsed, workflowId);
+}
+
+export async function workflowOwnershipRecordWorkflowId(
+  ownershipPath: string,
+): Promise<string> {
+  const registration = await readRegistrationFile(ownershipPath);
+  if (registration === null) {
+    throw new RuntimeError("workflow ownership record is malformed");
+  }
+  return registration.workflowId;
+}
+
+export interface WorkflowWorktreeOwnershipClaim {
+  workflowId: string;
+  bootstrapOwner: WorkflowBranchBootstrapOwnerRecord;
+}
+
+/** Validate and return the durable owner of one managed workflow worktree. */
+export async function workflowWorktreeOwnershipClaim(
+  ownershipPath: string,
+  worktreePath: string,
+): Promise<WorkflowWorktreeOwnershipClaim> {
+  const registration = await readRegistrationFile(ownershipPath);
+  if (registration === null) {
+    throw new RuntimeError("workflow ownership record is malformed");
+  }
+  const ownershipHash = createHash("sha256").update(registration.workflowId).digest("hex");
+  const expectedOwnershipPath = path.join(
+    resolveStateDir(),
+    "autopilot-branches",
+    `${ownershipHash}.json`,
+  );
+  if (path.resolve(ownershipPath) !== path.resolve(expectedOwnershipPath)) {
+    throw new RuntimeError("workflow ownership filename does not match its workflow id");
+  }
+  const [canonicalOwnershipPath, canonicalExpectedOwnershipPath, canonicalWorktreePath] =
+    await Promise.all([
+      realpath(ownershipPath),
+      realpath(expectedOwnershipPath),
+      realpath(worktreePath),
+    ]);
+  let canonicalRegisteredWorktreePath: string;
+  try {
+    canonicalRegisteredWorktreePath = await realpath(registration.worktreePath);
+  } catch (error) {
+    throw new RuntimeError("workflow ownership worktree path is unavailable", { cause: error });
+  }
+  const settledRegistration = await readRegistrationFile(ownershipPath);
+  if (settledRegistration === null
+    || JSON.stringify(settledRegistration) !== JSON.stringify(registration)) {
+    throw new RuntimeError("workflow ownership record changed during validation");
+  }
+  const managedName = `workflow-${ownershipHash.slice(0, 32)}`;
+  const candidateName = path.basename(canonicalWorktreePath);
+  const ownsPrimary = candidateName === managedName
+    && canonicalRegisteredWorktreePath === canonicalWorktreePath;
+  const legacyFinalName = `final-${createHash("sha256")
+    .update(JSON.stringify(registration.workflowId)).digest("hex").slice(0, 24)}`;
+  const ownsFinalMaterialization = (candidateName === `${managedName}-final`
+    || candidateName === legacyFinalName)
+    && path.basename(canonicalRegisteredWorktreePath) === managedName
+    && path.dirname(canonicalRegisteredWorktreePath) === path.dirname(canonicalWorktreePath);
+  if (canonicalOwnershipPath !== canonicalExpectedOwnershipPath
+    || (!ownsPrimary && !ownsFinalMaterialization)) {
+    throw new RuntimeError("workflow ownership record names a different worktree");
+  }
+  return {
+    workflowId: registration.workflowId,
+    bootstrapOwner: structuredClone(registration.bootstrapOwner),
+  };
+}
+
+/** Validate a durable workflow registration as the owner of one managed worktree. */
+export async function workflowOwnershipClaimsWorktree(
+  ownershipPath: string,
+  worktreePath: string,
+): Promise<boolean> {
+  await workflowWorktreeOwnershipClaim(ownershipPath, worktreePath);
+  return true;
+}
+
 function operationFailure(action: string, result: GitResult): never {
-  const diagnostic = (result.stderr || result.stdout).trim().slice(0, 2_000);
+  const diagnostic = boundedRedactedDiagnostic(
+    (result.stderr || result.stdout).trim(),
+    2_000,
+  );
   fail("git-command-failed", `${action} failed${diagnostic ? `: ${diagnostic}` : ""}`);
 }
 
@@ -389,15 +548,20 @@ export class WorkflowBranchManager {
     "acquireCheckoutLock" | "canonicalizePath" | "os"
   >;
   private readonly getProcessStartToken: PlatformServices["getProcessStartToken"];
+  private readonly worktreeManagerDependencies: WorktreeManagerDependencies;
 
   constructor(dependencies: WorkflowBranchManagerDependencies = {}) {
     this.runGit = dependencies.git ?? git;
     this.remoteTransport = dependencies.remoteTransport ?? createIsolatedRemoteTransport(this.runGit);
     this.removeOwnership = dependencies.removeOwnership ?? (ownershipPath => rm(ownershipPath));
     const platformServices = dependencies.platformServices ?? getPlatformServices();
-    this.platformServices = platformServices;
+    this.platformServices = guardWorktreeMutations(platformServices);
     this.getProcessStartToken = platformServices.getProcessStartToken?.bind(platformServices)
       ?? getPlatformServices().getProcessStartToken.bind(getPlatformServices());
+    this.worktreeManagerDependencies = {
+      ...dependencies.worktreeManagerDependencies,
+      git: this.runGit,
+    };
   }
 
   private ownershipPath(workflowId: string): string {
@@ -406,28 +570,10 @@ export class WorkflowBranchManager {
   }
 
   private async readRegistration(workflowId: string): Promise<WorkflowBranchRegistration | null> {
-    let handle;
     try {
-      const ownershipPath = this.ownershipPath(workflowId);
-      handle = await open(ownershipPath, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
-      const metadata = await handle.stat();
-      const named = await lstat(ownershipPath);
-      if (!metadata.isFile()
-        || metadata.nlink !== 1
-        || metadata.size > 32_768
-        || !named.isFile()
-        || named.isSymbolicLink()
-        || named.dev !== metadata.dev
-        || named.ino !== metadata.ino) return null;
-      const parsed = JSON.parse(await handle.readFile("utf8")) as unknown;
-      return parseRegistration(parsed, workflowId);
-    } catch (error) {
-      if (typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT") {
-        return null;
-      }
+      return await readRegistrationFile(this.ownershipPath(workflowId), workflowId);
+    } catch {
       return null;
-    } finally {
-      await handle?.close();
     }
   }
 
@@ -501,20 +647,7 @@ export class WorkflowBranchManager {
       }
       await rm(temporaryPath);
       temporaryExists = false;
-      const directoryHandle = await open(directory, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
-      try {
-        await directoryHandle.sync();
-      } catch (error) {
-        // Directory fsync is unsupported on Windows and returns EPERM/EISDIR/
-        // EINVAL/ENOTSUP; the ownership link and its temporary file were already
-        // durably synced above, so the rename remains crash-safe on POSIX.
-        const unsupportedOnWindows = process.platform === "win32"
-          && typeof error === "object" && error !== null && "code" in error
-          && ["EISDIR", "EINVAL", "ENOTSUP", "EPERM"].includes((error as { code?: string }).code ?? "");
-        if (!unsupportedOnWindows) throw error;
-      } finally {
-        await directoryHandle.close();
-      }
+      await syncDirectoryMetadata(directory);
       ownershipLinked = false;
     } finally {
       if (temporaryExists) await rm(temporaryPath, { force: true });
@@ -563,7 +696,11 @@ export class WorkflowBranchManager {
     let lock: CheckoutLock;
     try {
       lock = await this.platformServices.acquireCheckoutLock(initial.canonical);
-    } catch {
+    } catch (error) {
+      if (error instanceof RuntimeError
+        && error.detail?.classification === "recovery-ambiguous") {
+        fail("recovery-ambiguous", error.message);
+      }
       fail("checkout-locked");
     }
     let attached: Awaited<ReturnType<WorktreeManager["createAttached"]>> | undefined;
@@ -661,7 +798,7 @@ export class WorkflowBranchManager {
         initial.canonical,
         `workflow-${createHash("sha256").update(request.workflowId).digest("hex").slice(0, 32)}`,
         { os: this.platformServices.os },
-        { git: this.runGit },
+        { ...this.worktreeManagerDependencies, borrowedCheckoutLease: lock },
       );
       attached = await worktreeManager.createAttached(branch, fetchedOid);
       const worktreePath = await realpath(attached.path);
@@ -671,7 +808,10 @@ export class WorkflowBranchManager {
       if (!succeeded(worktreeGitDirResult)) {
         operationFailure("git resolve worktree administrative directory", worktreeGitDirResult);
       }
-      const worktreeGitDir = await realpath(worktreeGitDirResult.stdout.trim());
+      const worktreeGitDir = await realpath(gitPathOutput(
+        worktreeGitDirResult.stdout,
+        "workflow worktree Git directory",
+      ));
       const identity: WorkflowBranchIdentity = {
         ownershipVersion: OWNERSHIP_VERSION,
         workflowId: request.workflowId,
@@ -791,7 +931,7 @@ export class WorkflowBranchManager {
       "worktree", "list", "--porcelain", "-z",
     ]);
     if (!succeeded(registered)) return { ok: false, classification: "git-command-failed" };
-    const registrations = parseWorktreeRegistrations(registered.stdout);
+    const registrations = await parseWorktreeRegistrations(registered.stdout);
     if (registrations === null) return { ok: false, classification: "git-command-failed" };
     const expectedRegistration = registrations.find(
       registration => registration.worktree === identity.worktreePath,
@@ -843,38 +983,6 @@ export class WorkflowBranchManager {
       return { ok: false, classification: "remote-base-changed" };
     }
     return { ok: true };
-  }
-
-  private async removeStaleWorktreeRegistration(
-    identity: WorkflowBranchIdentity,
-  ): Promise<boolean> {
-    const administrativeRoot = path.join(identity.gitCommonDir, "worktrees");
-    if (path.dirname(identity.worktreeGitDir) !== administrativeRoot) return false;
-    try {
-      if (await realpath(administrativeRoot) !== administrativeRoot) return false;
-      const metadata = await lstat(identity.worktreeGitDir);
-      if (!metadata.isDirectory() || metadata.isSymbolicLink()) return false;
-      const gitdirHandle = await open(
-        path.join(identity.worktreeGitDir, "gitdir"),
-        constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0),
-      );
-      const headHandle = await open(
-        path.join(identity.worktreeGitDir, "HEAD"),
-        constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0),
-      );
-      try {
-        const gitdir = (await gitdirHandle.readFile("utf8")).trim();
-        const head = (await headHandle.readFile("utf8")).trim();
-        if (path.resolve(gitdir) !== path.join(identity.worktreePath, ".git")
-          || head !== `ref: ${identity.branchRef}`) return false;
-      } finally {
-        await Promise.all([gitdirHandle.close(), headHandle.close()]);
-      }
-      await rm(identity.worktreeGitDir, { recursive: true });
-      return true;
-    } catch {
-      return false;
-    }
   }
 
   async revalidate(
@@ -950,6 +1058,7 @@ export class WorkflowBranchManager {
   private async cleanupLocked(
     identity: WorkflowBranchIdentity,
     expectedHead: string,
+    checkoutLease: CheckoutLock,
   ): Promise<BranchCleanupResult> {
     if (!await this.readOwnership(identity)) {
       return { ok: false, classification: "cleanup-failed" };
@@ -975,22 +1084,19 @@ export class WorkflowBranchManager {
       "worktree", "list", "--porcelain", "-z",
     ]);
     if (!succeeded(registered)) return { ok: false, classification: "cleanup-failed" };
-    const registrations = parseWorktreeRegistrations(registered.stdout);
+    const registrations = await parseWorktreeRegistrations(registered.stdout, true);
     if (registrations === null) return { ok: false, classification: "cleanup-failed" };
     const expectedRegistration = registrations.find(
       registration => registration.worktree === identity.worktreePath,
     );
     const registrationPresent = expectedRegistration !== undefined;
-    let physicalWorktreePresent = false;
+    let physicalWorktreeIdentity: ManagedWorktreeDirectoryIdentity | null;
     try {
-      await lstat(identity.worktreePath);
-      physicalWorktreePresent = true;
-    } catch (error) {
-      if (typeof error !== "object" || error === null || !("code" in error)
-        || error.code !== "ENOENT") {
-        return { ok: false, classification: "cleanup-failed" };
-      }
+      physicalWorktreeIdentity = await managedWorktreeDirectoryIdentity(identity.worktreePath);
+    } catch {
+      return { ok: false, classification: "cleanup-failed" };
     }
+    const physicalWorktreePresent = physicalWorktreeIdentity !== null;
 
     if (registrationPresent) {
       if (expectedRegistration.branch !== identity.branchRef
@@ -1007,7 +1113,10 @@ export class WorkflowBranchManager {
           "rev-parse", "--path-format=absolute", "--git-dir",
         ]);
         if (!succeeded(actualGitDir)
-          || await realpath(actualGitDir.stdout.trim()) !== identity.worktreeGitDir) {
+          || await realpath(gitPathOutput(
+            actualGitDir.stdout,
+            "workflow worktree Git directory",
+          )) !== identity.worktreeGitDir) {
           return { ok: false, classification: "cleanup-failed" };
         }
         const symbolic = await this.runGit(identity.worktreePath, [
@@ -1055,13 +1164,19 @@ export class WorkflowBranchManager {
       identity.checkoutPath,
       `workflow-${createHash("sha256").update(identity.workflowId).digest("hex").slice(0, 32)}`,
       { os: this.platformServices.os },
-      { git: this.runGit },
+      { ...this.worktreeManagerDependencies, borrowedCheckoutLease: checkoutLease },
     );
     if (registrationPresent) {
-      if (physicalWorktreePresent) {
-        await manager.remove(identity.worktreePath);
-      } else if (!await this.removeStaleWorktreeRegistration(identity)) {
-        return { ok: false, classification: "cleanup-failed" };
+      if (physicalWorktreeIdentity !== null) {
+        await manager.remove(identity.worktreePath, physicalWorktreeIdentity);
+      } else {
+        await removeStaleWorktreeRegistration(
+          identity.checkoutPath,
+          identity.worktreePath,
+          identity.worktreeGitDir,
+          identity.branchRef,
+          this.worktreeManagerDependencies,
+        );
       }
     }
     if (refsPresent) {
@@ -1108,7 +1223,7 @@ export class WorkflowBranchManager {
       if (lock.repositoryIdentity !== identity.repositoryIdentity) {
         result = { ok: false, classification: "cleanup-failed" };
       } else {
-        result = await this.cleanupLocked(identity, expectedHead);
+        result = await this.cleanupLocked(identity, expectedHead, lock);
       }
     } catch {
       result = { ok: false, classification: "cleanup-failed" };

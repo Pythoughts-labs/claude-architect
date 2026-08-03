@@ -2,7 +2,8 @@
 
 Thank you for helping improve Claude Architect. The project treats external
 coding agents as untrusted Producers, so changes should preserve isolation,
-independent verification, and human-controlled acceptance.
+independent verification, and provenance-recorded acceptance under the
+configured decision authority.
 
 By participating, you agree to follow the [Code of Conduct](CODE_OF_CONDUCT.md).
 For usage help, see [SUPPORT.md](SUPPORT.md). Report vulnerabilities privately
@@ -60,7 +61,10 @@ Respect the ownership boundaries documented in [AGENTS.md](AGENTS.md):
 Producer output and self-reported success are never trusted evidence. The Host
 runtime—not a Producer adapter—must enforce scope, confinement, artifact,
 verification, decision, and integration policy. An implementer must not review
-or approve its own work, and only the human may accept a candidate.
+or approve its own work. Candidate acceptance follows the configured decision
+authority: the shipped autonomous policy accepts only independently verified,
+unwarned, readable pipeline candidates; every other case requires human MCP
+elicitation and fails closed without it.
 
 Changes involving process execution, sandboxing, paths, environment variables,
 credentials, redaction, candidate identity, verification, decisions, or

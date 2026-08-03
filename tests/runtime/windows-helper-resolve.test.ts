@@ -7,6 +7,8 @@ import {
   resolveJobKillHelper,
   WindowsPlatformServices,
 } from "../../src/platform/windows-platform-services.js";
+import { windowsEssentialEnvironment } from "../../src/platform/windows-env.js";
+import { resolveWindowsFilesystemHelper } from "../../src/platform/windows-filesystem-helper.js";
 
 describe("Windows job helper resolution (all OSes)", () => {
   const tempDirectories: string[] = [];
@@ -22,6 +24,22 @@ describe("Windows job helper resolution (all OSes)", () => {
     tempDirectories.push(directory);
     return directory;
   }
+
+  it("resolves each packaged native filesystem helper without PowerShell", async () => {
+    const [x64, arm64] = await Promise.all([
+      resolveWindowsFilesystemHelper("x64"),
+      resolveWindowsFilesystemHelper("arm64"),
+    ]);
+
+    expect(x64.command).toMatch(/native[\\/]bin[\\/]win32-filesystem-x64\.exe$/u);
+    expect(arm64.command).toMatch(/native[\\/]bin[\\/]win32-filesystem-arm64\.exe$/u);
+    expect(x64.resolvedFrom).toBe("plugin-native-filesystem-helper");
+  });
+
+  it("fails closed for an unsupported filesystem-helper architecture", async () => {
+    await expect(resolveWindowsFilesystemHelper("ia32"))
+      .rejects.toMatchObject({ detail: { classification: "cleanup-backend-unavailable" } });
+  });
 
   it("resolves the architecture-specific helper path", () => {
     const root = path.join("root", "plugin");
@@ -74,6 +92,33 @@ describe("Windows job helper resolution (all OSes)", () => {
     return new WindowsPlatformServices(root, "x64", fakeExec as never);
   }
 
+  it("passes only canonical essential environment to the kill helper", async () => {
+    const previousSystemRoot = process.env.SystemRoot;
+    const previousSecret = process.env.UNRELATED_SECRET;
+    process.env.SystemRoot = "C:\\Windows";
+    process.env.UNRELATED_SECRET = "must-not-leak";
+    const calls: unknown[][] = [];
+    const services = await servicesWithExec((...args: unknown[]) => {
+      calls.push(args);
+      (args[3] as (error: null, stdout: string) => void)(null, "");
+    });
+
+    try {
+      await expect(services.terminateProcessTreeByPid(42)).resolves.toBeUndefined();
+      const options = calls[0]?.[2] as { env: Record<string, string> };
+      expect(options.env).toMatchObject({ SystemRoot: "C:\\Windows" });
+      expect(options.env).not.toHaveProperty("UNRELATED_SECRET");
+      expect(Object.keys(options.env).every(name => [
+        "Path", "SystemRoot", "ComSpec", "TEMP", "TMP", "USERPROFILE", "APPDATA", "LOCALAPPDATA",
+      ].includes(name))).toBe(true);
+    } finally {
+      if (previousSystemRoot === undefined) delete process.env.SystemRoot;
+      else process.env.SystemRoot = previousSystemRoot;
+      if (previousSecret === undefined) delete process.env.UNRELATED_SECRET;
+      else process.env.UNRELATED_SECRET = previousSecret;
+    }
+  });
+
   it("uses the native helper token mode", async () => {
     const calls: unknown[][] = [];
     const services = await servicesWithExec((...args: unknown[]) => {
@@ -85,6 +130,8 @@ describe("Windows job helper resolution (all OSes)", () => {
     await expect(services.getProcessStartToken(42)).resolves.toBe("win32:12345");
     expect(calls).toHaveLength(2);
     expect(calls[0]?.[1]).toEqual(["token", "42"]);
+    expect((calls[0]?.[2] as { env: Record<string, string> }).env)
+      .toEqual(windowsEssentialEnvironment());
   });
 
   it("returns null for native helper exit 2 without PowerShell", async () => {
@@ -102,23 +149,15 @@ describe("Windows job helper resolution (all OSes)", () => {
     expect(calls).toHaveLength(2);
   });
 
-  it("falls back to PowerShell when the native helper fails", async () => {
+  it("returns an unverifiable token when the native helper fails", async () => {
     const calls: unknown[][] = [];
     const services = await servicesWithExec((...args: unknown[]) => {
       calls.push(args);
-      if (calls.length === 1) {
-        (args[3] as (error: Error, stdout: string) => void)(new Error("helper failed"), "");
-      } else {
-        (args[2] as (error: null, stdout: string) => void)(null, "67890\n");
-      }
+      (args[3] as (error: Error, stdout: string) => void)(new Error("helper failed"), "");
     });
 
-    await expect(services.getProcessStartToken(42)).resolves.toBe("win32:67890");
-    expect(calls).toHaveLength(2);
-    expect(calls[1]?.[0]).toBe("powershell.exe");
-    expect(calls[1]?.[1]).toEqual([
-      "-NoProfile", "-NonInteractive", "-Command", "(Get-Process -Id 42).StartTime.ToFileTimeUtc()",
-    ]);
+    await expect(services.getProcessStartToken(42)).resolves.toBeNull();
+    expect(calls).toHaveLength(1);
   });
 
   it("memoizes a successful own-process token", async () => {

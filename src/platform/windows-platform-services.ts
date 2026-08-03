@@ -6,6 +6,7 @@ import path from "node:path";
 import nodeProcess from "node:process";
 import { fileURLToPath } from "node:url";
 import { BoundedBuffer } from "../util/bounded-buffer.js";
+import { gitPathOutput } from "../git/git-output.js";
 import { RuntimeError } from "../util/errors.js";
 import type {
   CanonicalPath, CheckoutLock, ExecutableRequest, FileLock, LockOwnerAnnotation, PlatformServices,
@@ -14,7 +15,8 @@ import type {
 import {
   acquireWxFileLock, CLEANUP_JOURNAL_LOCK_KEY, withLockContentionDetail,
 } from "./posix-platform-services.js";
-import { normalizeWindowsEnv } from "./windows-env.js";
+import { normalizeWindowsEnv, windowsEssentialEnvironment } from "./windows-env.js";
+import { assertWindowsDirectoryWriteIntegrity } from "./durable-directory.js";
 
 const childHandles = new WeakMap<SupervisedProcess, ChildProcess>();
 
@@ -144,17 +146,27 @@ async function gitCommonDir(cwd: string): Promise<string> {
   return new Promise((resolve, reject) => {
     execFile("git", ["rev-parse", "--path-format=absolute", "--git-common-dir"], { cwd }, (error, stdout) => {
       if (error) reject(error);
-      else resolve(stdout.trim());
+      else {
+        try { resolve(gitPathOutput(stdout, "Git common directory")); }
+        catch (parseError) { reject(parseError); }
+      }
     });
   });
 }
 
 export function canonicalizeForScope(candidate: string, root: string): boolean {
-  const stripExtendedLengthPrefix = (value: string): string => value.startsWith("\\\\?\\")
-    ? value.slice(4)
-    : value;
-  const normalizedCandidate = path.win32.normalize(stripExtendedLengthPrefix(candidate)).toLowerCase();
-  let normalizedRoot = path.win32.normalize(stripExtendedLengthPrefix(root)).toLowerCase();
+  const stripExtendedLengthPrefix = (value: string): string => {
+    if (value.toUpperCase().startsWith("\\\\?\\UNC\\")) return `\\\\${value.slice(8)}`;
+    return value.startsWith("\\\\?\\") ? value.slice(4) : value;
+  };
+  const normalizeVolume = (value: string): string => value.replace(
+    /^[a-z]:/u,
+    match => match.toUpperCase(),
+  );
+  const normalizedCandidate = normalizeVolume(
+    path.win32.normalize(stripExtendedLengthPrefix(candidate)),
+  );
+  let normalizedRoot = normalizeVolume(path.win32.normalize(stripExtendedLengthPrefix(root)));
   if (normalizedRoot.endsWith("\\") && path.win32.parse(normalizedRoot).root !== normalizedRoot) {
     normalizedRoot = normalizedRoot.slice(0, -1);
   }
@@ -178,7 +190,11 @@ export class WindowsPlatformServices implements PlatformServices {
   private async runJobKillHelper(pid: number): Promise<void> {
     const helper = await this.jobKillHelper();
     await new Promise<void>((resolve, reject) => {
-      execFile(helper.path, [String(pid)], { windowsHide: true, shell: false }, error => {
+      this.tokenExecFile(helper.path, [String(pid)], {
+        windowsHide: true,
+        shell: false,
+        env: windowsEssentialEnvironment(),
+      }, error => {
         if (error === null || error.code === 2) resolve();
         else reject(new RuntimeError("windows process-tree termination failed", {
           path: helper.path, pid, cause: error,
@@ -261,7 +277,11 @@ export class WindowsPlatformServices implements PlatformServices {
             this.tokenExecFile(
               helper.path,
               ["token", String(pid)],
-              { windowsHide: true, shell: false },
+              {
+                windowsHide: true,
+                shell: false,
+                env: windowsEssentialEnvironment(),
+              },
               (error, stdout) => {
                 const token = stdout.trim();
                 if (error === null && token.length > 0) resolve(`win32:${token}`);
@@ -278,25 +298,8 @@ export class WindowsPlatformServices implements PlatformServices {
           return nativeToken;
         }
       }
-    } catch { /* fall back to PowerShell */ }
-    const powershellToken = await new Promise<string | null>(resolve => {
-      try {
-        this.tokenExecFile(
-          "powershell.exe",
-          ["-NoProfile", "-NonInteractive", "-Command", `(Get-Process -Id ${pid}).StartTime.ToFileTimeUtc()`],
-          (error, stdout) => {
-            const token = stdout.trim();
-            resolve(error || token.length === 0 ? null : `win32:${token}`);
-          },
-        );
-      } catch {
-        resolve(null);
-      }
-    });
-    if (pid === nodeProcess.pid && powershellToken !== null) {
-      this.ownProcessStartToken = powershellToken;
-    }
-    return powershellToken;
+    } catch { /* native helper unavailability is reported as an unverifiable token */ }
+    return null;
   }
   async terminateProcessTreeByPid(pid: number, expectedToken?: string | null): Promise<void> {
     if (typeof expectedToken === "string") {
@@ -309,8 +312,11 @@ export class WindowsPlatformServices implements PlatformServices {
     checkout: string,
     owner: LockOwnerAnnotation = {},
   ): Promise<CheckoutLock> {
-    const { canonical, gitCommonDir: commonDir } = await this.canonicalizePath(checkout);
-    const repositoryIdentity = commonDir ?? canonical;
+    const { gitCommonDir: commonDir } = await this.canonicalizePath(checkout);
+    if (commonDir === null) {
+      throw new RuntimeError("checkout Git common directory could not be resolved");
+    }
+    const repositoryIdentity = commonDir;
     const key = createHash("sha256").update(repositoryIdentity).digest("hex");
     const ownerToken = await this.getProcessStartToken(nodeProcess.pid);
     let lock;
@@ -331,6 +337,13 @@ export class WindowsPlatformServices implements PlatformServices {
 
   async createSecureTempDirectory(): Promise<string> {
     return fs.mkdtemp(path.join(tmpdir(), "claude-architect-"));
+  }
+
+  async assertDirectoryWriteIntegrity(
+    directory: string,
+    expectedIdentity: { dev: bigint; ino: bigint; birthtimeNs: bigint },
+  ): Promise<void> {
+    await assertWindowsDirectoryWriteIntegrity(directory, expectedIdentity, this);
   }
 
   async canonicalizePath(input: string): Promise<CanonicalPath> {

@@ -12,7 +12,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { git } from "../../src/git/git-exec.js";
-import { WorktreeManager } from "../../src/git/worktree-manager.js";
+import { WorktreeManager } from "../../src/runtime/worktree-manager.js";
 import { applyCandidateTree } from "../../src/integrate/controlled-integrator.js";
 import { delegatePipelineOutput } from "../../src/mcp/server.js";
 import {

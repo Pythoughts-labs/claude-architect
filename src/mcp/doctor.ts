@@ -13,7 +13,8 @@ import {
   type WorkflowOwnerRecord,
 } from "../autopilot/workflow-store.js";
 import { git as runGit } from "../git/git-exec.js";
-import { isWorktreeRegistrationFor } from "../git/worktree-registration.js";
+import { gitNulRecords, gitPathOutput } from "../git/git-output.js";
+import { findWorktreeRegistration } from "../git/worktree-registration.js";
 import type { PlatformServices } from "../platform/platform-services.js";
 import { CLEANUP_JOURNAL_LOCK_KEY } from "../platform/posix-platform-services.js";
 import { SANDBOX_BACKENDS } from "../platform/sandbox/backends.js";
@@ -543,15 +544,17 @@ async function observedBranchMatches(
       result.exitCode !== 0
       || result.truncated?.stdout === true
       || result.truncated?.stderr === true)) return false;
-    if (await realpath(observedCommon.stdout.trim()) !== registration.gitCommonDir
+    if (await realpath(gitPathOutput(
+      observedCommon.stdout,
+      "workflow common directory",
+    )) !== registration.gitCommonDir
       || symbolic.stdout.trim() !== registration.branch
       || head.stdout.trim() !== branchRef.stdout.trim()
       || baseRef.stdout.trim() !== registration.baseCommitOid) return false;
     const stateHead = expectedHead(state, registration);
     if (stateHead !== null && head.stdout.trim() !== stateHead) return false;
-    const fields = worktrees.stdout.split("\0");
-    const index = fields.findIndex(field =>
-      isWorktreeRegistrationFor(field, registration.worktreePath));
+    const fields = gitNulRecords(worktrees.stdout, "doctor Git worktree list");
+    const index = await findWorktreeRegistration(fields, registration.worktreePath);
     if (index === -1) return false;
     const next = fields.findIndex((field, fieldIndex) =>
       fieldIndex > index && field.startsWith("worktree "));

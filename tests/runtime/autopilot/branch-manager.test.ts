@@ -1,5 +1,16 @@
 import { createHash } from "node:crypto";
-import { mkdir, mkdtemp, readFile, realpath, rm, stat, writeFile } from "node:fs/promises";
+import {
+  mkdir,
+  mkdtemp,
+  readFile,
+  readdir,
+  realpath,
+  rename,
+  rm,
+  rmdir,
+  stat,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -13,6 +24,7 @@ import {
 } from "../../../src/autopilot/branch-manager.js";
 import { git, type GitResult } from "../../../src/git/git-exec.js";
 import { getPlatformServices } from "../../../src/platform/select-platform.js";
+import { recoverPendingWorktreeRemovals } from "../../../src/runtime/recovery-manager.js";
 import { RuntimeError } from "../../../src/util/errors.js";
 import { logger } from "../../../src/util/logger.js";
 
@@ -281,6 +293,27 @@ describe("WorkflowBranchManager", () => {
     expect(await snapshotCheckout(fixture.repoRoot)).toEqual(before);
   });
 
+  it("redacts repository paths from Git failure diagnostics", async () => {
+    const fixture = (await initFixture())!;
+    const sensitivePath = "/Users/private/person/repository";
+    const manager = new WorkflowBranchManager({
+      remoteTransport: localTransport(fixture.bareRemote),
+      git: async (cwd, args, options) => args[0] === "config"
+        && args.includes("--get-regexp")
+        ? {
+            exitCode: 2,
+            stdout: "",
+            stderr: `fatal: unable to inspect ${sensitivePath}`,
+          }
+        : git(cwd, args, options),
+    });
+
+    const error = await manager.create(fixture.request).catch((thrown: unknown) => thrown);
+    expect(error).toMatchObject({ classification: "git-command-failed" });
+    expect(String(error)).not.toContain(sensitivePath);
+    expect(String(error)).toContain("[path]");
+  });
+
   it.each(["stdout", "stderr"] as const)(
     "fails closed when successful git %s is truncated",
     async stream => {
@@ -543,7 +576,7 @@ describe("WorkflowBranchManager", () => {
       .update(fixture.request.workflowId).digest("hex").slice(0, 32)}`;
     const collision = path.join(process.env.CLAUDE_PLUGIN_DATA!, "worktrees", managedId);
     const sentinel = path.join(collision, "sentinel.txt");
-    await mkdir(path.dirname(collision), { recursive: true });
+    await mkdir(path.dirname(collision), { recursive: true, mode: 0o700 });
     await runGit(fixture.repoRoot, ["worktree", "add", "--detach", collision, fixture.baseOid]);
     await writeFile(sentinel, "keep\n");
     const before = await snapshotCheckout(fixture.repoRoot);
@@ -594,6 +627,25 @@ describe("WorkflowBranchManager", () => {
     });
 
     await expectCreateFailure(fixture, "checkout-locked", manager);
+  });
+
+  it("distinguishes unresolved recovery state from checkout contention", async () => {
+    const fixture = (await initFixture())!;
+    const selected = getPlatformServices();
+    const manager = new WorkflowBranchManager({
+      remoteTransport: localTransport(fixture.bareRemote),
+      platformServices: {
+        os: selected.os,
+        canonicalizePath: input => selected.canonicalizePath(input),
+        acquireCheckoutLock: async () => {
+          throw new RuntimeError("removal recovery remains ambiguous", {
+            classification: "recovery-ambiguous",
+          });
+        },
+      },
+    });
+
+    await expectCreateFailure(fixture, "recovery-ambiguous", manager);
   });
 
   it("fails closed while the branch ref lock is held and removes its fetched ref", async () => {
@@ -927,6 +979,128 @@ describe("WorkflowBranchManager", () => {
       ok: true,
       worktreeRemoved: false,
       refsRemoved: false,
+    });
+  });
+
+  it("preserves a workflow worktree substituted after cleanup validation", async () => {
+    const fixture = (await initFixture())!;
+    const created = await fixture.manager.create(fixture.request);
+    const displaced = `${created.worktreePath}-displaced`;
+    let listCalls = 0;
+    let substituted = false;
+    const cleanupManager = new WorkflowBranchManager({
+      remoteTransport: localTransport(fixture.bareRemote),
+      git: async (cwd, args, options) => {
+        if (args[0] === "worktree" && args[1] === "list") {
+          listCalls += 1;
+          if (listCalls === 2) {
+            const marker = await readFile(path.join(created.worktreePath, ".git"));
+            await rename(created.worktreePath, displaced);
+            await mkdir(created.worktreePath);
+            await writeFile(path.join(created.worktreePath, ".git"), marker);
+            await writeFile(
+              path.join(created.worktreePath, "replacement.txt"),
+              "preserve replacement\n",
+            );
+            substituted = true;
+          }
+        }
+        return await git(cwd, args, options);
+      },
+    });
+
+    try {
+      await expect(cleanupManager.cleanup(created)).resolves.toEqual({
+        ok: false,
+        classification: "cleanup-failed",
+      });
+      expect(substituted).toBe(true);
+      await expect(readFile(path.join(created.worktreePath, "replacement.txt"), "utf8"))
+        .resolves.toBe("preserve replacement\n");
+      await expect(readFile(path.join(displaced, "tracked.txt"), "utf8"))
+        .resolves.toBe("initial bytes\n");
+    } finally {
+      await rm(created.worktreePath, { recursive: true, force: true });
+      try { await rename(displaced, created.worktreePath); } catch { /* fixture cleanup */ }
+      try { await fixture.manager.cleanup(created); } catch { /* fixture cleanup */ }
+    }
+  });
+
+  it("preserves a registration pathname substituted during stale cleanup", async () => {
+    const fixture = (await initFixture())!;
+    const created = await fixture.manager.create(fixture.request);
+    await rm(created.worktreePath, { recursive: true });
+    let displaced = "";
+    let quarantine = "";
+    let sentinel = "";
+    const cleanupManager = new WorkflowBranchManager({
+      remoteTransport: localTransport(fixture.bareRemote),
+      worktreeManagerDependencies: {
+        async rename(source, destination) {
+          if (source !== created.worktreeGitDir) {
+            await rename(source, destination);
+            return;
+          }
+          displaced = `${source}-displaced`;
+          quarantine = destination;
+          sentinel = path.join(quarantine, "sentinel.txt");
+          await rename(source, displaced);
+          await mkdir(source);
+          await writeFile(path.join(source, "sentinel.txt"), "preserve replacement\n");
+          await rename(source, destination);
+        },
+      },
+    });
+
+    try {
+      await expect(cleanupManager.cleanup(created)).resolves.toEqual({
+        ok: false,
+        classification: "cleanup-failed",
+      });
+      await expect(readFile(sentinel, "utf8")).resolves.toBe("preserve replacement\n");
+      await expect(stat(displaced)).resolves.toBeDefined();
+    } finally {
+      if (quarantine !== "") await rm(quarantine, { recursive: true, force: true });
+      if (displaced !== "") await rm(displaced, { recursive: true, force: true });
+    }
+  });
+
+  it("recovers a committed stale-registration removal after final rmdir fails", async () => {
+    const fixture = (await initFixture())!;
+    const created = await fixture.manager.create(fixture.request);
+    await rm(created.worktreePath, { recursive: true });
+    let failFinalRmdir = true;
+    const cleanupManager = new WorkflowBranchManager({
+      remoteTransport: localTransport(fixture.bareRemote),
+      worktreeManagerDependencies: {
+        async rmdir(directory) {
+          if (failFinalRmdir && directory.includes("claude-architect-quarantine")) {
+            failFinalRmdir = false;
+            const error = new Error("simulated stale registration rmdir failure") as NodeJS.ErrnoException;
+            error.code = "EBUSY";
+            throw error;
+          }
+          await rmdir(directory);
+        },
+      },
+    });
+
+    await expect(cleanupManager.cleanup(created)).resolves.toEqual({
+      ok: false,
+      classification: "cleanup-failed",
+    });
+    const manifestRoot = path.join(process.env.CLAUDE_PLUGIN_DATA!, "worktree-removals");
+    const manifests = await readdir(manifestRoot);
+    expect(manifests).toHaveLength(1);
+    expect(JSON.parse(await readFile(path.join(manifestRoot, manifests[0]!), "utf8")))
+      .toMatchObject({ phase: "physical-removed", physicalPresent: false });
+
+    await expect(recoverPendingWorktreeRemovals()).resolves.toEqual([]);
+    await expect(readdir(manifestRoot)).resolves.toEqual([]);
+    await expect(fixture.manager.cleanup(created)).resolves.toEqual({
+      ok: true,
+      worktreeRemoved: false,
+      refsRemoved: true,
     });
   });
 

@@ -6,8 +6,10 @@ import { fileURLToPath } from "node:url";
 import { LATEST_PROTOCOL_VERSION } from "@modelcontextprotocol/sdk/types.js";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createServer } from "../../src/mcp/server.js";
+import type { PlatformServices } from "../../src/platform/platform-services.js";
+import { getPlatformServices } from "../../src/platform/select-platform.js";
 import { PROTOCOL_VERSION } from "../../src/protocol/versions.js";
 
 const bootstrapPath = fileURLToPath(new URL("../../runtime/bootstrap.mjs", import.meta.url));
@@ -92,6 +94,69 @@ describe("MCP server handshake", () => {
     } finally {
       if (previous === undefined) delete process.env.CLAUDE_ARCHITECT_DELEGATED;
       else process.env.CLAUDE_ARCHITECT_DELEGATED = previous;
+    }
+  });
+
+  it("keeps read-only tools available but gates mutations while recovery is ambiguous", async () => {
+    const recover = vi.fn(async () => ({
+      recovered: [],
+      quarantined: [],
+      worktreeSweepIssues: [{
+        worktreePath: "/private/repository/worktree",
+        reason: "unverifiable checkout owner",
+        repositoryIdentity: "/repo/.git",
+      }],
+    }));
+    const ps = Object.create(getPlatformServices()) as PlatformServices;
+    ps.canonicalizePath = async input => ({
+      input,
+      canonical: input,
+      gitCommonDir: `${input}/.git`,
+    });
+    const log = vi.spyOn(console, "error").mockImplementation(() => {});
+    const server = await createServer({
+      ps,
+      recoverStaleRuns: recover,
+      pruneRuns: async () => {},
+    });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    await server.connect(serverTransport);
+    const client = new Client({ name: "recovery-gate-test", version: "1.0.0" });
+    await client.connect(clientTransport);
+    try {
+      const validation = await client.callTool({
+        name: "validateDelegationSpec",
+        arguments: { spec: validSpec, protocolVersion: PROTOCOL_VERSION },
+      });
+      expect(validation.isError).not.toBe(true);
+      expect(recover).toHaveBeenCalledTimes(1);
+
+      const unrelated = await client.callTool({
+        name: "delegate",
+        arguments: {
+          checkoutPath: "/other",
+          spec: validSpec,
+          protocolVersion: PROTOCOL_VERSION,
+        },
+      });
+      expect(JSON.stringify(unrelated)).not.toContain("mutating tools are unavailable");
+
+      const delegated = await client.callTool({
+        name: "delegate",
+        arguments: {
+          checkoutPath: "/repo",
+          spec: validSpec,
+          protocolVersion: PROTOCOL_VERSION,
+        },
+      });
+      expect(delegated.isError).toBe(true);
+      expect(JSON.stringify(delegated)).toContain("mutating tools are unavailable");
+      expect(JSON.stringify(delegated)).not.toContain("/private/repository");
+      expect(recover).toHaveBeenCalledTimes(3);
+    } finally {
+      log.mockRestore();
+      await client.close();
+      await server.close();
     }
   });
 

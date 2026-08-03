@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { writeFileSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -14,18 +15,22 @@ import {
   FINAL_SYSTEMS_REVIEW_REF,
   FINAL_VERIFICATION_REF,
   FinalBranchReviewer,
+  type CumulativeBranchArtifact,
   type FinalBranchReport,
   type FinalBranchTaskEvidence,
 } from "../../../src/autopilot/final-branch-reviewer.js";
 import { canonicalArtifactHash } from "../../../src/autopilot/autopilot-eligibility.js";
 import {
   WorkflowBranchManager,
+  workflowWorktreeOwnershipClaim,
   type RemoteTransport,
   type WorkflowBranchIdentity,
 } from "../../../src/autopilot/branch-manager.js";
 import type { AutopilotWorkflowState } from "../../../src/autopilot/types.js";
 import { WorkflowStore } from "../../../src/autopilot/workflow-store.js";
 import { git } from "../../../src/git/git-exec.js";
+import type { PlatformServices } from "../../../src/platform/platform-services.js";
+import { getPlatformServices } from "../../../src/platform/select-platform.js";
 import type { AutopilotSpec } from "../../../src/protocol/autopilot-spec.js";
 import type {
   AcceptanceVerifyArgs,
@@ -298,7 +303,7 @@ async function fixture(): Promise<Fixture> {
 }
 
 /**
- * A seam, not the thing under test. Its `revalidate` re-derives head and dirt
+ * A seam, not the thing under test. Its revalidation methods derive head and dirt
  * from the real repository, which is enough to drive FinalBranchReviewer's
  * head-bound phases -- but it is NOT the production
  * `WorkflowBranchManager.revalidate`, which additionally proves ownership,
@@ -316,18 +321,20 @@ function localBranchManager(f: FixtureCore): WorkflowBranchManager {
     branchRef: "refs/heads/main",
     baseCommitOid: f.baseOid,
   } as WorkflowBranchIdentity;
+  const revalidate = vi.fn().mockImplementation(async (
+    _identity: WorkflowBranchIdentity,
+    expectedHead: string,
+  ) => {
+    const head = await git(f.repo, ["rev-parse", "--verify", "HEAD^{commit}"]);
+    const status = await git(f.repo, ["status", "--porcelain=v1", "--untracked-files=all"]);
+    return head.exitCode === 0 && head.stdout.trim() === expectedHead && status.stdout === ""
+      ? { ok: true }
+      : { ok: false, classification: "head-changed" };
+  });
   return {
     load: vi.fn().mockResolvedValue(identity),
-    revalidate: vi.fn().mockImplementation(async (
-      _identity: WorkflowBranchIdentity,
-      expectedHead: string,
-    ) => {
-      const head = await git(f.repo, ["rev-parse", "--verify", "HEAD^{commit}"]);
-      const status = await git(f.repo, ["status", "--porcelain=v1", "--untracked-files=all"]);
-      return head.exitCode === 0 && head.stdout.trim() === expectedHead && status.stdout === ""
-        ? { ok: true }
-        : { ok: false, classification: "head-changed" };
-    }),
+    revalidate,
+    revalidateUnderLock: revalidate,
   } as unknown as WorkflowBranchManager;
 }
 
@@ -483,12 +490,13 @@ function approvingRoleRunner(args: RoleRunArgs): Promise<RoleRunResult> {
 function finalReviewerFor(f: FixtureCore, overrides: {
   verify?: (args: AcceptanceVerifyArgs) => Promise<AcceptanceVerifyResult>;
   roleRunner?: (args: RoleRunArgs) => Promise<RoleRunResult>;
-  cleanup?: () => Promise<void>;
+  cleanup?: (scratch: string) => Promise<void>;
   git?: typeof git;
   evidence?: Map<string, string | null>;
   materializeFailure?: Error;
   useDefaultVerifier?: boolean;
   now?: () => string;
+  platformServices?: PlatformServices;
 } = {}): FinalBranchReviewer {
   let materializationIndex = 0;
   return new FinalBranchReviewer({
@@ -502,15 +510,20 @@ function finalReviewerFor(f: FixtureCore, overrides: {
     artifactStore: () => ({ writeLog: async name => `logs/${name}.log` }),
     evidenceStore: inMemoryEvidenceStore(overrides.evidence, archivedRefsForFixture(f)),
     taskEvidenceValidator: async () => {},
+    ...(overrides.platformServices === undefined
+      ? {}
+      : { platformServices: overrides.platformServices }),
     materialize: async ({ headCommitOid }) => {
       if (overrides.materializeFailure !== undefined) throw overrides.materializeFailure;
       const scratch = path.join(f.root, `final-materialization-${materializationIndex++}`);
       await runGit(f.repo, ["worktree", "add", "--detach", scratch, headCommitOid]);
       return {
         path: scratch,
-        cleanup: overrides.cleanup ?? (async () => {
-          await runGit(f.repo, ["worktree", "remove", "--force", scratch]);
-        }),
+        cleanup: overrides.cleanup === undefined
+          ? async () => {
+            await runGit(f.repo, ["worktree", "remove", "--force", scratch]);
+          }
+          : async () => await overrides.cleanup!(scratch),
       };
     },
     now: overrides.now ?? (() => "2026-07-20T20:02:00.000Z"),
@@ -612,6 +625,168 @@ describe("FinalBranchReviewer cumulative artifact", () => {
       f.repo,
     )).toEqual(artifact);
     expect(verification).toHaveBeenCalledOnce();
+  });
+
+  it("holds the checkout lease through materialized-phase concluding revalidation", async () => {
+    const f = await fixture();
+    const artifact = await freezeForFinalReview(f, reviewerFor(f));
+    const branchManager = localBranchManager(f);
+    let held = false;
+    let cleaned = false;
+    let revalidationsAfterCleanup = 0;
+    vi.spyOn(branchManager, "revalidateUnderLock").mockImplementation(async (
+      _identity,
+      expectedHead,
+    ) => {
+      expect(held).toBe(true);
+      if (cleaned) revalidationsAfterCleanup += 1;
+      const head = await git(f.repo, ["rev-parse", "--verify", "HEAD^{commit}"]);
+      const status = await git(f.repo, ["status", "--porcelain=v1", "--untracked-files=all"]);
+      return head.exitCode === 0 && head.stdout.trim() === expectedHead && status.stdout === ""
+        ? { ok: true }
+        : { ok: false, classification: "head-changed" };
+    });
+    const repositoryIdentity = await realpath(await runGit(f.repo, [
+      "rev-parse", "--path-format=absolute", "--git-common-dir",
+    ]));
+    const platformServices = Object.create(getPlatformServices()) as PlatformServices;
+    platformServices.canonicalizePath = async input => ({
+      input,
+      canonical: await realpath(input),
+      gitCommonDir: repositoryIdentity,
+    });
+    platformServices.acquireCheckoutLock = async () => {
+      expect(held).toBe(false);
+      held = true;
+      return {
+        key: "final-review-lease",
+        repositoryIdentity,
+        async release() {
+          expect(held).toBe(true);
+          expect(cleaned).toBe(true);
+          held = false;
+        },
+      };
+    };
+    const phaseGit: typeof git = async (_cwd, args) => {
+      expect(held).toBe(true);
+      if (args[0] === "symbolic-ref") {
+        return { exitCode: 1, stdout: "", stderr: "" };
+      }
+      if (args.includes("HEAD^{commit}")) {
+        return { exitCode: 0, stdout: `${artifact.headCommitOid}\n`, stderr: "" };
+      }
+      if (args.includes("HEAD^{tree}")) {
+        return { exitCode: 0, stdout: `${artifact.headTreeOid}\n`, stderr: "" };
+      }
+      if (args[0] === "status") return { exitCode: 0, stdout: "", stderr: "" };
+      throw new Error(`unexpected phase git command: ${args.join(" ")}`);
+    };
+    const reviewer = new FinalBranchReviewer({
+      git: phaseGit,
+      branchManager,
+      workflowStore: () => f.store,
+      evidenceStore: inMemoryEvidenceStore(new Map(), archivedRefsForFixture(f)),
+      taskEvidenceValidator: async () => {},
+      platformServices,
+      materialize: async () => {
+        expect(held).toBe(true);
+        return {
+          path: path.join(f.root, "materialized"),
+          async cleanup() {
+            expect(held).toBe(true);
+            cleaned = true;
+          },
+        };
+      },
+    });
+    const runner = reviewer as unknown as {
+      runFreshMaterializedPhase<T>(
+        frozen: CumulativeBranchArtifact,
+        checkoutPath: string,
+        phase: string,
+        execute: (materializedPath: string) => Promise<T>,
+      ): Promise<T>;
+    };
+
+    await expect(runner.runFreshMaterializedPhase(
+      artifact,
+      f.repo,
+      "lease-lifetime",
+      async () => {
+        expect(held).toBe(true);
+        return "complete";
+      },
+    )).resolves.toBe("complete");
+    expect(held).toBe(false);
+    expect(revalidationsAfterCleanup).toBeGreaterThan(0);
+
+    cleaned = false;
+    revalidationsAfterCleanup = 0;
+    const phaseFailure = new Error("simulated materialized phase failure");
+    await expect(runner.runFreshMaterializedPhase(
+      artifact,
+      f.repo,
+      "lease-lifetime-failure",
+      async () => {
+        expect(held).toBe(true);
+        throw phaseFailure;
+      },
+    )).rejects.toBe(phaseFailure);
+    expect(held).toBe(false);
+    expect(revalidationsAfterCleanup).toBeGreaterThan(0);
+  });
+
+  it("keeps the real checkout lock contended through materialization cleanup", async () => {
+    const f = await fixture();
+    const artifact = await freezeForFinalReview(f, reviewerFor(f));
+    const platformServices = getPlatformServices();
+    let contender: Promise<Awaited<ReturnType<PlatformServices["acquireCheckoutLock"]>>> | null = null;
+    let contenderAcquired = false;
+    let phaseSettled = false;
+    const scratch = path.join(f.root, "real-lock-materialization");
+    const reviewer = new FinalBranchReviewer({
+      branchManager: localBranchManager(f),
+      workflowStore: () => f.store,
+      evidenceStore: inMemoryEvidenceStore(new Map(), archivedRefsForFixture(f)),
+      taskEvidenceValidator: async () => {},
+      platformServices,
+      materialize: async ({ headCommitOid }) => {
+        await runGit(f.repo, ["worktree", "add", "--detach", scratch, headCommitOid]);
+        return {
+          path: scratch,
+          async cleanup() {
+            contender = platformServices.acquireCheckoutLock(f.repo).then(lock => {
+              if (!phaseSettled) contenderAcquired = true;
+              return lock;
+            });
+            await runGit(f.repo, ["worktree", "remove", "--force", scratch]);
+            await new Promise(resolve => setTimeout(resolve, 100));
+            expect(contenderAcquired).toBe(false);
+          },
+        };
+      },
+    });
+    const runner = reviewer as unknown as {
+      runFreshMaterializedPhase<T>(
+        frozen: CumulativeBranchArtifact,
+        checkoutPath: string,
+        phase: string,
+        execute: (materializedPath: string) => Promise<T>,
+      ): Promise<T>;
+    };
+
+    const phase = runner.runFreshMaterializedPhase(
+      artifact,
+      f.repo,
+      "real-lock-lifetime",
+      async () => "complete",
+    ).finally(() => { phaseSettled = true; });
+    await expect(phase).resolves.toBe("complete");
+    expect(contender).not.toBeNull();
+    const contenderLock = await contender!;
+    expect(contenderAcquired).toBe(false);
+    await contenderLock.release();
   });
 
   it("keeps the artifact hash stable across reordered and duplicate evidence refs", async () => {
@@ -761,6 +936,29 @@ describe("FinalBranchReviewer cumulative artifact", () => {
         expectedRevision: finalState.revision,
         taskEvidence: [evidence],
       });
+      const materializedRunner = reviewer as unknown as {
+        runFreshMaterializedPhase<T>(
+          frozen: CumulativeBranchArtifact,
+          checkoutPath: string,
+          phase: string,
+          execute: (materializedPath: string) => Promise<T>,
+        ): Promise<T>;
+      };
+      await expect(materializedRunner.runFreshMaterializedPhase(
+        artifact,
+        branch.worktreePath,
+        "real-manager-borrowed-lock",
+        async materializedPath => {
+          const workflowHash = createHash("sha256").update(workflowId).digest("hex");
+          expect(path.basename(materializedPath))
+            .toBe(`workflow-${workflowHash.slice(0, 32)}-final`);
+          await expect(workflowWorktreeOwnershipClaim(
+            path.join(stateDirectory, "autopilot-branches", `${workflowHash}.json`),
+            materializedPath,
+          )).resolves.toMatchObject({ workflowId });
+          return true;
+        },
+      )).resolves.toBe(true);
 
       await writeFile(path.join(branch.worktreePath, "drift.txt"), "unreviewed bytes\n");
       await runGit(branch.worktreePath, ["add", "drift.txt"]);
@@ -1003,6 +1201,57 @@ describe("FinalBranchReviewer cumulative artifact", () => {
 });
 
 describe("FinalBranchReviewer strict final gate", () => {
+  it("holds one checkout lease across every final-review phase and publication", async () => {
+    const f = await fixture();
+    const selected = getPlatformServices();
+    const platformServices = Object.create(selected) as PlatformServices;
+    let acquisitions = 0;
+    let releases = 0;
+    let held = false;
+    platformServices.acquireCheckoutLock = async checkoutPath => {
+      acquisitions += 1;
+      if (held) throw new Error("nested checkout lease acquisition");
+      const acquired = await selected.acquireCheckoutLock(checkoutPath);
+      held = true;
+      return {
+        key: acquired.key,
+        repositoryIdentity: acquired.repositoryIdentity,
+        async release() {
+          expect(held).toBe(true);
+          await acquired.release();
+          held = false;
+          releases += 1;
+        },
+      };
+    };
+    const phaseLeaseObservations: boolean[] = [];
+    const reviewer = finalReviewerFor(f, {
+      platformServices,
+      verify: async () => {
+        phaseLeaseObservations.push(held);
+        return passingVerification();
+      },
+      roleRunner: async args => {
+        phaseLeaseObservations.push(held);
+        return await approvingRoleRunner(args);
+      },
+    });
+    const artifact = await freezeForFinalReview(f, reviewer);
+
+    await reviewer.runFinalReview({
+      artifact,
+      autopilotSpec: finalSpec(),
+      checkoutPath: f.repo,
+    });
+
+    expect(phaseLeaseObservations).toEqual([true, true, true, true]);
+    expect({ acquisitions, releases, held }).toEqual({
+      acquisitions: 1,
+      releases: 1,
+      held: false,
+    });
+  });
+
   it("gives every final role the complete cumulative evidence package and no conversation channel", async () => {
     const f = await cumulativeFixture();
     const calls: RoleRunArgs[] = [];
@@ -1479,6 +1728,41 @@ describe("FinalBranchReviewer strict final gate", () => {
 
     expect(report.eligible).toBe(false);
     expect(report.reasons.some(reason => reason.includes("cleanup failed"))).toBe(true);
+  });
+
+  it("does not rematerialize while failed cleanup evidence remains pending", async () => {
+    const f = await fixture();
+    const previousPluginData = process.env.CLAUDE_PLUGIN_DATA;
+    process.env.CLAUDE_PLUGIN_DATA = path.join(f.root, "mutation-state");
+    let cleanupCalls = 0;
+    const roleRunner = vi.fn(approvingRoleRunner);
+    const reviewer = finalReviewerFor(f, {
+      roleRunner,
+      cleanup: async scratch => {
+        cleanupCalls += 1;
+        await runGit(f.repo, ["worktree", "remove", "--force", scratch]);
+        const removalRoot = path.join(process.env.CLAUDE_PLUGIN_DATA!, "worktree-removals");
+        await mkdir(removalRoot, { mode: 0o700, recursive: true });
+        await writeFile(path.join(removalRoot, "ambiguous-cleanup-residue"), "pending\n");
+        throw new Error("fixture cleanup publication failed");
+      },
+    });
+    const artifact = await freezeForFinalReview(f, reviewer);
+
+    try {
+      const report = await reviewer.runFinalReview({
+        artifact,
+        autopilotSpec: finalSpec(),
+        checkoutPath: f.repo,
+      });
+
+      expect(report.eligible).toBe(false);
+      expect(cleanupCalls).toBe(1);
+      expect(roleRunner).not.toHaveBeenCalled();
+    } finally {
+      if (previousPluginData === undefined) delete process.env.CLAUDE_PLUGIN_DATA;
+      else process.env.CLAUDE_PLUGIN_DATA = previousPluginData;
+    }
   });
 
   it("rejects an atomic final-report publication collision", async () => {

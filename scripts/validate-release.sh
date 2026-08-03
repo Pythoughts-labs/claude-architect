@@ -39,10 +39,17 @@ for vendored_skill in \
   fi
 done
 
-if [[ ! -s native/bin/win32-job-kill-x64.exe ]]; then
-  printf 'ERROR: missing or empty native helper native/bin/win32-job-kill-x64.exe.\n' >&2
-  exit 1
-fi
+for native_helper in \
+  native/bin/win32-job-kill-x64.exe \
+  native/bin/win32-job-kill-arm64.exe \
+  native/bin/win32-filesystem-x64.exe \
+  native/bin/win32-filesystem-arm64.exe; do
+  if [[ ! -s "$native_helper" ]]; then
+    printf 'ERROR: missing or empty native helper %s.\n' "$native_helper" >&2
+    exit 1
+  fi
+done
+node scripts/verify-native-helpers.mjs
 
 PLUGIN_VERSION=$(node -p 'JSON.parse(require("node:fs").readFileSync(".claude-plugin/plugin.json", "utf8")).version')
 MARKETPLACE_VERSION=$(node -p 'JSON.parse(require("node:fs").readFileSync(".claude-plugin/marketplace.json", "utf8")).plugins[0].version')

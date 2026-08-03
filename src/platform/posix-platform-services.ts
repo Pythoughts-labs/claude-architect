@@ -6,6 +6,7 @@ import path from "node:path";
 import nodeProcess from "node:process";
 import { resolveStateDir } from "../runtime/state-dir.js";
 import { BoundedBuffer } from "../util/bounded-buffer.js";
+import { gitPathOutput } from "../git/git-output.js";
 import { RuntimeError } from "../util/errors.js";
 import { logger } from "../util/logger.js";
 import { lockOwnerStatus, parseLockOwner, type LockOwnerStatus } from "./lock-owner.js";
@@ -197,7 +198,10 @@ async function gitCommonDir(cwd: string): Promise<string> {
   return new Promise((resolve, reject) => {
     execFile("git", ["rev-parse", "--path-format=absolute", "--git-common-dir"], { cwd }, (error, stdout) => {
       if (error) reject(error);
-      else resolve(stdout.trim());
+      else {
+        try { resolve(gitPathOutput(stdout, "Git common directory")); }
+        catch (parseError) { reject(parseError); }
+      }
     });
   });
 }
@@ -307,8 +311,11 @@ export class PosixPlatformServices implements PlatformServices {
     checkout: string,
     owner: LockOwnerAnnotation = {},
   ): Promise<CheckoutLock> {
-    const { canonical, gitCommonDir: commonDir } = await this.canonicalizePath(checkout);
-    const repositoryIdentity = commonDir ?? canonical;
+    const { gitCommonDir: commonDir } = await this.canonicalizePath(checkout);
+    if (commonDir === null) {
+      throw new RuntimeError("checkout Git common directory could not be resolved");
+    }
+    const repositoryIdentity = commonDir;
     const key = createHash("sha256").update(repositoryIdentity).digest("hex");
     const ownerToken = await this.getProcessStartToken(nodeProcess.pid);
     let lock;
@@ -329,6 +336,25 @@ export class PosixPlatformServices implements PlatformServices {
 
   async createSecureTempDirectory(): Promise<string> {
     return fs.mkdtemp(path.join(tmpdir(), "claude-architect-"));
+  }
+
+  async assertDirectoryWriteIntegrity(
+    directory: string,
+    expectedIdentity: { dev: bigint; ino: bigint; birthtimeNs: bigint },
+  ): Promise<void> {
+    const metadata = await fs.lstat(directory, { bigint: true });
+    const uid = nodeProcess.getuid?.();
+    if (!metadata.isDirectory()
+      || metadata.isSymbolicLink()
+      || metadata.dev !== expectedIdentity.dev
+      || metadata.ino !== expectedIdentity.ino
+      || metadata.birthtimeNs <= 0n
+      || metadata.birthtimeNs !== expectedIdentity.birthtimeNs
+      || uid === undefined
+      || metadata.uid !== BigInt(uid)
+      || (metadata.mode & 0o022n) !== 0n) {
+      throw new RuntimeError("directory lacks stable write integrity");
+    }
   }
 
   async canonicalizePath(input: string): Promise<CanonicalPath> {

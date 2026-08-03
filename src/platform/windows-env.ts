@@ -10,3 +10,14 @@ export function normalizeWindowsEnv(env: Record<string, string | undefined>): Re
   }
   return Object.fromEntries([...byLower.values()].map(e => [e.name, e.value]));
 }
+
+export function windowsEssentialEnvironment(
+  env: Record<string, string | undefined> = process.env,
+): Record<string, string> {
+  const normalized = normalizeWindowsEnv(env);
+  return Object.fromEntries(
+    [...CANONICAL.values()]
+      .filter(name => normalized[name] !== undefined)
+      .map(name => [name, normalized[name]!]),
+  );
+}

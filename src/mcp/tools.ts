@@ -50,6 +50,7 @@ import {
   type ReviewSnapshot,
 } from "../runtime/review-snapshot.js";
 import type { RunManifest } from "../runtime/run-manifest.js";
+import { guardWorktreeMutations } from "../runtime/worktree-mutation-gate.js";
 import { redact } from "../runtime/redaction.js";
 import { NestedDelegationError, RuntimeError } from "../util/errors.js";
 import { logger } from "../util/logger.js";
@@ -473,10 +474,11 @@ async function withCurrentArchivedRun<T>(
   preserveResultOnReleaseFailure?: (result: T) => T,
 ): Promise<T> {
   const ps = services(deps);
+  const lockingServices = guardWorktreeMutations(ps);
   const canonical = await ps.canonicalizePath(checkoutPath);
   const callerKey = canonical.gitCommonDir ?? canonical.canonical;
   return withRepoLock(callerKey, async () => {
-    const lock = await ps.acquireCheckoutLock(canonical.canonical, { runId });
+    const lock = await lockingServices.acquireCheckoutLock(canonical.canonical, { runId });
     let action: { ok: true; result: T } | { ok: false; error: unknown };
     try {
       if (lock.repositoryIdentity !== callerKey) {

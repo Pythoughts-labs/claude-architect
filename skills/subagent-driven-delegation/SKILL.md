@@ -54,7 +54,7 @@ Two upstream assumptions do not survive the trust boundary, and the table above 
 
 ## Setup
 
-1. **Isolated workspace.** Delegation already isolates each attempt, but the *branch* still needs a home. Use `superpowers:using-git-worktrees`, or confirm the current branch is not `main`/`master` without the user's explicit consent.
+1. **Isolated workspace.** Delegation already isolates each attempt, but the *branch* still needs a home. Use `superpowers:using-git-worktrees`, or confirm the current branch is not `main`/`master` without the user's explicit consent. This is the architect-owned integration workspace only: pass it as `checkoutPath`, but never dispatch a generic implementer to edit it. The runtime gives every implementation or repair attempt fresh context in its own isolated worktree. A repository delivery gate may later create another managed worktree; never reuse or expose one layer's worktree as another layer's workspace.
 2. **Clean checkout.** Delegation and controlled integration require an exact clean checkout: commit or stash tracked changes first, including tracked planning files such as `tasks/todo.md`. Git-ignored planning files are fine. Never use skip-worktree or assume-unchanged as a workaround.
 3. **Workspace and ledger.** When Superpowers is installed, run its `scripts/sdd-workspace PLAN_FILE` and use the directory it prints. Otherwise use `<repo-root>/.claude-architect/sdd/<plan-basename>/`. Create `progress.md` whose first line is `# SDD ledger — plan: <plan file path>`. A ledger naming a different plan belongs to that plan: leave it alone and start your own.
 4. **Resume, don't redo.** A task with a `Task <N>: complete` line is done. Re-dispatching completed tasks is the most expensive recoverable failure in this loop, and delegation makes it costly in Producer time as well. Trust the ledger and `git log` over your own recollection.
@@ -122,7 +122,10 @@ After the last task, review the **whole candidate branch and the cumulative atte
 
 If it returns findings, handle them as one fix wave — a single revised delegation carrying the complete findings list, not one delegation per finding — then exactly one scoped re-review. Residual findings are adjudicated as at the breaker.
 
-When the final review is clean and integrated, delete this plan's workspace; git history is the record. Then use `superpowers:finishing-a-development-branch`.
+When the final review is clean and integrated, inspect the repository instructions before deleting the plan workspace or invoking a finishing skill:
+
+- If the repository defines a delivery gate, that gate supersedes `superpowers:finishing-a-development-branch`. Require the final branch to be committed and clean, obtain whatever launch authorization the repository requires, and start the gate only from the architect session after every delegation run is terminal. Do not merge or push directly, and do not let a Producer, reviewer, or active delegation start the gate. Preserve the plan workspace and branch home while the gate owns the branch; clean them up only when the gate's live state and branch-custody instructions permit it.
+- If the repository defines no delivery gate, delete this plan's workspace; git history is the record. Then use `superpowers:finishing-a-development-branch`.
 
 ## Rationalizations
 

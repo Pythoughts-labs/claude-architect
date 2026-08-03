@@ -1,6 +1,7 @@
 import path from "node:path";
 import { git, type GitExecOptions, type GitResult } from "../git/git-exec.js";
-import { WorktreeManager } from "../git/worktree-manager.js";
+import { WorktreeManager } from "../runtime/worktree-manager.js";
+import { guardWorktreeMutations } from "../runtime/worktree-mutation-gate.js";
 import type { CheckoutLock, PlatformServices } from "../platform/platform-services.js";
 import { getPlatformServices } from "../platform/select-platform.js";
 import type {
@@ -898,6 +899,9 @@ async function runSliceReview(args: {
       args.checkoutPath,
       `${args.runId}-${args.namespace}-review`,
       ps,
+      args.deps.borrowedCheckoutLease === undefined
+        ? {}
+        : { borrowedCheckoutLease: args.deps.borrowedCheckoutLease },
     ),
     commit: args.candidateCommit,
     cleanupFailureMessage: "slice review failed and its worktree could not be cleaned up",
@@ -1140,6 +1144,9 @@ export async function verifyCandidate(args: {
     args.checkoutPath,
     `${args.attempt.runId}-${namespace}verify`,
     ps,
+    args.deps.borrowedCheckoutLease === undefined
+      ? {}
+      : { borrowedCheckoutLease: args.deps.borrowedCheckoutLease },
   );
   const fresh = await manager.create(args.candidateCommit);
   try {
@@ -1189,6 +1196,9 @@ export async function verifyCandidate(args: {
       spec: args.spec,
       ps,
       artifactStore: args.store,
+      ...(args.deps.borrowedCheckoutLease === undefined
+        ? {}
+        : { borrowedCheckoutLease: args.deps.borrowedCheckoutLease }),
       verificationId: () => `${args.attempt.runId}-${namespace}pipeline`,
       logNamePrefix: `${namespace}pipeline-verification`,
     });
@@ -1253,16 +1263,21 @@ export async function runPipeline(
   spec: DelegationSpec,
   deps: PipelineDependencies,
 ): Promise<PipelineResult> {
-  const ps = deps.ps ?? getPlatformServices();
+  const ps = guardWorktreeMutations(deps.ps ?? getPlatformServices());
   const canonical = await ps.canonicalizePath(checkoutPath);
   const lock = await ps.acquireCheckoutLock(canonical.canonical);
+  const guardedDependencies: PipelineDependencies = {
+    ...deps,
+    ps,
+    borrowedCheckoutLease: lock,
+  };
   let primaryError: unknown;
   let hasPrimaryError = false;
   try {
     const result = await runPipelineWithLease(
       checkoutPath,
       spec,
-      deps,
+      guardedDependencies,
       ps,
       lock,
     );
@@ -1687,6 +1702,9 @@ async function runPipelineWithLease(
                 checkoutPath,
                 `${attempt.runId}-${namespace}`,
                 ps,
+                deps.borrowedCheckoutLease === undefined
+                  ? {}
+                  : { borrowedCheckoutLease: deps.borrowedCheckoutLease },
               ),
               commit: base,
               cleanupFailureMessage:
@@ -1965,6 +1983,9 @@ async function runPipelineWithLease(
       checkoutPath,
       slices.length === 0 ? `${attempt.runId}-pipeline` : `${attempt.runId}-composed-review`,
       ps,
+      deps.borrowedCheckoutLease === undefined
+        ? {}
+        : { borrowedCheckoutLease: deps.borrowedCheckoutLease },
     ).create(currentCandidateCommit);
     let gitObjectAccess: LinkedWorktreeGitAccess | null = null;
     try {

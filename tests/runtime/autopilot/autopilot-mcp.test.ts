@@ -187,6 +187,40 @@ describe("autopilot MCP surface", () => {
       .not.toBe(true);
   });
 
+  it("does not let an unrelated startup sweep issue block another repository", async () => {
+    await client.close();
+    await server.close();
+    server = await createServer({
+      recoverStaleRuns: async () => ({
+        recovered: [],
+        quarantined: [],
+        worktreeSweepIssues: [{ worktreePath: "/redacted", reason: "ambiguous removal" }],
+      }),
+      pruneRuns: async () => {},
+      autopilotControllerFactory: () => ({ start, status, resume }),
+    });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    await server.connect(serverTransport);
+    client = new Client(
+      { name: "autopilot-mcp-ambiguity-test", version: "1.0.0" },
+      { capabilities: {} },
+    );
+    await client.connect(clientTransport);
+
+    const observed = await client.callTool({
+      name: "autopilotStatus",
+      arguments: { checkoutPath: CHECKOUT, workflowId: WORKFLOW_ID, protocolVersion: PROTOCOL_VERSION },
+    });
+    const resumed = await client.callTool({
+      name: "autopilotResume",
+      arguments: { checkoutPath: CHECKOUT, workflowId: WORKFLOW_ID, protocolVersion: PROTOCOL_VERSION },
+    });
+
+    expect(structured(observed)).toMatchObject({ ok: true });
+    expect(structured(resumed)).toMatchObject({ ok: true });
+    expect(resume).toHaveBeenCalledOnce();
+  });
+
   it("passes validated start, status, and resume inputs through", async () => {
     const started = await client.callTool({
       name: "autopilotStart",

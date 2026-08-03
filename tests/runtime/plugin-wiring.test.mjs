@@ -113,6 +113,26 @@ describe("P0-A plugin wiring", () => {
       /Call `delegate`[^.\n]*`expectedSpecSha256`[^.\n]*runtime-returned/u,
       "direct dispatch must bind the spec to the trusted runtime digest",
     );
+    assert.match(
+      skill,
+      /two-call MCP preflight[^.]*`validateDelegationSpec`[^.]*starts no Producer[^.]*exactly one `delegate` or `delegatePipeline`/u,
+      "skill must distinguish two MCP calls from two execution attempts",
+    );
+    assert.match(
+      skill,
+      /count is MCP calls, not Producer attempts/u,
+      "skill must explain Claude Code's grouped runtime call count",
+    );
+    assert.match(
+      skill,
+      /plain `delegate` execution run starts exactly one Producer attempt[^.]*`delegatePipeline` run may start multiple fresh Producers/u,
+      "skill must not describe a multi-role pipeline as one Producer attempt",
+    );
+    assert.match(
+      skill,
+      /execution call is pending[^.]*never invoke `delegate` or `delegatePipeline` again/u,
+      "skill must prohibit duplicate dispatch while the original attempt is active",
+    );
     assert.doesNotMatch(
       skill,
       /hash you computed/u,
@@ -172,6 +192,11 @@ describe("P0-A plugin wiring", () => {
         `${securityDoc} must distinguish ordinary caller control from trusted-host compromise`,
       );
     }
+    const contributing = read("CONTRIBUTING.md");
+    assert.match(contributing, /configured decision authority/u,
+      "contributor guidance must match the executable acceptance authority");
+    assert.doesNotMatch(contributing, /only the human may accept a candidate/u,
+      "contributor guidance must not restore unconditional human acceptance");
     // An absence gate whose pattern is an English phrase also matches comments,
     // so a Producer documenting why it avoided the pattern fails a check its
     // code satisfies. Observed live; the rule must stay in the authoring guide.
@@ -309,6 +334,14 @@ test("subagent-driven-delegation skill keeps the trust invariants that upstream 
   assert.match(sdd, /Gate before the next task/u,
     "SDD skill must gate the next task on a clean checkout after integration");
   assert.match(sdd, /confirm `git status` is clean/u);
+  assert.match(sdd, /architect-owned integration workspace/u,
+    "SDD must distinguish the branch home from runtime-owned attempt worktrees");
+  assert.match(sdd, /delivery gate[^.]*supersedes `superpowers:finishing-a-development-branch`/u,
+    "repository delivery policy must override the generic direct merge/push menu");
+  assert.match(sdd, /Preserve the plan workspace and branch home while the gate owns the branch/u,
+    "SDD must not clean up state still under delivery-gate custody");
+  assert.doesNotMatch(sdd, /no-mistakes/iu,
+    "the shipped SDD skill must remain generic rather than require a third-party gate");
   // The skill claims to be the native Superpowers SDD surface, so every skill
   // the methodology names must have a stated realization, not just SDD itself.
   for (const upstream of [
@@ -327,6 +360,20 @@ test("subagent-driven-delegation skill keeps the trust invariants that upstream 
   const delegate = read("skills/delegate/SKILL.md");
   assert.match(delegate, /\/claude-architect:subagent-driven-delegation/u,
     "delegate skill must point at the SDD skill for multi-task plans");
+});
+
+test("project policy composes Superpowers SDD with exclusive delivery controllers", () => {
+  const guide = read("AGENTS.md");
+  assert.match(guide, /Superpowers-authored multi-task plan[^.]*\/claude-architect:subagent-driven-delegation/u,
+    "project plans must route writing tasks through verified delegation");
+  assert.match(guide, /manual SDD[^.]*bare `\/no-mistakes` validate-only mode/u,
+    "manual SDD must hand a final committed branch to No Mistakes validate-only mode");
+  assert.match(guide, /Autopilot is a separate trusted delivery controller/u,
+    "Autopilot must remain distinct from the No Mistakes delivery path");
+  assert.match(guide, /Never start or stack No Mistakes while Autopilot is active/u,
+    "project policy must prohibit No Mistakes inside Autopilot custody");
+  assert.match(guide, /Never start Autopilot while No Mistakes is active/u,
+    "project policy must prohibit Autopilot inside No Mistakes custody");
 });
 
 test("codex skill ships the direct CLI lane without obscuring its trust boundary", () => {
@@ -431,6 +478,20 @@ test("CI exercises the supported macOS 15, Ubuntu, and Windows runners", () => {
   assert.match(workflow, /node-version:\s*22/u);
   assert.match(workflow, /actions\/upload-artifact@v7/u);
   assert.match(workflow, /win32-job-kill-x64\.exe/u);
+  assert.match(workflow, /setup-zig@v2[^]*version: 0\.15\.2/u,
+    "Windows CI must use the pinned compiler that produced the shipped helper");
+  assert.match(workflow, /win32-filesystem-x64-reviewed\.exe[^]*fc \/b/u,
+    "Windows x64 CI must byte-compare rebuilt and reviewed helper binaries");
+  assert.match(workflow, /win32-filesystem-arm64-reviewed\.exe[^]*fc \/b/u,
+    "Windows ARM64 CI must byte-compare rebuilt and reviewed filesystem helpers");
+  assert.match(workflow, /win32-job-kill-arm64-reviewed\.exe[^]*fc \/b/u,
+    "Windows ARM64 CI must byte-compare rebuilt and reviewed process helpers");
+  assert.match(workflow, /windows-11-arm/u,
+    "Windows ARM64 CI must exercise the shipped arm64 filesystem helper");
+  assert.match(workflow, /verify-native-helpers\.mjs/u,
+    "CI must verify committed native helper hashes before compiling sources");
+  assert.match(workflow, /windows-arm64-filesystem[^]*windows-job-kill\.test\.ts[^]*worktree-manager\.test\.ts[^]*recovery-manager\.test\.ts/u,
+    "Windows ARM64 CI must exercise process trees, worktree removal, and startup recovery");
 });
 
 test("delegation-lane agent ships the produce-only courier contract", () => {

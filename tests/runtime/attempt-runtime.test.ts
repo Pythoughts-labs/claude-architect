@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { git } from "../../src/git/git-exec.js";
-import { WorktreeManager } from "../../src/git/worktree-manager.js";
+import { WorktreeManager } from "../../src/runtime/worktree-manager.js";
 import { ArtifactStore } from "../../src/runtime/artifact-store.js";
 import { verifyBaseline } from "../../src/verify/baseline-verifier.js";
 import type {

@@ -7,12 +7,23 @@ import {
 } from "../../src/platform/windows-platform-services.js";
 
 describe("canonicalizeForScope (pure, all OSes)", () => {
-  it("treats differently-cased paths inside the root as in scope", () => {
-    expect(canonicalizeForScope("C:\\Repo\\SRC\\a.ts", "c:\\repo")).toBe(true);
+  it("fails closed for case-distinct paths on case-sensitive Windows directories", () => {
+    expect(canonicalizeForScope("C:\\Repo\\SRC\\a.ts", "c:\\repo")).toBe(false);
   });
 
-  it("treats the root itself as in scope", () => {
-    expect(canonicalizeForScope("C:\\Repo", "c:\\repo\\")).toBe(true);
+  it("normalizes drive-letter case without folding case-sensitive path components", () => {
+    expect(canonicalizeForScope("C:\\Repo\\src", "c:\\Repo")).toBe(true);
+  });
+
+  it("normalizes extended-length UNC roots", () => {
+    expect(canonicalizeForScope(
+      "\\\\?\\UNC\\server\\share\\Repo\\src",
+      "\\\\server\\share\\Repo",
+    )).toBe(true);
+  });
+
+  it("treats the exactly-cased root itself as in scope", () => {
+    expect(canonicalizeForScope("C:\\Repo", "C:\\Repo\\")).toBe(true);
   });
 
   it("rejects paths outside the root", () => {
@@ -23,9 +34,9 @@ describe("canonicalizeForScope (pure, all OSes)", () => {
     expect(canonicalizeForScope("C:\\Repo2\\a.ts", "c:\\repo")).toBe(false);
   });
 
-  it("supports reciprocal checks for normalized case-insensitive path identity", () => {
+  it("supports reciprocal checks for exactly-cased normalized path identity", () => {
     const sameLeft = "C:\\Repo\\SRC\\a.ts";
-    const sameRight = "c:\\repo\\src\\a.ts";
+    const sameRight = "C:\\Repo\\SRC\\a.ts";
     expect(canonicalizeForScope(sameLeft, sameRight)
       && canonicalizeForScope(sameRight, sameLeft)).toBe(true);
 
@@ -46,6 +57,18 @@ describe("acquireWxFileLock (shared, all OSes)", () => {
 });
 
 describe("WindowsPlatformServices checkout lock contract", () => {
+  it("refuses a checkout lock when the Git common directory is ambiguous", async () => {
+    const ps = Object.assign(new WindowsPlatformServices(), {
+      async canonicalizePath(input: string) {
+        return { input, canonical: "C:\\repo", gitCommonDir: null };
+      },
+    });
+
+    await expect(ps.acquireCheckoutLock("C:\\repo")).rejects.toThrow(
+      "checkout Git common directory could not be resolved",
+    );
+  });
+
   it("returns the canonical repository identity used to derive its lock key", async () => {
     const repositoryIdentity = `C:\\repo\\.git-${randomUUID()}`;
     const ps = Object.assign(new WindowsPlatformServices(), {

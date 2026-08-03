@@ -1,6 +1,7 @@
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { git as runGit } from "../git/git-exec.js";
+import { gitNulRecords } from "../git/git-output.js";
 import type { DelegationSpec } from "../protocol/delegation-spec.js";
 import { globMatches } from "../util/glob.js";
 
@@ -79,7 +80,7 @@ export async function checkAllowlistSufficiency(
   const listed = await (deps.git ?? runGit)(repoRoot, ["ls-files", "-z"]);
   if (listed.exitCode !== 0) return { allowlisted: 0, gaps: [], omitted: 0 };
   const tracked = new Set(
-    listed.stdout.split("\0").map(entry => entry.trim()).filter(entry => entry.length > 0),
+    gitNulRecords(listed.stdout, "Git tracked-file list").filter(entry => entry.length > 0),
   );
 
   const inScope = (candidate: string): boolean =>

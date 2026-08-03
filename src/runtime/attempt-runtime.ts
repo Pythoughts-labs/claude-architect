@@ -3,7 +3,8 @@ import { rm } from "node:fs/promises";
 import { freezeCandidate } from "../git/candidate-tree.js";
 import { git } from "../git/git-exec.js";
 import { checkPreconditions } from "../git/repo-preconditions.js";
-import { WorktreeManager } from "../git/worktree-manager.js";
+import { WorktreeManager } from "./worktree-manager.js";
+import { guardWorktreeMutations } from "./worktree-mutation-gate.js";
 import type {
   CheckoutLock,
   PlatformServices,
@@ -111,6 +112,7 @@ export interface AcceptanceVerificationArgs {
   spec: DelegationSpec;
   ps: PlatformServices;
   artifactStore: ArtifactStore;
+  borrowedCheckoutLease?: CheckoutLock;
 }
 
 export interface AcceptanceVerifierLike {
@@ -363,7 +365,7 @@ export async function runAttempt(
 ): Promise<AttemptResult> {
   if (hasEnvironmentMarker(deps.env ?? process.env)) throw new NestedDelegationError();
 
-  const ps = deps.ps ?? getPlatformServices();
+  const ps = guardWorktreeMutations(deps.ps ?? getPlatformServices());
   const producerRegistry = deps.producerRegistry ?? registry;
   const now = deps.now ?? Date.now;
   const startedAtMs = now();
@@ -485,6 +487,7 @@ export async function runAttempt(
         ps,
         runId,
         store,
+        borrowedCheckoutLease: lock,
         ...(deps.abortSignal === undefined ? {} : { abortSignal: deps.abortSignal }),
       });
     } catch (error) {
@@ -586,9 +589,9 @@ export async function runAttempt(
     });
   }
 
-    worktree = await new WorktreeManager(canonical.canonical, runId, ps).create(
-      preconditions.baseCommitOid,
-    );
+    worktree = await new WorktreeManager(canonical.canonical, runId, ps, {
+      borrowedCheckoutLease: lock,
+    }).create(preconditions.baseCommitOid);
     const profile = adapter.configurationProfile();
     if (shouldUseTemporaryHome(profile)) tempHome = await ps.createSecureTempDirectory();
     let invocation = adapter.buildInvocation(spec, {
@@ -657,6 +660,7 @@ export async function runAttempt(
         runId,
         ps,
         tempHome,
+        borrowedCheckoutLease: lock,
         ...(deps.abortSignal === undefined ? {} : { abortSignal: deps.abortSignal }),
       });
       baselineEvidence = { ...baselineEvidence, producerPreflight: preflight };
@@ -770,6 +774,7 @@ export async function runAttempt(
             spec,
             ps,
             artifactStore: store,
+            borrowedCheckoutLease: lock,
           });
           commandOutcomes = verification.commandOutcomes;
           unresolvedIssues = verification.failures;

@@ -13,6 +13,7 @@ import {
 } from "node:fs/promises";
 import path from "node:path";
 import { git } from "../git/git-exec.js";
+import { gitPathOutput } from "../git/git-output.js";
 import { manifestHashOf } from "../git/changed-path-manifest.js";
 import type {
   AttemptResult,
@@ -48,6 +49,7 @@ import {
 } from "./run-manifest.js";
 import { resolveStateDir } from "./state-dir.js";
 import { getPlatformServices } from "../platform/select-platform.js";
+import { guardWorktreeMutations } from "./worktree-mutation-gate.js";
 import type { CheckoutLock, PlatformServices } from "../platform/platform-services.js";
 import {
   advisorReportHash,
@@ -1530,7 +1532,10 @@ export class ArtifactStore {
     }
     const repositoryTopLevel = await git(canonicalRepoRoot, ["rev-parse", "--show-toplevel"]);
     if (repositoryTopLevel.exitCode !== 0
-      || await realpath(repositoryTopLevel.stdout.trim()) !== canonicalRepoRoot) {
+      || await realpath(gitPathOutput(
+        repositoryTopLevel.stdout,
+        "candidate repository root",
+      )) !== canonicalRepoRoot) {
       throw new RuntimeError("archived repository root is not a canonical repository root");
     }
     const commit = await git(canonicalRepoRoot, [
@@ -1779,7 +1784,9 @@ export class ArtifactStore {
         // Serialize archive removal against the checkout lifecycle: hold the
         // repository's checkout lease so recovery/integration cannot race a
         // prune that is deleting the same candidate anchors.
-        const platformServices = dependencies.platformServices ?? getPlatformServices();
+        const platformServices = guardWorktreeMutations(
+          dependencies.platformServices ?? getPlatformServices(),
+        );
         let canonical;
         try {
           canonical = await platformServices.canonicalizePath(initialManifest.repoRoot);

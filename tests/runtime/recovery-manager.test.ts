@@ -17,7 +17,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { git } from "../../src/git/git-exec.js";
-import { WorktreeManager } from "../../src/git/worktree-manager.js";
+import { WorktreeManager } from "../../src/runtime/worktree-manager.js";
 import { start } from "../../src/mcp/server.js";
 import { CLEANUP_JOURNAL_LOCK_KEY } from "../../src/platform/posix-platform-services.js";
 import { ArtifactStore } from "../../src/runtime/artifact-store.js";
@@ -286,7 +286,14 @@ describe("recoverStaleRuns", () => {
         async terminateProcessTreeByPid() {},
       },
       isProcessAlive: pid => pid === owner.pid,
-    })).resolves.toEqual({ recovered: [], quarantined: [] });
+    })).resolves.toEqual({
+      recovered: [],
+      quarantined: [],
+      worktreeSweepIssues: [{
+        worktreePath: await realpath(recoveryLockPath),
+        reason: expect.stringContaining("recovery lease"),
+      }],
+    });
 
     await expect(store.readResult(runId)).resolves.toBeNull();
     await expect(access(worktree.path)).resolves.toBeUndefined();
@@ -323,7 +330,14 @@ describe("recoverStaleRuns", () => {
         async terminateProcessTreeByPid() {},
       },
       isProcessAlive: pid => pid === owner.pid,
-    })).resolves.toEqual({ recovered: [], quarantined: [] });
+    })).resolves.toEqual({
+      recovered: [],
+      quarantined: [],
+      worktreeSweepIssues: [{
+        worktreePath: await realpath(recoveryLockPath),
+        reason: expect.stringContaining("recovery lease"),
+      }],
+    });
 
     expect(tokenProbes).toEqual([owner.pid]);
     await expect(readFile(recoveryLockPath)).resolves.toEqual(lockBytes);
@@ -349,17 +363,16 @@ describe("recoverStaleRuns", () => {
         platformServices: {
           os: "darwin",
           async getProcessStartToken(pid) {
-            return pid === 4242 ? "darwin:live" : "darwin:self";
+            return pid === 4242 ? "darwin:replacement" : "darwin:self";
           },
           async terminateProcessTreeByPid() {},
         },
         isProcessAlive: () => true,
-        async requestCooperativeTermination() {
+        async git() {
           await rm(locksRoot, { recursive: true });
           await writeFile(locksRoot, "blocks lock release");
           throw primaryError;
         },
-        graceMs: 0,
       });
     } catch (error) {
       thrown = error;
@@ -429,7 +442,14 @@ describe("recoverStaleRuns", () => {
         async terminateProcessTreeByPid() {},
       },
       isProcessAlive: () => false,
-    })).resolves.toEqual({ recovered: [], quarantined: [] });
+    })).resolves.toEqual({
+      recovered: [],
+      quarantined: [],
+      worktreeSweepIssues: [{
+        worktreePath: await realpath(recoveryLockPath),
+        reason: expect.stringContaining("recovery lease"),
+      }],
+    });
 
     await expect(readFile(recoveryLockPath)).resolves.toEqual(lockBytes);
     await expect(readFile(aliasPath)).resolves.toEqual(lockBytes);
@@ -1045,22 +1065,15 @@ describe("recoverStaleRuns", () => {
       isProcessAlive: probedPid => probedPid === pid,
       requestCooperativeTermination: cooperative,
       async delayMs() {},
-    })).resolves.toEqual({ recovered: [runId], quarantined: [] });
+    })).resolves.toEqual({ recovered: [], quarantined: [] });
 
     expect(cooperative).not.toHaveBeenCalled();
     expect(forced).not.toHaveBeenCalled();
     expect(tokenProbes).not.toContain(pid);
-    await expectMissing(worktree.path);
+    await expect(lstat(worktree.path)).resolves.toBeDefined();
     expect((await git(repo.directory, ["rev-parse", "--verify", "--quiet", anchorRef])).exitCode)
-      .not.toBe(0);
-    await expect(store.readResult(runId)).resolves.toMatchObject({
-      status: "cancelled",
-      evidence: {
-        recovery: "startup-stale-run",
-        originalStartedAt: "2026-07-14T12:00:00.000Z",
-        unverifiedLivePid: pid,
-      },
-    });
+      .toBe(0);
+    await expect(store.readResult(runId)).resolves.toBeNull();
   });
 
   it("preserves a checkout lock whose recorded owner pid is still alive", async () => {
@@ -1272,9 +1285,10 @@ describe("recoverStaleRuns", () => {
 
   it("restores a poisoned run and preserves both errors when quarantine persistence fails", async () => {
     const runId = "run-journal-failure";
-    const repo = await initRepo();
-    const store = await createUnfinishedRun(runId, repo.commonDir, 4242, "darwin:recorded");
+    const missingCommonDir = path.join(process.env.CLAUDE_PLUGIN_DATA!, "missing-common-dir");
+    const store = await createUnfinishedRun(runId, missingCommonDir, 4242, "darwin:recorded");
     const runsRoot = path.dirname(store.runDirectory);
+    let injected = false;
 
     let thrown: unknown;
     try {
@@ -1282,11 +1296,11 @@ describe("recoverStaleRuns", () => {
         platformServices: {
           os: "darwin",
           async getProcessStartToken(pid) {
-            if (pid === 4242) {
+            if (pid === 4242 && !injected) {
+              injected = true;
               await mkdir(path.join(runsRoot, "recovery-quarantine.ndjson"));
-              throw new Error("primary poison error");
             }
-            return "darwin:self";
+            return pid === 4242 ? "darwin:replacement" : "darwin:self";
           },
           async terminateProcessTreeByPid() {},
         },
@@ -1299,7 +1313,7 @@ describe("recoverStaleRuns", () => {
     expect(thrown).toBeInstanceOf(AggregateError);
     const errors = (thrown as AggregateError).errors as unknown[];
     expect(errors).toHaveLength(2);
-    expect(String(errors[0])).toContain("primary poison error");
+    expect(String(errors[0])).toMatch(/ENOENT|missing-common-dir/i);
     expect(String(errors[1])).toMatch(/EISDIR|regular file|incompatible/i);
     await expect(access(store.runDirectory)).resolves.toBeUndefined();
     await expectMissing(path.join(runsRoot, `.poisoned-${runId}`));
@@ -1307,13 +1321,14 @@ describe("recoverStaleRuns", () => {
 
   it("rejects a hard-linked quarantine journal without mutating its external alias", async () => {
     const runId = "run-hard-linked-journal";
-    const repo = await initRepo();
-    const store = await createUnfinishedRun(runId, repo.commonDir, 4242, "darwin:recorded");
+    const missingCommonDir = path.join(process.env.CLAUDE_PLUGIN_DATA!, "missing-common-dir");
+    const store = await createUnfinishedRun(runId, missingCommonDir, 4242, "darwin:recorded");
     const runsRoot = path.dirname(store.runDirectory);
     const externalPath = path.join(process.env.CLAUDE_PLUGIN_DATA!, "external-journal");
     const journalPath = path.join(runsRoot, "recovery-quarantine.ndjson");
     const externalBytes = "external bytes must remain unchanged\n";
     await writeFile(externalPath, externalBytes);
+    let injected = false;
 
     let thrown: unknown;
     try {
@@ -1321,11 +1336,11 @@ describe("recoverStaleRuns", () => {
         platformServices: {
           os: "darwin",
           async getProcessStartToken(pid) {
-            if (pid === 4242) {
+            if (pid === 4242 && !injected) {
+              injected = true;
               await link(externalPath, journalPath);
-              throw new Error("primary hard-link poison error");
             }
-            return "darwin:self";
+            return pid === 4242 ? "darwin:replacement" : "darwin:self";
           },
           async terminateProcessTreeByPid() {},
         },
@@ -1338,7 +1353,7 @@ describe("recoverStaleRuns", () => {
     expect(thrown).toBeInstanceOf(AggregateError);
     const errors = (thrown as AggregateError).errors as unknown[];
     expect(errors).toHaveLength(2);
-    expect(String(errors[0])).toContain("primary hard-link poison error");
+    expect(String(errors[0])).toMatch(/ENOENT|missing-common-dir/i);
     expect(String(errors[1])).toMatch(/recovery quarantine journal.*bounded regular file/i);
     await expect(readFile(externalPath, "utf8")).resolves.toBe(externalBytes);
     await expect(access(store.runDirectory)).resolves.toBeUndefined();
@@ -1365,6 +1380,7 @@ describe("recoverStaleRuns", () => {
       4242,
       "darwin:recorded",
     );
+    let injected = false;
 
     let thrown: unknown;
     try {
@@ -1372,11 +1388,11 @@ describe("recoverStaleRuns", () => {
         platformServices: {
           os: "darwin",
           async getProcessStartToken(pid) {
-            if (pid === 4242) {
+            if (pid === 4242 && !injected) {
+              injected = true;
               await link(journalPath, aliasPath);
-              throw new Error("second quarantine poison error");
             }
-            return "darwin:self";
+            return pid === 4242 ? "darwin:replacement" : "darwin:self";
           },
           async terminateProcessTreeByPid() {},
         },
@@ -1421,13 +1437,14 @@ describe("recoverStaleRuns", () => {
     skip,
   }) => {
     const runId = "run-symlinked-journal";
-    const repo = await initRepo();
-    const store = await createUnfinishedRun(runId, repo.commonDir, 4242, "darwin:recorded");
+    const missingCommonDir = path.join(process.env.CLAUDE_PLUGIN_DATA!, "missing-common-dir");
+    const store = await createUnfinishedRun(runId, missingCommonDir, 4242, "darwin:recorded");
     const runsRoot = path.dirname(store.runDirectory);
     const externalPath = path.join(process.env.CLAUDE_PLUGIN_DATA!, "external-target");
     const journalPath = path.join(runsRoot, "recovery-quarantine.ndjson");
     const externalBytes = "external target must remain unchanged\n";
     await writeFile(externalPath, externalBytes);
+    let injected = false;
 
     let thrown: unknown;
     try {
@@ -1435,7 +1452,8 @@ describe("recoverStaleRuns", () => {
         platformServices: {
           os: "darwin",
           async getProcessStartToken(pid) {
-            if (pid === 4242) {
+            if (pid === 4242 && !injected) {
+              injected = true;
               try {
                 await symlink(externalPath, journalPath, "file");
               } catch (error) {
@@ -1443,13 +1461,12 @@ describe("recoverStaleRuns", () => {
                   (error as NodeJS.ErrnoException).code ?? "",
                 )) {
                   skip();
-                  return "darwin:recorded";
+                } else {
+                  throw error;
                 }
-                throw error;
               }
-              throw new Error("primary symlink poison error");
             }
-            return "darwin:self";
+            return pid === 4242 ? "darwin:replacement" : "darwin:self";
           },
           async terminateProcessTreeByPid() {},
         },
@@ -1462,7 +1479,7 @@ describe("recoverStaleRuns", () => {
     expect(thrown).toBeInstanceOf(AggregateError);
     const errors = (thrown as AggregateError).errors as unknown[];
     expect(errors).toHaveLength(2);
-    expect(String(errors[0])).toContain("primary symlink poison error");
+    expect(String(errors[0])).toMatch(/ENOENT|missing-common-dir/i);
     expect(String(errors[1])).toMatch(/ELOOP|symbolic link|bounded regular file/i);
     await expect(readFile(externalPath, "utf8")).resolves.toBe(externalBytes);
     await expect(access(store.runDirectory)).resolves.toBeUndefined();
@@ -1594,12 +1611,12 @@ describe("recoverStaleRuns", () => {
       platformServices: {
         os: "darwin",
         async getProcessStartToken(pid) {
-          if (pid === 4242) throw new Error(`callback failed at ${rootedPath}`);
-          return "darwin:self";
+          return pid === 4242 ? "darwin:replacement" : "darwin:self";
         },
         async terminateProcessTreeByPid() {},
       },
       isProcessAlive: pid => pid === 4242,
+      async git() { throw new Error(`callback failed at ${rootedPath}`); },
     })).resolves.toEqual({ recovered: [], quarantined: [runId] });
 
     const journal = await readFile(
@@ -1613,91 +1630,94 @@ describe("recoverStaleRuns", () => {
     expect(diagnostic.reason).not.toContain(rootedPath);
   });
 
-  it("escalates a live matching orphan cooperatively and then forcibly", async () => {
+  it("preserves an unowned creation-like directory as ambiguous", async () => {
+    const stagingPath = path.join(
+      process.env.CLAUDE_PLUGIN_DATA!,
+      "worktrees",
+      ".create-run-unknown-00000000-0000-4000-8000-000000000099",
+    );
+    await mkdir(stagingPath, { recursive: true, mode: 0o700 });
+
+    await expect(recoverStaleRuns({ isProcessAlive: () => false })).resolves.toEqual({
+      recovered: [],
+      quarantined: [],
+      worktreeSweepIssues: [{
+        worktreePath: expect.stringContaining(path.basename(stagingPath)),
+        reason: expect.stringContaining("marker is missing"),
+      }],
+    });
+    await expect(access(stagingPath)).resolves.toBeUndefined();
+  });
+
+  it("recovers a stale registered worktree after the Producer deletes its .git marker", async () => {
     const repo = await initRepo();
-    const runId = "run-live-orphan-forced";
+    const runId = "run-stale-missing-marker";
+    await createUnfinishedRun(runId, repo.commonDir, 4241, "darwin:stale");
+    const pipelineWorktree = await new WorktreeManager(
+      repo.directory,
+      `${runId}-pipeline`,
+    ).create(repo.head);
+    await rm(path.join(pipelineWorktree.path, ".git"));
+
+    await expect(recoverStaleRuns({
+      platformServices: {
+        os: "darwin",
+        async getProcessStartToken() { return "darwin:recovery"; },
+        async terminateProcessTreeByPid() {},
+      },
+      isProcessAlive: () => false,
+    })).resolves.toEqual({ recovered: [runId], quarantined: [] });
+
+    await expectMissing(pipelineWorktree.path);
+    expect(await runGit(repo.directory, ["worktree", "list", "--porcelain"]))
+      .not.toContain(pipelineWorktree.path);
+  });
+
+  it("preserves an orphaned matching-token owner when its checkout lock is absent", async () => {
+    const repo = await initRepo();
+    const runId = "run-live-owner-matching";
     const store = await createUnfinishedRun(runId, repo.commonDir, 4242, "darwin:start");
     const pipelineWorktree = await new WorktreeManager(
       repo.directory,
       `${runId}-pipeline`,
     ).create(repo.head);
-    const events: string[] = [];
+    const terminate = vi.fn();
 
     await expect(recoverStaleRuns({
       platformServices: {
         os: "darwin",
-        async getProcessStartToken() { return "darwin:start"; },
-        async terminateProcessTreeByPid() { events.push("forced"); },
+        async getProcessStartToken(pid) {
+          return pid === 4242 ? "darwin:start" : "darwin:recovery";
+        },
+        async terminateProcessTreeByPid(...args) { terminate(...args); },
       },
-      isProcessAlive: () => true,
-      requestCooperativeTermination() { events.push("cooperative"); },
-      async delayMs(ms) { events.push(`delay:${ms}`); },
-    })).resolves.toEqual({ recovered: [runId], quarantined: [] });
+      isProcessAlive: pid => pid === 4242,
+    })).resolves.toEqual({ recovered: [], quarantined: [] });
 
-    expect(events).toEqual(["cooperative", "delay:3000", "forced"]);
-    await expectMissing(pipelineWorktree.path);
-    await expect(store.readResult(runId)).resolves.toMatchObject({
-      evidence: { recovery: "startup-stale-run", escalation: "forced" },
-    });
+    expect(terminate).not.toHaveBeenCalled();
+    await expect(lstat(pipelineWorktree.path)).resolves.toBeDefined();
+    await expect(store.readResult(runId)).resolves.toBeNull();
   });
 
-  it("records cooperative recovery when an orphan exits during the grace period", async () => {
+  it("preserves a live run whose process token cannot be verified", async () => {
     const repo = await initRepo();
-    const runId = "run-live-orphan-cooperative";
+    const runId = "run-live-owner-unverifiable";
     const store = await createUnfinishedRun(runId, repo.commonDir, 4343, "darwin:start");
-    const events: string[] = [];
-    let signalLocksAcquired!: () => void;
-    const locksAcquired = new Promise<void>(resolve => { signalLocksAcquired = resolve; });
-    let releaseRecovery!: () => void;
-    const recoveryReleased = new Promise<void>(resolve => { releaseRecovery = resolve; });
-    let alive = true;
+    const terminate = vi.fn();
 
-    const recovery = recoverStaleRuns({
+    await expect(recoverStaleRuns({
       platformServices: {
         os: "darwin",
-        async getProcessStartToken() { return "darwin:start"; },
-        async terminateProcessTreeByPid() { events.push("forced"); },
+        async getProcessStartToken(pid) {
+          return pid === 4343 ? null : "darwin:recovery";
+        },
+        async terminateProcessTreeByPid(...args) { terminate(...args); },
       },
-      isProcessAlive: () => alive,
-      async requestCooperativeTermination() {
-        events.push("cooperative");
-        signalLocksAcquired();
-        await recoveryReleased;
-      },
-      async delayMs() { events.push("delay"); alive = false; },
-    });
+      isProcessAlive: pid => pid === 4343,
+    })).resolves.toEqual({ recovered: [], quarantined: [] });
 
-    await locksAcquired;
-    const locksRoot = path.join(process.env.CLAUDE_PLUGIN_DATA!, "locks");
-    const lockKey = createHash("sha256").update(repo.commonDir).digest("hex");
-    const lockPaths = [
-      path.join(locksRoot, "recovery.lock"),
-      path.join(locksRoot, `${lockKey}.lock`),
-    ];
-    const ownerBytes = Buffer.from(JSON.stringify({
-      pid: process.pid,
-      processToken: "darwin:start",
-    }));
-    try {
-      for (const lockPath of lockPaths) {
-        const metadata = await lstat(lockPath);
-        expect(metadata.isFile()).toBe(true);
-        expect(metadata.isSymbolicLink()).toBe(false);
-        expect(metadata.nlink).toBe(1);
-        await expect(readFile(lockPath)).resolves.toEqual(ownerBytes);
-      }
-      expect((await readdir(locksRoot)).filter(entry =>
-        /^\.recovery-lock-.*\.tmp$/.test(entry))).toEqual([]);
-    } finally {
-      releaseRecovery();
-    }
-    await expect(recovery).resolves.toEqual({ recovered: [runId], quarantined: [] });
-
-    expect(events).toEqual(["cooperative", "delay"]);
-    await Promise.all(lockPaths.map(expectMissing));
-    await expect(store.readResult(runId)).resolves.toMatchObject({
-      evidence: { recovery: "startup-stale-run", escalation: "cooperative" },
-    });
+    expect(terminate).not.toHaveBeenCalled();
+    await expect(store.readResult(runId)).resolves.toBeNull();
   });
 
   it("reclaims token-mismatched live locks and preserves matching live locks", async () => {
@@ -2269,7 +2289,7 @@ describe("recoverStaleRuns", () => {
     await expectQuarantinedRun(runId, store.runDirectory);
   });
 
-  it("cleans every sliced worktree and ref for a terminal run without touching a prefix neighbor", async () => {
+  it("sweeps every orphan worktree while keeping terminal ref cleanup run-scoped", async () => {
     const repo = await initRepo();
     const runId = "run-sliced-terminal";
     const neighborRunId = `${runId}-neighbor`;
@@ -2304,8 +2324,8 @@ describe("recoverStaleRuns", () => {
       isProcessAlive: () => false,
     })).resolves.toEqual({ recovered: [], quarantined: [] });
 
-    await Promise.all(slicedWorktrees.map(worktree => expectMissing(worktree.path)));
-    await expect(access(neighborWorktree.path)).resolves.toBeUndefined();
+    await Promise.all([...slicedWorktrees, neighborWorktree]
+      .map(worktree => expectMissing(worktree.path)));
     for (const ref of sliceRefs) {
       expect((await git(repo.directory, ["rev-parse", "--verify", "--quiet", ref])).exitCode)
         .not.toBe(0);
@@ -2320,7 +2340,7 @@ describe("recoverStaleRuns", () => {
       },
       isProcessAlive: () => false,
     })).resolves.toEqual({ recovered: [], quarantined: [] });
-    await expect(access(neighborWorktree.path)).resolves.toBeUndefined();
+    await expectMissing(neighborWorktree.path);
     expect(await runGit(repo.directory, ["rev-parse", neighborRef])).toBe(repo.head);
   }, 120_000);
 
@@ -2334,6 +2354,7 @@ describe("recoverStaleRuns", () => {
       `refs/claude-architect/slices/${runId}/slice-2-attempt-0`,
     ];
     for (const ref of sliceRefs) await runGit(repo.directory, ["update-ref", ref, repo.head]);
+    let worktreesGoneBeforeRefCleanup = false;
 
     await expect(recoverStaleRuns({
       platformServices: {
@@ -2342,8 +2363,19 @@ describe("recoverStaleRuns", () => {
         async terminateProcessTreeByPid() {},
       },
       isProcessAlive: () => false,
+      git: async (cwd, args, options) => {
+        if (args[0] === "update-ref" && args.includes("-d")) {
+          const states = await Promise.all(slicedWorktrees.map(async worktree => {
+            try { await access(worktree.path); return "present" as const; }
+            catch { return "missing" as const; }
+          }));
+          worktreesGoneBeforeRefCleanup = states.every(state => state === "missing");
+        }
+        return await git(cwd, args, options);
+      },
     })).resolves.toEqual({ recovered: [runId], quarantined: [] });
 
+    expect(worktreesGoneBeforeRefCleanup).toBe(true);
     await Promise.all(slicedWorktrees.map(worktree => expectMissing(worktree.path)));
     for (const ref of sliceRefs) {
       expect((await git(repo.directory, ["rev-parse", "--verify", "--quiet", ref])).exitCode)
@@ -2528,6 +2560,39 @@ describe("MCP startup recovery", () => {
     });
 
     expect(serverEvents).toEqual(["recover", "prune", "connect"]);
+  });
+
+  it("surfaces bounded sweep issues without logging worktree paths", async () => {
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    const sensitivePath = "/Users/example/private-project/worktree";
+    let diagnostics = "";
+    try {
+      await start({
+        async recoverStaleRuns() {
+          serverEvents.push("recover");
+          return {
+            recovered: [],
+            quarantined: [],
+            worktreeSweepIssues: [{
+              worktreePath: sensitivePath,
+              reason: "repository identity lookup failed",
+            }],
+          };
+        },
+        async pruneRuns() {
+          return { removed: [], retained: [] };
+        },
+      });
+      diagnostics = error.mock.calls.flat().join("\n");
+    } finally {
+      error.mockRestore();
+    }
+
+    expect(diagnostics).toContain("worktree sweep preserved 1 ambiguous path");
+    expect(diagnostics).toContain("repository identity lookup failed");
+    expect(diagnostics).not.toContain(sensitivePath);
+    expect(Buffer.byteLength(diagnostics, "utf8")).toBeLessThanOrEqual(2_500);
+    expect(serverEvents).toEqual(["recover", "connect"]);
   });
 
   it("connects even when startup pruning fails", async () => {

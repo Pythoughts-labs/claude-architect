@@ -3,6 +3,7 @@ import path from "node:path";
 import { getPlatformServices } from "../platform/select-platform.js";
 import { canonicalizeForScope } from "../platform/windows-platform-services.js";
 import { git, type GitResult } from "./git-exec.js";
+import { gitPathOutput } from "./git-output.js";
 
 export interface PreconditionOptions {
   writeAllowlist?: string[];
@@ -59,8 +60,9 @@ export async function checkInProgressOperation(
   ]);
   if (!succeeded(gitDirectoryResult)) return "scan-failed";
   try {
+    const gitDirectory = gitPathOutput(gitDirectoryResult.stdout, "Git directory");
     return (await Promise.all(IN_PROGRESS_PATHS.map(relative =>
-      exists(path.join(gitDirectoryResult.stdout.trim(), relative))))).some(Boolean)
+      exists(path.join(gitDirectory, relative))))).some(Boolean)
       ? "in-progress"
       : "clear";
   } catch {
@@ -310,6 +312,9 @@ export async function checkPreconditions(
     "--git-common-dir",
   ]);
   if (!succeeded(commonDirectoryResult)) return { ok: false, reason: "git-command-failed" };
-  const gitCommonDir = await realpath(commonDirectoryResult.stdout.trim());
+  const gitCommonDir = await realpath(gitPathOutput(
+    commonDirectoryResult.stdout,
+    "Git common directory",
+  ));
   return { ok: true, baseCommitOid, gitCommonDir };
 }

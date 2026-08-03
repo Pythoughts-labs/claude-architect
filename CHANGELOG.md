@@ -13,6 +13,57 @@ All notable changes to Claude Architect are recorded here. The format follows
   malformed, human-required, or commit-mismatched evidence fail closed to human
   elicitation.
 
+### Changed
+
+- The verified SDD wrapper now distinguishes the architect-owned branch home
+  from runtime-owned attempt worktrees and lets a repository-defined delivery
+  gate supersede Superpowers' generic direct merge/push finish. This repository's
+  agent policy routes Superpowers SDD through verified delegation, hands manual
+  SDD branches to No Mistakes only after explicit authorization, and prevents
+  stacking that gate with Claude Architect Autopilot.
+- Manual delegation now labels its read-only spec validation and its single
+  execution dispatch as two MCP calls but one execution run. It distinguishes
+  plain delegation's one implementation attempt (after its separate edit-lane
+  environment probe) from a pipeline's multiple fresh implementation, review,
+  and repair Producers, and forbids a second dispatch
+  while the original execution call is pending.
+
+### Fixed
+
+- Startup recovery now sweeps proven orphaned registered worktrees regardless
+  of their names while preserving unproven directories and worktrees claimed by
+  live, ambiguous, or independently owned runs and workflows. Removal uses
+  bigint inode plus birth-time identity, inode-bound quarantine traversal,
+  parent-directory durability syncs, and a durable staged transaction for only
+  the exact Git registration under the checkout lease. Removal manifests replay
+  before stale-run inspection, registration paths are compared canonically, and
+  Autopilot stale registrations and run worktrees whose physical directories
+  vanished use the same recoverable removal owner instead of raw recursive
+  deletion. Unresolved removal manifests pause run/workflow cleanup; transient
+  Git failures, malformed or conflicting ownership entries, symlinked metadata
+  roots, and forged quarantine names fail closed. Creation publishes a bound
+  intent before `git worktree add`, so an immediate crash or managed-root
+  substitution can recover the hidden physical inode and exact registration.
+  On POSIX upgrades, recovery
+  safely tightens legacy runtime state/worktree directories from group/world-
+  readable modes to `0700` after binding and rechecking their filesystem identity.
+  Group/world-writable, wrong-owner, or substituted roots remain blocked; operators
+  must restore the runtime-data owner and remove group/world write bits before restart.
+  Newline/Unicode and
+  case-equivalent Windows paths remain intact, and bounded redacted sweep issues
+  are visible at MCP startup. Packaged x64/arm64 native helpers now validate
+  Windows ACLs, flush directory metadata, and delete identity-matched handles;
+  trusted runtime cleanup no longer depends on PowerShell. Cleanup-backend
+  prerequisites are checked before Git creates a worktree and fail with an
+  actionable classification.
+- Final-review head-bound phases now retain one real checkout lease through
+  materialization cleanup and every concluding head, tree, and branch-identity
+  revalidation on both success and failure paths.
+- Producer preflight now propagates managed worktree cleanup failures instead
+  of recursively deleting the checkout and potentially stranding its Git
+  registration. When probing, cancellation, or bounded probe-file reading also
+  fails, the ordered aggregate retains that primary outcome before cleanup.
+
 ## [0.43.0] - 2026-07-28
 
 ### Fixed

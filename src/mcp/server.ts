@@ -3,6 +3,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import type { RequestHandlerExtra } from "@modelcontextprotocol/sdk/shared/protocol.js";
 import type { ServerNotification, ServerRequest } from "@modelcontextprotocol/sdk/types.js";
+import path from "node:path";
 import { z } from "zod";
 import { PROTOCOL_VERSION, RUNTIME_VERSION } from "../protocol/versions.js";
 import { doctor, type DoctorDependencies } from "./doctor.js";
@@ -31,10 +32,15 @@ import {
   DECISION_AUTHORITY_ENV,
   type DecisionAuthority,
 } from "./decision-authority.js";
-import { recoverStaleRuns } from "../runtime/recovery-manager.js";
+import { recoverStaleRuns, type WorktreeSweepIssue } from "../runtime/recovery-manager.js";
 import { pruneRuns } from "../runtime/artifact-store.js";
 import { boundedRedactedDiagnostic, redact } from "../runtime/redaction.js";
 import { RuntimeError } from "../util/errors.js";
+import { getPlatformServices } from "../platform/select-platform.js";
+import { platformPathsEqual } from "../util/platform-path.js";
+import { git } from "../git/git-exec.js";
+import { gitNulRecords } from "../git/git-output.js";
+import { findWorktreeRegistration } from "../git/worktree-registration.js";
 
 const errorOutputFields = {
   ok: z.literal(false).optional(),
@@ -379,7 +385,71 @@ export async function createServer(
       "Claude Architect MCP startup denied: CLAUDE_ARCHITECT_DELEGATED is present",
     );
   }
-  await (dependencies.recoverStaleRuns ?? recoverStaleRuns)();
+  const recover = dependencies.recoverStaleRuns ?? recoverStaleRuns;
+  const recovery = await recover();
+  const sweepIssues = recovery.worktreeSweepIssues ?? [];
+  let unresolvedSweepIssues = sweepIssues;
+  if (sweepIssues.length > 0) {
+    const noun = sweepIssues.length === 1 ? "path" : "paths";
+    const diagnostic = boundedRedactedDiagnostic(
+      sweepIssues.map(issue => issue.reason).join("; "),
+      2_000,
+    );
+    // Paths themselves can contain user and repository names. Recovery already
+    // retained them in its structured in-process result; stderr gets only the
+    // bounded redacted reasons so startup ambiguity is visible without PII.
+    console.error(
+      `Claude Architect worktree sweep preserved ${sweepIssues.length} ambiguous ${noun}: ${diagnostic}`,
+    );
+  }
+
+  const assertMutationRecoveryClear = async (checkoutPath: string) => {
+    if (unresolvedSweepIssues.length === 0) return;
+    const retried = await recover();
+    unresolvedSweepIssues = retried.worktreeSweepIssues ?? [];
+    if (unresolvedSweepIssues.length === 0) return;
+    const attributed = unresolvedSweepIssues.filter(
+      (issue): issue is WorktreeSweepIssue & { repositoryIdentity: string } =>
+        issue.repositoryIdentity !== undefined,
+    );
+    const unattributedWorktrees = unresolvedSweepIssues.filter(issue =>
+      issue.repositoryIdentity === undefined
+      && path.basename(path.dirname(issue.worktreePath)) === "worktrees",
+    );
+    if (attributed.length === 0 && unattributedWorktrees.length === 0) return;
+    const canonical = await (dependencies.ps ?? getPlatformServices())
+      .canonicalizePath(checkoutPath);
+    const gitCommonDir = canonical.gitCommonDir;
+    if (gitCommonDir === null) {
+      throw new RuntimeError("checkout Git common directory could not be resolved");
+    }
+    const repositoryIssues: WorktreeSweepIssue[] = attributed.filter(issue =>
+      platformPathsEqual(issue.repositoryIdentity, gitCommonDir),
+    );
+    if (unattributedWorktrees.length > 0) {
+      const listed = await (dependencies.git ?? git)(gitCommonDir, [
+        "worktree", "list", "--porcelain", "-z",
+      ]);
+      if (listed.exitCode !== 0
+        || listed.truncated?.stdout === true
+        || listed.truncated?.stderr === true) {
+        throw new RuntimeError("repository worktree ownership could not be revalidated");
+      }
+      const fields = gitNulRecords(listed.stdout, "recovery-gate Git worktree list");
+      for (const issue of unattributedWorktrees) {
+        if (await findWorktreeRegistration(fields, issue.worktreePath, true) !== -1) {
+          repositoryIssues.push(issue);
+        }
+      }
+    }
+    if (repositoryIssues.length === 0) return;
+    const ambiguousPaths = `${repositoryIssues.length} ambiguous worktree ${
+      repositoryIssues.length === 1 ? "path" : "paths"
+    }`;
+    throw new RuntimeError(
+      `mutating tools are unavailable while repository recovery preserves ${ambiguousPaths}`,
+    );
+  };
 
   // Reclaim aged/oversized run archives once per boot, after recovery has
   // settled interrupted prunes. Fail-safe: a prune failure (including a lease
@@ -419,8 +489,9 @@ export async function createServer(
       // probe a client may retry freely.
       annotations: { destructiveHint: true, idempotentHint: false, readOnlyHint: false },
     },
-    async ({ checkoutPath, spec, protocolVersion, responseMode, expectedSpecSha256 }, extra) =>
-      withProgress(extra, "starting attempt", async onProgress =>
+    async ({ checkoutPath, spec, protocolVersion, responseMode, expectedSpecSha256 }, extra) => {
+      await assertMutationRecoveryClear(checkoutPath);
+      return withProgress(extra, "starting attempt", async onProgress =>
         toolOutput(await handleDelegate(
           checkoutPath,
           spec,
@@ -435,7 +506,8 @@ export async function createServer(
           responseMode ?? "full",
           expectedSpecSha256,
         ))
-      ),
+      );
+    },
   );
   server.registerTool(
     "delegatePipeline",
@@ -447,8 +519,9 @@ export async function createServer(
       // Runs Producers across implement/review/fix rounds.
       annotations: { destructiveHint: true, idempotentHint: false, readOnlyHint: false },
     },
-    async ({ checkoutPath, spec, protocolVersion, responseMode, expectedSpecSha256 }, extra) =>
-      withProgress(extra, "starting attempt", async onProgress =>
+    async ({ checkoutPath, spec, protocolVersion, responseMode, expectedSpecSha256 }, extra) => {
+      await assertMutationRecoveryClear(checkoutPath);
+      return withProgress(extra, "starting attempt", async onProgress =>
         toolOutput(await handleDelegatePipeline(
           checkoutPath,
           spec,
@@ -463,7 +536,8 @@ export async function createServer(
           responseMode ?? "full",
           expectedSpecSha256,
         ))
-      ),
+      );
+    },
   );
   server.registerTool(
     "autopilotStart",
@@ -476,15 +550,17 @@ export async function createServer(
       // branches and worktrees, promotes commits, pushes, and opens a PR.
       annotations: { destructiveHint: true, idempotentHint: false, readOnlyHint: false },
     },
-    async ({ checkoutPath, spec, protocolVersion }, extra) =>
-      withProgress(extra, "starting autopilot workflow", async onProgress =>
+    async ({ checkoutPath, spec, protocolVersion }, extra) => {
+      await assertMutationRecoveryClear(checkoutPath);
+      return withProgress(extra, "starting autopilot workflow", async onProgress =>
         toolOutput(await handleAutopilotStart(checkoutPath, spec, {
           ...dependencies,
           skillProtocolVersion: protocolVersion,
           abortSignal: extra.signal,
           ...(onProgress === undefined ? {} : { onProgress }),
         }))
-      ),
+      );
+    },
   );
   server.registerTool(
     "autopilotStatus",
@@ -513,15 +589,17 @@ export async function createServer(
       // Continues the same shipping workflow from durable state.
       annotations: { destructiveHint: true, idempotentHint: false, readOnlyHint: false },
     },
-    async ({ checkoutPath, workflowId, protocolVersion }, extra) =>
-      withProgress(extra, "resuming autopilot workflow", async onProgress =>
+    async ({ checkoutPath, workflowId, protocolVersion }, extra) => {
+      await assertMutationRecoveryClear(checkoutPath);
+      return withProgress(extra, "resuming autopilot workflow", async onProgress =>
         toolOutput(await handleAutopilotResume(checkoutPath, workflowId, {
           ...dependencies,
           skillProtocolVersion: protocolVersion,
           abortSignal: extra.signal,
           ...(onProgress === undefined ? {} : { onProgress }),
         }))
-      ),
+      );
+    },
   );
   server.registerTool(
     "reviewCandidate",
@@ -556,8 +634,9 @@ export async function createServer(
       // to the checkout; neither is a read-only probe a client may retry freely.
       annotations: { destructiveHint: true, idempotentHint: false, readOnlyHint: false },
     },
-    async ({ checkoutPath, runId, decision, expectedArtifactHash }) => toolOutput(
-      await handleDecideCandidate(
+    async ({ checkoutPath, runId, decision, expectedArtifactHash }) => {
+      await assertMutationRecoveryClear(checkoutPath);
+      return toolOutput(await handleDecideCandidate(
         checkoutPath,
         runId,
         decision,
@@ -589,8 +668,8 @@ export async function createServer(
             return "human-elicitation";
           },
         },
-      ),
-    ),
+      ));
+    },
   );
   server.registerTool(
     "integrateCandidate",
@@ -602,12 +681,15 @@ export async function createServer(
       // Writes the reviewed tree into the user's checkout.
       annotations: { destructiveHint: true, idempotentHint: false, readOnlyHint: false },
     },
-    async ({ checkoutPath, runId, expectedArtifactHash }) => toolOutput(await handleIntegrateCandidate(
-      checkoutPath,
-      runId,
-      expectedArtifactHash,
-      dependencies,
-    )),
+    async ({ checkoutPath, runId, expectedArtifactHash }) => {
+      await assertMutationRecoveryClear(checkoutPath);
+      return toolOutput(await handleIntegrateCandidate(
+        checkoutPath,
+        runId,
+        expectedArtifactHash,
+        dependencies,
+      ));
+    },
   );
   server.registerTool(
     "doctor",

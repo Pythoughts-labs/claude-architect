@@ -1,8 +1,13 @@
 import { realpath } from "node:fs/promises";
 import path from "node:path";
 import { git, type GitResult } from "../git/git-exec.js";
-import { WorktreeManager } from "../git/worktree-manager.js";
-import type { PlatformServices, ResolvedExecutable, SupervisedExit } from "../platform/platform-services.js";
+import { WorktreeManager } from "../runtime/worktree-manager.js";
+import type {
+  CheckoutLock,
+  PlatformServices,
+  ResolvedExecutable,
+  SupervisedExit,
+} from "../platform/platform-services.js";
 import { supervise } from "../platform/process-supervisor.js";
 import { getPlatformServices } from "../platform/select-platform.js";
 import { canonicalizeForScope } from "../platform/windows-platform-services.js";
@@ -39,6 +44,7 @@ export interface ProjectVerifyArgs {
   runId?: string;
   verificationId?: () => string;
   logNamePrefix?: string;
+  borrowedCheckoutLease?: CheckoutLock;
 }
 
 export interface ProjectCommandEvidence {
@@ -358,6 +364,9 @@ export async function projectVerify(args: ProjectVerifyArgs): Promise<ProjectVer
     args.repoRoot,
     `verify-${verificationId}`,
     ps,
+    args.borrowedCheckoutLease === undefined
+      ? {}
+      : { borrowedCheckoutLease: args.borrowedCheckoutLease },
   );
   const materialized = await manager.create(args.artifact.candidateCommitOid);
   let primaryError: unknown;

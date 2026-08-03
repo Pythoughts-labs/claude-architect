@@ -227,5 +227,7 @@ export function withRunStartPidRecording(
     acquireCleanupJournalLock: () => ps.acquireCleanupJournalLock(),
     createSecureTempDirectory: () => ps.createSecureTempDirectory(),
     canonicalizePath: input => ps.canonicalizePath(input),
+    assertDirectoryWriteIntegrity: (directory, identity) =>
+      ps.assertDirectoryWriteIntegrity(directory, identity),
   };
 }

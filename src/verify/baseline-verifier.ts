@@ -2,8 +2,8 @@ import { randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { basename } from "node:path";
 import path from "node:path";
-import { WorktreeManager } from "../git/worktree-manager.js";
-import type { PlatformServices } from "../platform/platform-services.js";
+import { WorktreeManager } from "../runtime/worktree-manager.js";
+import type { CheckoutLock, PlatformServices } from "../platform/platform-services.js";
 import { getPlatformServices } from "../platform/select-platform.js";
 import type { VerificationCommand } from "../protocol/delegation-spec.js";
 import { appliesToPlatform, executeCommand, resolveCommandCwd, scanCommandMutations } from "./project-verifier.js";
@@ -37,6 +37,7 @@ export interface BaselineVerifyArgs {
   runId?: string;
   verificationId?: () => string;
   abortSignal?: AbortSignal;
+  borrowedCheckoutLease?: CheckoutLock;
   /** When present, each command's output is archived for post-hoc diagnosis. */
   store?: Pick<ArtifactStore, "writeLog">;
 }
@@ -229,6 +230,9 @@ export async function verifyBaseline(args: BaselineVerifyArgs): Promise<Baseline
     // fixtures cannot collide on a shared worktrees root.
     `baseline-${args.runId ?? args.verificationId?.() ?? randomUUID()}`,
     ps,
+    args.borrowedCheckoutLease === undefined
+      ? {}
+      : { borrowedCheckoutLease: args.borrowedCheckoutLease },
   );
   const materialized = await manager.create(args.headCommitOid);
   let primaryError: unknown;

@@ -1,4 +1,4 @@
-import type { PlatformServices } from "../platform/platform-services.js";
+import type { CheckoutLock, PlatformServices } from "../platform/platform-services.js";
 import type { CandidateArtifact, CommandOutcome } from "../protocol/attempt-result.js";
 import type { DelegationSpec } from "../protocol/delegation-spec.js";
 import type { ArtifactStore } from "../runtime/artifact-store.js";
@@ -25,6 +25,7 @@ export interface AcceptanceVerifyArgs {
   artifactStore: Pick<ArtifactStore, "writeLog">;
   verificationId?: () => string;
   logNamePrefix?: string;
+  borrowedCheckoutLease?: CheckoutLock;
 }
 
 export interface AcceptanceVerifyResult {
@@ -157,6 +158,9 @@ export class AcceptanceVerifier {
       artifact: args.artifact,
       commands: args.spec.verification,
       ps: args.ps,
+      ...(args.borrowedCheckoutLease === undefined
+        ? {}
+        : { borrowedCheckoutLease: args.borrowedCheckoutLease }),
       ...(args.verificationId === undefined ? {} : { verificationId: args.verificationId }),
       ...(args.logNamePrefix === undefined ? {} : { logNamePrefix: args.logNamePrefix }),
     });

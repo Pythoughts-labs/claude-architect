@@ -285,6 +285,38 @@ describe("autopilot startup recovery", () => {
     expect(await snapshot(fixture.store.workflowDirectory)).toEqual(before);
   });
 
+  it("preserves a live workflow worktree before ownership publication", async () => {
+    const fixture = await createFixture();
+    await rm(autopilotOwnershipPath(
+      fixture.branch.workflowId,
+      process.env.CLAUDE_PLUGIN_DATA!,
+    ));
+
+    const result = await recoverStaleRuns(await recoveryDependencies());
+
+    expect(result.workflows).toEqual([{
+      workflowId: fixture.branch.workflowId,
+      disposition: "live-preserve",
+    }]);
+    await expect(lstat(fixture.branch.worktreePath)).resolves.toBeDefined();
+  });
+
+  it("isolates an oversized workflow ownership record as a bounded issue", async () => {
+    const fixture = await createFixture();
+    const ownershipPath = autopilotOwnershipPath(
+      fixture.branch.workflowId,
+      process.env.CLAUDE_PLUGIN_DATA!,
+    );
+    await writeFile(ownershipPath, "x".repeat(8_000_001));
+
+    const result = await recoverStaleRuns(await recoveryDependencies());
+
+    expect(result.worktreeSweepIssues).toEqual(expect.arrayContaining([
+      expect.objectContaining({ worktreePath: ownershipPath }),
+    ]));
+    await expect(lstat(fixture.branch.worktreePath)).resolves.toBeDefined();
+  });
+
   it("reports resume for a non-terminal workflow with dead owners and is byte-idempotent", async () => {
     const fixture = await createFixture();
     await makeBootstrapOwnerDead(fixture);
@@ -363,6 +395,37 @@ describe("autopilot startup recovery", () => {
       .toEqual({ worktreeRemoved: true, refsRemoved: true });
     expect(second.workflows).toBeUndefined();
     expect(await snapshot(fixture.store.workflowDirectory)).toEqual(afterFirst);
+  });
+
+  it("does not finalize cleanup from a truncated worktree registration list", async () => {
+    const fixture = await createFixture();
+    const cleaning = await advanceToCleaningUp(fixture.store);
+    await fixture.store.beginIntent({
+      expectedRevision: cleaning.revision,
+      operation: "cleanup-workflow-branch",
+      idempotencyKey: `cleanup:${fixture.branch.baseCommitOid}`,
+      expectedIdentities: { headCommitOid: fixture.branch.baseCommitOid },
+    });
+    await expect(fixture.branchManager.cleanup(fixture.branch, fixture.branch.baseCommitOid))
+      .resolves.toEqual({ ok: true, worktreeRemoved: true, refsRemoved: true });
+    await makeLeaseDead(fixture.store);
+    const dependencies = await recoveryDependencies();
+
+    const result = await recoverStaleRuns({
+      ...dependencies,
+      git: async (cwd, args, options) => {
+        const observed = await dependencies.git(cwd, args, options);
+        return args[0] === "worktree" && args[1] === "list"
+          ? { ...observed, truncated: { stdout: true, stderr: false } }
+          : observed;
+      },
+    });
+
+    expect(result.workflows).toEqual([{
+      workflowId: fixture.branch.workflowId,
+      disposition: "human-decision-required",
+    }]);
+    await expect(fixture.store.read()).resolves.toMatchObject({ phase: "cleaning-up" });
   });
 
   it("disposes a dead bootstrap orphan and converges byte-idempotently", async () => {

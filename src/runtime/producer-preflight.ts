@@ -1,12 +1,14 @@
-import { readFile, rm } from "node:fs/promises";
 import path from "node:path";
-import { WorktreeManager } from "../git/worktree-manager.js";
-import type { PlatformServices } from "../platform/platform-services.js";
+import { WorktreeManager } from "./worktree-manager.js";
+import type { CheckoutLock, PlatformServices } from "../platform/platform-services.js";
 import { supervise } from "../platform/process-supervisor.js";
 import { selectSandboxBackend } from "../platform/sandbox/backends.js";
 import { wrapInvocationWithSeatbelt } from "../platform/sandbox/seatbelt.js";
 import type { DelegationSpec } from "../protocol/delegation-spec.js";
 import type { CapabilityReport, ProducerAdapter } from "../producers/producer-adapter.js";
+import { RuntimeError } from "../util/errors.js";
+import { boundedRedactedDiagnostic } from "./redaction.js";
+import { readStableRegularFile } from "../util/stable-file.js";
 import { linkPrimaryDependencies } from "../verify/dependency-link.js";
 import { buildEnvironment } from "./environment-policy.js";
 
@@ -31,12 +33,14 @@ export interface ProducerPreflightResult {
   reason: string | null;
   missing: string[];
   probe: string | null;
+  cleanupFailure?: string;
 }
 
 export const PREFLIGHT_PROBE_FILE = "claude-architect-preflight.txt";
 const PREFLIGHT_TIMEOUT_MS = 180_000;
 const PREFLIGHT_OUTPUT_LIMIT = 256 * 1024;
 const PROBE_FILE_LIMIT = 64 * 1024;
+const PROBE_EVIDENCE_LIMIT = 16 * 1024;
 const SAFE_EXECUTABLE = /^[A-Za-z0-9._+-]+$/u;
 
 export function preflightExecutables(spec: DelegationSpec): string[] {
@@ -71,6 +75,10 @@ function probeSpec(spec: DelegationSpec, executables: string[]): DelegationSpec 
   };
 }
 
+export function redactedProbeEvidence(contents: string): string {
+  return boundedRedactedDiagnostic(contents, PROBE_EVIDENCE_LIMIT);
+}
+
 export function readProbe(contents: string, executables: string[]): string[] {
   const resolved = new Set<string>();
   for (const line of contents.split(/\r?\n/u)) {
@@ -94,6 +102,8 @@ export interface ProducerPreflightArgs {
   ps: PlatformServices;
   tempHome: string | null;
   abortSignal?: AbortSignal;
+  borrowedCheckoutLease?: CheckoutLock;
+  worktreeManager?: Pick<WorktreeManager, "create">;
 }
 
 export async function runProducerPreflight(
@@ -104,8 +114,19 @@ export async function runProducerPreflight(
     return { status: "inconclusive", reason: "no probeable executables", missing: [], probe: null };
   }
 
-  const manager = new WorktreeManager(args.repoRoot, `${args.runId}-preflight`, args.ps);
+  const manager = args.worktreeManager
+    ?? new WorktreeManager(args.repoRoot, `${args.runId}-preflight`, args.ps, {
+      ...(args.borrowedCheckoutLease === undefined
+        ? {}
+        : { borrowedCheckoutLease: args.borrowedCheckoutLease }),
+    });
   const worktree = await manager.create(args.baseCommitOid);
+  let probeError: unknown;
+  let probeOutcome: ProducerPreflightResult | undefined;
+  const complete = (outcome: ProducerPreflightResult) => {
+    probeOutcome = outcome;
+    return outcome;
+  };
   try {
     await linkPrimaryDependencies(args.repoRoot, worktree.path);
     const spec = probeSpec(args.spec, executables);
@@ -143,7 +164,7 @@ export async function runProducerPreflight(
         maxOutputBytes: PREFLIGHT_OUTPUT_LIMIT,
       }, args.abortSignal === undefined ? {} : { onCancel: args.abortSignal });
       if (exit.cancelled) {
-        return { status: "inconclusive", reason: "cancelled", missing: [], probe: null };
+        return complete({ status: "inconclusive", reason: "cancelled", missing: [], probe: null });
       }
     } finally {
       built.secretRegistration.dispose();
@@ -151,34 +172,60 @@ export async function runProducerPreflight(
 
     let contents: string;
     try {
-      contents = (await readFile(path.join(worktree.path, PREFLIGHT_PROBE_FILE), "utf8"))
-        .slice(0, PROBE_FILE_LIMIT);
-    } catch {
-      return {
+      const probeBytes = await readStableRegularFile(
+        path.join(worktree.path, PREFLIGHT_PROBE_FILE),
+        BigInt(PROBE_FILE_LIMIT),
+      );
+      if (probeBytes === null) throw new RuntimeError("the Producer probe file is not stable");
+      contents = probeBytes.toString("utf8");
+    } catch (error) {
+      probeError = error;
+      return complete({
         status: "inconclusive",
         reason: "the Producer did not write the probe file",
         missing: [],
         probe: null,
-      };
+      });
     }
 
     const missing = readProbe(contents, executables);
-    return missing.length === 0
-      ? { status: "ok", reason: null, missing: [], probe: contents }
+    const safeProbe = redactedProbeEvidence(contents);
+    return complete(missing.length === 0
+      ? { status: "ok", reason: null, missing: [], probe: safeProbe }
       : {
         status: "environment-defect",
         reason: `the Producer shell cannot resolve: ${missing.join(", ")}`,
         missing,
-        probe: contents,
-      };
-  } catch {
+        probe: safeProbe,
+      });
+  } catch (error) {
+    probeError = error;
     // An unusable probe must never become a new terminal failure mode.
-    return { status: "inconclusive", reason: "the probe could not run", missing: [], probe: null };
+    return complete({
+      status: "inconclusive",
+      reason: "the probe could not run",
+      missing: [],
+      probe: null,
+    });
   } finally {
     try {
       await worktree.cleanup();
-    } catch {
-      await rm(worktree.path, { recursive: true, force: true }).catch(() => {});
+    } catch (cleanupError) {
+      if (probeOutcome?.reason === "cancelled") {
+        probeOutcome.cleanupFailure = boundedRedactedDiagnostic(
+          cleanupError,
+          PROBE_EVIDENCE_LIMIT,
+        );
+      } else {
+        const primaryError = probeError ?? (probeOutcome !== undefined && probeOutcome.status !== "ok"
+          ? new RuntimeError(`producer preflight ${probeOutcome.status}: ${probeOutcome.reason ?? "unknown"}`)
+          : undefined);
+        if (primaryError === undefined) throw cleanupError;
+        throw new AggregateError(
+          [primaryError, cleanupError],
+          "producer preflight failed and its managed worktree cleanup also failed",
+        );
+      }
     }
   }
 }

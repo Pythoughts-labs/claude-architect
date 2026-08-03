@@ -8,9 +8,12 @@ import {
   parseRawDiff,
 } from "../git/changed-path-manifest.js";
 import { git, type GitResult } from "../git/git-exec.js";
+import { syncDirectoryMetadata } from "../platform/durable-directory.js";
 import { globMatches } from "../util/glob.js";
-import { WorktreeManager } from "../git/worktree-manager.js";
-import type { PlatformServices } from "../platform/platform-services.js";
+import { WorktreeManager } from "../runtime/worktree-manager.js";
+import { guardWorktreeMutations } from "../runtime/worktree-mutation-gate.js";
+import { assertNoPendingWorktreeRemovalForRepository } from "../runtime/worktree-removal-manifest.js";
+import type { CheckoutLock, PlatformServices } from "../platform/platform-services.js";
 import { getPlatformServices } from "../platform/select-platform.js";
 import type { AcceptanceVerifyResult } from "../verify/acceptance-verifier.js";
 import { AcceptanceVerifier } from "../verify/acceptance-verifier.js";
@@ -178,6 +181,7 @@ export interface FinalBranchReviewerDependencies {
     workflowId: string;
     headCommitOid: string;
     platformServices: PlatformServices;
+    borrowedCheckoutLease: CheckoutLock;
   }) => Promise<{ path: string; cleanup(): Promise<void> }>;
   now?: () => string;
 }
@@ -525,8 +529,11 @@ async function revalidateBranchIdentity(
   branchManager: WorkflowBranchManager,
   identity: WorkflowBranchIdentity,
   expectedHead: string,
+  borrowedCheckoutLock?: CheckoutLock,
 ): Promise<void> {
-  const result = await branchManager.revalidate(identity, expectedHead);
+  const result = borrowedCheckoutLock === undefined
+    ? await branchManager.revalidate(identity, expectedHead)
+    : await branchManager.revalidateUnderLock(identity, expectedHead, borrowedCheckoutLock);
   if (!result.ok) {
     fail(
       result.classification === "head-changed" ? "head-changed" : "workflow-state-mismatch",
@@ -842,21 +849,6 @@ function freezePackage<T>(value: T): T {
   return value;
 }
 
-async function syncDirectory(directory: string): Promise<void> {
-  let handle: FileHandle | undefined;
-  try {
-    handle = await open(directory, constants.O_RDONLY | NO_FOLLOW);
-    await handle.sync();
-  } catch (error) {
-    const code = (error as NodeJS.ErrnoException).code ?? "";
-    const unsupportedOnWindows = process.platform === "win32"
-      && ["EISDIR", "EINVAL", "ENOTSUP", "EPERM"].includes(code);
-    if (!unsupportedOnWindows) throw error;
-  } finally {
-    await handle?.close();
-  }
-}
-
 async function persistImmutableJson(
   workflowDirectory: string,
   reference: string,
@@ -892,7 +884,7 @@ async function persistImmutableJson(
     }
     await rm(temporary);
     temporaryExists = false;
-    await syncDirectory(workflowDirectory);
+    await syncDirectoryMetadata(workflowDirectory);
     if (await readFile(destination, "utf8") !== serialized) {
       fail("artifact-persistence-failed", `${reference} was not durably persisted`);
     }
@@ -942,7 +934,7 @@ async function persistFrozenArtifact(
     }
     await rm(temporary);
     temporaryExists = false;
-    await syncDirectory(workflowDirectory);
+    await syncDirectoryMetadata(workflowDirectory);
     const persisted = JSON.parse(await readFile(destination, "utf8")) as CumulativeBranchArtifact;
     const { branchArtifactHash, ...unhashed } = persisted;
     if (branchArtifactHash !== artifact.branchArtifactHash
@@ -1015,17 +1007,21 @@ export class FinalBranchReviewer {
       structural: async args => await structuralVerifyFinalBranch(args, this.runGit),
     });
     this.roleRunner = dependencies.roleRunner ?? runRole;
-    this.platformServices = dependencies.platformServices ?? getPlatformServices();
+    this.platformServices = guardWorktreeMutations(
+      dependencies.platformServices ?? getPlatformServices(),
+    );
     this.producerRegistry = dependencies.producerRegistry ?? defaultRegistry;
     this.artifactStore = dependencies.artifactStore ?? (workflowId =>
       new ArtifactStore(`final-${canonicalArtifactHash(workflowId).slice(0, 24)}`));
     this.evidenceStore = dependencies.evidenceStore ?? (runId => new ArtifactStore(runId));
     this.taskEvidenceValidator = dependencies.taskEvidenceValidator ?? validateArchivedTaskEvidence;
     this.materialize = dependencies.materialize ?? (async request => {
+      const workflowHash = createHash("sha256").update(request.workflowId).digest("hex");
       const manager = new WorktreeManager(
         request.checkoutPath,
-        `final-${canonicalArtifactHash(request.workflowId).slice(0, 24)}`,
+        `workflow-${workflowHash.slice(0, 32)}-final`,
         request.platformServices,
+        { borrowedCheckoutLease: request.borrowedCheckoutLease },
       );
       return await manager.create(request.headCommitOid);
     });
@@ -1131,11 +1127,67 @@ export class FinalBranchReviewer {
     });
   }
 
+  private async withCheckoutLease<T>(
+    checkoutPath: string,
+    phase: string,
+    execute: (lease: CheckoutLock) => Promise<T>,
+  ): Promise<T> {
+    const canonical = await this.platformServices.canonicalizePath(checkoutPath);
+    if (canonical.gitCommonDir === null) {
+      fail("workflow-state-mismatch", "final review checkout is not a repository");
+    }
+    const lease = await this.platformServices.acquireCheckoutLock(canonical.canonical);
+    let primaryError: unknown;
+    try {
+      if (lease.repositoryIdentity !== canonical.gitCommonDir) {
+        fail("workflow-state-mismatch", "final review checkout lease repository identity mismatch");
+      }
+      return await execute(lease);
+    } catch (error) {
+      primaryError = error;
+      throw error;
+    } finally {
+      try {
+        await lease.release();
+      } catch (releaseError) {
+        if (primaryError === undefined) {
+          throw new Error(
+            `${phase} checkout lease release failed: ${errorDiagnostic(releaseError)}`,
+          );
+        }
+        throw new AggregateError(
+          [primaryError, releaseError],
+          `${phase} failed and its checkout lease release also failed: ${errorDiagnostic(releaseError)}`,
+        );
+      }
+    }
+  }
+
   async runHeadBoundPhase<T>(
     artifact: CumulativeBranchArtifact,
     phase: string,
     execute: () => Promise<T>,
     checkoutPath: string,
+  ): Promise<T> {
+    return await this.withCheckoutLease(
+      checkoutPath,
+      phase,
+      async lease => await this.runHeadBoundPhaseCore(
+        artifact,
+        phase,
+        execute,
+        checkoutPath,
+        lease,
+      ),
+    );
+  }
+
+  private async runHeadBoundPhaseCore<T>(
+    artifact: CumulativeBranchArtifact,
+    phase: string,
+    execute: () => Promise<T>,
+    checkoutPath: string,
+    checkoutLease: CheckoutLock,
   ): Promise<T> {
     const store = this.workflowStore(artifact.workflowId);
     const state = await store.read();
@@ -1152,36 +1204,69 @@ export class FinalBranchReviewer {
     }
     await assertPersistedArtifact(store.workflowDirectory, artifact);
     await assertTaskEvidenceCurrent(artifact, this.evidenceStore);
-    await revalidateBranchIdentity(this.branchManager, branchIdentity, artifact.headCommitOid);
-    const result = await withHeadRevalidation({
-      checkoutPath,
-      expectedHead: artifact.headCommitOid,
-      expectedTree: artifact.headTreeOid,
-      phase,
-      execute: async () => {
-        let primaryError: unknown;
-        try {
-          return await execute();
-        } catch (error) {
-          primaryError = error;
-          throw error;
-        } finally {
+    await revalidateBranchIdentity(
+      this.branchManager,
+      branchIdentity,
+      artifact.headCommitOid,
+      checkoutLease,
+    );
+    let result: T | undefined;
+    let completed = false;
+    let phaseError: unknown;
+    try {
+      result = await withHeadRevalidation({
+        checkoutPath,
+        expectedHead: artifact.headCommitOid,
+        expectedTree: artifact.headTreeOid,
+        phase,
+        execute: async () => {
+          let primaryError: unknown;
           try {
-            await assertPersistedArtifact(store.workflowDirectory, artifact);
-            await assertTaskEvidenceCurrent(artifact, this.evidenceStore);
-          } catch (evidenceError) {
-            if (primaryError === undefined) throw evidenceError;
-            throw new AggregateError(
-              [primaryError, evidenceError],
-              `${phase} failed and its frozen evidence also changed`,
-            );
+            return await execute();
+          } catch (error) {
+            primaryError = error;
+            throw error;
+          } finally {
+            try {
+              await assertPersistedArtifact(store.workflowDirectory, artifact);
+              await assertTaskEvidenceCurrent(artifact, this.evidenceStore);
+            } catch (evidenceError) {
+              if (primaryError === undefined) throw evidenceError;
+              throw new AggregateError(
+                [primaryError, evidenceError],
+                `${phase} failed and its frozen evidence also changed`,
+              );
+            }
           }
-        }
-      },
-      git: this.runGit,
-    });
-    await revalidateBranchIdentity(this.branchManager, branchIdentity, artifact.headCommitOid);
-    return result;
+        },
+        git: this.runGit,
+      });
+      completed = true;
+    } catch (error) {
+      phaseError = error;
+    }
+    try {
+      await revalidateBranchIdentity(
+        this.branchManager,
+        branchIdentity,
+        artifact.headCommitOid,
+        checkoutLease,
+      );
+    } catch (revalidationError) {
+      if (phaseError === undefined) throw revalidationError;
+      if (phaseError instanceof FinalBranchReviewError
+        && revalidationError instanceof FinalBranchReviewError
+        && phaseError.classification === revalidationError.classification) {
+        throw phaseError;
+      }
+      throw new AggregateError(
+        [phaseError, revalidationError],
+        `${phase} failed and final branch identity also changed`,
+      );
+    }
+    if (phaseError !== undefined) throw phaseError;
+    if (!completed) fail("workflow-state-mismatch", `${phase} did not complete`);
+    return result as T;
   }
 
   private async runFreshMaterializedPhase<T>(
@@ -1189,54 +1274,62 @@ export class FinalBranchReviewer {
     sourceCheckoutPath: string,
     phase: string,
     execute: (materializedPath: string) => Promise<T>,
+    checkoutLease?: CheckoutLock,
   ): Promise<T> {
-    return await this.runHeadBoundPhase(artifact, phase, async () => {
-      let materialization: { path: string; cleanup(): Promise<void> } | null = null;
-      let primaryError: unknown;
-      try {
-        materialization = await this.materialize({
-          checkoutPath: sourceCheckoutPath,
-          workflowId: artifact.workflowId,
-          headCommitOid: artifact.headCommitOid,
-          platformServices: this.platformServices,
-        });
-        const detached = await this.runGit(materialization.path, [
-          "symbolic-ref", "--quiet", "HEAD",
-        ]);
-        if (detached.exitCode !== 1
-          || detached.truncated?.stdout === true
-          || detached.truncated?.stderr === true) {
-          fail("workflow-state-mismatch", "final review materialization is not detached");
-        }
-        return await withHeadRevalidation({
-          checkoutPath: materialization.path,
-          expectedHead: artifact.headCommitOid,
-          expectedTree: artifact.headTreeOid,
-          phase: `${phase} materialization`,
-          execute: async () => await execute(materialization!.path),
-          git: this.runGit,
-        });
-      } catch (error) {
-        primaryError = error;
-        throw error;
-      } finally {
-        if (materialization !== null) {
-          try {
-            await materialization.cleanup();
-          } catch (cleanupError) {
-            if (primaryError === undefined) {
-              throw new Error(
-                `${phase} materialization cleanup failed: ${errorDiagnostic(cleanupError)}`,
+    const runWithLease = async (lease: CheckoutLock) => {
+      await assertNoPendingWorktreeRemovalForRepository(lease.repositoryIdentity);
+      return await this.runHeadBoundPhaseCore(artifact, phase, async () => {
+        let materialization: { path: string; cleanup(): Promise<void> } | null = null;
+        let phaseError: unknown;
+        try {
+          materialization = await this.materialize({
+            checkoutPath: sourceCheckoutPath,
+            workflowId: artifact.workflowId,
+            headCommitOid: artifact.headCommitOid,
+            platformServices: this.platformServices,
+            borrowedCheckoutLease: lease,
+          });
+          const detached = await this.runGit(materialization.path, [
+            "symbolic-ref", "--quiet", "HEAD",
+          ]);
+          if (detached.exitCode !== 1
+            || detached.truncated?.stdout === true
+            || detached.truncated?.stderr === true) {
+            fail("workflow-state-mismatch", "final review materialization is not detached");
+          }
+          return await withHeadRevalidation({
+            checkoutPath: materialization.path,
+            expectedHead: artifact.headCommitOid,
+            expectedTree: artifact.headTreeOid,
+            phase: `${phase} materialization`,
+            execute: async () => await execute(materialization!.path),
+            git: this.runGit,
+          });
+        } catch (error) {
+          phaseError = error;
+          throw error;
+        } finally {
+          if (materialization !== null) {
+            try {
+              await materialization.cleanup();
+            } catch (cleanupError) {
+              if (phaseError === undefined) {
+                throw new Error(
+                  `${phase} materialization cleanup failed: ${errorDiagnostic(cleanupError)}`,
+                );
+              }
+              throw new AggregateError(
+                [phaseError, cleanupError],
+                `${phase} failed and its materialization cleanup also failed: ${errorDiagnostic(cleanupError)}`,
               );
             }
-            throw new AggregateError(
-              [primaryError, cleanupError],
-              `${phase} failed and its fresh materialization cleanup also failed: ${errorDiagnostic(cleanupError)}`,
-            );
           }
         }
-      }
-    }, sourceCheckoutPath);
+      }, sourceCheckoutPath, lease);
+    };
+    return checkoutLease === undefined
+      ? await this.withCheckoutLease(sourceCheckoutPath, phase, runWithLease)
+      : await runWithLease(checkoutLease);
   }
 
   /** Freeze the whole branch, then execute the complete cumulative gate. */
@@ -1255,6 +1348,17 @@ export class FinalBranchReviewer {
 
   /** Execute the final, whole-branch gate from one immutable cumulative artifact. */
   async runFinalReview(request: RunFinalBranchReviewRequest): Promise<FinalBranchReport> {
+    return await this.withCheckoutLease(
+      request.checkoutPath,
+      "final-review",
+      async checkoutLease => await this.runFinalReviewCore(request, checkoutLease),
+    );
+  }
+
+  private async runFinalReviewCore(
+    request: RunFinalBranchReviewRequest,
+    checkoutLease: CheckoutLock,
+  ): Promise<FinalBranchReport> {
     const { artifact } = request;
     const store = this.workflowStore(artifact.workflowId);
     await assertPersistedArtifact(store.workflowDirectory, artifact);
@@ -1287,9 +1391,11 @@ export class FinalBranchReviewer {
             spec,
             ps: this.platformServices,
             artifactStore: this.artifactStore(artifact.workflowId),
+            borrowedCheckoutLease: checkoutLease,
             verificationId: () => `${roleRunId}-verification`,
             logNamePrefix: "final-verification",
           }),
+        checkoutLease,
       )) as unknown as AcceptanceVerifyResult;
     } catch (error) {
       verification = failedVerification(`final verification execution failed: ${errorDiagnostic(error)}`);
@@ -1327,6 +1433,7 @@ export class FinalBranchReviewer {
             registry: this.producerRegistry,
             runId: roleRunId,
           }),
+        checkoutLease,
       );
       return parseRoleReport<T>(result, validate);
     };
@@ -1377,7 +1484,7 @@ export class FinalBranchReviewer {
       status: reasons.length === 0 ? "ready-to-ship" : "human-decision-required",
       evaluatedAt: this.now(),
     };
-    await this.runHeadBoundPhase(
+    await this.runHeadBoundPhaseCore(
       artifact,
       "final-evidence-publication",
       async () => {
@@ -1391,8 +1498,9 @@ export class FinalBranchReviewer {
         await persistImmutableJson(store.workflowDirectory, FINAL_ADVISOR_REF, advisor);
       },
       request.checkoutPath,
+      checkoutLease,
     );
-    await this.runHeadBoundPhase(
+    await this.runHeadBoundPhaseCore(
       artifact,
       "final-report-publication",
       async () => await persistImmutableJson(
@@ -1401,6 +1509,7 @@ export class FinalBranchReviewer {
         report,
       ),
       request.checkoutPath,
+      checkoutLease,
     );
     return structuredClone(report);
   }

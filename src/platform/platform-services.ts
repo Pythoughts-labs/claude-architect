@@ -50,6 +50,12 @@ export interface CanonicalPath { input: string; canonical: string; gitCommonDir:
  */
 export interface LockOwnerAnnotation { runId?: string }
 
+export interface PlatformDirectoryIdentity {
+  dev: bigint;
+  ino: bigint;
+  birthtimeNs: bigint;
+}
+
 export interface PlatformServices {
   os: "darwin" | "linux" | "win32";
   resolveExecutable(request: ExecutableRequest): Promise<ResolvedExecutable>;
@@ -69,4 +75,8 @@ export interface PlatformServices {
   acquireCleanupJournalLock(): Promise<FileLock>;
   createSecureTempDirectory(): Promise<string>;
   canonicalizePath(path: string): Promise<CanonicalPath>;
+  assertDirectoryWriteIntegrity(
+    directory: string,
+    expectedIdentity: PlatformDirectoryIdentity,
+  ): Promise<void>;
 }
