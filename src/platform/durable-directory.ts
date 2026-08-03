@@ -10,6 +10,25 @@ import { RuntimeError } from "../util/errors.js";
 
 const WINDOWS_DIRECTORY_SYNC_TIMEOUT_MS = 30_000;
 const WINDOWS_UNSUPPORTED_DIRECTORY_CODES = new Set(["EISDIR", "EINVAL", "ENOTSUP", "EPERM"]);
+
+function windowsHelperFailure(result: Awaited<ReturnType<typeof supervise>>): string {
+  const condition = result.spawnError !== undefined
+    ? "spawnError"
+    : result.exitCode !== 0
+      ? `exitCode=${result.exitCode}`
+      : result.signal !== null
+        ? `signal=${result.signal}`
+        : result.timedOut
+          ? "timedOut=true"
+          : result.cancelled
+            ? "cancelled=true"
+            : result.truncated.stdout
+              ? "stdoutTruncated=true"
+              : "stderrTruncated=true";
+  const stderr = result.stderr.slice(0, 512);
+  return ` (${condition})${stderr.length === 0 ? "" : `: ${stderr}`}`;
+}
+
 async function assertWindowsDirectoryAcl(
   command: "validate-private-directory" | "validate-directory-write-integrity",
   directory: string,
@@ -38,7 +57,9 @@ async function assertWindowsDirectoryAcl(
     || result.cancelled
     || result.truncated.stdout
     || result.truncated.stderr) {
-    throw new RuntimeError(`Windows directory ACL validation failed: ${command}`);
+    throw new RuntimeError(
+      `Windows directory ACL validation failed: ${command}${windowsHelperFailure(result)}`,
+    );
   }
 }
 
@@ -230,7 +251,9 @@ async function syncWindowsDirectoryMetadata(
     || result.cancelled
     || result.truncated.stdout
     || result.truncated.stderr) {
-    throw new RuntimeError("Windows directory metadata sync failed");
+    throw new RuntimeError(
+      `Windows directory metadata sync failed${windowsHelperFailure(result)}`,
+    );
   }
 }
 

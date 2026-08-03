@@ -32448,6 +32448,11 @@ async function resolveWindowsFilesystemHelper(arch = process.arch) {
 // src/platform/durable-directory.ts
 var WINDOWS_DIRECTORY_SYNC_TIMEOUT_MS = 3e4;
 var WINDOWS_UNSUPPORTED_DIRECTORY_CODES = /* @__PURE__ */ new Set(["EISDIR", "EINVAL", "ENOTSUP", "EPERM"]);
+function windowsHelperFailure(result) {
+  const condition = result.spawnError !== void 0 ? "spawnError" : result.exitCode !== 0 ? `exitCode=${result.exitCode}` : result.signal !== null ? `signal=${result.signal}` : result.timedOut ? "timedOut=true" : result.cancelled ? "cancelled=true" : result.truncated.stdout ? "stdoutTruncated=true" : "stderrTruncated=true";
+  const stderr = result.stderr.slice(0, 512);
+  return ` (${condition})${stderr.length === 0 ? "" : `: ${stderr}`}`;
+}
 async function assertWindowsDirectoryAcl(command, directory, expectedIdentity, platformServices) {
   const helper = await resolveWindowsFilesystemHelper();
   const result = await supervise(platformServices, {
@@ -32465,7 +32470,9 @@ async function assertWindowsDirectoryAcl(command, directory, expectedIdentity, p
     maxOutputBytes: 16384
   }, { graceMs: 1e3 });
   if (result.spawnError !== void 0 || result.exitCode !== 0 || result.signal !== null || result.timedOut || result.cancelled || result.truncated.stdout || result.truncated.stderr) {
-    throw new RuntimeError(`Windows directory ACL validation failed: ${command}`);
+    throw new RuntimeError(
+      `Windows directory ACL validation failed: ${command}${windowsHelperFailure(result)}`
+    );
   }
 }
 async function assertWindowsPrivateDirectory(directory, expectedIdentity, platformServices = getPlatformServices()) {
@@ -32598,7 +32605,9 @@ async function syncWindowsDirectoryMetadata(directory, expectedIdentity, platfor
     maxOutputBytes: 16384
   }, { graceMs: 1e3 });
   if (result.spawnError !== void 0 || result.exitCode !== 0 || result.signal !== null || result.timedOut || result.cancelled || result.truncated.stdout || result.truncated.stderr) {
-    throw new RuntimeError("Windows directory metadata sync failed");
+    throw new RuntimeError(
+      `Windows directory metadata sync failed${windowsHelperFailure(result)}`
+    );
   }
 }
 async function syncDirectoryMetadata(directory, dependencies = {}) {
@@ -35833,8 +35842,8 @@ async function git(cwd, args, indexFileOrOptions) {
   const maxOutputBytes = options.maxOutputBytes ?? 8e6;
   const env = {
     PATH: process.env.PATH ?? "",
-    GIT_CONFIG_GLOBAL: nullDevice,
-    GIT_CONFIG_SYSTEM: nullDevice,
+    GIT_CONFIG_GLOBAL: "/dev/null",
+    GIT_CONFIG_SYSTEM: "/dev/null",
     GIT_CONFIG_NOSYSTEM: "1",
     GIT_ATTR_NOSYSTEM: "1",
     GIT_OPTIONAL_LOCKS: "0",
@@ -56204,9 +56213,221 @@ async function recoverPendingWorktreeRemovals(platformServices = getPlatformServ
         await assertRemovalRootsUnchanged();
       };
       const uid = process.getuid?.();
-      if (!quarantineMetadata.isDirectory() || quarantineMetadata.isSymbolicLink() || process.platform !== "win32" && (uid === void 0 || quarantineMetadata.uid !== BigInt(uid) || (quarantineMetadata.mode & 0o077n) !== 0n) || commonDirIdentity === null || !sameManagedIdentity(commonDirIdentity, expectedCommonDirIdentity) || registrationRootIdentity === null || !sameManagedIdentity(registrationRootIdentity, expectedRegistrationRootIdentity) || quarantineRootIdentity === null || !sameManagedIdentity(quarantineRootIdentity, expectedQuarantineRootIdentity) || physicalRootIdentity === null || !sameManagedIdentity(physicalRootIdentity, expectedPhysicalRootIdentity) || !platformPathsEqual(commonDir, manifest.commonDir) || !platformPathsEqual(registrationRoot, expectedRegistrationRoot) || !platformPathsEqual(quarantineRoot, expectedQuarantineRoot) || !platformPathsEqual(registrationRoot, manifest.registrationRoot) || !platformPathsEqual(quarantineRoot, manifest.quarantineRoot) || !path30.isAbsolute(manifest.registrationPath) || path30.resolve(manifest.registrationPath) !== manifest.registrationPath || platformPathsEqual(manifest.registrationPath, registrationRoot) || !path30.isAbsolute(manifest.quarantinePath) || path30.resolve(manifest.quarantinePath) !== manifest.quarantinePath || platformPathsEqual(manifest.quarantinePath, quarantineRoot) || !path30.isAbsolute(manifest.physicalPath) || path30.resolve(manifest.physicalPath) !== manifest.physicalPath || platformPathsEqual(manifest.physicalPath, physicalRoot) || !path30.isAbsolute(manifest.physicalQuarantinePath) || path30.resolve(manifest.physicalQuarantinePath) !== manifest.physicalQuarantinePath || platformPathsEqual(manifest.physicalQuarantinePath, physicalRoot) || !platformPathsEqual(path30.dirname(manifest.registrationPath), registrationRoot) || !platformPathsEqual(path30.dirname(manifest.quarantinePath), quarantineRoot) || path30.basename(manifest.quarantinePath) !== `.remove-registration-${path30.basename(manifest.registrationPath)}-${manifest.transactionId}` || !platformPathsEqual(manifestPhysicalRoot, physicalRoot) || !platformPathsEqual(manifestPhysicalQuarantineRoot, physicalRoot) || path30.basename(manifest.physicalQuarantinePath) !== `.remove-${path30.basename(manifest.physicalPath)}-${manifest.transactionId}`) {
-        throw new RuntimeError("worktree removal manifest paths are inconsistent");
+      const checkManifestConsistency = (tag, ok, ...operands) => {
+        if (ok) return;
+        const detail = operands.length === 0 ? "" : ` (${operands.map((operand) => boundedRedactedDiagnostic(
+          JSON.stringify(operand, (_key, value) => typeof value === "bigint" ? value.toString() : value),
+          256
+        )).join(" vs ")})`;
+        throw new RuntimeError(
+          `worktree removal manifest paths are inconsistent: ${tag}${detail}`
+        );
+      };
+      checkManifestConsistency(
+        "quarantineRoot directory mismatch",
+        quarantineMetadata.isDirectory(),
+        quarantineMetadata.isDirectory(),
+        true
+      );
+      checkManifestConsistency(
+        "quarantineRoot symlink mismatch",
+        !quarantineMetadata.isSymbolicLink(),
+        quarantineMetadata.isSymbolicLink(),
+        false
+      );
+      if (process.platform !== "win32") {
+        checkManifestConsistency("quarantineRoot owner unavailable", uid !== void 0, uid);
+        checkManifestConsistency(
+          "quarantineRoot owner mismatch",
+          quarantineMetadata.uid === BigInt(uid),
+          quarantineMetadata.uid,
+          uid
+        );
+        checkManifestConsistency(
+          "quarantineRoot mode mismatch",
+          (quarantineMetadata.mode & 0o077n) === 0n,
+          quarantineMetadata.mode & 0o077n,
+          0
+        );
       }
+      checkManifestConsistency(
+        "commonDir identity unavailable",
+        commonDirIdentity !== null,
+        commonDirIdentity
+      );
+      checkManifestConsistency(
+        "commonDir identity mismatch",
+        sameManagedIdentity(commonDirIdentity, expectedCommonDirIdentity),
+        commonDirIdentity,
+        expectedCommonDirIdentity
+      );
+      checkManifestConsistency(
+        "registrationRoot identity unavailable",
+        registrationRootIdentity !== null,
+        registrationRootIdentity
+      );
+      checkManifestConsistency(
+        "registrationRoot identity mismatch",
+        sameManagedIdentity(registrationRootIdentity, expectedRegistrationRootIdentity),
+        registrationRootIdentity,
+        expectedRegistrationRootIdentity
+      );
+      checkManifestConsistency(
+        "quarantineRoot identity unavailable",
+        quarantineRootIdentity !== null,
+        quarantineRootIdentity
+      );
+      checkManifestConsistency(
+        "quarantineRoot identity mismatch",
+        sameManagedIdentity(quarantineRootIdentity, expectedQuarantineRootIdentity),
+        quarantineRootIdentity,
+        expectedQuarantineRootIdentity
+      );
+      checkManifestConsistency(
+        "physicalRoot identity unavailable",
+        physicalRootIdentity !== null,
+        physicalRootIdentity
+      );
+      checkManifestConsistency(
+        "physicalRoot identity mismatch",
+        sameManagedIdentity(physicalRootIdentity, expectedPhysicalRootIdentity),
+        physicalRootIdentity,
+        expectedPhysicalRootIdentity
+      );
+      checkManifestConsistency(
+        "commonDir mismatch",
+        platformPathsEqual(commonDir, manifest.commonDir),
+        commonDir,
+        manifest.commonDir
+      );
+      checkManifestConsistency(
+        "derived registrationRoot mismatch",
+        platformPathsEqual(registrationRoot, expectedRegistrationRoot),
+        registrationRoot,
+        expectedRegistrationRoot
+      );
+      checkManifestConsistency(
+        "derived quarantineRoot mismatch",
+        platformPathsEqual(quarantineRoot, expectedQuarantineRoot),
+        quarantineRoot,
+        expectedQuarantineRoot
+      );
+      checkManifestConsistency(
+        "registrationRoot mismatch",
+        platformPathsEqual(registrationRoot, manifest.registrationRoot),
+        registrationRoot,
+        manifest.registrationRoot
+      );
+      checkManifestConsistency(
+        "quarantineRoot mismatch",
+        platformPathsEqual(quarantineRoot, manifest.quarantineRoot),
+        quarantineRoot,
+        manifest.quarantineRoot
+      );
+      checkManifestConsistency(
+        "registrationPath is not absolute",
+        path30.isAbsolute(manifest.registrationPath),
+        manifest.registrationPath
+      );
+      checkManifestConsistency(
+        "registrationPath is not normalized",
+        path30.resolve(manifest.registrationPath) === manifest.registrationPath,
+        path30.resolve(manifest.registrationPath),
+        manifest.registrationPath
+      );
+      checkManifestConsistency(
+        "registrationPath equals registrationRoot",
+        !platformPathsEqual(manifest.registrationPath, registrationRoot),
+        manifest.registrationPath,
+        registrationRoot
+      );
+      checkManifestConsistency(
+        "quarantinePath is not absolute",
+        path30.isAbsolute(manifest.quarantinePath),
+        manifest.quarantinePath
+      );
+      checkManifestConsistency(
+        "quarantinePath is not normalized",
+        path30.resolve(manifest.quarantinePath) === manifest.quarantinePath,
+        path30.resolve(manifest.quarantinePath),
+        manifest.quarantinePath
+      );
+      checkManifestConsistency(
+        "quarantinePath equals quarantineRoot",
+        !platformPathsEqual(manifest.quarantinePath, quarantineRoot),
+        manifest.quarantinePath,
+        quarantineRoot
+      );
+      checkManifestConsistency(
+        "physicalPath is not absolute",
+        path30.isAbsolute(manifest.physicalPath),
+        manifest.physicalPath
+      );
+      checkManifestConsistency(
+        "physicalPath is not normalized",
+        path30.resolve(manifest.physicalPath) === manifest.physicalPath,
+        path30.resolve(manifest.physicalPath),
+        manifest.physicalPath
+      );
+      checkManifestConsistency(
+        "physicalPath equals physicalRoot",
+        !platformPathsEqual(manifest.physicalPath, physicalRoot),
+        manifest.physicalPath,
+        physicalRoot
+      );
+      checkManifestConsistency(
+        "physicalQuarantinePath is not absolute",
+        path30.isAbsolute(manifest.physicalQuarantinePath),
+        manifest.physicalQuarantinePath
+      );
+      checkManifestConsistency(
+        "physicalQuarantinePath is not normalized",
+        path30.resolve(manifest.physicalQuarantinePath) === manifest.physicalQuarantinePath,
+        path30.resolve(manifest.physicalQuarantinePath),
+        manifest.physicalQuarantinePath
+      );
+      checkManifestConsistency(
+        "physicalQuarantinePath equals physicalRoot",
+        !platformPathsEqual(manifest.physicalQuarantinePath, physicalRoot),
+        manifest.physicalQuarantinePath,
+        physicalRoot
+      );
+      checkManifestConsistency(
+        "registrationPath parent mismatch",
+        platformPathsEqual(path30.dirname(manifest.registrationPath), registrationRoot),
+        path30.dirname(manifest.registrationPath),
+        registrationRoot
+      );
+      checkManifestConsistency(
+        "quarantinePath parent mismatch",
+        platformPathsEqual(path30.dirname(manifest.quarantinePath), quarantineRoot),
+        path30.dirname(manifest.quarantinePath),
+        quarantineRoot
+      );
+      checkManifestConsistency(
+        "quarantinePath name mismatch",
+        path30.basename(manifest.quarantinePath) === `.remove-registration-${path30.basename(manifest.registrationPath)}-${manifest.transactionId}`,
+        path30.basename(manifest.quarantinePath),
+        `.remove-registration-${path30.basename(manifest.registrationPath)}-${manifest.transactionId}`
+      );
+      checkManifestConsistency(
+        "physicalPath parent mismatch",
+        platformPathsEqual(manifestPhysicalRoot, physicalRoot),
+        manifestPhysicalRoot,
+        physicalRoot
+      );
+      checkManifestConsistency(
+        "physicalQuarantinePath parent mismatch",
+        platformPathsEqual(manifestPhysicalQuarantineRoot, physicalRoot),
+        manifestPhysicalQuarantineRoot,
+        physicalRoot
+      );
+      checkManifestConsistency(
+        "physicalQuarantinePath name mismatch",
+        path30.basename(manifest.physicalQuarantinePath) === `.remove-${path30.basename(manifest.physicalPath)}-${manifest.transactionId}`,
+        path30.basename(manifest.physicalQuarantinePath),
+        `.remove-${path30.basename(manifest.physicalPath)}-${manifest.transactionId}`
+      );
       if (manifest.phase === "creation-root-changed") {
         throw new RuntimeError("worktree creation root changed and requires manual resolution");
       }

@@ -1,7 +1,7 @@
 import { access, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { git } from "../../src/git/git-exec.js";
 import type { PlatformServices } from "../../src/platform/platform-services.js";
 import { getPlatformServices } from "../../src/platform/select-platform.js";
@@ -9,6 +9,7 @@ import type { VerificationCommand } from "../../src/protocol/delegation-spec.js"
 import { verifyBaseline } from "../../src/verify/baseline-verifier.js";
 
 const temporaryPaths: string[] = [];
+let previousPluginData: string | undefined;
 
 async function fixture(): Promise<{ repoRoot: string; headCommitOid: string }> {
   const repoRoot = await mkdtemp(join(tmpdir(), "ca-baseline-verifier-"));
@@ -71,7 +72,16 @@ function platformWithCommandOutput(
   return ps;
 }
 
+beforeEach(async () => {
+  previousPluginData = process.env.CLAUDE_PLUGIN_DATA;
+  const stateRoot = await mkdtemp(join(tmpdir(), "ca-baseline-verifier-state-"));
+  temporaryPaths.push(stateRoot);
+  process.env.CLAUDE_PLUGIN_DATA = stateRoot;
+});
+
 afterEach(async () => {
+  if (previousPluginData === undefined) delete process.env.CLAUDE_PLUGIN_DATA;
+  else process.env.CLAUDE_PLUGIN_DATA = previousPluginData;
   await Promise.all(temporaryPaths.splice(0).map(path =>
     rm(path, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })));
 });
