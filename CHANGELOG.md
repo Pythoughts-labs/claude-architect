@@ -6,6 +6,8 @@ All notable changes to Claude Architect are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.47.0] - 2026-08-04
+
 ### Fixed
 
 - Seatbelt-confined Pi, OpenCode, and Pythinker edit-lane model sessions can
