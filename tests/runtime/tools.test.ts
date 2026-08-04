@@ -661,7 +661,7 @@ describe("MCP tool handlers", () => {
 
     const output = await handleDelegate(
       "/repo",
-      { ...validSpec, producerPreferences: ["codex", "opencode", "pi", "pythinker"] },
+      { ...validSpec, producerPreferences: ["codex", "opencode", "pi", "pythinker", "agy"] },
       deps,
     );
 

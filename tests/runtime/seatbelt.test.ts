@@ -189,6 +189,44 @@ describe("seatbelt profile", () => {
     expect(profile).not.toContain('(subpath "/Users/test/.pythinker-code")');
   });
 
+  it("allowlists only agy's config/state directory (~/.gemini/antigravity-cli), detected by executable identity", () => {
+    const wrapped = wrapInvocationWithSeatbelt({
+      ...invocation,
+      executable: {
+        kind: "native",
+        command: "/usr/local/bin/agy",
+        prefixArgs: [],
+        resolvedFrom: "path:/usr/local/bin/agy",
+      },
+      args: ["-p", "test"],
+      env: { HOME: "/Users/test" },
+    }, {
+      worktreePath: "/tmp/wt",
+      tempHome: null,
+      allowNetwork: false,
+    });
+    const profile = wrapped.args[1] ?? "";
+
+    expect(profile).toContain('(subpath "/Users/test/.gemini/antigravity-cli")');
+    expect(profile).not.toContain('(subpath "/Users/test/.gemini")');
+    expect(profile).not.toContain('(subpath "/Users/test")');
+  });
+
+  it("does not allowlist agy's directory for an unrelated executable requiring GEMINI_API_KEY", () => {
+    const wrapped = wrapInvocationWithSeatbelt({
+      ...invocation,
+      requiredEnv: ["GEMINI_API_KEY"],
+      env: { HOME: "/Users/test" },
+    }, {
+      worktreePath: "/tmp/wt",
+      tempHome: null,
+      allowNetwork: false,
+    });
+    const profile = wrapped.args[1] ?? "";
+
+    expect(profile).not.toContain('(subpath "/Users/test/.gemini/antigravity-cli")');
+  });
+
   it("keeps joined subpaths POSIX even when HOME contains win32-style separators", () => {
     const wrapped = wrapInvocationWithSeatbelt({
       ...invocation,

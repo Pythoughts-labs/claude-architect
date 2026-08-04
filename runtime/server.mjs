@@ -36036,12 +36036,13 @@ function selectSandboxBackend(report) {
   return { backend, state: platform.state };
 }
 
-// src/producers/codex-adapter.ts
-import { execFileSync } from "node:child_process";
-import { existsSync as existsSync2, realpathSync } from "node:fs";
-import { open as open3 } from "node:fs/promises";
-import { homedir, tmpdir as tmpdir4 } from "node:os";
+// src/producers/agy-adapter.ts
+import { existsSync as existsSync2 } from "node:fs";
+import { homedir } from "node:os";
 import { join } from "node:path";
+
+// src/producers/plain-text.ts
+import { open as open3 } from "node:fs/promises";
 
 // src/producers/skill-bootstrap.ts
 import { existsSync } from "node:fs";
@@ -36122,7 +36123,261 @@ function renderSkillBootstrap() {
   );
 }
 
+// src/producers/plain-text.ts
+var PLAIN_TEXT_LIMIT = 8e3;
+function renderList(values) {
+  return values.length === 0 ? "- (none)" : values.map((value) => `- ${value}`).join("\n");
+}
+function renderProducerPrompt(spec, readOnly = false) {
+  return [
+    "You are an untrusted implementation Producer operating inside an isolated worktree.",
+    "Do not delegate to other agents or expand the authorized scope.",
+    ...readOnly ? [] : ["", renderSkillBootstrap()],
+    "",
+    "Objective:",
+    spec.objective,
+    "",
+    "Context:",
+    spec.context,
+    "",
+    "Authorized write allowlist:",
+    renderList(spec.writeAllowlist),
+    "",
+    "Forbidden scope:",
+    renderList(spec.forbiddenScope),
+    "",
+    "Success criteria:",
+    renderList(spec.successCriteria),
+    "",
+    "Make only the requested edits. Return a concise final summary of the work performed."
+  ].join("\n");
+}
+function normalizePlainText(raw) {
+  if (raw.exit.truncated.stdout) {
+    return {
+      events: [{ kind: "error", text: "stdout-truncated" }],
+      producerSummary: null,
+      ok: false
+    };
+  }
+  if (raw.exit.exitCode !== 0) {
+    return {
+      events: [{ kind: "error", text: raw.stderr.slice(-PLAIN_TEXT_LIMIT) }],
+      producerSummary: null,
+      ok: false
+    };
+  }
+  const trimmed = raw.stdout.trim();
+  const summary = trimmed.length > PLAIN_TEXT_LIMIT ? trimmed.slice(-PLAIN_TEXT_LIMIT) : trimmed;
+  if (summary.length === 0) return { events: [], producerSummary: null, ok: false };
+  return {
+    events: [{ kind: "final", text: summary }],
+    producerSummary: summary,
+    ok: true
+  };
+}
+async function normalizeNodeShim(executable) {
+  if (executable.kind !== "native") return executable;
+  let handle;
+  try {
+    handle = await open3(executable.command, "r");
+    const buffer = Buffer.alloc(256);
+    const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);
+    const firstLine = buffer.subarray(0, bytesRead).toString("utf8").split(/\r?\n/u, 1)[0] ?? "";
+    if (!/^#![^\r\n]*\bnode(?:\s|$)/u.test(firstLine)) return executable;
+    return {
+      kind: "node-entrypoint",
+      command: process.execPath,
+      prefixArgs: [executable.command, ...executable.prefixArgs],
+      resolvedFrom: `${executable.resolvedFrom};node:${process.execPath}`
+    };
+  } catch {
+    return executable;
+  } finally {
+    await handle?.close();
+  }
+}
+function selectOsWriteConfinementBackend(ctx) {
+  const backend = SANDBOX_BACKENDS.find((candidate) => candidate.id === "macos-seatbelt" && candidate.platforms.some((platform) => platform.os === ctx.os && platform.environmentType === ctx.environmentType && (platform.arch === void 0 || platform.arch === ctx.arch) && (platform.state === "certified" || platform.state === "tested")));
+  return backend?.id ?? null;
+}
+
+// src/producers/agy-adapter.ts
+var AGY_REQUIRED_ENV = ["GEMINI_API_KEY"];
+var VERSION_TIMEOUT_MS = 1e4;
+var VERSION_OUTPUT_LIMIT = 64 * 1024;
+var TEXT_LIMIT = 8e3;
+function isRecord3(value) {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+function stringProperty(value, name) {
+  if (!isRecord3(value)) return void 0;
+  const property = value[name];
+  return typeof property === "string" ? property : void 0;
+}
+function unavailableReport(ctx, reason, resolvedExecutable = null) {
+  return {
+    producerId: "agy",
+    available: false,
+    reason,
+    os: ctx.os,
+    arch: ctx.arch,
+    environmentType: ctx.environmentType,
+    resolvedExecutable,
+    version: null,
+    authState: "unknown",
+    executionModes: ["edit"],
+    structuredOutput: true,
+    writeConfinementBackend: null,
+    laneEligibility: { edit: false }
+  };
+}
+function parseVersion(stdout) {
+  const match = /(?:^|\s)(\d+\.\d+\.\d+(?:[-+][^\s]+)?)(?:\s|$)/u.exec(stdout.trim());
+  return match?.[1] ?? null;
+}
+function formatPrintTimeout(timeoutMs) {
+  return `${Math.ceil(timeoutMs / 1e3)}s`;
+}
+var AgyAdapter = class {
+  constructor(deps = {
+    env: process.env,
+    homeDirectory: homedir()
+  }) {
+    this.deps = deps;
+  }
+  deps;
+  producerId = "agy";
+  structuredOutput = true;
+  executionModes = ["edit"];
+  hasAuthStore(directory) {
+    return (this.deps.hasAuthStore ?? ((store) => existsSync2(join(store, "settings.json"))))(directory);
+  }
+  async probe(ctx) {
+    if (ctx.os === "win32") return unavailableReport(ctx, "unsupported-platform");
+    let executable;
+    try {
+      executable = await normalizeNodeShim(
+        await ctx.ps.resolveExecutable({ name: "agy" })
+      );
+    } catch {
+      return unavailableReport(ctx, "missing-executable");
+    }
+    try {
+      const result = await supervise(ctx.ps, {
+        executable,
+        args: ["--version"],
+        cwd: process.cwd(),
+        env: {},
+        timeoutMs: VERSION_TIMEOUT_MS,
+        maxOutputBytes: VERSION_OUTPUT_LIMIT
+      }, {});
+      const version2 = result.spawnError === void 0 && result.exitCode === 0 ? parseVersion(result.stdout) : null;
+      if (version2 === null) return unavailableReport(ctx, "probe-failed", executable);
+      const writeConfinementBackend = selectOsWriteConfinementBackend(ctx);
+      const authStore = join(this.deps.homeDirectory, ".gemini", "antigravity-cli");
+      const authState = this.hasAuthStore(authStore) ? "authenticated" : "unauthenticated";
+      return {
+        producerId: this.producerId,
+        available: true,
+        reason: null,
+        os: ctx.os,
+        arch: ctx.arch,
+        environmentType: ctx.environmentType,
+        resolvedExecutable: executable,
+        version: version2,
+        authState,
+        executionModes: [...this.executionModes],
+        structuredOutput: this.structuredOutput,
+        writeConfinementBackend,
+        laneEligibility: { edit: writeConfinementBackend !== null }
+      };
+    } catch {
+      return unavailableReport(ctx, "probe-failed", executable);
+    }
+  }
+  buildInvocation(spec, ctx) {
+    const args = [
+      "-p",
+      renderProducerPrompt(spec, ctx.readOnly === true),
+      "--add-dir",
+      ctx.worktreePath,
+      "--new-project",
+      "--output-format",
+      "json",
+      "--dangerously-skip-permissions",
+      "--print-timeout",
+      formatPrintTimeout(spec.timeoutMs)
+    ];
+    if (spec.producerOverrides?.model !== void 0) {
+      args.push("--model", spec.producerOverrides.model);
+    }
+    if (spec.producerOverrides?.reasoningEffort !== void 0) {
+      args.push("--effort", spec.producerOverrides.reasoningEffort);
+    }
+    return {
+      executable: ctx.executable,
+      args,
+      requiredEnv: [...AGY_REQUIRED_ENV],
+      // Model sessions must reach the provider API; write-protection remains the confinement goal.
+      network: "allowed"
+    };
+  }
+  normalizeEvents(raw) {
+    if (raw.exit.truncated.stdout) {
+      return { events: [], producerSummary: null, ok: false };
+    }
+    if (raw.exit.exitCode !== 0) {
+      return {
+        events: [{ kind: "error", text: raw.stderr.slice(-TEXT_LIMIT) }],
+        producerSummary: null,
+        ok: false
+      };
+    }
+    let parsed;
+    try {
+      parsed = JSON.parse(raw.stdout.trim());
+    } catch {
+      return { events: [], producerSummary: null, ok: false };
+    }
+    if (!isRecord3(parsed) || typeof parsed.status !== "string") {
+      return { events: [], producerSummary: null, ok: false };
+    }
+    const response = stringProperty(parsed, "response");
+    const ok = parsed.status === "SUCCESS";
+    if (ok) {
+      if (response === void 0) return { events: [], producerSummary: null, ok: false };
+      const events2 = [{ kind: "final", text: response, raw: parsed }];
+      return { events: events2, producerSummary: response, ok: true };
+    }
+    const events = [{
+      kind: "error",
+      ...response === void 0 ? {} : { text: response },
+      raw: parsed
+    }];
+    return { events, producerSummary: null, ok: false };
+  }
+  configurationProfile() {
+    return {
+      isolationState: "inherited-config-only",
+      credentialSources: [
+        'macOS Keychain ("Antigravity IDE Safe Storage")',
+        "GEMINI_API_KEY (optional, unconfirmed CI semantics)"
+      ],
+      behavioralConfigSources: ["~/.gemini/antigravity-cli/settings.json", "explicit invocation argv"],
+      repositoryInstructionSources: ["worktree AGENTS.md"],
+      environmentDependencies: [...AGY_REQUIRED_ENV],
+      temporaryHomeStrategy: "real HOME inherited by declared policy (keyring auth is not HOME-redirectable); reduced reproducibility recorded in the Run Manifest"
+    };
+  }
+};
+
 // src/producers/codex-adapter.ts
+import { execFileSync } from "node:child_process";
+import { existsSync as existsSync3, realpathSync } from "node:fs";
+import { open as open4 } from "node:fs/promises";
+import { homedir as homedir2, tmpdir as tmpdir4 } from "node:os";
+import { join as join2 } from "node:path";
 var CODEX_REQUIRED_ENV = [
   "CODEX_HOME",
   "CODEX_API_KEY",
@@ -36145,7 +36400,7 @@ function resolveDarwinUserTempDirectory() {
   try {
     const raw = execFileSync("/usr/bin/getconf", ["DARWIN_USER_TEMP_DIR"], {
       encoding: "utf8",
-      timeout: VERSION_TIMEOUT_MS
+      timeout: VERSION_TIMEOUT_MS2
     }).trim();
     darwinUserTempDirectory = raw.length === 0 ? realpathSync(tmpdir4()) : realpathSync(raw);
   } catch {
@@ -36162,17 +36417,17 @@ function sandboxSupportWritableRoots(platform) {
   const temporaryDirectory = resolveDarwinUserTempDirectory();
   return temporaryDirectory === null ? [] : [temporaryDirectory];
 }
-var VERSION_TIMEOUT_MS = 1e4;
-var VERSION_OUTPUT_LIMIT = 64 * 1024;
-function isRecord3(value) {
+var VERSION_TIMEOUT_MS2 = 1e4;
+var VERSION_OUTPUT_LIMIT2 = 64 * 1024;
+function isRecord4(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
-function stringProperty(value, name) {
-  if (!isRecord3(value)) return void 0;
+function stringProperty2(value, name) {
+  if (!isRecord4(value)) return void 0;
   const property = value[name];
   return typeof property === "string" ? property : void 0;
 }
-function unavailableReport(ctx, reason, resolvedExecutable = null) {
+function unavailableReport2(ctx, reason, resolvedExecutable = null) {
   return {
     producerId: "codex",
     available: false,
@@ -36189,7 +36444,7 @@ function unavailableReport(ctx, reason, resolvedExecutable = null) {
     laneEligibility: { edit: false }
   };
 }
-function parseVersion(stdout) {
+function parseVersion2(stdout) {
   const match = /(?:^|\s)(\d+\.\d+\.\d+(?:[-+][^\s]+)?)(?:\s|$)/u.exec(stdout.trim());
   return match?.[1] ?? null;
 }
@@ -36201,7 +36456,7 @@ async function normalizeCodexExecutable(executable) {
   if (executable.kind !== "native") return executable;
   let handle;
   try {
-    handle = await open3(executable.command, "r");
+    handle = await open4(executable.command, "r");
     const buffer = Buffer.alloc(256);
     const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);
     const firstLine = buffer.subarray(0, bytesRead).toString("utf8").split(/\r?\n/u, 1)[0] ?? "";
@@ -36221,7 +36476,7 @@ async function normalizeCodexExecutable(executable) {
 function quoteTomlString(value) {
   return JSON.stringify(value);
 }
-function renderList(values) {
+function renderList2(values) {
   return values.length === 0 ? "- (none)" : values.map((value) => `- ${value}`).join("\n");
 }
 var CODEX_EDIT_ACTION_PREAMBLE = [
@@ -36243,13 +36498,13 @@ function renderPrompt(spec, readOnly) {
     spec.context,
     "",
     "Authorized write allowlist:",
-    renderList(spec.writeAllowlist),
+    renderList2(spec.writeAllowlist),
     "",
     "Forbidden scope:",
-    renderList(spec.forbiddenScope),
+    renderList2(spec.forbiddenScope),
     "",
     "Success criteria:",
-    renderList(spec.successCriteria),
+    renderList2(spec.successCriteria),
     "",
     "If you run linting, formatting, or type checking, complete all linting and formatting first, then run a final type-check covering every typed file you changed, including new or modified tests.",
     "",
@@ -36262,7 +36517,7 @@ ${renderSkillBootstrap()}
 ${prompt}`;
 }
 function resolveCodexStore(deps) {
-  return deps.env.CODEX_HOME ?? join(deps.homeDirectory, ".codex");
+  return deps.env.CODEX_HOME ?? join2(deps.homeDirectory, ".codex");
 }
 function defaultCodexEnv(deps) {
   if (deps.env.CODEX_HOME !== void 0) return {};
@@ -36272,24 +36527,24 @@ function defaultCodexEnv(deps) {
 var CodexAdapter = class {
   constructor(deps = {
     env: process.env,
-    homeDirectory: homedir()
+    homeDirectory: homedir2()
   }) {
     this.deps = deps;
   }
   deps;
   producerId = "codex";
   hasAuthStore(directory) {
-    return (this.deps.hasAuthStore ?? ((store) => existsSync2(join(store, "auth.json"))))(directory);
+    return (this.deps.hasAuthStore ?? ((store) => existsSync3(join2(store, "auth.json"))))(directory);
   }
   async probe(ctx) {
-    if (ctx.os === "win32") return unavailableReport(ctx, "unsupported-platform");
+    if (ctx.os === "win32") return unavailableReport2(ctx, "unsupported-platform");
     let executable;
     try {
       executable = await normalizeCodexExecutable(
         await ctx.ps.resolveExecutable({ name: "codex" })
       );
     } catch {
-      return unavailableReport(ctx, "missing-executable");
+      return unavailableReport2(ctx, "missing-executable");
     }
     try {
       const result = await supervise(ctx.ps, {
@@ -36297,11 +36552,11 @@ var CodexAdapter = class {
         args: ["--version"],
         cwd: process.cwd(),
         env: {},
-        timeoutMs: VERSION_TIMEOUT_MS,
-        maxOutputBytes: VERSION_OUTPUT_LIMIT
+        timeoutMs: VERSION_TIMEOUT_MS2,
+        maxOutputBytes: VERSION_OUTPUT_LIMIT2
       }, {});
-      const version2 = result.spawnError === void 0 && result.exitCode === 0 && result.signal === null && result.timedOut === false && result.cancelled === false ? parseVersion(result.stdout) : null;
-      if (version2 === null) return unavailableReport(ctx, "probe-failed", executable);
+      const version2 = result.spawnError === void 0 && result.exitCode === 0 && result.signal === null && result.timedOut === false && result.cancelled === false ? parseVersion2(result.stdout) : null;
+      if (version2 === null) return unavailableReport2(ctx, "probe-failed", executable);
       const writeConfinementBackend = selectCodexWriteConfinementBackend(ctx);
       const authState = this.hasAuthStore(resolveCodexStore(this.deps)) ? "authenticated" : "unauthenticated";
       return {
@@ -36320,7 +36575,7 @@ var CodexAdapter = class {
         laneEligibility: { edit: writeConfinementBackend !== null }
       };
     } catch {
-      return unavailableReport(ctx, "probe-failed", executable);
+      return unavailableReport2(ctx, "probe-failed", executable);
     }
   }
   buildInvocation(spec, ctx) {
@@ -36430,7 +36685,7 @@ var CodexAdapter = class {
     try {
       for (const line of lines) {
         const parsed = JSON.parse(line);
-        if (!isRecord3(parsed) || typeof parsed.type !== "string") {
+        if (!isRecord4(parsed) || typeof parsed.type !== "string") {
           return { events: [], producerSummary: null, ok: false };
         }
         if (parsed.type === "turn.completed") {
@@ -36439,7 +36694,7 @@ var CodexAdapter = class {
         }
         if (parsed.type === "error" || parsed.type === "turn.failed") {
           failed = true;
-          const text = stringProperty(parsed, "message") ?? stringProperty(parsed.error, "message");
+          const text = stringProperty2(parsed, "message") ?? stringProperty2(parsed.error, "message");
           events.push({
             kind: "error",
             ...text === void 0 ? {} : { text },
@@ -36449,9 +36704,9 @@ var CodexAdapter = class {
         }
         if (parsed.type !== "item.completed") continue;
         const item = parsed.item;
-        const itemType = stringProperty(item, "type");
+        const itemType = stringProperty2(item, "type");
         if (itemType === "agent_message") {
-          const text = stringProperty(item, "text");
+          const text = stringProperty2(item, "text");
           if (text === void 0) return { events: [], producerSummary: null, ok: false };
           producerSummary = text;
           events.push({ kind: "final", text, raw: parsed });
@@ -36486,95 +36741,13 @@ var CodexAdapter = class {
 };
 
 // src/producers/opencode-adapter.ts
-import { existsSync as existsSync3 } from "node:fs";
-import { homedir as homedir2 } from "node:os";
-import { join as join2 } from "node:path";
-
-// src/producers/plain-text.ts
-import { open as open4 } from "node:fs/promises";
-var PLAIN_TEXT_LIMIT = 8e3;
-function renderList2(values) {
-  return values.length === 0 ? "- (none)" : values.map((value) => `- ${value}`).join("\n");
-}
-function renderProducerPrompt(spec, readOnly = false) {
-  return [
-    "You are an untrusted implementation Producer operating inside an isolated worktree.",
-    "Do not delegate to other agents or expand the authorized scope.",
-    ...readOnly ? [] : ["", renderSkillBootstrap()],
-    "",
-    "Objective:",
-    spec.objective,
-    "",
-    "Context:",
-    spec.context,
-    "",
-    "Authorized write allowlist:",
-    renderList2(spec.writeAllowlist),
-    "",
-    "Forbidden scope:",
-    renderList2(spec.forbiddenScope),
-    "",
-    "Success criteria:",
-    renderList2(spec.successCriteria),
-    "",
-    "Make only the requested edits. Return a concise final summary of the work performed."
-  ].join("\n");
-}
-function normalizePlainText(raw) {
-  if (raw.exit.truncated.stdout) {
-    return {
-      events: [{ kind: "error", text: "stdout-truncated" }],
-      producerSummary: null,
-      ok: false
-    };
-  }
-  if (raw.exit.exitCode !== 0) {
-    return {
-      events: [{ kind: "error", text: raw.stderr.slice(-PLAIN_TEXT_LIMIT) }],
-      producerSummary: null,
-      ok: false
-    };
-  }
-  const trimmed = raw.stdout.trim();
-  const summary = trimmed.length > PLAIN_TEXT_LIMIT ? trimmed.slice(-PLAIN_TEXT_LIMIT) : trimmed;
-  if (summary.length === 0) return { events: [], producerSummary: null, ok: false };
-  return {
-    events: [{ kind: "final", text: summary }],
-    producerSummary: summary,
-    ok: true
-  };
-}
-async function normalizeNodeShim(executable) {
-  if (executable.kind !== "native") return executable;
-  let handle;
-  try {
-    handle = await open4(executable.command, "r");
-    const buffer = Buffer.alloc(256);
-    const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);
-    const firstLine = buffer.subarray(0, bytesRead).toString("utf8").split(/\r?\n/u, 1)[0] ?? "";
-    if (!/^#![^\r\n]*\bnode(?:\s|$)/u.test(firstLine)) return executable;
-    return {
-      kind: "node-entrypoint",
-      command: process.execPath,
-      prefixArgs: [executable.command, ...executable.prefixArgs],
-      resolvedFrom: `${executable.resolvedFrom};node:${process.execPath}`
-    };
-  } catch {
-    return executable;
-  } finally {
-    await handle?.close();
-  }
-}
-function selectOsWriteConfinementBackend(ctx) {
-  const backend = SANDBOX_BACKENDS.find((candidate) => candidate.id === "macos-seatbelt" && candidate.platforms.some((platform) => platform.os === ctx.os && platform.environmentType === ctx.environmentType && (platform.arch === void 0 || platform.arch === ctx.arch) && (platform.state === "certified" || platform.state === "tested")));
-  return backend?.id ?? null;
-}
-
-// src/producers/opencode-adapter.ts
+import { existsSync as existsSync4 } from "node:fs";
+import { homedir as homedir3 } from "node:os";
+import { join as join3 } from "node:path";
 var OPENCODE_REQUIRED_ENV = ["OPENCODE_CONFIG_DIR", "XDG_DATA_HOME"];
-var VERSION_TIMEOUT_MS2 = 1e4;
-var VERSION_OUTPUT_LIMIT2 = 64 * 1024;
-function unavailableReport2(ctx, reason, resolvedExecutable = null) {
+var VERSION_TIMEOUT_MS3 = 1e4;
+var VERSION_OUTPUT_LIMIT3 = 64 * 1024;
+function unavailableReport3(ctx, reason, resolvedExecutable = null) {
   return {
     producerId: "opencode",
     available: false,
@@ -36591,19 +36764,19 @@ function unavailableReport2(ctx, reason, resolvedExecutable = null) {
     laneEligibility: { edit: false }
   };
 }
-function parseVersion2(stdout) {
+function parseVersion3(stdout) {
   const match = /(?:^|\s)(\d+\.\d+\.\d+(?:[-+][^\s]+)?)(?:\s|$)/u.exec(stdout.trim());
   return match?.[1] ?? null;
 }
 function defaultOpenCodeEnv(deps) {
   if (deps.env.XDG_DATA_HOME !== void 0) return {};
-  const dataHome = join2(deps.homeDirectory, ".local", "share");
-  return deps.hasAuthStore(join2(dataHome, "opencode")) ? { XDG_DATA_HOME: dataHome } : {};
+  const dataHome = join3(deps.homeDirectory, ".local", "share");
+  return deps.hasAuthStore(join3(dataHome, "opencode")) ? { XDG_DATA_HOME: dataHome } : {};
 }
 var OpenCodeAdapter = class {
   constructor(deps = {
     env: process.env,
-    homeDirectory: homedir2()
+    homeDirectory: homedir3()
   }) {
     this.deps = deps;
   }
@@ -36612,17 +36785,17 @@ var OpenCodeAdapter = class {
   structuredOutput = false;
   executionModes = ["edit"];
   hasAuthStore(directory) {
-    return (this.deps.hasAuthStore ?? ((store) => existsSync3(join2(store, "auth.json"))))(directory);
+    return (this.deps.hasAuthStore ?? ((store) => existsSync4(join3(store, "auth.json"))))(directory);
   }
   async probe(ctx) {
-    if (ctx.os === "win32") return unavailableReport2(ctx, "unsupported-platform");
+    if (ctx.os === "win32") return unavailableReport3(ctx, "unsupported-platform");
     let executable;
     try {
       executable = await normalizeNodeShim(
         await ctx.ps.resolveExecutable({ name: "opencode" })
       );
     } catch {
-      return unavailableReport2(ctx, "missing-executable");
+      return unavailableReport3(ctx, "missing-executable");
     }
     try {
       const result = await supervise(ctx.ps, {
@@ -36630,13 +36803,13 @@ var OpenCodeAdapter = class {
         args: ["--version"],
         cwd: process.cwd(),
         env: {},
-        timeoutMs: VERSION_TIMEOUT_MS2,
-        maxOutputBytes: VERSION_OUTPUT_LIMIT2
+        timeoutMs: VERSION_TIMEOUT_MS3,
+        maxOutputBytes: VERSION_OUTPUT_LIMIT3
       }, {});
-      const version2 = result.spawnError === void 0 && result.exitCode === 0 ? parseVersion2(result.stdout) : null;
-      if (version2 === null) return unavailableReport2(ctx, "probe-failed", executable);
+      const version2 = result.spawnError === void 0 && result.exitCode === 0 ? parseVersion3(result.stdout) : null;
+      if (version2 === null) return unavailableReport3(ctx, "probe-failed", executable);
       const writeConfinementBackend = selectOsWriteConfinementBackend(ctx);
-      const authStore = join2(this.deps.homeDirectory, ".local", "share", "opencode");
+      const authStore = join3(this.deps.homeDirectory, ".local", "share", "opencode");
       const authState = this.hasAuthStore(authStore) ? "authenticated" : "unauthenticated";
       return {
         producerId: this.producerId,
@@ -36654,7 +36827,7 @@ var OpenCodeAdapter = class {
         laneEligibility: { edit: writeConfinementBackend !== null }
       };
     } catch {
-      return unavailableReport2(ctx, "probe-failed", executable);
+      return unavailableReport3(ctx, "probe-failed", executable);
     }
   }
   buildInvocation(spec, ctx) {
@@ -36701,13 +36874,13 @@ var OpenCodeAdapter = class {
 };
 
 // src/producers/pi-adapter.ts
-import { existsSync as existsSync4 } from "node:fs";
-import { homedir as homedir3 } from "node:os";
-import { join as join3 } from "node:path";
+import { existsSync as existsSync5 } from "node:fs";
+import { homedir as homedir4 } from "node:os";
+import { join as join4 } from "node:path";
 var PI_REQUIRED_ENV = ["PI_API_KEY"];
-var VERSION_TIMEOUT_MS3 = 1e4;
-var VERSION_OUTPUT_LIMIT3 = 64 * 1024;
-function unavailableReport3(ctx, reason, resolvedExecutable = null) {
+var VERSION_TIMEOUT_MS4 = 1e4;
+var VERSION_OUTPUT_LIMIT4 = 64 * 1024;
+function unavailableReport4(ctx, reason, resolvedExecutable = null) {
   return {
     producerId: "pi",
     available: false,
@@ -36724,18 +36897,18 @@ function unavailableReport3(ctx, reason, resolvedExecutable = null) {
     laneEligibility: { edit: false }
   };
 }
-function parseVersion3(stdout) {
+function parseVersion4(stdout) {
   const match = /(?:^|\s)(\d+\.\d+\.\d+(?:[-+][^\s]+)?)(?:\s|$)/u.exec(stdout.trim());
   return match?.[1] ?? null;
 }
 function defaultPiEnv(deps) {
   if (deps.env.HOME !== void 0) return {};
-  return deps.hasConfigDir(join3(deps.homeDirectory, ".pi")) ? { HOME: deps.homeDirectory } : {};
+  return deps.hasConfigDir(join4(deps.homeDirectory, ".pi")) ? { HOME: deps.homeDirectory } : {};
 }
 var PiAdapter = class {
   constructor(deps = {
     env: process.env,
-    homeDirectory: homedir3()
+    homeDirectory: homedir4()
   }) {
     this.deps = deps;
   }
@@ -36744,20 +36917,20 @@ var PiAdapter = class {
   structuredOutput = false;
   executionModes = ["edit"];
   hasAuthStore(directory) {
-    return (this.deps.hasAuthStore ?? ((store) => existsSync4(join3(store, "auth.json"))))(directory);
+    return (this.deps.hasAuthStore ?? ((store) => existsSync5(join4(store, "auth.json"))))(directory);
   }
   hasConfigDir(directory) {
-    return existsSync4(directory);
+    return existsSync5(directory);
   }
   async probe(ctx) {
-    if (ctx.os === "win32") return unavailableReport3(ctx, "unsupported-platform");
+    if (ctx.os === "win32") return unavailableReport4(ctx, "unsupported-platform");
     let executable;
     try {
       executable = await normalizeNodeShim(
         await ctx.ps.resolveExecutable({ name: "pi" })
       );
     } catch {
-      return unavailableReport3(ctx, "missing-executable");
+      return unavailableReport4(ctx, "missing-executable");
     }
     try {
       const result = await supervise(ctx.ps, {
@@ -36765,13 +36938,13 @@ var PiAdapter = class {
         args: ["--version"],
         cwd: process.cwd(),
         env: {},
-        timeoutMs: VERSION_TIMEOUT_MS3,
-        maxOutputBytes: VERSION_OUTPUT_LIMIT3
+        timeoutMs: VERSION_TIMEOUT_MS4,
+        maxOutputBytes: VERSION_OUTPUT_LIMIT4
       }, {});
-      const version2 = result.spawnError === void 0 && result.exitCode === 0 ? parseVersion3(result.stdout) : null;
-      if (version2 === null) return unavailableReport3(ctx, "probe-failed", executable);
+      const version2 = result.spawnError === void 0 && result.exitCode === 0 ? parseVersion4(result.stdout) : null;
+      if (version2 === null) return unavailableReport4(ctx, "probe-failed", executable);
       const writeConfinementBackend = selectOsWriteConfinementBackend(ctx);
-      const authStore = join3(this.deps.homeDirectory, ".pi", "agent");
+      const authStore = join4(this.deps.homeDirectory, ".pi", "agent");
       const authState = this.hasAuthStore(authStore) ? "authenticated" : "unauthenticated";
       return {
         producerId: this.producerId,
@@ -36789,7 +36962,7 @@ var PiAdapter = class {
         laneEligibility: { edit: writeConfinementBackend !== null }
       };
     } catch {
-      return unavailableReport3(ctx, "probe-failed", executable);
+      return unavailableReport4(ctx, "probe-failed", executable);
     }
   }
   buildInvocation(spec, ctx) {
@@ -36836,13 +37009,13 @@ var PiAdapter = class {
 };
 
 // src/producers/pythinker-adapter.ts
-import { existsSync as existsSync5 } from "node:fs";
-import { homedir as homedir4 } from "node:os";
-import { join as join4 } from "node:path";
-var VERSION_TIMEOUT_MS4 = 1e4;
-var VERSION_OUTPUT_LIMIT4 = 64 * 1024;
+import { existsSync as existsSync6 } from "node:fs";
+import { homedir as homedir5 } from "node:os";
+import { join as join5 } from "node:path";
+var VERSION_TIMEOUT_MS5 = 1e4;
+var VERSION_OUTPUT_LIMIT5 = 64 * 1024;
 var REQUIRED_LONG_OPTIONS = ["--prompt", "--model"];
-function unavailableReport4(ctx, reason, resolvedExecutable = null) {
+function unavailableReport5(ctx, reason, resolvedExecutable = null) {
   return {
     producerId: "pythinker",
     available: false,
@@ -36859,7 +37032,7 @@ function unavailableReport4(ctx, reason, resolvedExecutable = null) {
     laneEligibility: { edit: false }
   };
 }
-function parseVersion4(stdout) {
+function parseVersion5(stdout) {
   const match = /(?:^|\s)(\d+\.\d+\.\d+(?:[-+][^\s]+)?)(?:\s|$)/u.exec(stdout.trim());
   return match?.[1] ?? /\d+\.\d+\.\d+(?:[-+][^\s]+)?/u.exec(stdout)?.[0] ?? null;
 }
@@ -36873,7 +37046,7 @@ function parseLongOptionTokens(helpText) {
 }
 function resolvePythinkerHome(deps) {
   const configuredHome = deps.env.PYTHINKER_CODE_HOME;
-  return configuredHome !== void 0 && configuredHome.length > 0 ? configuredHome : join4(deps.homeDirectory, ".pythinker-code");
+  return configuredHome !== void 0 && configuredHome.length > 0 ? configuredHome : join5(deps.homeDirectory, ".pythinker-code");
 }
 function defaultPythinkerEnv(deps) {
   if (deps.env.HOME !== void 0) return {};
@@ -36882,7 +37055,7 @@ function defaultPythinkerEnv(deps) {
 var PythinkerAdapter = class {
   constructor(deps = {
     env: process.env,
-    homeDirectory: homedir4()
+    homeDirectory: homedir5()
   }) {
     this.deps = deps;
   }
@@ -36891,22 +37064,22 @@ var PythinkerAdapter = class {
   structuredOutput = false;
   executionModes = ["edit"];
   hasAuthStore(directory) {
-    return (this.deps.hasAuthStore ?? ((store) => existsSync5(
-      join4(store, "credentials", "pythinker-code.json")
+    return (this.deps.hasAuthStore ?? ((store) => existsSync6(
+      join5(store, "credentials", "pythinker-code.json")
     )))(directory);
   }
   hasConfigDir(directory) {
-    return existsSync5(directory);
+    return existsSync6(directory);
   }
   async probe(ctx) {
-    if (ctx.os === "win32") return unavailableReport4(ctx, "unsupported-platform");
+    if (ctx.os === "win32") return unavailableReport5(ctx, "unsupported-platform");
     let executable;
     try {
       executable = await normalizeNodeShim(
         await ctx.ps.resolveExecutable({ name: "pythinker" })
       );
     } catch {
-      return unavailableReport4(ctx, "missing-executable");
+      return unavailableReport5(ctx, "missing-executable");
     }
     try {
       const result = await supervise(ctx.ps, {
@@ -36914,11 +37087,11 @@ var PythinkerAdapter = class {
         args: ["--version"],
         cwd: process.cwd(),
         env: {},
-        timeoutMs: VERSION_TIMEOUT_MS4,
-        maxOutputBytes: VERSION_OUTPUT_LIMIT4
+        timeoutMs: VERSION_TIMEOUT_MS5,
+        maxOutputBytes: VERSION_OUTPUT_LIMIT5
       }, {});
-      const version2 = result.spawnError === void 0 && result.exitCode === 0 ? parseVersion4(result.stdout) : null;
-      if (version2 === null) return unavailableReport4(ctx, "probe-failed", executable);
+      const version2 = result.spawnError === void 0 && result.exitCode === 0 ? parseVersion5(result.stdout) : null;
+      if (version2 === null) return unavailableReport5(ctx, "probe-failed", executable);
       let helpResult;
       try {
         helpResult = await supervise(ctx.ps, {
@@ -36926,18 +37099,18 @@ var PythinkerAdapter = class {
           args: ["--help"],
           cwd: process.cwd(),
           env: {},
-          timeoutMs: VERSION_TIMEOUT_MS4,
-          maxOutputBytes: VERSION_OUTPUT_LIMIT4
+          timeoutMs: VERSION_TIMEOUT_MS5,
+          maxOutputBytes: VERSION_OUTPUT_LIMIT5
         }, {});
       } catch {
-        return unavailableReport4(ctx, "unsupported-cli-surface", executable);
+        return unavailableReport5(ctx, "unsupported-cli-surface", executable);
       }
       const options = parseLongOptionTokens(
         `${helpResult.stdout}
 ${helpResult.stderr}`
       );
       if (helpResult.spawnError !== void 0 || helpResult.exitCode !== 0 || REQUIRED_LONG_OPTIONS.some((option) => !options.has(option))) {
-        return unavailableReport4(ctx, "unsupported-cli-surface", executable);
+        return unavailableReport5(ctx, "unsupported-cli-surface", executable);
       }
       const writeConfinementBackend = selectOsWriteConfinementBackend(ctx);
       const authStore = resolvePythinkerHome(this.deps);
@@ -36958,7 +37131,7 @@ ${helpResult.stderr}`
         laneEligibility: { edit: writeConfinementBackend !== null }
       };
     } catch {
-      return unavailableReport4(ctx, "probe-failed", executable);
+      return unavailableReport5(ctx, "probe-failed", executable);
     }
   }
   buildInvocation(spec, ctx) {
@@ -37019,7 +37192,7 @@ var ProducerRegistry = class {
     return [...this.adapters];
   }
 };
-var registry2 = new ProducerRegistry([new CodexAdapter(), new OpenCodeAdapter(), new PiAdapter(), new PythinkerAdapter()]);
+var registry2 = new ProducerRegistry([new CodexAdapter(), new OpenCodeAdapter(), new PiAdapter(), new PythinkerAdapter(), new AgyAdapter()]);
 
 // src/producers/capability-probe.ts
 async function probeAll(ctx, producerRegistry = registry2) {
@@ -38089,7 +38262,7 @@ function validateSpec(input) {
   });
   return { ok: false, errors: validationErrors };
 }
-function isRecord4(value) {
+function isRecord5(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 function escapeJsonPointerSegment(value) {
@@ -38116,9 +38289,9 @@ function isSafeCommitMessage(message) {
 }
 function taskIdForDelegationPath(input, instancePath) {
   const match = /^\/tasks\/(\d+)\/delegation(?:\/|$)/u.exec(instancePath);
-  if (match === null || !isRecord4(input) || !Array.isArray(input.tasks)) return void 0;
+  if (match === null || !isRecord5(input) || !Array.isArray(input.tasks)) return void 0;
   const task = input.tasks[Number(match[1])];
-  if (!isRecord4(task) || typeof task.id !== "string") return void 0;
+  if (!isRecord5(task) || typeof task.id !== "string") return void 0;
   const idLength = [...task.id].length;
   return idLength >= 1 && idLength <= 128 ? task.id : void 0;
 }
@@ -38129,9 +38302,9 @@ function validateAutopilotSpec(input) {
     message: error51.message ?? "invalid"
   }));
   const ids = /* @__PURE__ */ new Set();
-  const tasks = isRecord4(input) && Array.isArray(input.tasks) ? input.tasks : [];
+  const tasks = isRecord5(input) && Array.isArray(input.tasks) ? input.tasks : [];
   for (const task of tasks) {
-    if (!isRecord4(task) || typeof task.id !== "string") continue;
+    if (!isRecord5(task) || typeof task.id !== "string") continue;
     const taskId = task.id;
     if (ids.has(taskId)) {
       errors.push({ path: "#/tasks", message: `duplicate task id: ${taskId}` });
@@ -38281,7 +38454,7 @@ var IGNORED_PATHS_LIMIT = 50;
 function reviewError(message, toolError) {
   return new RuntimeError(message, { toolError });
 }
-function isRecord5(value) {
+function isRecord6(value) {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 function hasExactKeys(value, expected) {
@@ -38309,14 +38482,14 @@ function canonicalJsonValue(value) {
   if (Array.isArray(value)) {
     return `[${value.map((item) => canonicalJsonValue(item)).join(",")}]`;
   }
-  if (!isRecord5(value)) throw new RuntimeError("review snapshot contains a non-JSON value");
+  if (!isRecord6(value)) throw new RuntimeError("review snapshot contains a non-JSON value");
   return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${canonicalJsonValue(value[key])}`).join(",")}}`;
 }
 function validateChangedPath(value) {
-  return isRecord5(value) && hasExactKeys(value, ["path", "changeType", "mode", "contentHash"]) && typeof value.path === "string" && ["added", "modified", "deleted"].includes(value.changeType) && typeof value.mode === "string" && (value.contentHash === null || typeof value.contentHash === "string");
+  return isRecord6(value) && hasExactKeys(value, ["path", "changeType", "mode", "contentHash"]) && typeof value.path === "string" && ["added", "modified", "deleted"].includes(value.changeType) && typeof value.mode === "string" && (value.contentHash === null || typeof value.contentHash === "string");
 }
 function validateCommandOutcome(value) {
-  return isRecord5(value) && hasExactKeys(value, [
+  return isRecord6(value) && hasExactKeys(value, [
     "id",
     "executable",
     "args",
@@ -38328,7 +38501,7 @@ function validateCommandOutcome(value) {
   ]) && typeof value.id === "string" && typeof value.executable === "string" && Array.isArray(value.args) && value.args.every((arg) => typeof arg === "string") && (value.exitCode === null || typeof value.exitCode === "number" && Number.isInteger(value.exitCode)) && typeof value.timedOut === "boolean" && typeof value.durationMs === "number" && Number.isFinite(value.durationMs) && value.durationMs >= 0 && typeof value.stdoutRef === "string" && typeof value.stderrRef === "string";
 }
 function validateReviewSnapshot(value, expectedRunId) {
-  if (!isRecord5(value) || !hasExactKeys(value, [
+  if (!isRecord6(value) || !hasExactKeys(value, [
     "runId",
     "baseCommitOid",
     "candidateCommitOid",
@@ -38338,7 +38511,7 @@ function validateReviewSnapshot(value, expectedRunId) {
     "changedPaths",
     "evidence",
     "executedVerification"
-  ]) || typeof value.runId !== "string" || expectedRunId !== void 0 && value.runId !== expectedRunId || typeof value.baseCommitOid !== "string" || !GIT_OID.test(value.baseCommitOid) || typeof value.candidateCommitOid !== "string" || !GIT_OID.test(value.candidateCommitOid) || typeof value.candidateTreeOid !== "string" || !GIT_OID.test(value.candidateTreeOid) || typeof value.manifestHash !== "string" || !SHA256.test(value.manifestHash) || typeof value.patch !== "string" || !Array.isArray(value.changedPaths) || !value.changedPaths.every(validateChangedPath) || !isRecord5(value.evidence) || !Array.isArray(value.executedVerification) || !value.executedVerification.every(validateCommandOutcome)) {
+  ]) || typeof value.runId !== "string" || expectedRunId !== void 0 && value.runId !== expectedRunId || typeof value.baseCommitOid !== "string" || !GIT_OID.test(value.baseCommitOid) || typeof value.candidateCommitOid !== "string" || !GIT_OID.test(value.candidateCommitOid) || typeof value.candidateTreeOid !== "string" || !GIT_OID.test(value.candidateTreeOid) || typeof value.manifestHash !== "string" || !SHA256.test(value.manifestHash) || typeof value.patch !== "string" || !Array.isArray(value.changedPaths) || !value.changedPaths.every(validateChangedPath) || !isRecord6(value.evidence) || !Array.isArray(value.executedVerification) || !value.executedVerification.every(validateCommandOutcome)) {
     throw new RuntimeError("archived review snapshot is malformed");
   }
   const snapshot = value;
@@ -42217,11 +42390,11 @@ function withManifestHash(body) {
     manifestHash: sha2562(stableJson(sanitized))
   };
 }
-function isRecord6(value) {
+function isRecord7(value) {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 function hasExactKeys2(value, expected) {
-  if (!isRecord6(value)) return false;
+  if (!isRecord7(value)) return false;
   const actual = Object.keys(value);
   return actual.length === expected.length && expected.every((key) => actual.includes(key));
 }
@@ -42258,7 +42431,7 @@ function assertManifestShape(value) {
     "schemaVersions",
     "packagedVerifier",
     "manifestHash"
-  ]) || value.manifestVersion !== "1" || typeof value.runId !== "string" || typeof value.repoRoot !== "string" || !isObjectId(value.baseCommitOid) || value.candidateManifestHash !== null && !isSha256(value.candidateManifestHash) || !hasExactKeys2(value.producer, ["id", "version", "model"]) || !isNullableString(value.producer.id) || !isNullableString(value.producer.version) || !isNullableString(value.producer.model) || !isRecord6(value.effectivePolicy) || !Array.isArray(value.repositoryInstructions) || !value.repositoryInstructions.every((instruction) => hasExactKeys2(instruction, ["path", "hash"]) && typeof instruction.path === "string" && isSha256(instruction.hash)) || !isSha256(value.promptHash) || !isRecord6(value.executionPolicy) || !Array.isArray(value.environment) || !value.environment.every((entry) => hasExactKeys2(entry, ["name", "source"]) && typeof entry.name === "string" && typeof entry.source === "string") || typeof value.runtimeVersion !== "string" || typeof value.protocolVersion !== "string" || !hasExactKeys2(value.schemaVersions, ["delegationSpec", "attemptResult"]) || typeof value.schemaVersions.delegationSpec !== "string" || typeof value.schemaVersions.attemptResult !== "string" || !hasExactKeys2(value.packagedVerifier, ["version", "hash"]) || typeof value.packagedVerifier.version !== "string" || !isSha256(value.packagedVerifier.hash) || !isSha256(value.manifestHash)) {
+  ]) || value.manifestVersion !== "1" || typeof value.runId !== "string" || typeof value.repoRoot !== "string" || !isObjectId(value.baseCommitOid) || value.candidateManifestHash !== null && !isSha256(value.candidateManifestHash) || !hasExactKeys2(value.producer, ["id", "version", "model"]) || !isNullableString(value.producer.id) || !isNullableString(value.producer.version) || !isNullableString(value.producer.model) || !isRecord7(value.effectivePolicy) || !Array.isArray(value.repositoryInstructions) || !value.repositoryInstructions.every((instruction) => hasExactKeys2(instruction, ["path", "hash"]) && typeof instruction.path === "string" && isSha256(instruction.hash)) || !isSha256(value.promptHash) || !isRecord7(value.executionPolicy) || !Array.isArray(value.environment) || !value.environment.every((entry) => hasExactKeys2(entry, ["name", "source"]) && typeof entry.name === "string" && typeof entry.source === "string") || typeof value.runtimeVersion !== "string" || typeof value.protocolVersion !== "string" || !hasExactKeys2(value.schemaVersions, ["delegationSpec", "attemptResult"]) || typeof value.schemaVersions.delegationSpec !== "string" || typeof value.schemaVersions.attemptResult !== "string" || !hasExactKeys2(value.packagedVerifier, ["version", "hash"]) || typeof value.packagedVerifier.version !== "string" || !isSha256(value.packagedVerifier.hash) || !isSha256(value.manifestHash)) {
     throw new RuntimeError("archived run manifest is malformed");
   }
 }
@@ -43859,8 +44032,8 @@ import { rm as rm6 } from "node:fs/promises";
 
 // src/platform/sandbox/seatbelt.ts
 import { realpathSync as realpathSync2 } from "node:fs";
-import { homedir as homedir5 } from "node:os";
-import { basename, join as join5 } from "node:path/posix";
+import { homedir as homedir6 } from "node:os";
+import { basename, join as join6 } from "node:path/posix";
 function buildReadOnlySeatbeltPolicy(args) {
   return {
     worktreePath: "",
@@ -43891,25 +44064,33 @@ function sbPath(path32) {
 }
 function openCodeWritablePaths(invocation, policy) {
   if (policy.tempHome !== null || !invocation.requiredEnv.includes("OPENCODE_CONFIG_DIR")) return [];
-  const home = homedir5();
-  const dataHome = invocation.env?.XDG_DATA_HOME ?? process.env.XDG_DATA_HOME ?? join5(home, ".local", "share");
-  const stateHome = invocation.env?.XDG_STATE_HOME ?? process.env.XDG_STATE_HOME ?? join5(home, ".local", "state");
-  return [join5(dataHome, "opencode"), join5(stateHome, "opencode")];
+  const home = homedir6();
+  const dataHome = invocation.env?.XDG_DATA_HOME ?? process.env.XDG_DATA_HOME ?? join6(home, ".local", "share");
+  const stateHome = invocation.env?.XDG_STATE_HOME ?? process.env.XDG_STATE_HOME ?? join6(home, ".local", "state");
+  return [join6(dataHome, "opencode"), join6(stateHome, "opencode")];
 }
 function piWritablePaths(invocation, policy) {
   if (policy.tempHome !== null || !invocation.requiredEnv.includes("PI_API_KEY")) return [];
-  const home = invocation.env?.HOME ?? process.env.HOME ?? homedir5();
-  return [join5(home, ".pi", "agent")];
+  const home = invocation.env?.HOME ?? process.env.HOME ?? homedir6();
+  return [join6(home, ".pi", "agent")];
 }
 function isPythinkerInvocation(invocation) {
   return [invocation.executable.command, ...invocation.executable.prefixArgs].some((part) => basename(part) === "pythinker");
+}
+function isAgyInvocation(invocation) {
+  return [invocation.executable.command, ...invocation.executable.prefixArgs].some((part) => basename(part) === "agy");
+}
+function agyWritablePaths(invocation, policy) {
+  if (policy.tempHome !== null || !isAgyInvocation(invocation)) return [];
+  const home = invocation.env?.HOME ?? process.env.HOME ?? homedir6();
+  return [join6(home, ".gemini", "antigravity-cli")];
 }
 function pythinkerWritablePaths(invocation, policy) {
   if (policy.tempHome !== null || !isPythinkerInvocation(invocation)) return [];
   const configuredHome = invocation.env?.PYTHINKER_CODE_HOME ?? process.env.PYTHINKER_CODE_HOME;
   if (configuredHome !== void 0 && configuredHome.length > 0) return [configuredHome];
-  const home = invocation.env?.HOME ?? process.env.HOME ?? homedir5();
-  return [join5(home, ".pythinker-code")];
+  const home = invocation.env?.HOME ?? process.env.HOME ?? homedir6();
+  return [join6(home, ".pythinker-code")];
 }
 function buildProfile(policy, additionalWritable) {
   const writable = [...new Set([
@@ -43941,7 +44122,8 @@ function wrapInvocationWithSeatbelt(invocation, policy) {
   const profile = buildProfile(policy, [
     ...openCodeWritablePaths(invocation, policy),
     ...piWritablePaths(invocation, policy),
-    ...pythinkerWritablePaths(invocation, policy)
+    ...pythinkerWritablePaths(invocation, policy),
+    ...agyWritablePaths(invocation, policy)
   ]);
   const inner = [
     invocation.executable.command,
@@ -52922,7 +53104,7 @@ function createHostingCommandRunner(platformServices = getPlatformServices()) {
     return toCommandResult(exit);
   };
 }
-function parseVersion5(output) {
+function parseVersion6(output) {
   const firstLine = output.split(/\r?\n/u, 1)[0] ?? "";
   const match = /^gh version (\d+)\.(\d+)\.(\d+)(?:\s|$)/u.exec(firstLine);
   if (match === null) return null;
@@ -53143,7 +53325,7 @@ var GitHubCliAdapter = class {
       failCommand(error51, "preflight-gh-unavailable");
     }
     requireCleanExit(version2, "preflight-gh-unavailable");
-    const parsedVersion = parseVersion5(version2.stdout);
+    const parsedVersion = parseVersion6(version2.stdout);
     if (parsedVersion === null) fail3("preflight-gh-version-invalid");
     if (!versionAtLeast(parsedVersion, MINIMUM_GH_VERSION)) {
       fail3("preflight-gh-version-unsupported");
@@ -53880,7 +54062,7 @@ async function handleAutopilotResume(checkoutPath, workflowId, deps = {}) {
     return autopilotErrorResult(error51);
   }
 }
-function isRecord7(value) {
+function isRecord8(value) {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 async function loadArchivedRun(runId, deps) {
@@ -53983,7 +54165,7 @@ function unknownProducerErrors(preferences) {
   }]);
 }
 function schemaCompatibility(input) {
-  if (isRecord7(input) && input.specVersion !== void 0 && input.specVersion !== DELEGATION_SPEC_VERSION) {
+  if (isRecord8(input) && input.specVersion !== void 0 && input.specVersion !== DELEGATION_SPEC_VERSION) {
     return {
       ok: false,
       diagnostic: `delegation spec version mismatch: request declares ${String(input.specVersion)}, runtime expects ${DELEGATION_SPEC_VERSION}`
@@ -54254,12 +54436,12 @@ function decisionAdvisoryForRun(run) {
   const incomplete = run.result.evidence.pipelineReviewIncomplete;
   const cleared = run.result.evidence.pipelineGateCleared;
   const warnings = [];
-  if (isRecord7(refused) && Array.isArray(refused.reasons)) {
+  if (isRecord8(refused) && Array.isArray(refused.reasons)) {
     warnings.push(
       `the pipeline gate did NOT clear this candidate: ${refused.reasons.filter((r) => typeof r === "string").join("; ")}`
     );
   }
-  if (isRecord7(incomplete) && typeof incomplete.reason === "string") {
+  if (isRecord8(incomplete) && typeof incomplete.reason === "string") {
     warnings.push(`the pipeline could not complete its own review: ${incomplete.reason}`);
   }
   let gateCleared = false;
@@ -54267,7 +54449,7 @@ function decisionAdvisoryForRun(run) {
     if (warnings.length === 0) {
       warnings.push("the pipeline gate clearance record is missing");
     }
-  } else if (!isRecord7(cleared) || typeof cleared.candidateCommitOid !== "string" || typeof cleared.requiresHumanDecision !== "boolean") {
+  } else if (!isRecord8(cleared) || typeof cleared.candidateCommitOid !== "string" || typeof cleared.requiresHumanDecision !== "boolean") {
     warnings.push("the pipeline gate clearance record is malformed");
   } else if (cleared.requiresHumanDecision === true) {
     warnings.push("the pipeline gate clearance record requires a human decision");

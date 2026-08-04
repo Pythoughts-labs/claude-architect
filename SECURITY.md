@@ -26,7 +26,7 @@ Include as much of the following as is safe to share:
 - the affected plugin version or commit;
 - host operating system and architecture, Claude Code version, and Node.js
   version;
-- Producer CLI and version (`codex`, `opencode`, `pi`, or `pythinker`);
+- Producer CLI and version (`codex`, `opencode`, `pi`, `pythinker`, or `agy`);
 - a clear description of the impact and the trust boundary involved;
 - minimal reproduction steps or a proof of concept;
 - redacted logs, diagnostics, candidate artifacts, or stack traces; and

@@ -88,6 +88,21 @@ function isPythinkerInvocation(invocation: ProducerInvocation): boolean {
     .some(part => basename(part) === "pythinker");
 }
 
+function isAgyInvocation(invocation: ProducerInvocation): boolean {
+  return [invocation.executable.command, ...invocation.executable.prefixArgs]
+    .some(part => basename(part) === "agy");
+}
+
+function agyWritablePaths(
+  invocation: ProducerInvocation,
+  policy: SeatbeltPolicy,
+): string[] {
+  if (policy.tempHome !== null || !isAgyInvocation(invocation)) return [];
+
+  const home = invocation.env?.HOME ?? process.env.HOME ?? homedir();
+  return [join(home, ".gemini", "antigravity-cli")];
+}
+
 function pythinkerWritablePaths(
   invocation: ProducerInvocation,
   policy: SeatbeltPolicy,
@@ -143,6 +158,7 @@ export function wrapInvocationWithSeatbelt(
     ...openCodeWritablePaths(invocation, policy),
     ...piWritablePaths(invocation, policy),
     ...pythinkerWritablePaths(invocation, policy),
+    ...agyWritablePaths(invocation, policy),
   ]);
   const inner = [
     invocation.executable.command,

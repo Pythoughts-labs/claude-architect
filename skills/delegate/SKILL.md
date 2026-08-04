@@ -37,6 +37,7 @@ The delegated CLIs are the architect's **implementation agents** — the same su
 | `opencode-implementer` | OpenCode provider/model | optional `--variant` |
 | `pi-implementer` | Pi configured model | optional `--thinking` |
 | `pythinker-implementer` | Pythinker provider/model | the installed pythinker-code CLI exposes no reasoning override; the configured default always applies |
+| `agy-implementer` | Antigravity CLI (`agy`) configured model | optional `--effort low\|medium\|high` |
 
 If the user invokes `/claude-architect:delegate` without naming a CLI, implementer, or agent, use the host's structured question tool when available, ask this question, and wait for the answer. Include the producer and reasoning control in each option so the user knows what the lane will run:
 
@@ -48,6 +49,7 @@ Offer exactly these choices:
 - **OpenCode** - `opencode-implementer`; configured provider/model unless overridden, with an optional model-specific `--variant` such as `high` when supported.
 - **Pi** - `pi-implementer`; configured model unless overridden, with optional `--thinking off|minimal|low|medium|high|xhigh|max`; Pi configuration supplies the default.
 - **Pythinker** - `pythinker-implementer`; configured provider/model unless overridden; the installed pythinker-code CLI exposes no reasoning override, so the Pythinker configured default always applies.
+- **Antigravity CLI** - `agy-implementer`; configured model unless overridden, with optional `--effort low|medium|high`; darwin/arm64 only until a Linux/Windows write-confinement backend exists.
 
 There is no implicit lane default. If the answer names a supported model or reasoning override, include it in the delegation spec; otherwise let the selected Producer use its configured default.
 

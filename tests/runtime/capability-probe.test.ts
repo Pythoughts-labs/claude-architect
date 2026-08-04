@@ -72,6 +72,7 @@ describe("ProducerRegistry", () => {
       "opencode",
       "pi",
       "pythinker",
+      "agy",
     ]);
   });
 });

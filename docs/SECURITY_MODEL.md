@@ -4,7 +4,7 @@ Claude Architect treats repository content, Producer output, model text, and com
 
 ## Components that execute code
 
-`runtime/bootstrap.mjs` executes Node.js and starts the MCP server. The Host runtime invokes `git`, the selected Producer CLI (`codex`, `opencode`, `pi`, or `pythinker`), OS confinement helpers such as `/usr/bin/sandbox-exec` on supported macOS systems, Linux sandbox tooling when selected, and the packaged Windows watchdog/helper. Verification executes only commands listed in the validated Delegation Spec.
+`runtime/bootstrap.mjs` executes Node.js and starts the MCP server. The Host runtime invokes `git`, the selected Producer CLI (`codex`, `opencode`, `pi`, `pythinker`, or `agy`), OS confinement helpers such as `/usr/bin/sandbox-exec` on supported macOS systems, Linux sandbox tooling when selected, and the packaged Windows watchdog/helper. Verification executes only commands listed in the validated Delegation Spec.
 
 Producer commands are built by adapters in `src/producers/`; user-controlled values are passed as argv rather than interpolated shell programs. Executables are resolved through platform services. Verification commands include an executable, argv, relative cwd, timeout, network policy, expected exit codes, optional environment, platform filters, and mutation policy. There is no general MCP “run arbitrary shell” tool.
 

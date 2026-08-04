@@ -6,6 +6,13 @@ All notable changes to Claude Architect are recorded here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- Antigravity CLI (`agy`) as a fifth delegation-lane Producer (`agy-implementer`),
+  routed and confined by the existing `ProducerAdapter` contract: structured
+  JSON output, `--add-dir`/`--new-project` worktree scoping, and Seatbelt
+  write-confinement on macOS arm64, same platform ceiling as Pi and OpenCode.
+
 ## [0.47.0] - 2026-08-04
 
 ### Fixed
