@@ -624,9 +624,9 @@ export async function createServer(
         + "An independently verified candidate is accepted without prompting when it "
         + "carries no advisory warnings: either a delegatePipeline candidate with a "
         + "durable, well-formed pipelineGateCleared record bound to the candidate "
-        + "commit and requiring no human decision, or a plain delegate candidate, "
-        + "which carries no pipeline evidence at all and is judged on its independent "
-        + "verification result alone; "
+        + "commit and requiring no human decision, or a plain delegate candidate "
+        + "whose archive records plain-delegate provenance and is judged on its "
+        + "independent verification result alone; "
         + "anything else requires human confirmation through MCP elicitation and fails "
         + "closed without it. Set "
         + `${DECISION_AUTHORITY_ENV}=human to require confirmation for every decision.`,

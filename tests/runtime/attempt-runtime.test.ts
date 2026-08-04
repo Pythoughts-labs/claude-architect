@@ -824,10 +824,13 @@ describe("runAttempt", () => {
     expect(result.status).toBe("verified-candidate");
     expect(result.failure).toBeNull();
     expect(result.candidate?.candidateTreeOid).toMatch(/^[0-9a-f]{40}$/);
-    expect(result.evidence).toMatchObject({ acceptance: "passed" });
+    // Positive provenance for the decision gate: a non-pipeline-managed run
+    // must record `plainDelegate` or autonomous acceptance fails closed.
+    expect(result.evidence).toMatchObject({ acceptance: "passed", plainDelegate: true });
     expect(await archivedJson(runId, "result.json")).toMatchObject({
       runId,
       status: "verified-candidate",
+      evidence: { plainDelegate: true },
     });
     const runStart = await archivedJson(runId, "run-start.json");
     expect(runStart).toMatchObject({
@@ -840,6 +843,24 @@ describe("runAttempt", () => {
     expect(runStart.startedAt).toEqual(expect.any(String));
     expect(containsRegisteredSecret("attempt-secret-value")).toBe(false);
     await expectAttemptResourcesCleaned(runId);
+  });
+
+  it("withholds the plain-delegate marker from a pipeline-managed attempt", async () => {
+    // A pipeline-managed attempt's provenance is its terminal gate evidence;
+    // stamping `plainDelegate` here would let a decided slice masquerade as a
+    // plain delegate run at the decision gate.
+    const repoRoot = await initRepo();
+    const result = await runAttempt(
+      repoRoot,
+      validSpec(),
+      dependencies(new FakeAdapter(), "run-pipeline-managed", {
+        runStatus: { mode: "single", sliceIndex: null, sliceCount: null, pipelineManaged: true },
+      }),
+    );
+
+    expect(result.status).toBe("verified-candidate");
+    expect(result.evidence.plainDelegate).toBeUndefined();
+    await expectAttemptResourcesCleaned("run-pipeline-managed");
   });
 
   it("awaits onRunStart after durably archiving run-start", async () => {

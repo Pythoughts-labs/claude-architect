@@ -50052,7 +50052,7 @@ async function runAttempt(checkoutPath, spec, deps) {
     });
   };
   const archiveWithStatus = async (context) => {
-    const result = await archiveTerminal(context);
+    const result = await archiveTerminal(statusContext.pipelineManaged ? context : { ...context, evidence: { ...context.evidence, plainDelegate: true } });
     if (!statusContext.pipelineManaged) {
       await emitStatus(result.status === "verified-candidate" ? "done" : "failed", {
         producerId: result.producerId,
@@ -54444,9 +54444,9 @@ function decisionAdvisoryForRun(run) {
   if (isRecord8(incomplete) && typeof incomplete.reason === "string") {
     warnings.push(`the pipeline could not complete its own review: ${incomplete.reason}`);
   }
-  const noPipelineEvidence = refused === void 0 && incomplete === void 0 && cleared === void 0;
+  const plainDelegate = run.result.evidence.plainDelegate === true && refused === void 0 && incomplete === void 0 && cleared === void 0;
   let gateCleared = false;
-  if (noPipelineEvidence) {
+  if (plainDelegate) {
     gateCleared = true;
   } else if (cleared === void 0) {
     if (warnings.length === 0) {
@@ -58504,7 +58504,7 @@ async function createServer(dependencies = {}) {
     "decideCandidate",
     {
       title: "Record a candidate decision",
-      description: `Record acceptance, rejection, or a revision request for a candidate. An independently verified candidate is accepted without prompting when it carries no advisory warnings: either a delegatePipeline candidate with a durable, well-formed pipelineGateCleared record bound to the candidate commit and requiring no human decision, or a plain delegate candidate, which carries no pipeline evidence at all and is judged on its independent verification result alone; anything else requires human confirmation through MCP elicitation and fails closed without it. Set ${DECISION_AUTHORITY_ENV}=human to require confirmation for every decision.`,
+      description: `Record acceptance, rejection, or a revision request for a candidate. An independently verified candidate is accepted without prompting when it carries no advisory warnings: either a delegatePipeline candidate with a durable, well-formed pipelineGateCleared record bound to the candidate commit and requiring no human decision, or a plain delegate candidate whose archive records plain-delegate provenance and is judged on its independent verification result alone; anything else requires human confirmation through MCP elicitation and fails closed without it. Set ${DECISION_AUTHORITY_ENV}=human to require confirmation for every decision.`,
       inputSchema: decideCandidateInputSchema,
       outputSchema: decisionOutput,
       // Rejection deletes the candidate anchor and acceptance authorizes writes

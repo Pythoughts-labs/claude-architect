@@ -214,13 +214,13 @@ describe("decideCandidate authority", () => {
     });
   });
 
-  it("autonomously accepts a plain delegate result with no pipeline evidence", async () => {
+  it("autonomously accepts a plain delegate result recording its provenance", async () => {
     // Same client and authority as above; a plain `delegate` run never enters
-    // the pipeline gate, so the missing gate record is not itself a warning —
-    // the archived status/failure is the only signal there is.
+    // the pipeline gate, and its archive records `plainDelegate` provenance —
+    // the archived status/failure is the only other signal there is.
     const { decision, output } = await decideVia({
       ...verifiedResult,
-      evidence: {},
+      evidence: { plainDelegate: true },
     });
     expect(decision, JSON.stringify(output)).not.toBeNull();
     expect(decision?.authority).toBe("policy-autonomous");

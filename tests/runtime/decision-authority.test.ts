@@ -289,19 +289,38 @@ async function decideVia(
 }
 
 describe("decideCandidate honors the configured authority", () => {
-  it("auto-accepts a plain `delegate` result with no pipeline evidence at all", async () => {
+  it("auto-accepts a plain `delegate` result carrying its provenance marker", async () => {
     // A plain `delegate` run never enters the pipeline gate: there is no
-    // review round to clear or refuse. Its only signal is the archived
-    // attempt's own status/failure from independent verification, so a clean
-    // verified-candidate is autonomy-eligible on that alone.
-    const advisory = await advisoryFor(verifiedResult);
+    // review round to clear or refuse. Its archive records `plainDelegate`
+    // provenance at the terminal-archive funnel, and its only other signal is
+    // the archived attempt's own status/failure from independent
+    // verification, so a clean verified-candidate is autonomy-eligible.
+    const plainDelegateResult = {
+      ...verifiedResult,
+      evidence: { plainDelegate: true },
+    } as AttemptResult;
+    const advisory = await advisoryFor(plainDelegateResult);
 
     expect(advisory).toEqual({ warnings: [], verifiedClean: true, unreadable: false });
     expect(autonomousEligibility("autonomous", advisory).eligible).toBe(true);
 
-    const { decision, output } = await decideVia("autonomous", verifiedResult);
+    const { decision, output } = await decideVia("autonomous", plainDelegateResult);
     expect(decision, JSON.stringify(output)).not.toBeNull();
     expect(decision?.authority).toBe("policy-autonomous");
+  });
+
+  it("fails closed on an archive with neither provenance marker nor gate evidence", async () => {
+    // An archive carrying no `plainDelegate` marker and no pipeline evidence
+    // proves nothing about how it was produced. Autonomy must key on positive
+    // provenance, never on the absence of a pipeline's paperwork.
+    const advisory = await advisoryFor(verifiedResult);
+
+    expect(advisory).toEqual({
+      warnings: ["the pipeline gate clearance record is missing"],
+      verifiedClean: false,
+      unreadable: false,
+    });
+    expect(autonomousEligibility("autonomous", advisory).eligible).toBe(false);
   });
 
   it("does not double-report a missing clearance record when the gate refused", async () => {

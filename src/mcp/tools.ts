@@ -985,10 +985,12 @@ export interface DecisionAdvisory {
   /**
    * The run is an independently verified candidate carrying no failure, and
    * either (a) a durable pipeline-gate clearance bound to its archived
-   * candidate commit, or (b) no pipeline evidence at all — a plain `delegate`
-   * run never enters the pipeline gate, so there is nothing to clear or
-   * refuse, and its independent verification result is the only signal there
-   * is. This is deliberately not "warnings.length === 0": partial or
+   * candidate commit, or (b) a recorded `plainDelegate` provenance marker with
+   * no pipeline evidence — a plain `delegate` run never enters the pipeline
+   * gate, so there is nothing to clear or refuse, and its independent
+   * verification result is the only signal there is. An archive carrying
+   * neither the marker nor gate evidence proves nothing about its provenance
+   * and requires a human. This is deliberately not "warnings.length === 0": partial or
    * malformed pipeline evidence (a refused gate, a mid-review salvage, a
    * clearance record that doesn't match the archived commit) still refuses,
    * because that IS positive evidence something did not go cleanly.
@@ -1016,17 +1018,15 @@ function decisionAdvisoryForRun(run: ArchivedRun): DecisionAdvisory {
   if (isRecord(incomplete) && typeof incomplete.reason === "string") {
     warnings.push(`the pipeline could not complete its own review: ${incomplete.reason}`);
   }
-  // `runPipelineWithLease` unconditionally writes exactly one of these three
-  // evidence keys on every terminal pipeline outcome, so their total absence
-  // positively identifies a plain `delegate` run rather than an incomplete
-  // pipeline one. A pipeline run that started but never reached its gate ends
-  // some other status (failed / human-decision-required), never
-  // verified-candidate, so it can't reach this function looking like a clean
-  // delegate run by accident.
-  const noPipelineEvidence = refused === undefined && incomplete === undefined
-    && cleared === undefined;
+  // A plain `delegate` run records `plainDelegate: true` in its archived
+  // evidence at the terminal-archive funnel; pipeline-managed attempts never
+  // do. Autonomy keys on that positive marker plus the absence of every
+  // pipeline evidence key — an archive carrying neither the marker nor gate
+  // evidence proves nothing about its provenance and requires a human.
+  const plainDelegate = run.result.evidence.plainDelegate === true
+    && refused === undefined && incomplete === undefined && cleared === undefined;
   let gateCleared = false;
-  if (noPipelineEvidence) {
+  if (plainDelegate) {
     gateCleared = true;
   } else if (cleared === undefined) {
     if (warnings.length === 0) {

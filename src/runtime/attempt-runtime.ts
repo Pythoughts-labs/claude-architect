@@ -401,7 +401,12 @@ export async function runAttempt(
     });
   };
   const archiveWithStatus = async (context: TerminalContext): Promise<AttemptResult> => {
-    const result = await archiveTerminal(context);
+    // Positive provenance for the decision gate: a plain `delegate` run never
+    // enters a pipeline gate, so autonomy over its candidate must key on this
+    // recorded marker, never on the mere absence of pipeline evidence.
+    const result = await archiveTerminal(statusContext.pipelineManaged
+      ? context
+      : { ...context, evidence: { ...context.evidence, plainDelegate: true } });
     if (!statusContext.pipelineManaged) {
       await emitStatus(result.status === "verified-candidate" ? "done" : "failed", {
         producerId: result.producerId,

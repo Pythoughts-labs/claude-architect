@@ -18,10 +18,13 @@ All notable changes to Claude Architect are recorded here. The format follows
 - Under the `autonomous` decision authority, `decideCandidate` now also
   auto-accepts a plain `delegate` result (not only `delegatePipeline`) when it
   is an independently verified candidate with no failure and no advisory
-  warnings. A plain `delegate` run carries no pipeline-gate evidence at all,
-  so it is judged on its independent verification result alone; any failure,
-  warning, or unreadable archive still requires human confirmation through
-  MCP elicitation, unchanged.
+  warnings. A plain `delegate` run never enters the pipeline gate; its archive
+  now records a positive `plainDelegate` provenance marker at the
+  terminal-archive funnel, and autonomy keys on that marker plus its
+  independent verification result. An archive carrying neither the marker nor
+  pipeline-gate evidence proves nothing about its provenance and fails closed
+  to a human, as does any failure, warning, or unreadable archive, through MCP
+  elicitation, unchanged.
 
 ## [0.47.0] - 2026-08-04
 
