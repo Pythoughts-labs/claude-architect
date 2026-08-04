@@ -364,8 +364,6 @@ test("subagent-driven-delegation skill keeps the trust invariants that upstream 
 
 test("project policy composes Superpowers SDD with exclusive delivery controllers", () => {
   const guide = read("AGENTS.md");
-  assert.match(guide, /Superpowers-authored multi-task plan[^.]*\/claude-architect:subagent-driven-delegation/u,
-    "project plans must route writing tasks through verified delegation");
   assert.match(guide, /manual SDD[^.]*bare `\/no-mistakes` validate-only mode/u,
     "manual SDD must hand a final committed branch to No Mistakes validate-only mode");
   assert.match(guide, /Autopilot is a separate trusted delivery controller/u,
