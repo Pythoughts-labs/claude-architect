@@ -322,7 +322,7 @@ describe("OpenCodeAdapter", () => {
     expect(invocation.stdin).toContain("src/greeting.ts");
     expect(invocation.stdin).toContain(renderSkillBootstrap());
     expect(invocation.requiredEnv).toEqual(["OPENCODE_CONFIG_DIR", "XDG_DATA_HOME"]);
-    expect(invocation.network).toBe("denied");
+    expect(invocation.network).toBe("allowed");
   });
 
   it("omits the delegated skill bootstrap from read-only prompts", () => {

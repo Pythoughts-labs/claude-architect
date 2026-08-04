@@ -161,7 +161,8 @@ export class PiAdapter implements ProducerAdapter {
         homeDirectory: this.deps.homeDirectory,
         hasConfigDir: directory => this.hasConfigDir(directory),
       }),
-      network: "denied",
+      // Model sessions must reach the provider API; write-protection remains the confinement goal.
+      network: "allowed",
     };
   }
 

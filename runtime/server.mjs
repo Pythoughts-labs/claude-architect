@@ -36681,7 +36681,8 @@ var OpenCodeAdapter = class {
         homeDirectory: this.deps.homeDirectory,
         hasAuthStore: (directory) => this.hasAuthStore(directory)
       }),
-      network: "denied"
+      // Model sessions must reach the provider API; write-protection remains the confinement goal.
+      network: "allowed"
     };
   }
   normalizeEvents(raw) {
@@ -36815,7 +36816,8 @@ var PiAdapter = class {
         homeDirectory: this.deps.homeDirectory,
         hasConfigDir: (directory) => this.hasConfigDir(directory)
       }),
-      network: "denied"
+      // Model sessions must reach the provider API; write-protection remains the confinement goal.
+      network: "allowed"
     };
   }
   normalizeEvents(raw) {
@@ -36982,7 +36984,8 @@ ${helpResult.stderr}`
         pythinkerHome: resolvePythinkerHome(this.deps),
         hasConfigDir: (directory) => this.hasConfigDir(directory)
       }),
-      network: "denied"
+      // Model sessions must reach the provider API; write-protection remains the confinement goal.
+      network: "allowed"
     };
   }
   normalizeEvents(raw) {

@@ -6,6 +6,12 @@ All notable changes to Claude Architect are recorded here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- Seatbelt-confined Pi, OpenCode, and Pythinker edit-lane model sessions can
+  reach their provider APIs while retaining filesystem write confinement;
+  verification commands that deny network access remain OS-confined offline.
+
 ## [0.46.0] - 2026-08-03
 
 ### Fixed

@@ -317,7 +317,29 @@ describe("PiAdapter", () => {
     expect(invocation.stdin).toContain("src/greeting.ts");
     expect(invocation.stdin).toContain(renderSkillBootstrap());
     expect(invocation.requiredEnv).toEqual(["PI_API_KEY"]);
-    expect(invocation.network).toBe("denied");
+    expect(invocation.network).toBe("allowed");
+  });
+
+  it("wraps a Pi edit invocation with provider network and write confinement", () => {
+    const context = invocationContext();
+    const spec = sampleSpec();
+    const invocation = new PiAdapter({
+      env: {},
+      homeDirectory: "/hosthome",
+      hasAuthStore: () => false,
+    }).buildInvocation(spec, context);
+    const wrapped = wrapInvocationWithSeatbelt(invocation, {
+      worktreePath: context.worktreePath,
+      tempHome: context.tempHome ?? null,
+      allowNetwork: invocation.network === "allowed",
+    });
+    const profile = wrapped.args[1] ?? "";
+
+    expect(spec.executionMode).toBe("edit");
+    expect(invocation.network).toBe("allowed");
+    expect(wrapped.executable.command).toBe("/usr/bin/sandbox-exec");
+    expect(profile).not.toContain("(deny network*)");
+    expect(profile).toContain("(deny file-write*)");
   });
 
   it("omits the delegated skill bootstrap from read-only prompts", () => {

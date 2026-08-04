@@ -425,7 +425,7 @@ describe("PythinkerAdapter", () => {
     expect(invocation.args).toEqual(baseArgs(spec));
     expect(invocation.stdin).toBeUndefined();
     expect(invocation.requiredEnv).toEqual([]);
-    expect(invocation.network).toBe("denied");
+    expect(invocation.network).toBe("allowed");
   });
 
   it("passes the complete rendered prompt as one argv element", () => {

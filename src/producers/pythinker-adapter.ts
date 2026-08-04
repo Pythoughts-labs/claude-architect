@@ -205,7 +205,8 @@ export class PythinkerAdapter implements ProducerAdapter {
         pythinkerHome: resolvePythinkerHome(this.deps),
         hasConfigDir: directory => this.hasConfigDir(directory),
       }),
-      network: "denied",
+      // Model sessions must reach the provider API; write-protection remains the confinement goal.
+      network: "allowed",
     };
   }
 
