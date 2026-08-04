@@ -21,7 +21,7 @@ import type {
 
 const VERSION_TIMEOUT_MS = 10_000;
 const VERSION_OUTPUT_LIMIT = 64 * 1024;
-const REQUIRED_LONG_OPTIONS = ["--auto", "--prompt", "--model"] as const;
+const REQUIRED_LONG_OPTIONS = ["--prompt", "--model"] as const;
 
 function unavailableReport(
   ctx: ProbeContext,
@@ -65,13 +65,23 @@ export interface PythinkerAdapterDeps {
   hasAuthStore?: (directory: string) => boolean;
 }
 
+function resolvePythinkerHome(
+  deps: Required<Pick<PythinkerAdapterDeps, "env" | "homeDirectory">>,
+): string {
+  const configuredHome = deps.env.PYTHINKER_CODE_HOME;
+  return configuredHome !== undefined && configuredHome.length > 0
+    ? configuredHome
+    : join(deps.homeDirectory, ".pythinker-code");
+}
+
 function defaultPythinkerEnv(
   deps: Required<Pick<PythinkerAdapterDeps, "env" | "homeDirectory">> & {
+    pythinkerHome: string;
     hasConfigDir: (directory: string) => boolean;
   },
 ): Record<string, string> {
   if (deps.env.HOME !== undefined) return {};
-  return deps.hasConfigDir(join(deps.homeDirectory, ".pythinker"))
+  return deps.hasConfigDir(deps.pythinkerHome)
     ? { HOME: deps.homeDirectory }
     : {};
 }
@@ -87,7 +97,9 @@ export class PythinkerAdapter implements ProducerAdapter {
   }) {}
 
   private hasAuthStore(directory: string): boolean {
-    return (this.deps.hasAuthStore ?? (store => existsSync(join(store, "auth.json"))))(directory);
+    return (this.deps.hasAuthStore ?? (store => existsSync(
+      join(store, "credentials", "pythinker-code.json"),
+    )))(directory);
   }
 
   private hasConfigDir(directory: string): boolean {
@@ -145,7 +157,7 @@ export class PythinkerAdapter implements ProducerAdapter {
       }
 
       const writeConfinementBackend = selectOsWriteConfinementBackend(ctx);
-      const authStore = join(this.deps.homeDirectory, ".pythinker");
+      const authStore = resolvePythinkerHome(this.deps);
       const authState = this.hasAuthStore(authStore)
         ? "authenticated"
         : "unauthenticated";
@@ -172,12 +184,11 @@ export class PythinkerAdapter implements ProducerAdapter {
   buildInvocation(spec: DelegationSpec, ctx: InvocationContext): ProducerInvocation {
     if (spec.producerOverrides?.reasoningEffort !== undefined) {
       throw new Error(
-        "Pythinker reasoningEffort override is unsupported by pythinker-code 0.5.1.",
+        "Pythinker reasoningEffort override is unsupported by the installed pythinker-code CLI.",
       );
     }
 
     const args = [
-      "--auto",
       "--prompt",
       renderProducerPrompt(spec, ctx.readOnly === true),
     ];
@@ -191,6 +202,7 @@ export class PythinkerAdapter implements ProducerAdapter {
       env: defaultPythinkerEnv({
         env: this.deps.env,
         homeDirectory: this.deps.homeDirectory,
+        pythinkerHome: resolvePythinkerHome(this.deps),
         hasConfigDir: directory => this.hasConfigDir(directory),
       }),
       network: "denied",
@@ -206,10 +218,13 @@ export class PythinkerAdapter implements ProducerAdapter {
   configurationProfile(): ProducerConfigurationProfile {
     return {
       isolationState: "inherited-config-only",
-      credentialSources: ["~/.pythinker/auth.json"],
-      behavioralConfigSources: ["~/.pythinker/config.toml"],
+      credentialSources: ["~/.pythinker-code/credentials/pythinker-code.json"],
+      behavioralConfigSources: [
+        "~/.pythinker-code/config.toml",
+        "~/.pythinker-code/tui.toml",
+      ],
       repositoryInstructionSources: ["worktree AGENTS.md"],
-      environmentDependencies: [],
+      environmentDependencies: ["PYTHINKER_CODE_HOME"],
       temporaryHomeStrategy: "real HOME inherited by declared policy; reduced reproducibility recorded in the Run Manifest",
     };
   }

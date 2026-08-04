@@ -14,7 +14,7 @@ assert.match(skill, /GPT-5\.6 Sol at `low` reasoning by default \(supported over
 assert.match(skill, /model-specific `--variant`/);
 assert.match(skill, /`--thinking off\|minimal\|low\|medium\|high\|xhigh\|max`/);
 assert.doesNotMatch(skill, /--thinking-effort/);
-assert.match(skill, /pythinker-code 0\.5\.1 exposes no reasoning override, so the Pythinker configured default always applies/);
+assert.match(skill, /the installed pythinker-code CLI exposes no reasoning override, so the Pythinker configured default always applies/);
 assert.match(skill, /include it in the delegation spec/);
 
 assert.doesNotMatch(skill, /Use Codex by default|default implementation lane/);

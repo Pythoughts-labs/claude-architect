@@ -36,7 +36,7 @@ The delegated CLIs are the architect's **implementation agents** — the same su
 | `codex-implementer` | GPT-5.6 Sol (OpenAI Codex CLI) | `low` by default |
 | `opencode-implementer` | OpenCode provider/model | optional `--variant` |
 | `pi-implementer` | Pi configured model | optional `--thinking` |
-| `pythinker-implementer` | Pythinker provider/model | pythinker-code 0.5.1 exposes no reasoning override; the configured default always applies |
+| `pythinker-implementer` | Pythinker provider/model | the installed pythinker-code CLI exposes no reasoning override; the configured default always applies |
 
 If the user invokes `/claude-architect:delegate` without naming a CLI, implementer, or agent, use the host's structured question tool when available, ask this question, and wait for the answer. Include the producer and reasoning control in each option so the user knows what the lane will run:
 
@@ -47,7 +47,7 @@ Offer exactly these choices:
 - **Codex** - `codex-implementer`; GPT-5.6 Sol at `low` reasoning by default (supported overrides: `medium`, `high`, `xhigh`, `max`, `ultra`).
 - **OpenCode** - `opencode-implementer`; configured provider/model unless overridden, with an optional model-specific `--variant` such as `high` when supported.
 - **Pi** - `pi-implementer`; configured model unless overridden, with optional `--thinking off|minimal|low|medium|high|xhigh|max`; Pi configuration supplies the default.
-- **Pythinker** - `pythinker-implementer`; configured provider/model unless overridden. pythinker-code 0.5.1 exposes no reasoning override, so the Pythinker configured default always applies.
+- **Pythinker** - `pythinker-implementer`; configured provider/model unless overridden; the installed pythinker-code CLI exposes no reasoning override, so the Pythinker configured default always applies.
 
 There is no implicit lane default. If the answer names a supported model or reasoning override, include it in the delegation spec; otherwise let the selected Producer use its configured default.
 

@@ -39,7 +39,6 @@ const supportedHelp = [
   "Usage: pythinker [options]",
   "",
   "Options:",
-  "  --auto                 run autonomously",
   "  -p, --prompt <prompt>  provide a prompt",
   "  -m, --model <model>    select a model",
   "  -h, --help             display help",
@@ -86,6 +85,7 @@ function unavailablePlatformServices(): PlatformServices {
     async canonicalizePath() {
       throw new Error("unexpected canonicalization");
     },
+    async assertDirectoryWriteIntegrity() {},
   };
 }
 
@@ -131,6 +131,7 @@ function versionPlatformServices(
     async canonicalizePath() {
       throw new Error("unexpected canonicalization");
     },
+    async assertDirectoryWriteIntegrity() {},
   };
 }
 
@@ -197,7 +198,6 @@ function probeContext(ps: PlatformServices): ProbeContext {
 
 function baseArgs(spec: DelegationSpec): string[] {
   return [
-    "--auto",
     "--prompt",
     renderProducerPrompt(spec),
   ];
@@ -262,7 +262,7 @@ describe("PythinkerAdapter", () => {
     });
   });
 
-  it.each(["--auto", "--prompt", "--model"])(
+  it.each(["--prompt", "--model"])(
     "fails closed when help lacks the required %s option",
     async missingOption => {
       const help = supportedHelp
@@ -323,11 +323,14 @@ describe("PythinkerAdapter", () => {
     });
   });
 
-  it("reports authenticated when auth.json exists in the default store", async () => {
+  it("reports authenticated when credentials exist in the default Pythinker Code home", async () => {
     const root = await mkdtemp(join(tmpdir(), "claude-architect-pythinker-auth-"));
-    const store = join(root, ".pythinker");
-    await mkdir(store, { recursive: true });
-    await writeFile(join(store, "auth.json"), "fixture contents must not be read");
+    const credentials = join(root, ".pythinker-code", "credentials");
+    await mkdir(credentials, { recursive: true });
+    await writeFile(
+      join(credentials, "pythinker-code.json"),
+      "fixture contents must not be read",
+    );
 
     try {
       const report = await new PythinkerAdapter({
@@ -341,7 +344,7 @@ describe("PythinkerAdapter", () => {
     }
   });
 
-  it("reports unauthenticated when auth.json is absent from the default store", async () => {
+  it("reports unauthenticated when credentials are absent from the default Pythinker Code home", async () => {
     const root = await mkdtemp(join(tmpdir(), "claude-architect-pythinker-auth-"));
 
     try {
@@ -351,6 +354,28 @@ describe("PythinkerAdapter", () => {
       }).probe(probeContext(versionPlatformServices(executable)));
 
       expect(report.authState).toBe("unauthenticated");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("uses PYTHINKER_CODE_HOME for the authentication store", async () => {
+    const root = await mkdtemp(join(tmpdir(), "claude-architect-pythinker-auth-"));
+    const pythinkerHome = join(root, "custom-pythinker-home");
+    const credentials = join(pythinkerHome, "credentials");
+    await mkdir(credentials, { recursive: true });
+    await writeFile(
+      join(credentials, "pythinker-code.json"),
+      "fixture contents must not be read",
+    );
+
+    try {
+      const report = await new PythinkerAdapter({
+        env: { PYTHINKER_CODE_HOME: pythinkerHome },
+        homeDirectory: root,
+      }).probe(probeContext(versionPlatformServices(executable)));
+
+      expect(report.authState).toBe("authenticated");
     } finally {
       await rm(root, { recursive: true, force: true });
     }
@@ -444,7 +469,7 @@ describe("PythinkerAdapter", () => {
     ]);
   });
 
-  it("rejects an unsupported reasoningEffort override before spawn", () => {
+  it("rejects an unsupported reasoningEffort override with a version-agnostic message", () => {
     const spec = sampleSpec();
     spec.producerOverrides = { reasoningEffort: "high" };
 
@@ -453,13 +478,13 @@ describe("PythinkerAdapter", () => {
       homeDirectory: "/hosthome",
       hasAuthStore: () => false,
     }).buildInvocation(spec, invocationContext())).toThrowError(
-      /Pythinker.*reasoningEffort.*unsupported/iu,
+      "Pythinker reasoningEffort override is unsupported by the installed pythinker-code CLI.",
     );
   });
 
   it("defaults HOME to the host home when the Pythinker config directory exists", async () => {
     const root = await mkdtemp(join(tmpdir(), "claude-architect-pythinker-config-"));
-    await mkdir(join(root, ".pythinker"));
+    await mkdir(join(root, ".pythinker-code"));
 
     try {
       const invocation = new PythinkerAdapter({
@@ -475,7 +500,7 @@ describe("PythinkerAdapter", () => {
 
   it("does not default HOME when the host already set it", async () => {
     const root = await mkdtemp(join(tmpdir(), "claude-architect-pythinker-config-"));
-    await mkdir(join(root, ".pythinker"));
+    await mkdir(join(root, ".pythinker-code"));
 
     try {
       const invocation = new PythinkerAdapter({
@@ -507,10 +532,13 @@ describe("PythinkerAdapter", () => {
   it("declares the Pythinker configuration isolation profile", () => {
     expect(new PythinkerAdapter().configurationProfile()).toEqual({
       isolationState: "inherited-config-only",
-      credentialSources: ["~/.pythinker/auth.json"],
-      behavioralConfigSources: ["~/.pythinker/config.toml"],
+      credentialSources: ["~/.pythinker-code/credentials/pythinker-code.json"],
+      behavioralConfigSources: [
+        "~/.pythinker-code/config.toml",
+        "~/.pythinker-code/tui.toml",
+      ],
       repositoryInstructionSources: ["worktree AGENTS.md"],
-      environmentDependencies: [],
+      environmentDependencies: ["PYTHINKER_CODE_HOME"],
       temporaryHomeStrategy: "real HOME inherited by declared policy; reduced reproducibility recorded in the Run Manifest",
     });
   });

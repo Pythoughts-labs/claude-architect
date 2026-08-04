@@ -6,6 +6,12 @@ All notable changes to Claude Architect are recorded here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- The Pythinker edit lane now invokes the documented non-interactive prompt
+  mode without a conflicting permission flag and resolves authentication and
+  configuration from `PYTHINKER_CODE_HOME` or `~/.pythinker-code`.
+
 ## [0.45.0] - 2026-08-03
 
 ### Fixed
