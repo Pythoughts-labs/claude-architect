@@ -983,12 +983,15 @@ export interface DecisionAdvisory {
   /** Human-readable cautions to show whoever confirms the decision. */
   warnings: string[];
   /**
-   * The run is an independently verified candidate carrying no failure and a
-   * durable pipeline-gate clearance bound to its archived candidate commit.
-   * This is deliberately not "warnings.length === 0": a plain `delegate` run
-   * has neither pipeline-gate evidence nor review evidence. Autonomy must turn
-   * on positive evidence for these exact bytes, never on status or the absence
-   * of a pipeline's paperwork.
+   * The run is an independently verified candidate carrying no failure, and
+   * either (a) a durable pipeline-gate clearance bound to its archived
+   * candidate commit, or (b) no pipeline evidence at all — a plain `delegate`
+   * run never enters the pipeline gate, so there is nothing to clear or
+   * refuse, and its independent verification result is the only signal there
+   * is. This is deliberately not "warnings.length === 0": partial or
+   * malformed pipeline evidence (a refused gate, a mid-review salvage, a
+   * clearance record that doesn't match the archived commit) still refuses,
+   * because that IS positive evidence something did not go cleanly.
    */
   verifiedClean: boolean;
   /**
@@ -1013,8 +1016,19 @@ function decisionAdvisoryForRun(run: ArchivedRun): DecisionAdvisory {
   if (isRecord(incomplete) && typeof incomplete.reason === "string") {
     warnings.push(`the pipeline could not complete its own review: ${incomplete.reason}`);
   }
+  // `runPipelineWithLease` unconditionally writes exactly one of these three
+  // evidence keys on every terminal pipeline outcome, so their total absence
+  // positively identifies a plain `delegate` run rather than an incomplete
+  // pipeline one. A pipeline run that started but never reached its gate ends
+  // some other status (failed / human-decision-required), never
+  // verified-candidate, so it can't reach this function looking like a clean
+  // delegate run by accident.
+  const noPipelineEvidence = refused === undefined && incomplete === undefined
+    && cleared === undefined;
   let gateCleared = false;
-  if (cleared === undefined) {
+  if (noPipelineEvidence) {
+    gateCleared = true;
+  } else if (cleared === undefined) {
     if (warnings.length === 0) {
       warnings.push("the pipeline gate clearance record is missing");
     }

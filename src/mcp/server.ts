@@ -621,10 +621,12 @@ export async function createServer(
     {
       title: "Record a candidate decision",
       description: "Record acceptance, rejection, or a revision request for a candidate. "
-        + "Only an independently verified delegatePipeline candidate with a durable, "
-        + "well-formed pipelineGateCleared record bound to the candidate commit, "
-        + "requiring no human decision and carrying no advisory warnings, is accepted "
-        + "without prompting; "
+        + "An independently verified candidate is accepted without prompting when it "
+        + "carries no advisory warnings: either a delegatePipeline candidate with a "
+        + "durable, well-formed pipelineGateCleared record bound to the candidate "
+        + "commit and requiring no human decision, or a plain delegate candidate, "
+        + "which carries no pipeline evidence at all and is judged on its independent "
+        + "verification result alone; "
         + "anything else requires human confirmation through MCP elicitation and fails "
         + "closed without it. Set "
         + `${DECISION_AUTHORITY_ENV}=human to require confirmation for every decision.`,

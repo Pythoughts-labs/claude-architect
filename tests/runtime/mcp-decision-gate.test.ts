@@ -214,19 +214,16 @@ describe("decideCandidate authority", () => {
     });
   });
 
-  it("does not autonomously accept a plain delegate result without pipeline clearance", async () => {
-    // Same client, authority, and candidate bytes as above; only the missing gate record makes this fail closed, so a status-only regression would record here.
+  it("autonomously accepts a plain delegate result with no pipeline evidence", async () => {
+    // Same client and authority as above; a plain `delegate` run never enters
+    // the pipeline gate, so the missing gate record is not itself a warning —
+    // the archived status/failure is the only signal there is.
     const { decision, output } = await decideVia({
       ...verifiedResult,
       evidence: {},
     });
-    expect(decision).toBeNull();
-    expect(output).toMatchObject({
-      structuredContent: {
-        ok: false,
-        error: "elicitation-unavailable",
-      },
-    });
+    expect(decision, JSON.stringify(output)).not.toBeNull();
+    expect(decision?.authority).toBe("policy-autonomous");
   });
 
   it("never records a clean candidate without elicitation under human authority", async () => {

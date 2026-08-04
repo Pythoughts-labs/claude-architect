@@ -66,9 +66,9 @@ describe("autonomousEligibility", () => {
   });
 
   it("refuses a run that is not an independently verified candidate", () => {
-    // The decisive case: zero warnings but unverified. A plain `delegate` run
-    // carries no pipeline evidence, so keying autonomy off warnings alone would
-    // auto-accept whatever it produced.
+    // The decisive case: zero warnings but unverified (e.g. a failed or
+    // still-open run). Keying autonomy off warnings alone, instead of the
+    // archived status, would auto-accept whatever such a run produced.
     const verdict = autonomousEligibility(
       "autonomous",
       { warnings: [], verifiedClean: false, unreadable: false },
@@ -289,19 +289,19 @@ async function decideVia(
 }
 
 describe("decideCandidate honors the configured authority", () => {
-  it("requires positive pipeline-gate evidence for autonomous acceptance", async () => {
+  it("auto-accepts a plain `delegate` result with no pipeline evidence at all", async () => {
+    // A plain `delegate` run never enters the pipeline gate: there is no
+    // review round to clear or refuse. Its only signal is the archived
+    // attempt's own status/failure from independent verification, so a clean
+    // verified-candidate is autonomy-eligible on that alone.
     const advisory = await advisoryFor(verifiedResult);
 
-    expect(advisory).toMatchObject({
-      warnings: [expect.stringContaining("pipeline gate clearance record is missing")],
-      verifiedClean: false,
-      unreadable: false,
-    });
-    expect(autonomousEligibility("autonomous", advisory).eligible).toBe(false);
+    expect(advisory).toEqual({ warnings: [], verifiedClean: true, unreadable: false });
+    expect(autonomousEligibility("autonomous", advisory).eligible).toBe(true);
 
     const { decision, output } = await decideVia("autonomous", verifiedResult);
-    expect(decision).toBeNull();
-    expect(JSON.stringify(output)).toContain("elicitation");
+    expect(decision, JSON.stringify(output)).not.toBeNull();
+    expect(decision?.authority).toBe("policy-autonomous");
   });
 
   it("does not double-report a missing clearance record when the gate refused", async () => {

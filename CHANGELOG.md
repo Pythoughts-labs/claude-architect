@@ -13,6 +13,16 @@ All notable changes to Claude Architect are recorded here. The format follows
   JSON output, `--add-dir`/`--new-project` worktree scoping, and Seatbelt
   write-confinement on macOS arm64, same platform ceiling as Pi and OpenCode.
 
+### Changed
+
+- Under the `autonomous` decision authority, `decideCandidate` now also
+  auto-accepts a plain `delegate` result (not only `delegatePipeline`) when it
+  is an independently verified candidate with no failure and no advisory
+  warnings. A plain `delegate` run carries no pipeline-gate evidence at all,
+  so it is judged on its independent verification result alone; any failure,
+  warning, or unreadable archive still requires human confirmation through
+  MCP elicitation, unchanged.
+
 ## [0.47.0] - 2026-08-04
 
 ### Fixed
