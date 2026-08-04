@@ -120,10 +120,20 @@ describe("seatbelt profile", () => {
     expect(profile).not.toContain('(subpath "/Users/test")');
   });
 
-  it("allowlists only Pythinker's state directory without a temp home", () => {
+  it("detects Pythinker by resolved executable identity, not a --work-dir flag the installed CLI does not have", () => {
+    // PythinkerAdapter.buildInvocation() only ever sends ["--prompt", ...] (and
+    // optionally "--model"); it never sends "--work-dir". Detection keyed off
+    // that flag never fired, so real pythinker attempts always ran with zero
+    // writable paths and crashed with EPERM on their own session directory.
     const wrapped = wrapInvocationWithSeatbelt({
       ...invocation,
-      args: ["--work-dir", "/tmp/wt", "--prompt", "test"],
+      executable: {
+        kind: "native",
+        command: "/usr/local/bin/pythinker",
+        prefixArgs: [],
+        resolvedFrom: "path:/usr/local/bin/pythinker",
+      },
+      args: ["--prompt", "test"],
       env: { HOME: "/Users/test" },
     }, {
       worktreePath: "/tmp/wt",
@@ -132,16 +142,63 @@ describe("seatbelt profile", () => {
     });
     const profile = wrapped.args[1] ?? "";
 
-    expect(profile).toContain('(subpath "/Users/test/.pythinker")');
+    expect(profile).toContain('(subpath "/Users/test/.pythinker-code")');
+  });
+
+  it("allowlists only Pythinker's state directory (.pythinker-code) without a temp home", () => {
+    const wrapped = wrapInvocationWithSeatbelt({
+      ...invocation,
+      executable: {
+        kind: "native",
+        command: "/usr/local/bin/pythinker",
+        prefixArgs: [],
+        resolvedFrom: "path:/usr/local/bin/pythinker",
+      },
+      args: ["--prompt", "test"],
+      env: { HOME: "/Users/test" },
+    }, {
+      worktreePath: "/tmp/wt",
+      tempHome: null,
+      allowNetwork: false,
+    });
+    const profile = wrapped.args[1] ?? "";
+
+    expect(profile).toContain('(subpath "/Users/test/.pythinker-code")');
     expect(profile).not.toContain('(subpath "/Users/test")');
-    expect(wrapped.args.slice(-2)).toEqual(["--mcp-config-file", "/dev/stdin"]);
-    expect(wrapped.stdin).toBe('{"mcpServers":{}}\n');
+  });
+
+  it("grants Pythinker's PYTHINKER_CODE_HOME override instead of the default when set", () => {
+    const wrapped = wrapInvocationWithSeatbelt({
+      ...invocation,
+      executable: {
+        kind: "native",
+        command: "/usr/local/bin/pythinker",
+        prefixArgs: [],
+        resolvedFrom: "path:/usr/local/bin/pythinker",
+      },
+      args: ["--prompt", "test"],
+      env: { HOME: "/Users/test", PYTHINKER_CODE_HOME: "/Users/test/custom-pythinker-home" },
+    }, {
+      worktreePath: "/tmp/wt",
+      tempHome: null,
+      allowNetwork: false,
+    });
+    const profile = wrapped.args[1] ?? "";
+
+    expect(profile).toContain('(subpath "/Users/test/custom-pythinker-home")');
+    expect(profile).not.toContain('(subpath "/Users/test/.pythinker-code")');
   });
 
   it("keeps joined subpaths POSIX even when HOME contains win32-style separators", () => {
     const wrapped = wrapInvocationWithSeatbelt({
       ...invocation,
-      args: ["--work-dir", "/tmp/wt", "--prompt", "test"],
+      executable: {
+        kind: "native",
+        command: "/usr/local/bin/pythinker",
+        prefixArgs: [],
+        resolvedFrom: "path:/usr/local/bin/pythinker",
+      },
+      args: ["--prompt", "test"],
       env: { HOME: "C:\\Users\\test" },
     }, {
       worktreePath: "/tmp/wt",
@@ -150,7 +207,7 @@ describe("seatbelt profile", () => {
     });
     const profile = wrapped.args[1] ?? "";
 
-    expect(profile).toContain('(subpath "C:\\\\Users\\\\test/.pythinker")');
+    expect(profile).toContain('(subpath "C:\\\\Users\\\\test/.pythinker-code")');
     expect(profile).not.toContain('(subpath "C:\\\\Users\\\\test")');
   });
 

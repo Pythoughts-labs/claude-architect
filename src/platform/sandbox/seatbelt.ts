@@ -1,6 +1,6 @@
 import { realpathSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path/posix";
+import { basename, join } from "node:path/posix";
 import type { ProducerInvocation } from "../../producers/producer-adapter.js";
 
 export interface SeatbeltPolicy {
@@ -84,8 +84,8 @@ function piWritablePaths(
 }
 
 function isPythinkerInvocation(invocation: ProducerInvocation): boolean {
-  return invocation.args.includes("--work-dir")
-    && invocation.args.includes("--prompt");
+  return [invocation.executable.command, ...invocation.executable.prefixArgs]
+    .some(part => basename(part) === "pythinker");
 }
 
 function pythinkerWritablePaths(
@@ -94,19 +94,12 @@ function pythinkerWritablePaths(
 ): string[] {
   if (policy.tempHome !== null || !isPythinkerInvocation(invocation)) return [];
 
-  const home = invocation.env?.HOME ?? process.env.HOME ?? homedir();
-  return [join(home, ".pythinker")];
-}
+  const configuredHome = invocation.env?.PYTHINKER_CODE_HOME
+    ?? process.env.PYTHINKER_CODE_HOME;
+  if (configuredHome !== undefined && configuredHome.length > 0) return [configuredHome];
 
-function preparePythinkerInvocation(
-  invocation: ProducerInvocation,
-): ProducerInvocation {
-  if (!isPythinkerInvocation(invocation)) return invocation;
-  return {
-    ...invocation,
-    args: [...invocation.args, "--mcp-config-file", "/dev/stdin"],
-    stdin: '{"mcpServers":{}}\n',
-  };
+  const home = invocation.env?.HOME ?? process.env.HOME ?? homedir();
+  return [join(home, ".pythinker-code")];
 }
 
 function buildProfile(policy: SeatbeltPolicy, additionalWritable: string[]): string {
@@ -151,14 +144,13 @@ export function wrapInvocationWithSeatbelt(
     ...piWritablePaths(invocation, policy),
     ...pythinkerWritablePaths(invocation, policy),
   ]);
-  const preparedInvocation = preparePythinkerInvocation(invocation);
   const inner = [
-    preparedInvocation.executable.command,
-    ...preparedInvocation.executable.prefixArgs,
-    ...preparedInvocation.args,
+    invocation.executable.command,
+    ...invocation.executable.prefixArgs,
+    ...invocation.args,
   ];
   return {
-    ...preparedInvocation,
+    ...invocation,
     executable: {
       kind: "native",
       command: "/usr/bin/sandbox-exec",

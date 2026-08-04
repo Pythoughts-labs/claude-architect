@@ -43860,7 +43860,7 @@ import { rm as rm6 } from "node:fs/promises";
 // src/platform/sandbox/seatbelt.ts
 import { realpathSync as realpathSync2 } from "node:fs";
 import { homedir as homedir5 } from "node:os";
-import { join as join5 } from "node:path/posix";
+import { basename, join as join5 } from "node:path/posix";
 function buildReadOnlySeatbeltPolicy(args) {
   return {
     worktreePath: "",
@@ -43902,20 +43902,14 @@ function piWritablePaths(invocation, policy) {
   return [join5(home, ".pi", "agent")];
 }
 function isPythinkerInvocation(invocation) {
-  return invocation.args.includes("--work-dir") && invocation.args.includes("--prompt");
+  return [invocation.executable.command, ...invocation.executable.prefixArgs].some((part) => basename(part) === "pythinker");
 }
 function pythinkerWritablePaths(invocation, policy) {
   if (policy.tempHome !== null || !isPythinkerInvocation(invocation)) return [];
+  const configuredHome = invocation.env?.PYTHINKER_CODE_HOME ?? process.env.PYTHINKER_CODE_HOME;
+  if (configuredHome !== void 0 && configuredHome.length > 0) return [configuredHome];
   const home = invocation.env?.HOME ?? process.env.HOME ?? homedir5();
-  return [join5(home, ".pythinker")];
-}
-function preparePythinkerInvocation(invocation) {
-  if (!isPythinkerInvocation(invocation)) return invocation;
-  return {
-    ...invocation,
-    args: [...invocation.args, "--mcp-config-file", "/dev/stdin"],
-    stdin: '{"mcpServers":{}}\n'
-  };
+  return [join5(home, ".pythinker-code")];
 }
 function buildProfile(policy, additionalWritable) {
   const writable = [...new Set([
@@ -43949,14 +43943,13 @@ function wrapInvocationWithSeatbelt(invocation, policy) {
     ...piWritablePaths(invocation, policy),
     ...pythinkerWritablePaths(invocation, policy)
   ]);
-  const preparedInvocation = preparePythinkerInvocation(invocation);
   const inner = [
-    preparedInvocation.executable.command,
-    ...preparedInvocation.executable.prefixArgs,
-    ...preparedInvocation.args
+    invocation.executable.command,
+    ...invocation.executable.prefixArgs,
+    ...invocation.args
   ];
   return {
-    ...preparedInvocation,
+    ...invocation,
     executable: {
       kind: "native",
       command: "/usr/bin/sandbox-exec",
@@ -49139,14 +49132,14 @@ async function freezeCandidate(args) {
 // src/verify/baseline-verifier.ts
 import { randomUUID as randomUUID9 } from "node:crypto";
 import { readFile as readFile5 } from "node:fs/promises";
-import { basename } from "node:path";
+import { basename as basename2 } from "node:path";
 import path24 from "node:path";
 function throwIfAborted(signal) {
   if (!signal?.aborted) return;
   throw new DOMException("Baseline verification was cancelled", "AbortError");
 }
 function executableName(value) {
-  return basename(value).toLowerCase().replace(/\.(?:cmd|exe|mjs|cjs|js)$/u, "");
+  return basename2(value).toLowerCase().replace(/\.(?:cmd|exe|mjs|cjs|js)$/u, "");
 }
 function firstPositional(args) {
   const optionsWithValues = /* @__PURE__ */ new Set([
