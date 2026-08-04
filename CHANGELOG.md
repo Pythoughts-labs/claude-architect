@@ -6,6 +6,8 @@ All notable changes to Claude Architect are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.45.0] - 2026-08-03
+
 ### Fixed
 
 - The Pythinker edit lane now emits the supported pythinker-code 0.5.1
