@@ -6,6 +6,13 @@ All notable changes to Claude Architect are recorded here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- The Pythinker edit lane now emits the supported pythinker-code 0.5.1
+  autonomous prompt and model arguments, rejects unsupported reasoning-effort
+  overrides before spawn, and fails closed during probing when the CLI help
+  surface lacks any option the adapter can emit.
+
 ## [0.44.0] - 2026-08-03
 
 ### Security

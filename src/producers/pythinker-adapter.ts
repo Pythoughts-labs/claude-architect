@@ -21,6 +21,7 @@ import type {
 
 const VERSION_TIMEOUT_MS = 10_000;
 const VERSION_OUTPUT_LIMIT = 64 * 1024;
+const REQUIRED_LONG_OPTIONS = ["--auto", "--prompt", "--model"] as const;
 
 function unavailableReport(
   ctx: ProbeContext,
@@ -47,6 +48,15 @@ function unavailableReport(
 function parseVersion(stdout: string): string | null {
   const match = /(?:^|\s)(\d+\.\d+\.\d+(?:[-+][^\s]+)?)(?:\s|$)/u.exec(stdout.trim());
   return match?.[1] ?? /\d+\.\d+\.\d+(?:[-+][^\s]+)?/u.exec(stdout)?.[0] ?? null;
+}
+
+function parseLongOptionTokens(helpText: string): Set<string> {
+  const options = new Set<string>();
+  for (const line of helpText.split(/\r?\n/u)) {
+    const match = /^\s*(?:-[A-Z0-9],\s*)?(--[a-z][a-z0-9-]*)(?=\s|$)/iu.exec(line);
+    if (match?.[1] !== undefined) options.add(match[1]);
+  }
+  return options;
 }
 
 export interface PythinkerAdapterDeps {
@@ -110,6 +120,30 @@ export class PythinkerAdapter implements ProducerAdapter {
         : null;
       if (version === null) return unavailableReport(ctx, "probe-failed", executable);
 
+      let helpResult;
+      try {
+        helpResult = await supervise(ctx.ps, {
+          executable,
+          args: ["--help"],
+          cwd: process.cwd(),
+          env: {},
+          timeoutMs: VERSION_TIMEOUT_MS,
+          maxOutputBytes: VERSION_OUTPUT_LIMIT,
+        }, {});
+      } catch {
+        return unavailableReport(ctx, "unsupported-cli-surface", executable);
+      }
+      const options = parseLongOptionTokens(
+        `${helpResult.stdout}\n${helpResult.stderr}`,
+      );
+      if (
+        helpResult.spawnError !== undefined
+        || helpResult.exitCode !== 0
+        || REQUIRED_LONG_OPTIONS.some(option => !options.has(option))
+      ) {
+        return unavailableReport(ctx, "unsupported-cli-surface", executable);
+      }
+
       const writeConfinementBackend = selectOsWriteConfinementBackend(ctx);
       const authStore = join(this.deps.homeDirectory, ".pythinker");
       const authState = this.hasAuthStore(authStore)
@@ -136,21 +170,20 @@ export class PythinkerAdapter implements ProducerAdapter {
   }
 
   buildInvocation(spec: DelegationSpec, ctx: InvocationContext): ProducerInvocation {
+    if (spec.producerOverrides?.reasoningEffort !== undefined) {
+      throw new Error(
+        "Pythinker reasoningEffort override is unsupported by pythinker-code 0.5.1.",
+      );
+    }
+
     const args = [
-      "--quiet",
-      "--yolo",
-      "--work-dir",
-      ctx.worktreePath,
+      "--auto",
       "--prompt",
       renderProducerPrompt(spec, ctx.readOnly === true),
     ];
     if (spec.producerOverrides?.model !== undefined) {
       args.push("--model", spec.producerOverrides.model);
     }
-    if (spec.producerOverrides?.reasoningEffort !== undefined) {
-      args.push("--thinking-effort", spec.producerOverrides.reasoningEffort);
-    }
-
     return {
       executable: ctx.executable,
       args,

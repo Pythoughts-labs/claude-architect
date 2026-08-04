@@ -35,6 +35,17 @@ const executable: ResolvedExecutable = {
   resolvedFrom: "test",
 };
 
+const supportedHelp = [
+  "Usage: pythinker [options]",
+  "",
+  "Options:",
+  "  --auto                 run autonomously",
+  "  -p, --prompt <prompt>  provide a prompt",
+  "  -m, --model <model>    select a model",
+  "  -h, --help             display help",
+  "",
+].join("\n");
+
 function exit(overrides: Partial<SupervisedExit> = {}): SupervisedExit {
   return {
     exitCode: 0,
@@ -82,6 +93,8 @@ function versionPlatformServices(
   resolvedExecutable: ResolvedExecutable,
   spawned: ResolvedExecutable[] = [],
   stdout = "pythinker 0.80.7\n",
+  helpResult: SupervisedExit = exit({ stdout: supportedHelp }),
+  spawnedArgs: string[][] = [],
 ): PlatformServices {
   return {
     os: "darwin",
@@ -90,11 +103,14 @@ function versionPlatformServices(
     },
     async spawnSupervised(request) {
       spawned.push(request.executable);
+      spawnedArgs.push([...request.args]);
       return {
         pid: 42,
         stdout: Readable.from([]),
         stderr: Readable.from([]),
-        done: Promise.resolve(exit({ stdout })),
+        done: Promise.resolve(
+          request.args.includes("--help") ? helpResult : exit({ stdout }),
+        ),
       };
     },
     async requestCooperativeCancellation() {},
@@ -181,10 +197,7 @@ function probeContext(ps: PlatformServices): ProbeContext {
 
 function baseArgs(spec: DelegationSpec): string[] {
   return [
-    "--quiet",
-    "--yolo",
-    "--work-dir",
-    "/tmp/attempt-worktree",
+    "--auto",
     "--prompt",
     renderProducerPrompt(spec),
   ];
@@ -249,6 +262,56 @@ describe("PythinkerAdapter", () => {
     });
   });
 
+  it.each(["--auto", "--prompt", "--model"])(
+    "fails closed when help lacks the required %s option",
+    async missingOption => {
+      const help = supportedHelp
+        .split("\n")
+        .filter(line => !line.includes(missingOption))
+        .concat(`Pythinker documentation mentions ${missingOption} in prose.`)
+        .join("\n");
+
+      await expect(new PythinkerAdapter({
+        env: {},
+        homeDirectory: "/hosthome",
+        hasAuthStore: () => false,
+      }).probe(probeContext(versionPlatformServices(
+        executable,
+        [],
+        "pythinker 0.5.1\n",
+        exit({ stdout: help }),
+      )))).resolves.toMatchObject({
+        available: false,
+        reason: "unsupported-cli-surface",
+        resolvedExecutable: executable,
+        version: null,
+        laneEligibility: { edit: false },
+      });
+    },
+  );
+
+  it("keeps the lane available when help exposes every emitted option", async () => {
+    const spawnedArgs: string[][] = [];
+
+    await expect(new PythinkerAdapter({
+      env: {},
+      homeDirectory: "/hosthome",
+      hasAuthStore: () => false,
+    }).probe(probeContext(versionPlatformServices(
+      executable,
+      [],
+      "pythinker 0.5.1\n",
+      exit({ stdout: supportedHelp }),
+      spawnedArgs,
+    )))).resolves.toMatchObject({
+      available: true,
+      reason: null,
+      version: "0.5.1",
+      laneEligibility: { edit: true },
+    });
+    expect(spawnedArgs).toEqual([["--version"], ["--help"]]);
+  });
+
   it("reports probe-failed when version output cannot be parsed", async () => {
     await expect(new PythinkerAdapter().probe(probeContext(
       versionPlatformServices(executable, [], "pythinker development\n"),
@@ -309,6 +372,11 @@ describe("PythinkerAdapter", () => {
       const report = await new PythinkerAdapter().probe(probeContext(ps));
 
       expect(spawned).toEqual([{
+        kind: "node-entrypoint",
+        command: process.execPath,
+        prefixArgs: [entrypoint],
+        resolvedFrom: `path:${entrypoint};node:${process.execPath}`,
+      }, {
         kind: "node-entrypoint",
         command: process.execPath,
         prefixArgs: [entrypoint],
@@ -376,38 +444,17 @@ describe("PythinkerAdapter", () => {
     ]);
   });
 
-  it("appends a thinking-effort override without adding a model override", () => {
+  it("rejects an unsupported reasoningEffort override before spawn", () => {
     const spec = sampleSpec();
     spec.producerOverrides = { reasoningEffort: "high" };
 
-    const args = new PythinkerAdapter({
+    expect(() => new PythinkerAdapter({
       env: {},
       homeDirectory: "/hosthome",
       hasAuthStore: () => false,
-    }).buildInvocation(spec, invocationContext()).args;
-
-    expect(args).toEqual([...baseArgs(spec), "--thinking-effort", "high"]);
-    expect(args).not.toContain("--model");
-  });
-
-  it("appends model then thinking-effort overrides to the invocation argv", () => {
-    const spec = sampleSpec();
-    spec.producerOverrides = {
-      model: "provider/model",
-      reasoningEffort: "medium",
-    };
-
-    expect(new PythinkerAdapter({
-      env: {},
-      homeDirectory: "/hosthome",
-      hasAuthStore: () => false,
-    }).buildInvocation(spec, invocationContext()).args).toEqual([
-      ...baseArgs(spec),
-      "--model",
-      "provider/model",
-      "--thinking-effort",
-      "medium",
-    ]);
+    }).buildInvocation(spec, invocationContext())).toThrowError(
+      /Pythinker.*reasoningEffort.*unsupported/iu,
+    );
   });
 
   it("defaults HOME to the host home when the Pythinker config directory exists", async () => {

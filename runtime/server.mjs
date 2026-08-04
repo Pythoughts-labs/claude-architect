@@ -36839,6 +36839,7 @@ import { homedir as homedir4 } from "node:os";
 import { join as join4 } from "node:path";
 var VERSION_TIMEOUT_MS4 = 1e4;
 var VERSION_OUTPUT_LIMIT4 = 64 * 1024;
+var REQUIRED_LONG_OPTIONS = ["--auto", "--prompt", "--model"];
 function unavailableReport4(ctx, reason, resolvedExecutable = null) {
   return {
     producerId: "pythinker",
@@ -36859,6 +36860,14 @@ function unavailableReport4(ctx, reason, resolvedExecutable = null) {
 function parseVersion4(stdout) {
   const match = /(?:^|\s)(\d+\.\d+\.\d+(?:[-+][^\s]+)?)(?:\s|$)/u.exec(stdout.trim());
   return match?.[1] ?? /\d+\.\d+\.\d+(?:[-+][^\s]+)?/u.exec(stdout)?.[0] ?? null;
+}
+function parseLongOptionTokens(helpText) {
+  const options = /* @__PURE__ */ new Set();
+  for (const line of helpText.split(/\r?\n/u)) {
+    const match = /^\s*(?:-[A-Z0-9],\s*)?(--[a-z][a-z0-9-]*)(?=\s|$)/iu.exec(line);
+    if (match?.[1] !== void 0) options.add(match[1]);
+  }
+  return options;
 }
 function defaultPythinkerEnv(deps) {
   if (deps.env.HOME !== void 0) return {};
@@ -36902,6 +36911,26 @@ var PythinkerAdapter = class {
       }, {});
       const version2 = result.spawnError === void 0 && result.exitCode === 0 ? parseVersion4(result.stdout) : null;
       if (version2 === null) return unavailableReport4(ctx, "probe-failed", executable);
+      let helpResult;
+      try {
+        helpResult = await supervise(ctx.ps, {
+          executable,
+          args: ["--help"],
+          cwd: process.cwd(),
+          env: {},
+          timeoutMs: VERSION_TIMEOUT_MS4,
+          maxOutputBytes: VERSION_OUTPUT_LIMIT4
+        }, {});
+      } catch {
+        return unavailableReport4(ctx, "unsupported-cli-surface", executable);
+      }
+      const options = parseLongOptionTokens(
+        `${helpResult.stdout}
+${helpResult.stderr}`
+      );
+      if (helpResult.spawnError !== void 0 || helpResult.exitCode !== 0 || REQUIRED_LONG_OPTIONS.some((option) => !options.has(option))) {
+        return unavailableReport4(ctx, "unsupported-cli-surface", executable);
+      }
       const writeConfinementBackend = selectOsWriteConfinementBackend(ctx);
       const authStore = join4(this.deps.homeDirectory, ".pythinker");
       const authState = this.hasAuthStore(authStore) ? "authenticated" : "unauthenticated";
@@ -36925,19 +36954,18 @@ var PythinkerAdapter = class {
     }
   }
   buildInvocation(spec, ctx) {
+    if (spec.producerOverrides?.reasoningEffort !== void 0) {
+      throw new Error(
+        "Pythinker reasoningEffort override is unsupported by pythinker-code 0.5.1."
+      );
+    }
     const args = [
-      "--quiet",
-      "--yolo",
-      "--work-dir",
-      ctx.worktreePath,
+      "--auto",
       "--prompt",
       renderProducerPrompt(spec, ctx.readOnly === true)
     ];
     if (spec.producerOverrides?.model !== void 0) {
       args.push("--model", spec.producerOverrides.model);
-    }
-    if (spec.producerOverrides?.reasoningEffort !== void 0) {
-      args.push("--thinking-effort", spec.producerOverrides.reasoningEffort);
     }
     return {
       executable: ctx.executable,
