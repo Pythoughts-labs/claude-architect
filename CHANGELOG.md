@@ -6,6 +6,8 @@ All notable changes to Claude Architect are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.46.0] - 2026-08-03
+
 ### Fixed
 
 - The Pythinker edit lane now invokes the documented non-interactive prompt

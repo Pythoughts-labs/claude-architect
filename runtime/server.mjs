@@ -31815,7 +31815,7 @@ import path31 from "node:path";
 var PROTOCOL_VERSION = "2.0.0";
 var DELEGATION_SPEC_VERSION = "1";
 var ATTEMPT_RESULT_VERSION = "1";
-var RUNTIME_VERSION = "0.45.0";
+var RUNTIME_VERSION = "0.46.0";
 
 // src/mcp/doctor.ts
 import { createHash as createHash5 } from "node:crypto";
