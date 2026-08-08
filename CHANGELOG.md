@@ -4,6 +4,25 @@ All notable changes to Claude Architect are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses
 [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- The Pi delegation lane no longer accepts a `producerOverrides.model`
+  override: it always runs the model configured in Pi itself, and a spec that
+  names one fails the lane explicitly instead of silently substituting a
+  different (possibly local) model. `--thinking` reasoning overrides are
+  unchanged.
+
+### Fixed
+
+- MCP output contracts: the advertised `doctor` output schema now declares
+  every key the tool returns (`git.path`, `sandboxBackends`, `dependencyClone`,
+  `liveBundle`), and `delegatePipeline` declares the pipeline result's
+  `failure` classification and the lane-mode correlation envelope. Strict MCP
+  clients previously rejected these server-produced responses with -32602. A
+  new output-schema contract test requires a byte-exact round-trip.
+
 ## [0.48.0] - 2026-08-04
 
 ### Added

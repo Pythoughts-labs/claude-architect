@@ -31817,6 +31817,29 @@ var DELEGATION_SPEC_VERSION = "1";
 var ATTEMPT_RESULT_VERSION = "1";
 var RUNTIME_VERSION = "0.48.0";
 
+// src/protocol/attempt-result.ts
+var FAILURE_PRECEDENCE = [
+  "invalid-specification",
+  "environment-defect",
+  // clean baseline verification failed
+  "unavailable",
+  // pre-launch unavailability
+  "authentication-required",
+  // pre-launch; never triggers fallback
+  "spawn-failure",
+  "cancelled",
+  // per the initiating runtime event
+  "timeout",
+  "sandbox-violation",
+  "invalid-output",
+  "producer-failure",
+  "verification-failure"
+];
+function classifyFailure(s) {
+  for (const reason of FAILURE_PRECEDENCE) if (s[reason]) return reason;
+  return null;
+}
+
 // src/mcp/doctor.ts
 import { createHash as createHash5 } from "node:crypto";
 import { constants as constants4 } from "node:fs";
@@ -36966,6 +36989,11 @@ var PiAdapter = class {
     }
   }
   buildInvocation(spec, ctx) {
+    if (spec.producerOverrides?.model !== void 0) {
+      throw new Error(
+        "Pi model override is unsupported: the pi lane always uses the model configured in Pi."
+      );
+    }
     const args = [
       "-p",
       "--no-session",
@@ -36973,9 +37001,6 @@ var PiAdapter = class {
       "--tools",
       "read,bash,edit,write,grep,find,ls"
     ];
-    if (spec.producerOverrides?.model !== void 0) {
-      args.push("--model", spec.producerOverrides.model);
-    }
     if (spec.producerOverrides?.reasoningEffort !== void 0) {
       args.push("--thinking", spec.producerOverrides.reasoningEffort);
     }
@@ -44140,29 +44165,6 @@ function wrapInvocationWithSeatbelt(invocation, policy) {
     },
     args: ["-p", profile, ...inner]
   };
-}
-
-// src/protocol/attempt-result.ts
-var FAILURE_PRECEDENCE = [
-  "invalid-specification",
-  "environment-defect",
-  // clean baseline verification failed
-  "unavailable",
-  // pre-launch unavailability
-  "authentication-required",
-  // pre-launch; never triggers fallback
-  "spawn-failure",
-  "cancelled",
-  // per the initiating runtime event
-  "timeout",
-  "sandbox-violation",
-  "invalid-output",
-  "producer-failure",
-  "verification-failure"
-];
-function classifyFailure(s) {
-  for (const reason of FAILURE_PRECEDENCE) if (s[reason]) return reason;
-  return null;
 }
 
 // src/producers/routing-policy.ts
@@ -58030,31 +58032,41 @@ var validateDelegationSpecOutput = external_exports.object({
   diagnostic: external_exports.string().optional(),
   error: external_exports.string().optional()
 });
+var pipelineResultOutput = external_exports.object({
+  runId: external_exports.string(),
+  status: external_exports.enum(["decision-ready", "human-decision-required", "failed"]),
+  attempt: external_exports.record(external_exports.string(), external_exports.unknown()),
+  increments: external_exports.array(external_exports.object({
+    increment: external_exports.number(),
+    report: external_exports.object({
+      reportVersion: external_exports.literal("1"),
+      candidateCommit: external_exports.string(),
+      status: external_exports.enum(["complete", "continue", "blocked"]),
+      summary: external_exports.string(),
+      nextSteps: external_exports.string().optional(),
+      blockers: external_exports.string().optional()
+    }),
+    roleLogRefs: external_exports.array(external_exports.string())
+  })),
+  rounds: external_exports.array(external_exports.record(external_exports.string(), external_exports.unknown())),
+  verification: external_exports.record(external_exports.string(), external_exports.unknown()).nullable(),
+  gate: external_exports.record(external_exports.string(), external_exports.unknown()),
+  finalCandidateCommit: external_exports.string(),
+  slices: external_exports.array(external_exports.record(external_exports.string(), external_exports.unknown())),
+  haltedSliceIndex: external_exports.number().nullable(),
+  failure: external_exports.enum(FAILURE_PRECEDENCE).nullable().optional()
+}).strict();
+var laneEnvelopeOutput = external_exports.object({
+  runId: external_exports.string(),
+  status: external_exports.enum(["unavailable", "failed", "cancelled", "verified-candidate"]),
+  producerId: external_exports.string().nullable(),
+  manifestHash: external_exports.string().nullable(),
+  failure: external_exports.enum(FAILURE_PRECEDENCE).nullable(),
+  durationMs: external_exports.number()
+}).strict();
 var delegatePipelineOutput = external_exports.object({
   ok: external_exports.boolean(),
-  result: external_exports.object({
-    runId: external_exports.string(),
-    status: external_exports.enum(["decision-ready", "human-decision-required", "failed"]),
-    attempt: external_exports.record(external_exports.string(), external_exports.unknown()),
-    increments: external_exports.array(external_exports.object({
-      increment: external_exports.number(),
-      report: external_exports.object({
-        reportVersion: external_exports.literal("1"),
-        candidateCommit: external_exports.string(),
-        status: external_exports.enum(["complete", "continue", "blocked"]),
-        summary: external_exports.string(),
-        nextSteps: external_exports.string().optional(),
-        blockers: external_exports.string().optional()
-      }),
-      roleLogRefs: external_exports.array(external_exports.string())
-    })),
-    rounds: external_exports.array(external_exports.record(external_exports.string(), external_exports.unknown())),
-    verification: external_exports.record(external_exports.string(), external_exports.unknown()).nullable(),
-    gate: external_exports.record(external_exports.string(), external_exports.unknown()),
-    finalCandidateCommit: external_exports.string(),
-    slices: external_exports.array(external_exports.record(external_exports.string(), external_exports.unknown())),
-    haltedSliceIndex: external_exports.number().nullable()
-  }).optional(),
+  result: external_exports.union([pipelineResultOutput, laneEnvelopeOutput]).optional(),
   validationErrors: external_exports.array(external_exports.object({ path: external_exports.string(), message: external_exports.string() })).optional(),
   diagnostic: external_exports.string().optional(),
   error: external_exports.string().optional()
@@ -58086,14 +58098,36 @@ var integrationOutput = external_exports.object({
   ...errorOutputFields
 });
 var doctorOutput = external_exports.object({
-  node: external_exports.object({ version: external_exports.string(), ok: external_exports.boolean() }),
-  git: external_exports.object({ version: external_exports.string().nullable(), ok: external_exports.boolean() }),
+  node: external_exports.object({ version: external_exports.string(), ok: external_exports.boolean() }).strict(),
+  git: external_exports.object({
+    version: external_exports.string().nullable(),
+    ok: external_exports.boolean(),
+    // Which git actually resolved; a PATH wrapper behaves differently under
+    // load than a real git, and a version string alone cannot show that.
+    path: external_exports.string().nullable()
+  }).strict(),
   producers: external_exports.array(external_exports.record(external_exports.string(), external_exports.unknown())),
+  sandboxBackends: external_exports.array(external_exports.object({
+    id: external_exports.string(),
+    kind: external_exports.string(),
+    state: external_exports.enum(["certified", "tested", "unsupported"])
+  }).strict()),
+  dependencyClone: external_exports.object({
+    cowSupported: external_exports.boolean(),
+    strategy: external_exports.string()
+  }).strict(),
+  liveBundle: external_exports.object({
+    selfHosted: external_exports.boolean(),
+    runningVersion: external_exports.string(),
+    repositoryVersion: external_exports.string().nullable(),
+    bundleMatches: external_exports.boolean().nullable(),
+    stale: external_exports.boolean()
+  }).strict(),
   runtimeVersion: external_exports.string(),
   schemaVersion: external_exports.string(),
   protocolVersion: external_exports.string(),
   issues: external_exports.array(external_exports.string())
-});
+}).strict();
 var gitReadOutput = external_exports.object({
   ok: external_exports.boolean(),
   output: external_exports.string().optional(),

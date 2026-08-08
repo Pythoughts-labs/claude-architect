@@ -5,6 +5,7 @@ demo/
 .pi-subagents/
 # pythinker — local agent state (do not commit)
 .pythinker/
+.pythinker-code/
 .pythinker-review/
 .pythinker-review-flow/
 *.scratchpad.lock

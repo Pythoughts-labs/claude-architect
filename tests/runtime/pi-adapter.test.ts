@@ -352,19 +352,17 @@ describe("PiAdapter", () => {
     expect(invocation.stdin).not.toContain("## Delegated procedure skills");
   });
 
-  it("appends a model override to the invocation argv", () => {
+  it("rejects a model override so the lane always uses the Pi-configured model", () => {
     const spec = sampleSpec();
     spec.producerOverrides = { model: "provider/model" };
 
-    expect(new PiAdapter({
+    expect(() => new PiAdapter({
       env: {},
       homeDirectory: "/hosthome",
       hasAuthStore: () => false,
-    }).buildInvocation(spec, invocationContext()).args).toEqual([
-      ...baseArgs,
-      "--model",
-      "provider/model",
-    ]);
+    }).buildInvocation(spec, invocationContext())).toThrow(
+      "Pi model override is unsupported",
+    );
   });
 
   it("appends a thinking override without adding a model override", () => {
@@ -381,24 +379,20 @@ describe("PiAdapter", () => {
     expect(args).not.toContain("--model");
   });
 
-  it("appends model then thinking overrides to the invocation argv", () => {
+  it("rejects a model override even when combined with a thinking override", () => {
     const spec = sampleSpec();
     spec.producerOverrides = {
       model: "provider/model",
       reasoningEffort: "medium",
     };
 
-    expect(new PiAdapter({
+    expect(() => new PiAdapter({
       env: {},
       homeDirectory: "/hosthome",
       hasAuthStore: () => false,
-    }).buildInvocation(spec, invocationContext()).args).toEqual([
-      ...baseArgs,
-      "--model",
-      "provider/model",
-      "--thinking",
-      "medium",
-    ]);
+    }).buildInvocation(spec, invocationContext())).toThrow(
+      "Pi model override is unsupported",
+    );
   });
 
   it("defaults HOME to the host home when the Pi config directory exists", async () => {
@@ -512,7 +506,6 @@ describe("PiAdapter", () => {
         spec.successCriteria = ["smoke.txt exists and contains ok."];
         spec.timeoutMs = 300_000;
         spec.producerOverrides = {
-          model: "openai-codex/gpt-5.6-sol",
           reasoningEffort: "low",
         };
         const invocation = wrapInvocationWithSeatbelt(adapter.buildInvocation(spec, {

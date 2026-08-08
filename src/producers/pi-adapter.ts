@@ -137,6 +137,15 @@ export class PiAdapter implements ProducerAdapter {
   }
 
   buildInvocation(spec: DelegationSpec, ctx: InvocationContext): ProducerInvocation {
+    // The Pi lane always runs the model configured in Pi itself
+    // (~/.pi/agent/models.json). A requested override would silently substitute
+    // a different model — possibly a local one — so it fails the lane instead,
+    // mirroring the Pythinker reasoningEffort precedent.
+    if (spec.producerOverrides?.model !== undefined) {
+      throw new Error(
+        "Pi model override is unsupported: the pi lane always uses the model configured in Pi.",
+      );
+    }
     const args = [
       "-p",
       "--no-session",
@@ -144,9 +153,6 @@ export class PiAdapter implements ProducerAdapter {
       "--tools",
       "read,bash,edit,write,grep,find,ls",
     ];
-    if (spec.producerOverrides?.model !== undefined) {
-      args.push("--model", spec.producerOverrides.model);
-    }
     if (spec.producerOverrides?.reasoningEffort !== undefined) {
       args.push("--thinking", spec.producerOverrides.reasoningEffort);
     }

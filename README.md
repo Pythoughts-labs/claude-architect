@@ -67,7 +67,7 @@ Open Claude Code in a Git repository and name the Producer you want:
 /claude-architect:delegate Use Codex to add rate limiting to the public API, run the tests, and show me the independently reviewed candidate before integration.
 ```
 
-If no Producer is named, the skill asks you to choose Codex, OpenCode, Pi, Pythinker, or Antigravity CLI. Pi, OpenCode, Pythinker, and Antigravity CLI are harnesses that accept optional model and thinking/variant/effort overrides; model selection within a harness lane is optional and otherwise defers to that CLI's configured default. For non-trivial work it uses the fresh-context review pipeline. Read the exact patch, findings, and verification output before deciding whether to accept.
+If no Producer is named, the skill asks you to choose Codex, OpenCode, Pi, Pythinker, or Antigravity CLI. OpenCode, Pythinker, and Antigravity CLI are harnesses that accept optional model and thinking/variant/effort overrides; model selection within a harness lane is optional and otherwise defers to that CLI's configured default. The Pi lane has no model override: it always runs the model configured in Pi, and a requested override fails the lane rather than silently substituting another model. For non-trivial work it uses the fresh-context review pipeline. Read the exact patch, findings, and verification output before deciding whether to accept.
 
 ### Direct Codex CLI
 

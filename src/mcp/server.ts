@@ -6,6 +6,7 @@ import type { ServerNotification, ServerRequest } from "@modelcontextprotocol/sd
 import path from "node:path";
 import { z } from "zod";
 import { PROTOCOL_VERSION, RUNTIME_VERSION } from "../protocol/versions.js";
+import { FAILURE_PRECEDENCE } from "../protocol/attempt-result.js";
 import { doctor, type DoctorDependencies } from "./doctor.js";
 import {
   gitChangedFiles,
@@ -61,31 +62,46 @@ const validateDelegationSpecOutput = z.object({
   diagnostic: z.string().optional(),
   error: z.string().optional(),
 });
+// The advertised output schema must describe every byte the server returns:
+// a strict client validates structured content against it and rejects keys the
+// schema omits, even when the server itself produced them.
+const pipelineResultOutput = z.object({
+  runId: z.string(),
+  status: z.enum(["decision-ready", "human-decision-required", "failed"]),
+  attempt: z.record(z.string(), z.unknown()),
+  increments: z.array(z.object({
+    increment: z.number(),
+    report: z.object({
+      reportVersion: z.literal("1"),
+      candidateCommit: z.string(),
+      status: z.enum(["complete", "continue", "blocked"]),
+      summary: z.string(),
+      nextSteps: z.string().optional(),
+      blockers: z.string().optional(),
+    }),
+    roleLogRefs: z.array(z.string()),
+  })),
+  rounds: z.array(z.record(z.string(), z.unknown())),
+  verification: z.record(z.string(), z.unknown()).nullable(),
+  gate: z.record(z.string(), z.unknown()),
+  finalCandidateCommit: z.string(),
+  slices: z.array(z.record(z.string(), z.unknown())),
+  haltedSliceIndex: z.number().nullable(),
+  failure: z.enum(FAILURE_PRECEDENCE).nullable().optional(),
+}).strict();
+// Lane mode returns the correlation envelope instead of the full result; both
+// shapes are part of the advertised contract.
+const laneEnvelopeOutput = z.object({
+  runId: z.string(),
+  status: z.enum(["unavailable", "failed", "cancelled", "verified-candidate"]),
+  producerId: z.string().nullable(),
+  manifestHash: z.string().nullable(),
+  failure: z.enum(FAILURE_PRECEDENCE).nullable(),
+  durationMs: z.number(),
+}).strict();
 export const delegatePipelineOutput = z.object({
   ok: z.boolean(),
-  result: z.object({
-    runId: z.string(),
-    status: z.enum(["decision-ready", "human-decision-required", "failed"]),
-    attempt: z.record(z.string(), z.unknown()),
-    increments: z.array(z.object({
-      increment: z.number(),
-      report: z.object({
-        reportVersion: z.literal("1"),
-        candidateCommit: z.string(),
-        status: z.enum(["complete", "continue", "blocked"]),
-        summary: z.string(),
-        nextSteps: z.string().optional(),
-        blockers: z.string().optional(),
-      }),
-      roleLogRefs: z.array(z.string()),
-    })),
-    rounds: z.array(z.record(z.string(), z.unknown())),
-    verification: z.record(z.string(), z.unknown()).nullable(),
-    gate: z.record(z.string(), z.unknown()),
-    finalCandidateCommit: z.string(),
-    slices: z.array(z.record(z.string(), z.unknown())),
-    haltedSliceIndex: z.number().nullable(),
-  }).optional(),
+  result: z.union([pipelineResultOutput, laneEnvelopeOutput]).optional(),
   validationErrors: z.array(z.object({ path: z.string(), message: z.string() })).optional(),
   diagnostic: z.string().optional(),
   error: z.string().optional(),
@@ -116,15 +132,41 @@ const integrationOutput = z.object({
   detail: z.string().optional(),
   ...errorOutputFields,
 });
-const doctorOutput = z.object({
-  node: z.object({ version: z.string(), ok: z.boolean() }),
-  git: z.object({ version: z.string().nullable(), ok: z.boolean() }),
+// Must mirror DoctorResult in ./doctor.ts exactly: the client validates
+// structured content against this schema, and the doctor response previously
+// carried undeclared keys (git.path, sandboxBackends, dependencyClone,
+// liveBundle) that strict clients rejected with -32602.
+export const doctorOutput = z.object({
+  node: z.object({ version: z.string(), ok: z.boolean() }).strict(),
+  git: z.object({
+    version: z.string().nullable(),
+    ok: z.boolean(),
+    // Which git actually resolved; a PATH wrapper behaves differently under
+    // load than a real git, and a version string alone cannot show that.
+    path: z.string().nullable(),
+  }).strict(),
   producers: z.array(z.record(z.string(), z.unknown())),
+  sandboxBackends: z.array(z.object({
+    id: z.string(),
+    kind: z.string(),
+    state: z.enum(["certified", "tested", "unsupported"]),
+  }).strict()),
+  dependencyClone: z.object({
+    cowSupported: z.boolean(),
+    strategy: z.string(),
+  }).strict(),
+  liveBundle: z.object({
+    selfHosted: z.boolean(),
+    runningVersion: z.string(),
+    repositoryVersion: z.string().nullable(),
+    bundleMatches: z.boolean().nullable(),
+    stale: z.boolean(),
+  }).strict(),
   runtimeVersion: z.string(),
   schemaVersion: z.string(),
   protocolVersion: z.string(),
   issues: z.array(z.string()),
-});
+}).strict();
 const gitReadOutput = z.object({
   ok: z.boolean(),
   output: z.string().optional(),

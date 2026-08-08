@@ -13,6 +13,8 @@ for (const lane of ["codex-implementer", "opencode-implementer", "pi-implementer
 assert.match(skill, /GPT-5\.6 Sol at `low` reasoning by default \(supported overrides: `medium`, `high`, `xhigh`, `max`, `ultra`\)/);
 assert.match(skill, /model-specific `--variant`/);
 assert.match(skill, /`--thinking off\|minimal\|low\|medium\|high\|xhigh\|max`/);
+assert.match(skill, /`pi-implementer`; always uses the model configured in Pi/);
+assert.match(skill, /The Pi lane accepts no model override: it always runs the model configured in Pi/);
 assert.doesNotMatch(skill, /--thinking-effort/);
 assert.match(skill, /the installed pythinker-code CLI exposes no reasoning override, so the Pythinker configured default always applies/);
 assert.match(skill, /`--effort low\|medium\|high`/);
