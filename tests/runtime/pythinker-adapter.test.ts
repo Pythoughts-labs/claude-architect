@@ -325,7 +325,7 @@ describe("PythinkerAdapter", () => {
 
   it("reports authenticated when credentials exist in the default Pythinker Code home", async () => {
     const root = await mkdtemp(join(tmpdir(), "claude-architect-pythinker-auth-"));
-    const credentials = join(root, ".pythinker-code", "credentials");
+    const credentials = join(root, ".pythinker", "credentials");
     await mkdir(credentials, { recursive: true });
     await writeFile(
       join(credentials, "pythinker-code.json"),
@@ -359,7 +359,7 @@ describe("PythinkerAdapter", () => {
     }
   });
 
-  it("uses PYTHINKER_CODE_HOME for the authentication store", async () => {
+  it("uses PYTHINKER_SHARE_DIR for the authentication store", async () => {
     const root = await mkdtemp(join(tmpdir(), "claude-architect-pythinker-auth-"));
     const pythinkerHome = join(root, "custom-pythinker-home");
     const credentials = join(pythinkerHome, "credentials");
@@ -371,7 +371,7 @@ describe("PythinkerAdapter", () => {
 
     try {
       const report = await new PythinkerAdapter({
-        env: { PYTHINKER_CODE_HOME: pythinkerHome },
+        env: { PYTHINKER_SHARE_DIR: pythinkerHome },
         homeDirectory: root,
       }).probe(probeContext(versionPlatformServices(executable)));
 
@@ -424,7 +424,7 @@ describe("PythinkerAdapter", () => {
     expect(invocation.executable).toBe(executable);
     expect(invocation.args).toEqual(baseArgs(spec));
     expect(invocation.stdin).toBeUndefined();
-    expect(invocation.requiredEnv).toEqual(["PYTHINKER_CODE_HOME", "PYTHINKER_CLI_NO_AUTO_UPDATE"]);
+    expect(invocation.requiredEnv).toEqual(["PYTHINKER_SHARE_DIR", "PYTHINKER_CLI_NO_AUTO_UPDATE"]);
     expect(invocation.network).toBe("allowed");
   });
 
@@ -484,7 +484,7 @@ describe("PythinkerAdapter", () => {
 
   it("defaults HOME to the host home when the Pythinker config directory exists", async () => {
     const root = await mkdtemp(join(tmpdir(), "claude-architect-pythinker-config-"));
-    await mkdir(join(root, ".pythinker-code"));
+    await mkdir(join(root, ".pythinker"));
 
     try {
       const invocation = new PythinkerAdapter({
@@ -500,7 +500,7 @@ describe("PythinkerAdapter", () => {
 
   it("does not default HOME when the host already set it", async () => {
     const root = await mkdtemp(join(tmpdir(), "claude-architect-pythinker-config-"));
-    await mkdir(join(root, ".pythinker-code"));
+    await mkdir(join(root, ".pythinker"));
 
     try {
       const invocation = new PythinkerAdapter({
@@ -547,13 +547,13 @@ describe("PythinkerAdapter", () => {
   it("declares the Pythinker configuration isolation profile", () => {
     expect(new PythinkerAdapter().configurationProfile()).toEqual({
       isolationState: "inherited-config-only",
-      credentialSources: ["~/.pythinker-code/credentials/pythinker-code.json"],
+      credentialSources: ["~/.pythinker/credentials/pythinker-code.json"],
       behavioralConfigSources: [
-        "~/.pythinker-code/config.toml",
-        "~/.pythinker-code/tui.toml",
+        "~/.pythinker/config.toml",
+        "~/.pythinker/tui.toml",
       ],
       repositoryInstructionSources: ["worktree AGENTS.md"],
-      environmentDependencies: ["PYTHINKER_CODE_HOME", "PYTHINKER_CLI_NO_AUTO_UPDATE"],
+      environmentDependencies: ["PYTHINKER_SHARE_DIR", "PYTHINKER_CLI_NO_AUTO_UPDATE"],
       temporaryHomeStrategy: "real HOME inherited by declared policy; reduced reproducibility recorded in the Run Manifest",
     });
   });

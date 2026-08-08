@@ -7,7 +7,37 @@ import { resolveWindowsFilesystemHelper } from "./windows-filesystem-helper.js";
 import { windowsEssentialEnvironment } from "./windows-env.js";
 import { RuntimeError } from "../util/errors.js";
 
-const EMPTY_DIRECTORY_TIMEOUT_MS = 120_000;
+const DEFAULT_EMPTY_DIRECTORY_TIMEOUT_MS = 120_000;
+export const EMPTY_DIRECTORY_TIMEOUT_ENV = "CLAUDE_ARCHITECT_EMPTY_DIRECTORY_TIMEOUT_MS";
+
+/**
+ * How long the quarantine-emptying helper may run before a disposable
+ * worktree's teardown is classified as timed out. The default budget is sized
+ * for an ordinary checkout; a large `node_modules`/monorepo tree can
+ * routinely exceed it. A worktree-teardown timeout no longer discards the
+ * result it interrupts (baseline-verifier.ts records it as `cleanupIssue`
+ * instead of overwriting the run's outcome), but the run still burns the
+ * whole budget and defers the physical removal to a later recovery pass on
+ * every single attempt against such a repository. Override this for
+ * repositories with unusually large disposable worktrees; unset, empty, or
+ * invalid values fail closed to the default rather than silently disabling
+ * the bound (an unbounded budget would leave a wedged Producer process
+ * uncleanable).
+ */
+export function resolveEmptyDirectoryTimeoutMs(
+  env: NodeJS.ProcessEnv = process.env,
+  warn: (message: string) => void = message => console.error(message),
+): number {
+  const raw = env[EMPTY_DIRECTORY_TIMEOUT_ENV];
+  if (raw === undefined || raw === "") return DEFAULT_EMPTY_DIRECTORY_TIMEOUT_MS;
+  const parsed = Number(raw);
+  if (Number.isInteger(parsed) && parsed > 0) return parsed;
+  warn(
+    `${EMPTY_DIRECTORY_TIMEOUT_ENV}="${raw}" is not a positive integer; using the default `
+    + `${DEFAULT_EMPTY_DIRECTORY_TIMEOUT_MS}ms.`,
+  );
+  return DEFAULT_EMPTY_DIRECTORY_TIMEOUT_MS;
+}
 const EMPTY_DIRECTORY_SCRIPT = String.raw`
 const { execFileSync } = require("node:child_process");
 const { randomUUID } = require("node:crypto");
@@ -461,7 +491,7 @@ export async function emptyBoundDirectory(
         ...windowsEssentialEnvironment(),
         CLAUDE_ARCHITECT_WINDOWS_FILESYSTEM_HELPER: helper.command,
       },
-    timeoutMs: EMPTY_DIRECTORY_TIMEOUT_MS,
+    timeoutMs: resolveEmptyDirectoryTimeoutMs(),
     maxOutputBytes: 16_384,
   }, { graceMs: 1_000 });
   if (result.spawnError !== undefined

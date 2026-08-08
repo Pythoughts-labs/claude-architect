@@ -9,6 +9,8 @@ import type { VerificationCommand } from "../protocol/delegation-spec.js";
 import { appliesToPlatform, executeCommand, resolveCommandCwd, scanCommandMutations } from "./project-verifier.js";
 import { linkPrimaryDependencies, type DependencyLink } from "./dependency-link.js";
 import type { ArtifactStore } from "../runtime/artifact-store.js";
+import { boundedRedactedDiagnostic } from "../runtime/redaction.js";
+import { logger } from "../util/logger.js";
 
 export interface BaselineCommandResult {
   id: string;
@@ -25,6 +27,15 @@ export interface BaselineReport {
   baselineCommitOid: string;
   commands: BaselineCommandResult[];
   dependencyLink: DependencyLink;
+  /**
+   * Set when the disposable verification worktree could not be torn down
+   * *after* baseline verification already produced this terminal
+   * classification (observed with a large `node_modules` tree exceeding the
+   * removal timeout). This is a secondary environment-cleanup defect and
+   * must never replace or suppress `commands`/`dependencyLink` — see the
+   * caller in `verifyBaseline()`.
+   */
+  cleanupIssue?: string;
 }
 
 export interface BaselineVerifyArgs {
@@ -235,7 +246,7 @@ export async function verifyBaseline(args: BaselineVerifyArgs): Promise<Baseline
       : { borrowedCheckoutLease: args.borrowedCheckoutLease },
   );
   const materialized = await manager.create(args.headCommitOid);
-  let primaryError: unknown;
+  let report: BaselineReport;
   try {
     const dependencyLink = await linkPrimaryDependencies(args.repoRoot, materialized.path);
     const commands: BaselineCommandResult[] = [];
@@ -317,19 +328,50 @@ export async function verifyBaseline(args: BaselineVerifyArgs): Promise<Baseline
       });
       throwIfAborted(args.abortSignal);
     }
-    return { baselineCommitOid: args.headCommitOid, commands, dependencyLink };
-  } catch (error) {
-    primaryError = error;
-    throw error;
-  } finally {
+    report = { baselineCommitOid: args.headCommitOid, commands, dependencyLink };
+  } catch (primaryError) {
     try {
       await materialized.cleanup();
     } catch (cleanupError) {
-      if (primaryError === undefined) throw cleanupError;
       throw new AggregateError(
         [primaryError, cleanupError],
         "baseline verification failed and its worktree could not be cleaned up",
       );
     }
+    throw primaryError;
   }
+
+  // Baseline verification already produced its terminal classification above —
+  // including any failing commands, which are the load-bearing diagnostic
+  // record for the run. A worktree-teardown failure past this point (observed
+  // with a large disposable worktree exceeding the removal timeout) is a
+  // secondary environment-cleanup defect. It must never overwrite or suppress
+  // that classification: previously, throwing here discarded the fully
+  // computed report, so the caller surfaced only "quarantined directory
+  // contents could not be removed" with no result.json and no record of the
+  // actual baseline outcome. Record it alongside the report instead, mirroring
+  // how attempt-runtime.ts records a post-archival attempt-worktree cleanup
+  // failure without replacing the attempt's own outcome.
+  try {
+    await materialized.cleanup();
+  } catch (cleanupError) {
+    const diagnostic = boundedRedactedDiagnostic(cleanupError, 2_000);
+    logger.warn("baseline verification worktree cleanup failed after producing a result", {
+      runId: args.runId,
+      error: diagnostic,
+    });
+    if (args.store !== undefined) {
+      try {
+        await args.store.writeLog("baseline-cleanup-failure", `${diagnostic}\n`);
+      } catch (writeError) {
+        // The report already carries the failure; a second write error must
+        // not replace it either — but it must still be visible.
+        logger.warn("baseline cleanup failure could not be archived", {
+          error: boundedRedactedDiagnostic(writeError, 2_000),
+        });
+      }
+    }
+    report = { ...report, cleanupIssue: diagnostic };
+  }
+  return report;
 }

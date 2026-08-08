@@ -109,12 +109,14 @@ function pythinkerWritablePaths(
 ): string[] {
   if (policy.tempHome !== null || !isPythinkerInvocation(invocation)) return [];
 
-  const configuredHome = invocation.env?.PYTHINKER_CODE_HOME
-    ?? process.env.PYTHINKER_CODE_HOME;
+  // Pythinker's real default data directory is `~/.pythinker`, overridable with
+  // `PYTHINKER_SHARE_DIR` — see the matching rationale in pythinker-adapter.ts.
+  const configuredHome = invocation.env?.PYTHINKER_SHARE_DIR
+    ?? process.env.PYTHINKER_SHARE_DIR;
   if (configuredHome !== undefined && configuredHome.length > 0) return [configuredHome];
 
   const home = invocation.env?.HOME ?? process.env.HOME ?? homedir();
-  return [join(home, ".pythinker-code")];
+  return [join(home, ".pythinker")];
 }
 
 function buildProfile(policy: SeatbeltPolicy, additionalWritable: string[]): string {

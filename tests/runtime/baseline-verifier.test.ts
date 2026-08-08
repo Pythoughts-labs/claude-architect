@@ -1,11 +1,12 @@
 import { access, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { git } from "../../src/git/git-exec.js";
 import type { PlatformServices } from "../../src/platform/platform-services.js";
 import { getPlatformServices } from "../../src/platform/select-platform.js";
 import type { VerificationCommand } from "../../src/protocol/delegation-spec.js";
+import { WorktreeManager } from "../../src/runtime/worktree-manager.js";
 import { verifyBaseline } from "../../src/verify/baseline-verifier.js";
 
 const temporaryPaths: string[] = [];
@@ -564,6 +565,41 @@ describe("verifyBaseline", () => {
       clearTimeout(cancellation);
     }
     await expect(access(marker)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("records a worktree cleanup failure alongside the result instead of erasing it", async () => {
+    // Reproduces a real incident: a disposable verification worktree's
+    // removal exceeded the teardown timeout after `tsc` had already failed.
+    // The runtime returned only the teardown error ("quarantined directory
+    // contents could not be removed"); no result.json was written, and the
+    // genuine baseline failure was recoverable only by hand-reading logs.
+    const repo = await fixture();
+    const create = WorktreeManager.prototype.create;
+    const createSpy = vi.spyOn(WorktreeManager.prototype, "create")
+      .mockImplementationOnce(async function (this: WorktreeManager, baseCommitOid: string) {
+        const worktree = await create.call(this, baseCommitOid);
+        return {
+          ...worktree,
+          async cleanup() {
+            await worktree.cleanup();
+            throw new Error("quarantined directory contents could not be removed (timedOut=true)");
+          },
+        };
+      });
+
+    let report;
+    try {
+      report = await verifyBaseline({ ...repo, commands: [command(1)] });
+    } finally {
+      createSpy.mockRestore();
+    }
+
+    // The genuine baseline failure must still be reported...
+    expect(report.commands).toEqual([{ id: "exit-1", exitCode: 1, ok: false }]);
+    // ...with the teardown failure recorded alongside it, not in place of it.
+    expect(report.cleanupIssue).toContain(
+      "quarantined directory contents could not be removed",
+    );
   });
 
   it("archives each command's output so a baseline failure can be diagnosed", async () => {

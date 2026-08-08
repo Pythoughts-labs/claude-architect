@@ -71,20 +71,28 @@ export interface PythinkerAdapterDeps {
 // this adapter probed moments earlier (--version/--help); the host may still override this
 // by setting the variable itself, since defaultPythinkerEnv only fills in an absent value.
 const PYTHINKER_NO_AUTO_UPDATE_ENV = "PYTHINKER_CLI_NO_AUTO_UPDATE";
-// Forwarded from the host so a redirected Pythinker Code home — used below to resolve the
-// auth store and the default HOME — actually reaches the invoked process. Without this, a
-// deployment that sets PYTHINKER_CODE_HOME to isolate this producer's config would have the
-// adapter report auth/config state from that directory while the real invocation silently
-// fell back to pythinker's own default `~/.pythinker-code`.
-const PYTHINKER_REQUIRED_ENV = ["PYTHINKER_CODE_HOME", PYTHINKER_NO_AUTO_UPDATE_ENV] as const;
+// Forwarded from the host so a redirected Pythinker Code data directory — used below to
+// resolve the auth store and the default HOME — actually reaches the invoked process.
+// Pythinker's real default data directory is `~/.pythinker` (confirmed live via
+// docs/en/configuration/providers.md's `~/.pythinker/config.toml`, the 0.19.0 and 0.34.0
+// release notes referencing `~/.pythinker/projects/...` and `~/.pythinker/sessions/`, and an
+// upstream commit noting `get_share_dir`/`get_config_file` "materialize ~/.pythinker"), not
+// `~/.pythinker-code` as an earlier version of this adapter assumed. The override variable
+// name follows the same `share.py`/`get_share_dir()` convention as the shared upstream CLI
+// scaffold, whose confirmed override variable is `KIMI_SHARE_DIR` — the Pythinker-branded
+// equivalent is `PYTHINKER_SHARE_DIR`. Without forwarding it, a deployment that sets
+// PYTHINKER_SHARE_DIR to isolate this producer's config would have the adapter report
+// auth/config state from that directory while the real invocation silently fell back to
+// pythinker's own default `~/.pythinker`.
+const PYTHINKER_REQUIRED_ENV = ["PYTHINKER_SHARE_DIR", PYTHINKER_NO_AUTO_UPDATE_ENV] as const;
 
 function resolvePythinkerHome(
   deps: Required<Pick<PythinkerAdapterDeps, "env" | "homeDirectory">>,
 ): string {
-  const configuredHome = deps.env.PYTHINKER_CODE_HOME;
+  const configuredHome = deps.env.PYTHINKER_SHARE_DIR;
   return configuredHome !== undefined && configuredHome.length > 0
     ? configuredHome
-    : join(deps.homeDirectory, ".pythinker-code");
+    : join(deps.homeDirectory, ".pythinker");
 }
 
 function defaultPythinkerEnv(
@@ -236,10 +244,10 @@ export class PythinkerAdapter implements ProducerAdapter {
   configurationProfile(): ProducerConfigurationProfile {
     return {
       isolationState: "inherited-config-only",
-      credentialSources: ["~/.pythinker-code/credentials/pythinker-code.json"],
+      credentialSources: ["~/.pythinker/credentials/pythinker-code.json"],
       behavioralConfigSources: [
-        "~/.pythinker-code/config.toml",
-        "~/.pythinker-code/tui.toml",
+        "~/.pythinker/config.toml",
+        "~/.pythinker/tui.toml",
       ],
       repositoryInstructionSources: ["worktree AGENTS.md"],
       environmentDependencies: [...PYTHINKER_REQUIRED_ENV],

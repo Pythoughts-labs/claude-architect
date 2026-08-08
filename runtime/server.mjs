@@ -37070,10 +37070,10 @@ function parseLongOptionTokens(helpText) {
   return options;
 }
 var PYTHINKER_NO_AUTO_UPDATE_ENV = "PYTHINKER_CLI_NO_AUTO_UPDATE";
-var PYTHINKER_REQUIRED_ENV = ["PYTHINKER_CODE_HOME", PYTHINKER_NO_AUTO_UPDATE_ENV];
+var PYTHINKER_REQUIRED_ENV = ["PYTHINKER_SHARE_DIR", PYTHINKER_NO_AUTO_UPDATE_ENV];
 function resolvePythinkerHome(deps) {
-  const configuredHome = deps.env.PYTHINKER_CODE_HOME;
-  return configuredHome !== void 0 && configuredHome.length > 0 ? configuredHome : join5(deps.homeDirectory, ".pythinker-code");
+  const configuredHome = deps.env.PYTHINKER_SHARE_DIR;
+  return configuredHome !== void 0 && configuredHome.length > 0 ? configuredHome : join5(deps.homeDirectory, ".pythinker");
 }
 function defaultPythinkerEnv(deps) {
   const env = {};
@@ -37200,10 +37200,10 @@ ${helpResult.stderr}`
   configurationProfile() {
     return {
       isolationState: "inherited-config-only",
-      credentialSources: ["~/.pythinker-code/credentials/pythinker-code.json"],
+      credentialSources: ["~/.pythinker/credentials/pythinker-code.json"],
       behavioralConfigSources: [
-        "~/.pythinker-code/config.toml",
-        "~/.pythinker-code/tui.toml"
+        "~/.pythinker/config.toml",
+        "~/.pythinker/tui.toml"
       ],
       repositoryInstructionSources: ["worktree AGENTS.md"],
       environmentDependencies: [...PYTHINKER_REQUIRED_ENV],
@@ -38915,7 +38915,18 @@ import path14 from "node:path";
 import { constants as constants5 } from "node:fs";
 import { access as access3, lstat as lstat5, open as open6, rmdir } from "node:fs/promises";
 import path12 from "node:path";
-var EMPTY_DIRECTORY_TIMEOUT_MS = 12e4;
+var DEFAULT_EMPTY_DIRECTORY_TIMEOUT_MS = 12e4;
+var EMPTY_DIRECTORY_TIMEOUT_ENV = "CLAUDE_ARCHITECT_EMPTY_DIRECTORY_TIMEOUT_MS";
+function resolveEmptyDirectoryTimeoutMs(env = process.env, warn = (message) => console.error(message)) {
+  const raw = env[EMPTY_DIRECTORY_TIMEOUT_ENV];
+  if (raw === void 0 || raw === "") return DEFAULT_EMPTY_DIRECTORY_TIMEOUT_MS;
+  const parsed = Number(raw);
+  if (Number.isInteger(parsed) && parsed > 0) return parsed;
+  warn(
+    `${EMPTY_DIRECTORY_TIMEOUT_ENV}="${raw}" is not a positive integer; using the default ${DEFAULT_EMPTY_DIRECTORY_TIMEOUT_MS}ms.`
+  );
+  return DEFAULT_EMPTY_DIRECTORY_TIMEOUT_MS;
+}
 var EMPTY_DIRECTORY_SCRIPT = String.raw`
 const { execFileSync } = require("node:child_process");
 const { randomUUID } = require("node:crypto");
@@ -39299,7 +39310,7 @@ async function emptyBoundDirectory(directory, expectedIdentity, platformServices
       ...windowsEssentialEnvironment(),
       CLAUDE_ARCHITECT_WINDOWS_FILESYSTEM_HELPER: helper.command
     },
-    timeoutMs: EMPTY_DIRECTORY_TIMEOUT_MS,
+    timeoutMs: resolveEmptyDirectoryTimeoutMs(),
     maxOutputBytes: 16384
   }, { graceMs: 1e3 });
   if (result.spawnError !== void 0 || result.exitCode !== 0 || result.timedOut || result.cancelled || result.truncated.stdout || result.truncated.stderr) {
@@ -44120,10 +44131,10 @@ function agyWritablePaths(invocation, policy) {
 }
 function pythinkerWritablePaths(invocation, policy) {
   if (policy.tempHome !== null || !isPythinkerInvocation(invocation)) return [];
-  const configuredHome = invocation.env?.PYTHINKER_CODE_HOME ?? process.env.PYTHINKER_CODE_HOME;
+  const configuredHome = invocation.env?.PYTHINKER_SHARE_DIR ?? process.env.PYTHINKER_SHARE_DIR;
   if (configuredHome !== void 0 && configuredHome.length > 0) return [configuredHome];
   const home = invocation.env?.HOME ?? process.env.HOME ?? homedir6();
-  return [join6(home, ".pythinker-code")];
+  return [join6(home, ".pythinker")];
 }
 function buildProfile(policy, additionalWritable) {
   const writable = [...new Set([
@@ -49482,7 +49493,7 @@ async function verifyBaseline(args) {
     args.borrowedCheckoutLease === void 0 ? {} : { borrowedCheckoutLease: args.borrowedCheckoutLease }
   );
   const materialized = await manager.create(args.headCommitOid);
-  let primaryError;
+  let report;
   try {
     const dependencyLink = await linkPrimaryDependencies(args.repoRoot, materialized.path);
     const commands = [];
@@ -49546,21 +49557,39 @@ async function verifyBaseline(args) {
       });
       throwIfAborted(args.abortSignal);
     }
-    return { baselineCommitOid: args.headCommitOid, commands, dependencyLink };
-  } catch (error51) {
-    primaryError = error51;
-    throw error51;
-  } finally {
+    report = { baselineCommitOid: args.headCommitOid, commands, dependencyLink };
+  } catch (primaryError) {
     try {
       await materialized.cleanup();
     } catch (cleanupError) {
-      if (primaryError === void 0) throw cleanupError;
       throw new AggregateError(
         [primaryError, cleanupError],
         "baseline verification failed and its worktree could not be cleaned up"
       );
     }
+    throw primaryError;
   }
+  try {
+    await materialized.cleanup();
+  } catch (cleanupError) {
+    const diagnostic = boundedRedactedDiagnostic(cleanupError, 2e3);
+    logger.warn("baseline verification worktree cleanup failed after producing a result", {
+      runId: args.runId,
+      error: diagnostic
+    });
+    if (args.store !== void 0) {
+      try {
+        await args.store.writeLog("baseline-cleanup-failure", `${diagnostic}
+`);
+      } catch (writeError) {
+        logger.warn("baseline cleanup failure could not be archived", {
+          error: boundedRedactedDiagnostic(writeError, 2e3)
+        });
+      }
+    }
+    report = { ...report, cleanupIssue: diagnostic };
+  }
+  return report;
 }
 
 // src/runtime/producer-preflight.ts

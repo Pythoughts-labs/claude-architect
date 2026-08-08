@@ -142,10 +142,10 @@ describe("seatbelt profile", () => {
     });
     const profile = wrapped.args[1] ?? "";
 
-    expect(profile).toContain('(subpath "/Users/test/.pythinker-code")');
+    expect(profile).toContain('(subpath "/Users/test/.pythinker")');
   });
 
-  it("allowlists only Pythinker's state directory (.pythinker-code) without a temp home", () => {
+  it("allowlists only Pythinker's state directory (.pythinker) without a temp home", () => {
     const wrapped = wrapInvocationWithSeatbelt({
       ...invocation,
       executable: {
@@ -163,11 +163,11 @@ describe("seatbelt profile", () => {
     });
     const profile = wrapped.args[1] ?? "";
 
-    expect(profile).toContain('(subpath "/Users/test/.pythinker-code")');
+    expect(profile).toContain('(subpath "/Users/test/.pythinker")');
     expect(profile).not.toContain('(subpath "/Users/test")');
   });
 
-  it("grants Pythinker's PYTHINKER_CODE_HOME override instead of the default when set", () => {
+  it("grants Pythinker's PYTHINKER_SHARE_DIR override instead of the default when set", () => {
     const wrapped = wrapInvocationWithSeatbelt({
       ...invocation,
       executable: {
@@ -177,7 +177,7 @@ describe("seatbelt profile", () => {
         resolvedFrom: "path:/usr/local/bin/pythinker",
       },
       args: ["--prompt", "test"],
-      env: { HOME: "/Users/test", PYTHINKER_CODE_HOME: "/Users/test/custom-pythinker-home" },
+      env: { HOME: "/Users/test", PYTHINKER_SHARE_DIR: "/Users/test/custom-pythinker-home" },
     }, {
       worktreePath: "/tmp/wt",
       tempHome: null,
@@ -186,7 +186,7 @@ describe("seatbelt profile", () => {
     const profile = wrapped.args[1] ?? "";
 
     expect(profile).toContain('(subpath "/Users/test/custom-pythinker-home")');
-    expect(profile).not.toContain('(subpath "/Users/test/.pythinker-code")');
+    expect(profile).not.toContain('(subpath "/Users/test/.pythinker")');
   });
 
   it("allowlists only agy's config/state directory (~/.gemini/antigravity-cli), detected by executable identity", () => {
@@ -245,7 +245,7 @@ describe("seatbelt profile", () => {
     });
     const profile = wrapped.args[1] ?? "";
 
-    expect(profile).toContain('(subpath "C:\\\\Users\\\\test/.pythinker-code")');
+    expect(profile).toContain('(subpath "C:\\\\Users\\\\test/.pythinker")');
     expect(profile).not.toContain('(subpath "C:\\\\Users\\\\test")');
   });
 
