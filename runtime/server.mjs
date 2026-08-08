@@ -31815,7 +31815,7 @@ import path31 from "node:path";
 var PROTOCOL_VERSION = "2.0.0";
 var DELEGATION_SPEC_VERSION = "1";
 var ATTEMPT_RESULT_VERSION = "1";
-var RUNTIME_VERSION = "0.48.0";
+var RUNTIME_VERSION = "0.49.0";
 
 // src/protocol/attempt-result.ts
 var FAILURE_PRECEDENCE = [
@@ -37069,13 +37069,21 @@ function parseLongOptionTokens(helpText) {
   }
   return options;
 }
+var PYTHINKER_NO_AUTO_UPDATE_ENV = "PYTHINKER_CLI_NO_AUTO_UPDATE";
+var PYTHINKER_REQUIRED_ENV = ["PYTHINKER_CODE_HOME", PYTHINKER_NO_AUTO_UPDATE_ENV];
 function resolvePythinkerHome(deps) {
   const configuredHome = deps.env.PYTHINKER_CODE_HOME;
   return configuredHome !== void 0 && configuredHome.length > 0 ? configuredHome : join5(deps.homeDirectory, ".pythinker-code");
 }
 function defaultPythinkerEnv(deps) {
-  if (deps.env.HOME !== void 0) return {};
-  return deps.hasConfigDir(deps.pythinkerHome) ? { HOME: deps.homeDirectory } : {};
+  const env = {};
+  if (deps.env.HOME === void 0 && deps.hasConfigDir(deps.pythinkerHome)) {
+    env.HOME = deps.homeDirectory;
+  }
+  if (deps.env[PYTHINKER_NO_AUTO_UPDATE_ENV] === void 0) {
+    env[PYTHINKER_NO_AUTO_UPDATE_ENV] = "1";
+  }
+  return env;
 }
 var PythinkerAdapter = class {
   constructor(deps = {
@@ -37175,7 +37183,7 @@ ${helpResult.stderr}`
     return {
       executable: ctx.executable,
       args,
-      requiredEnv: [],
+      requiredEnv: [...PYTHINKER_REQUIRED_ENV],
       env: defaultPythinkerEnv({
         env: this.deps.env,
         homeDirectory: this.deps.homeDirectory,
@@ -37198,7 +37206,7 @@ ${helpResult.stderr}`
         "~/.pythinker-code/tui.toml"
       ],
       repositoryInstructionSources: ["worktree AGENTS.md"],
-      environmentDependencies: ["PYTHINKER_CODE_HOME"],
+      environmentDependencies: [...PYTHINKER_REQUIRED_ENV],
       temporaryHomeStrategy: "real HOME inherited by declared policy; reduced reproducibility recorded in the Run Manifest"
     };
   }
@@ -49574,7 +49582,8 @@ function preflightProbeCommand(executables) {
   const loop = executables.map((name) => `printf '%s ' ${name}; command -v ${name} || printf 'MISSING\\n'`).join("; ");
   return `{ ${loop}; } > ${PREFLIGHT_PROBE_FILE} 2>&1`;
 }
-function probeSpec(spec, executables) {
+function probeSpec(spec, executables, options = {}) {
+  const forceLowReasoning = options.forceLowReasoning ?? true;
   return {
     ...spec,
     objective: [
@@ -49586,7 +49595,7 @@ function probeSpec(spec, executables) {
     context: "The runtime reads the probe file directly; no summary is needed.",
     writeAllowlist: [PREFLIGHT_PROBE_FILE],
     successCriteria: [`${PREFLIGHT_PROBE_FILE} exists and names every executable.`],
-    producerOverrides: { ...spec.producerOverrides, reasoningEffort: "low" }
+    ...forceLowReasoning ? { producerOverrides: { ...spec.producerOverrides, reasoningEffort: "low" } } : {}
   };
 }
 function redactedProbeEvidence(contents) {
@@ -49621,14 +49630,25 @@ async function runProducerPreflight(args) {
   };
   try {
     await linkPrimaryDependencies(args.repoRoot, worktree.path);
-    const spec = probeSpec(args.spec, executables);
-    let invocation = args.adapter.buildInvocation(spec, {
+    const invocationCtx = {
       worktreePath: worktree.path,
       runId: args.runId,
       ...args.tempHome === null ? {} : { tempHome: args.tempHome },
       capabilityReport: args.capabilityReport,
       executable: args.capabilityReport.resolvedExecutable
-    });
+    };
+    let invocation;
+    try {
+      invocation = args.adapter.buildInvocation(
+        probeSpec(args.spec, executables),
+        invocationCtx
+      );
+    } catch {
+      invocation = args.adapter.buildInvocation(
+        probeSpec(args.spec, executables, { forceLowReasoning: false }),
+        invocationCtx
+      );
+    }
     const selection = selectSandboxBackend(args.capabilityReport);
     if (selection.backend?.kind === "os" && selection.backend.id === "macos-seatbelt") {
       invocation = wrapInvocationWithSeatbelt(invocation, {

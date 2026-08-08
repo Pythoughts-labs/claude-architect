@@ -5,7 +5,11 @@ import { supervise } from "../platform/process-supervisor.js";
 import { selectSandboxBackend } from "../platform/sandbox/backends.js";
 import { wrapInvocationWithSeatbelt } from "../platform/sandbox/seatbelt.js";
 import type { DelegationSpec } from "../protocol/delegation-spec.js";
-import type { CapabilityReport, ProducerAdapter } from "../producers/producer-adapter.js";
+import type {
+  CapabilityReport,
+  ProducerAdapter,
+  ProducerInvocation,
+} from "../producers/producer-adapter.js";
 import { RuntimeError } from "../util/errors.js";
 import { boundedRedactedDiagnostic } from "./redaction.js";
 import { readStableRegularFile } from "../util/stable-file.js";
@@ -59,7 +63,12 @@ export function preflightProbeCommand(executables: string[]): string {
   return `{ ${loop}; } > ${PREFLIGHT_PROBE_FILE} 2>&1`;
 }
 
-function probeSpec(spec: DelegationSpec, executables: string[]): DelegationSpec {
+function probeSpec(
+  spec: DelegationSpec,
+  executables: string[],
+  options: { forceLowReasoning?: boolean } = {},
+): DelegationSpec {
+  const forceLowReasoning = options.forceLowReasoning ?? true;
   return {
     ...spec,
     objective: [
@@ -71,7 +80,9 @@ function probeSpec(spec: DelegationSpec, executables: string[]): DelegationSpec 
     context: "The runtime reads the probe file directly; no summary is needed.",
     writeAllowlist: [PREFLIGHT_PROBE_FILE],
     successCriteria: [`${PREFLIGHT_PROBE_FILE} exists and names every executable.`],
-    producerOverrides: { ...spec.producerOverrides, reasoningEffort: "low" },
+    ...(forceLowReasoning
+      ? { producerOverrides: { ...spec.producerOverrides, reasoningEffort: "low" } }
+      : {}),
   };
 }
 
@@ -129,14 +140,31 @@ export async function runProducerPreflight(
   };
   try {
     await linkPrimaryDependencies(args.repoRoot, worktree.path);
-    const spec = probeSpec(args.spec, executables);
-    let invocation = args.adapter.buildInvocation(spec, {
+    const invocationCtx = {
       worktreePath: worktree.path,
       runId: args.runId,
       ...(args.tempHome === null ? {} : { tempHome: args.tempHome }),
       capabilityReport: args.capabilityReport,
       executable: args.capabilityReport.resolvedExecutable,
-    });
+    };
+    let invocation: ProducerInvocation;
+    try {
+      invocation = args.adapter.buildInvocation(
+        probeSpec(args.spec, executables),
+        invocationCtx,
+      );
+    } catch {
+      // Some adapters (e.g. Pythinker) reject ANY reasoningEffort override outright, so a
+      // real caller request is never silently substituted. The "low" value forced above is a
+      // synthetic speed optimization for this probe, not a real request, so retry without it
+      // instead of letting every run on such an adapter degrade to "inconclusive". A rejection
+      // unrelated to reasoningEffort (e.g. an invalid model override) reproduces identically
+      // here and still surfaces below.
+      invocation = args.adapter.buildInvocation(
+        probeSpec(args.spec, executables, { forceLowReasoning: false }),
+        invocationCtx,
+      );
+    }
     // Faithfulness is the whole value: a probe that runs in a different
     // environment than the attempt is worse than no probe at all.
     const selection = selectSandboxBackend(args.capabilityReport);

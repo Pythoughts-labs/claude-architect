@@ -424,7 +424,7 @@ describe("PythinkerAdapter", () => {
     expect(invocation.executable).toBe(executable);
     expect(invocation.args).toEqual(baseArgs(spec));
     expect(invocation.stdin).toBeUndefined();
-    expect(invocation.requiredEnv).toEqual([]);
+    expect(invocation.requiredEnv).toEqual(["PYTHINKER_CODE_HOME", "PYTHINKER_CLI_NO_AUTO_UPDATE"]);
     expect(invocation.network).toBe("allowed");
   });
 
@@ -492,7 +492,7 @@ describe("PythinkerAdapter", () => {
         homeDirectory: root,
       }).buildInvocation(sampleSpec(), invocationContext());
 
-      expect(invocation.env).toEqual({ HOME: root });
+      expect(invocation.env).toEqual({ HOME: root, PYTHINKER_CLI_NO_AUTO_UPDATE: "1" });
     } finally {
       await rm(root, { recursive: true, force: true });
     }
@@ -508,7 +508,7 @@ describe("PythinkerAdapter", () => {
         homeDirectory: root,
       }).buildInvocation(sampleSpec(), invocationContext());
 
-      expect(invocation.env).toEqual({});
+      expect(invocation.env).toEqual({ PYTHINKER_CLI_NO_AUTO_UPDATE: "1" });
     } finally {
       await rm(root, { recursive: true, force: true });
     }
@@ -520,6 +520,21 @@ describe("PythinkerAdapter", () => {
     try {
       const invocation = new PythinkerAdapter({
         env: {},
+        homeDirectory: root,
+      }).buildInvocation(sampleSpec(), invocationContext());
+
+      expect(invocation.env).toEqual({ PYTHINKER_CLI_NO_AUTO_UPDATE: "1" });
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("does not override PYTHINKER_CLI_NO_AUTO_UPDATE when the host already set it", async () => {
+    const root = await mkdtemp(join(tmpdir(), "claude-architect-pythinker-config-"));
+
+    try {
+      const invocation = new PythinkerAdapter({
+        env: { PYTHINKER_CLI_NO_AUTO_UPDATE: "0" },
         homeDirectory: root,
       }).buildInvocation(sampleSpec(), invocationContext());
 
@@ -538,7 +553,7 @@ describe("PythinkerAdapter", () => {
         "~/.pythinker-code/tui.toml",
       ],
       repositoryInstructionSources: ["worktree AGENTS.md"],
-      environmentDependencies: ["PYTHINKER_CODE_HOME"],
+      environmentDependencies: ["PYTHINKER_CODE_HOME", "PYTHINKER_CLI_NO_AUTO_UPDATE"],
       temporaryHomeStrategy: "real HOME inherited by declared policy; reduced reproducibility recorded in the Run Manifest",
     });
   });

@@ -65,6 +65,19 @@ export interface PythinkerAdapterDeps {
   hasAuthStore?: (directory: string) => boolean;
 }
 
+// The installed pythinker-code CLI auto-updates itself in the background by default
+// (`pythinker doctor` reports "Auto-update: on (installs in background)"). Disabling it for
+// the duration of a delegated run keeps the binary actually invoked consistent with the one
+// this adapter probed moments earlier (--version/--help); the host may still override this
+// by setting the variable itself, since defaultPythinkerEnv only fills in an absent value.
+const PYTHINKER_NO_AUTO_UPDATE_ENV = "PYTHINKER_CLI_NO_AUTO_UPDATE";
+// Forwarded from the host so a redirected Pythinker Code home — used below to resolve the
+// auth store and the default HOME — actually reaches the invoked process. Without this, a
+// deployment that sets PYTHINKER_CODE_HOME to isolate this producer's config would have the
+// adapter report auth/config state from that directory while the real invocation silently
+// fell back to pythinker's own default `~/.pythinker-code`.
+const PYTHINKER_REQUIRED_ENV = ["PYTHINKER_CODE_HOME", PYTHINKER_NO_AUTO_UPDATE_ENV] as const;
+
 function resolvePythinkerHome(
   deps: Required<Pick<PythinkerAdapterDeps, "env" | "homeDirectory">>,
 ): string {
@@ -80,10 +93,14 @@ function defaultPythinkerEnv(
     hasConfigDir: (directory: string) => boolean;
   },
 ): Record<string, string> {
-  if (deps.env.HOME !== undefined) return {};
-  return deps.hasConfigDir(deps.pythinkerHome)
-    ? { HOME: deps.homeDirectory }
-    : {};
+  const env: Record<string, string> = {};
+  if (deps.env.HOME === undefined && deps.hasConfigDir(deps.pythinkerHome)) {
+    env.HOME = deps.homeDirectory;
+  }
+  if (deps.env[PYTHINKER_NO_AUTO_UPDATE_ENV] === undefined) {
+    env[PYTHINKER_NO_AUTO_UPDATE_ENV] = "1";
+  }
+  return env;
 }
 
 export class PythinkerAdapter implements ProducerAdapter {
@@ -198,7 +215,7 @@ export class PythinkerAdapter implements ProducerAdapter {
     return {
       executable: ctx.executable,
       args,
-      requiredEnv: [],
+      requiredEnv: [...PYTHINKER_REQUIRED_ENV],
       env: defaultPythinkerEnv({
         env: this.deps.env,
         homeDirectory: this.deps.homeDirectory,
@@ -225,7 +242,7 @@ export class PythinkerAdapter implements ProducerAdapter {
         "~/.pythinker-code/tui.toml",
       ],
       repositoryInstructionSources: ["worktree AGENTS.md"],
-      environmentDependencies: ["PYTHINKER_CODE_HOME"],
+      environmentDependencies: [...PYTHINKER_REQUIRED_ENV],
       temporaryHomeStrategy: "real HOME inherited by declared policy; reduced reproducibility recorded in the Run Manifest",
     };
   }

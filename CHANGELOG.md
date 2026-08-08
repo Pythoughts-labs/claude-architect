@@ -4,7 +4,7 @@ All notable changes to Claude Architect are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses
 [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.49.0] - 2026-08-08
 
 ### Changed
 
@@ -22,6 +22,20 @@ All notable changes to Claude Architect are recorded here. The format follows
   `failure` classification and the lane-mode correlation envelope. Strict MCP
   clients previously rejected these server-produced responses with -32602. A
   new output-schema contract test requires a byte-exact round-trip.
+- The Pythinker adapter now forwards `PYTHINKER_CODE_HOME` to the invoked
+  process. Previously the adapter used this variable to resolve the auth store
+  and default `HOME`, and the Seatbelt policy already scoped write access to
+  it, but the invoked `pythinker` process never received the variable itself
+  and would silently fall back to its own default `~/.pythinker-code`. The
+  adapter also disables Pythinker's background self-update
+  (`PYTHINKER_CLI_NO_AUTO_UPDATE=1`, host-overridable) for the duration of a
+  run, so the binary actually invoked cannot drift from the one just probed.
+- Producer preflight no longer degrades every Pythinker run to "inconclusive".
+  The preflight probe unconditionally forced a `reasoningEffort: "low"`
+  override, which Pythinker's adapter rejects outright (by design, to avoid
+  silently substituting an unsupported setting); the probe now retries once
+  without the forced override when an adapter rejects it, restoring the
+  preflight's actual purpose for that lane.
 
 ## [0.48.0] - 2026-08-04
 

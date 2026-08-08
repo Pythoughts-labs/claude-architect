@@ -106,6 +106,70 @@ describe("producer preflight", () => {
     expect(readProbe("node \ngit /usr/bin/git", ["node", "git"])).toEqual(["node"]);
   });
 
+  it("retries without the forced reasoningEffort override when an adapter rejects it outright", async () => {
+    // Mirrors PythinkerAdapter: throws for ANY reasoningEffort override rather than silently
+    // dropping or substituting it. The preflight's forced "low" value is a synthetic speed
+    // optimization, not a real caller request, so the probe must still succeed.
+    const root = await mkdtemp(join(tmpdir(), "producer-preflight-reasoning-"));
+    const repoRoot = join(root, "repo");
+    const worktreePath = join(root, "worktree");
+    await Promise.all([mkdir(repoRoot), mkdir(worktreePath)]);
+    const executable = {
+      kind: "native" as const,
+      command: process.execPath,
+      prefixArgs: [],
+      resolvedFrom: "test",
+    };
+    const buildInvocationCalls: Array<DelegationSpec["producerOverrides"]> = [];
+    const adapter = {
+      buildInvocation(spec: DelegationSpec) {
+        buildInvocationCalls.push(spec.producerOverrides);
+        if (spec.producerOverrides?.reasoningEffort !== undefined) {
+          throw new Error("reasoningEffort override is unsupported");
+        }
+        return {
+          executable,
+          args: [
+            "-e",
+            `require("fs").writeFileSync(${JSON.stringify(PREFLIGHT_PROBE_FILE)}, "node /usr/bin/node\\n")`,
+          ],
+          requiredEnv: [],
+          network: "denied" as const,
+        };
+      },
+    } as unknown as ProducerAdapter;
+    const capabilityReport = {
+      resolvedExecutable: executable,
+      writeConfinementBackend: null,
+    } as unknown as CapabilityReport;
+
+    try {
+      const result = await runProducerPreflight({
+        adapter,
+        capabilityReport,
+        spec: spec(["node"]),
+        repoRoot,
+        baseCommitOid: "a".repeat(40),
+        runId: "preflight-reasoning-retry",
+        ps: new PosixPlatformServices(),
+        tempHome: null,
+        worktreeManager: {
+          async create() {
+            return { path: worktreePath, async cleanup() {} };
+          },
+        },
+      });
+
+      expect(result.status).toBe("ok");
+      expect(buildInvocationCalls).toEqual([
+        { reasoningEffort: "low" },
+        undefined,
+      ]);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("preserves cancellation when managed cleanup also fails", async () => {
     const root = await mkdtemp(join(tmpdir(), "producer-preflight-cancelled-"));
     const repoRoot = join(root, "repo");
